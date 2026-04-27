@@ -240,10 +240,48 @@ flowchart TD
 
 - `System-audio capture` is the current PoC expression for online meetings. The broader architectural concern is `capture source routing`, which must allow future scenarios such as in-person microphone-based meetings without rewriting the core pipeline.
 - `Audio playback during correction` is treated as mandatory, not optional.
-- The exact process topology remains deferred:
-  - one process
-  - several cooperating processes
-  - supervised worker model
+
+### 4.4 Process Topology Decision
+
+Status: Confirmed
+
+The current process topology decision is:
+
+- one dedicated `Recorder Process`
+- one separate `Main App Process`
+
+The `Recorder Process` owns:
+
+- capture-source routing
+- audio capture
+- segment flushing
+- source-artifact updates
+- recording-related session-state updates
+
+The `Main App Process` owns:
+
+- session control
+- post-meeting orchestration
+- correction workflow
+- export generation
+- capability and policy resolution
+
+Reasoning:
+
+- recording robustness is the highest-priority quality attribute
+- recording must be isolated from downstream processing failures
+- this topology is still small enough for a PoC
+- it creates cleaner work boundaries for later coding-agent implementation
+
+Deferred:
+
+- further subdivision into additional supervised workers
+
+Revisit trigger:
+
+- new input topologies, such as richer in-person meeting capture
+- processing concurrency requirements
+- operational complexity that justifies more worker isolation
 
 ## 5. Building Block View
 
@@ -472,3 +510,52 @@ If an implementation choice affects:
 - future interface independence
 
 then it is not a mere implementation detail and must either appear in this architecture draft or be tracked as an open architecture question.
+
+## 7. Deployment and Runtime Data Boundaries
+
+Status: Provisional
+
+### 7.1 Why This Matters Early
+
+For the PoC, the developer machine and the first customer machine are the same machine.
+This increases the risk of mixing:
+
+- source code
+- architecture and research documents
+- runtime session artifacts
+- model caches
+- logs
+- exported meeting notes
+
+If these concerns are not separated early, the PoC will become hard to operate, hard to clean up, and easy to corrupt through normal development work.
+
+### 7.2 Current Boundary Rule
+
+The repository root must not be treated as the product's runtime home.
+
+The architecture assumes a separation between:
+
+- repository contents
+- runtime working data
+- long-lived user data
+- generated exports
+
+### 7.3 Architectural Consequences
+
+- runtime artifacts must not be written into arbitrary source-code directories
+- session outputs must not rely on git-tracked paths as their canonical storage location
+- integrity and reconciliation logic must work independently from the repository layout
+- local development convenience must not define the production data model
+
+### 7.4 Current Direction
+
+The exact directory layout is still open, but the architecture already assumes:
+
+- source code and documentation live in the repository
+- runtime data lives outside normal source directories
+- the application can be run locally by a developer without making the repository itself the canonical data store
+
+This decision supports both:
+
+- local PoC development on the same machine as day-to-day use
+- later packaging into a more product-like local application
