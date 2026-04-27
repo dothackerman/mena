@@ -247,10 +247,10 @@ Status: Confirmed
 
 The current process topology decision is:
 
-- one dedicated `Recorder Process`
-- one separate `Main App Process`
+- one dedicated `Capture Worker Process`
+- one separate `Session Orchestrator Process`
 
-The `Recorder Process` owns:
+The `Capture Worker Process` owns:
 
 - capture-source routing
 - audio capture
@@ -258,7 +258,7 @@ The `Recorder Process` owns:
 - source-artifact updates
 - recording-related session-state updates
 
-The `Main App Process` owns:
+The `Session Orchestrator Process` owns:
 
 - session control
 - post-meeting orchestration
@@ -272,6 +272,85 @@ Reasoning:
 - recording must be isolated from downstream processing failures
 - this topology is still small enough for a PoC
 - it creates cleaner work boundaries for later coding-agent implementation
+
+### 4.5 Separate Process Evaluation Rule
+
+Status: Confirmed
+
+A separate process is warranted only when the benefit of runtime isolation is greater than the cost of extra coordination.
+
+Current evaluation criteria:
+
+- `Failure isolation`
+  If this part crashes, must another part survive cleanly?
+- `Real-time or hardware ownership`
+  Does it own timing-sensitive loops, device handles, or OS-level capture responsibilities?
+- `Resource isolation`
+  Can it spike CPU, RAM, GPU, or block execution in ways that would materially harm the rest of the system?
+- `Lifecycle independence`
+  Does it need to continue running even if another part restarts or fails?
+- `Privilege or security boundary`
+  Does it need stricter containment or a narrower trust boundary?
+- `Runtime or framework incompatibility`
+  Does it need a different event loop, runtime model, or native integration boundary?
+
+Architectural rule:
+
+- use a separate process only when one or more of the above criteria are materially true
+- otherwise prefer module boundaries and adapter boundaries inside an existing process
+
+### 4.6 Why Interactive Correction Is Not a Separate Process
+
+Status: Confirmed
+
+`Interactive correction` is not currently modeled as a separate process because it does not yet meet the process-separation criteria strongly enough.
+
+Current reasoning:
+
+- correction failure must not endanger sealed source artifacts, but it does not need the same hardware and timing isolation as capture
+- correction is not a real-time capture concern
+- correction does not currently justify separate device ownership
+- correction belongs naturally to the session orchestration and review flow
+
+Architectural note:
+
+- `interactive correction` still deserves a clear module boundary and adapter boundary
+- it does not currently deserve an OS-process boundary
+
+### 4.7 Most Likely Next Process Boundary
+
+Status: Provisional
+
+If the architecture grows beyond two processes, the most likely next candidate is a dedicated `Processing Worker Process`, not a separate correction process.
+
+Reasoning:
+
+- ASR, diarization, and summarization runtimes are more likely than correction UI to create memory pressure, GPU pressure, native-library instability, or long blocking operations
+- this creates a stronger case for failure isolation and resource isolation
+- this remains a future evolution path, not a current PoC requirement
+
+### 4.8 Internal Protocol Direction
+
+Status: Provisional
+
+The architecture currently assumes a private but disciplined internal protocol between:
+
+- `Session Orchestrator Process`
+- `Capture Worker Process`
+
+Current direction:
+
+- version the protocol from day one
+- use a schema-defined `command + event` shape
+- keep live coordination in the protocol
+- keep durable artifacts in files
+- pass artifact references, not audio payloads
+- keep stop/finalization behavior idempotent where reasonable
+
+Current architectural stance:
+
+- protocol design should be clean enough for future reuse
+- protocol design should not be over-optimized as a public platform API
 
 Deferred:
 
