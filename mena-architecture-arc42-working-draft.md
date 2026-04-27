@@ -559,3 +559,151 @@ This decision supports both:
 
 - local PoC development on the same machine as day-to-day use
 - later packaging into a more product-like local application
+
+## 8. Session Model and Persistence Semantics
+
+Status: Provisional
+
+### 8.1 Session Bundle vs Session Record
+
+The architecture distinguishes between:
+
+- `Session Bundle`: the complete persisted collection for one meeting session
+- `Session Record`: the structured ledger for one meeting session
+
+The `Session Bundle` is the container concept.
+It groups together everything that belongs to one meeting session.
+
+The `Session Record` is one artifact inside that bundle.
+It does not replace the bundle and it does not duplicate all bundle contents.
+
+Current model:
+
+```text
+Session Bundle
+├── Session Record
+├── Source Artifacts
+├── Derived Artifacts
+├── Review Artifacts
+└── Export Artifacts
+```
+
+### 8.2 Session Bundle Decision
+
+Status: Confirmed
+
+The baseline persistence pattern is:
+
+- one `Session Bundle` per meeting session
+- one `Session Record` per `Session Bundle`
+
+Reasoning:
+
+- it keeps session ownership clear
+- it supports resumability cleanly
+- it supports artifact integrity checks
+- it avoids treating the repository or a global index as the canonical home of session data
+
+### 8.3 Session Record Role
+
+Status: Confirmed
+
+The `Session Record` is canonical for:
+
+- session identity
+- workflow state
+- artifact references
+- integrity metadata
+- checkpoints and operational trace
+
+The `Session Record` is not canonical for:
+
+- transcript bodies that already exist as artifacts
+- raw audio payloads
+- user-interface-only transient state
+- privacy-sensitive analytics beyond what is required for session operation
+
+### 8.4 Artifact-First Persistence Refinement
+
+Status: Confirmed
+
+The architecture uses:
+
+- artifact-first persistence
+- a per-session ledger (`Session Record`)
+- a lightweight rebuildable global index
+
+That means:
+
+- files/artifacts are primary for captured and generated content
+- the `Session Record` is primary for one session's lifecycle and references
+- the global index is a projection and must be rebuildable
+
+If divergence occurs:
+
+- missing referenced artifact -> mark session broken and stop downstream trust
+- unindexed artifact -> mark orphaned and require explicit recovery path
+- integrity mismatch -> mark artifact tainted or corrupt and stop trusting it
+- stale index with consistent bundles -> rebuild the index
+
+### 8.5 UX and Quality Telemetry Separation
+
+Status: Provisional
+
+The architecture distinguishes between:
+
+- `operational session data`
+- `product-quality and UX telemetry`
+
+The `Session Record` should contain only the operational data required to run, resume, verify, and inspect a session safely.
+
+Product-quality and UX telemetry must be stored separately from core session operation.
+
+Examples of telemetry that may be valuable:
+
+- number of flagged segments
+- number of user corrections
+- categories of corrections
+- processing durations
+- model/provider identifiers
+- fallback backend usage
+- review completion status
+- whether the user accepted the session result as satisfactory
+
+Examples of data that must not be treated as product telemetry:
+
+- transcript text
+- meeting topic content
+- participant identity
+- user identity beyond what is operationally required for a local installation
+- anything that reveals what was discussed
+
+Architectural direction:
+
+- telemetry must be privacy-preserving by design
+- telemetry must be decoupled from canonical session operation
+- telemetry should be derived from session outcomes and interaction events, not by duplicating meeting content
+- telemetry should be exportable or analyzable without exposing meeting substance
+
+### 8.6 Session Lifecycle as State Machine
+
+Status: Confirmed
+
+The session lifecycle must be modeled as a state machine, not as a one-way linear pipeline.
+
+The earlier linear narrative is useful for explanation, but it is not sufficient as the architecture model.
+
+Reasoning:
+
+- processing may fail and resume
+- review may be revisited
+- exports may be regenerated
+- optional steps such as diarization may be skipped or re-run
+
+Current direction:
+
+- normal forward progress exists
+- retries and partial rollback paths must exist where operationally meaningful
+- source artifacts remain immutable once sealed
+- derived artifacts may be regenerated
+- review overlays may evolve without mutating source artifacts
