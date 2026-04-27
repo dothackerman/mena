@@ -256,7 +256,7 @@ The `Capture Worker Process` owns:
 - audio capture
 - segment flushing
 - source-artifact updates
-- recording-related session-state updates
+- capture facts and source-artifact finalization facts
 
 The `Session Orchestrator Process` owns:
 
@@ -351,6 +351,83 @@ Current architectural stance:
 
 - protocol design should be clean enough for future reuse
 - protocol design should not be over-optimized as a public platform API
+
+### 4.9 State Authority and Session Record Ownership
+
+Status: Confirmed
+
+The architecture uses a `single-writer` rule for the canonical `Session Record`.
+
+Current authority split:
+
+- `Session Orchestrator Process` is the primary writer of the canonical `Session Record`
+- `Capture Worker Process` writes source artifacts and emits capture facts through the internal protocol
+- the `Session Orchestrator Process` updates the `Session Record` based on durable artifact references and capture facts
+
+Reasoning:
+
+- reduces race conditions
+- avoids split-brain session state
+- keeps the session lifecycle model consistent
+- makes reconciliation and resumability easier
+
+Architectural rule:
+
+- both processes must not directly mutate the same canonical session ledger
+
+Allowed future refinement:
+
+- the `Capture Worker Process` may maintain a narrow capture journal or local operational state if needed
+- such a journal does not replace or compete with the canonical `Session Record`
+
+### 4.10 Internal Protocol Message Catalog
+
+Status: Provisional
+
+The first architecture-level protocol catalog is intentionally small.
+
+The protocol currently assumes:
+
+- explicit commands
+- explicit responses where acknowledgment or data is required
+- explicit asynchronous events for capture facts
+- versioned schemas from day one
+
+#### Host-to-Capture Commands
+
+- `InitializeCaptureWorker`
+- `StartCapture`
+- `StopCapture`
+- `GetCaptureStatus`
+- `ShutdownCaptureWorker`
+
+#### Capture-to-Host Responses and Events
+
+- `CaptureWorkerReady`
+- `CaptureStarted`
+- `CaptureStartRejected`
+- `SegmentFlushed`
+- `CaptureHeartbeat`
+- `CaptureWarning`
+- `CaptureError`
+- `CaptureStopped`
+- `CaptureFinalized`
+- `CaptureStatus`
+
+#### Message Design Rules
+
+- protocol messages carry control data, status data, and artifact references
+- protocol messages do not carry raw audio payloads
+- stop and finalization commands should be idempotent where reasonable
+- live capture coordination belongs in the protocol
+- durable artifacts belong in persisted storage
+
+#### Deferred
+
+- concrete transport mechanism
+- concrete encoding mechanism
+- whether capability exchange is needed in the first implementation
+- exact error-code taxonomy
 
 Deferred:
 
