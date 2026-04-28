@@ -19,6 +19,11 @@ This draft currently covers:
 - current system context
 - current runtime pipeline
 - initial glossary
+- building block view
+- variability and substitution points
+- deployment and runtime-data boundaries
+- session model and persistence semantics
+- architecture-derived research backlog
 
 Later sections will be added as decisions are made.
 
@@ -27,6 +32,29 @@ Later sections will be added as decisions are made.
 - `Confirmed`: accepted as current architecture baseline
 - `Provisional`: accepted for now, but likely to be refined later
 - `Deferred`: intentionally not decided yet
+
+### 1.4 Current Quality Priorities
+
+Status: Provisional
+
+Current priority order:
+
+1. `Recording robustness / recoverability`
+2. `Sovereignty / privacy`
+3. `Resumability / traceability`
+4. `Local operability`
+5. `Replaceability / evolvability`
+6. `Output quality / user trust`
+7. `Performance / processing time`
+8. `Interface convenience`
+
+Current interpretation:
+
+- `Recording robustness / recoverability` outranks implementation simplicity and feature richness.
+- `Sovereignty / privacy` outranks convenience in remote fallback configuration.
+- `Local operability` and `replaceability / evolvability` are both important, but they must not undermine the first three priorities.
+- `Performance / processing time` matters, but the current PoC does not have a strict latency target.
+- `Interface convenience` is subordinate to correctness, safety, and future-proofing.
 
 ## 2. Glossary
 
@@ -1002,3 +1030,240 @@ An item belongs in this research backlog when:
 - the architecture already depends on the answer
 - the answer is not yet stable enough to hard-decide
 - guessing during implementation would create avoidable rework or policy risk
+
+## 10. Quality Requirements and Utility Tree
+
+Status: Provisional
+
+This section translates the current quality priorities into concrete architectural scenarios.
+
+### 10.1 Utility Tree
+
+#### 1. Recording Robustness / Recoverability
+
+Highest priority.
+
+##### 1.1 Capture survives downstream failure
+
+Scenario:
+
+- while capture is running, the `Session Orchestrator Process` crashes or must restart
+
+Expected:
+
+- the `Capture Worker Process` continues safely where feasible or, at minimum, all already flushed segments remain preserved and usable
+
+##### 1.2 Bounded data loss on recording interruption
+
+Scenario:
+
+- a system-level interruption occurs during recording, for example process kill, power loss, or OS-level failure
+
+Expected:
+
+- loss is limited to the current unflushed segment
+- already flushed source artifacts remain recoverable
+
+##### 1.3 Detect capture degradation explicitly
+
+Scenario:
+
+- an audio device disappears, capture routing drifts, or captured system-output audio becomes polluted
+
+Expected:
+
+- the system emits an explicit warning or error
+- the system does not silently report capture as healthy
+
+#### 2. Sovereignty / Privacy
+
+##### 2.1 Allowed remote fallback under insufficient local inference capability
+
+Scenario:
+
+- a machine lacks sufficient local inference capability for an LLM-dependent stage such as summarization or semantic flagging
+
+Expected:
+
+- only an allowed remote fallback may be used
+- fallback use remains constrained by sovereignty policy
+- the user may provide required credentials, but may not arbitrarily configure disallowed remote providers or models
+
+##### 2.2 Product telemetry reveals no meeting substance
+
+Scenario:
+
+- product-quality telemetry is exported or analyzed for UX improvement
+
+Expected:
+
+- correction counts, durations, model/provider identifiers, and satisfaction outcomes may be present
+- transcript text, participant identity, meeting topic, and discussion substance are absent
+
+##### 2.3 Local data remains inspectable and controllable
+
+Scenario:
+
+- the user wants to inspect, retain, or remove local runtime/session data
+
+Expected:
+
+- relevant session artifacts remain locally accessible
+- data is not trapped only inside hidden internal storage structures
+
+#### 3. Resumability / Traceability
+
+##### 3.1 Resume after interrupted processing
+
+Scenario:
+
+- processing is interrupted by a process or system failure, for example during diarization or summarization
+
+Expected:
+
+- on next launch, the system detects the interrupted state
+- already completed steps are reused where safe
+- source artifacts remain trusted if integrity checks still pass
+
+##### 3.2 Distinguish user interruption from system interruption
+
+Scenario:
+
+- the user intentionally stops or interrupts a workflow, or the system interrupts it unexpectedly
+
+Expected:
+
+- user-initiated interruption leaves the system waiting for later user action
+- system/process interruption leads to safe recovery and resumability behavior on next start
+- the two cases are not conflated
+
+##### 3.3 Artifact integrity is verifiable
+
+Scenario:
+
+- a source artifact changes after sealing
+
+Expected:
+
+- integrity mismatch is detected before further downstream trust is granted
+
+##### 3.4 Rebuild projections from canonical data
+
+Scenario:
+
+- the global index becomes stale or corrupted
+
+Expected:
+
+- the index can be rebuilt from `Session Bundles` and `Session Records`
+
+#### 4. Local Operability
+
+##### 4.1 Clean local runtime separation
+
+Scenario:
+
+- the developer machine is also the first customer machine
+
+Expected:
+
+- repository files, runtime data, model caches, logs, and user outputs stay separated
+
+##### 4.2 Install, update, and remove path is manageable
+
+Scenario:
+
+- a user wants to install, update, or remove the local CLI product
+
+Expected:
+
+- product files can be installed and removed cleanly
+- uninstalling the product does not imply deleting the repository or user session data by default
+
+#### 5. Replaceability / Evolvability
+
+##### 5.1 Interface swap without core rewrite
+
+Scenario:
+
+- the `CLI` is later complemented by `OpenClaw`, a desktop UI, or another adapter
+
+Expected:
+
+- core workflow logic remains unchanged
+
+##### 5.2 Provider swap without domain rewrite
+
+Scenario:
+
+- the `ASR`, diarization, or summarization provider changes
+
+Expected:
+
+- domain artifacts and orchestration logic remain stable
+
+##### 5.3 Capture-profile extension without pipeline fork
+
+Scenario:
+
+- in-person capture is added after online dual-stream
+
+Expected:
+
+- the core pipeline reuses the same artifact/session model rather than forking around meeting type
+
+#### 6. Output Quality / User Trust
+
+##### 6.1 Exception-first review remains bounded
+
+Scenario:
+
+- a noisy or uncertain meeting generates many low-confidence segments
+
+Expected:
+
+- the user reviews flagged segments by default, not an overwhelming raw transcript
+
+##### 6.2 Output is trustworthy enough to adopt
+
+Scenario:
+
+- the user finishes a session and judges whether the result is acceptable
+
+Expected:
+
+- the meeting notes are useful enough to replace or materially reduce the current manual process
+
+#### 7. Performance / Processing Time
+
+##### 7.1 Safe completion outranks speed
+
+Scenario:
+
+- a faster processing option conflicts with recoverability, sovereignty constraints, or stability
+
+Expected:
+
+- the system chooses the safer and more policy-compliant path over the faster one
+
+##### 7.2 Automated stages complete without babysitting
+
+Scenario:
+
+- post-meeting processing runs on a realistic local machine
+
+Expected:
+
+- automated stages proceed without manual intervention between steps unless a true review or failure boundary is reached
+
+#### 8. Interface Convenience
+
+##### 8.1 Convenience remains subordinate to architecture goals
+
+Scenario:
+
+- a more convenient interface behavior would blur safety or architectural boundaries
+
+Expected:
+
+- convenience is sacrificed before robustness, privacy, resumability, or clean separation of concerns
