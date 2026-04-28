@@ -1141,3 +1141,111 @@ Scenario:
 Expected:
 
 - convenience is sacrificed before robustness, privacy, resumability, or clean separation of concerns
+
+## 11. Cross-Cutting Concepts
+
+Status: Provisional
+
+Cross-cutting concepts define recurring architectural rules that multiple building blocks must obey.
+They are not a dumping ground for every important topic.
+
+### 11.1 Capture Source Model
+
+Status: Confirmed
+
+#### Problem
+
+`mena` must support different ways of obtaining meeting audio without rewriting the rest of the processing pipeline.
+
+Current PoC profile:
+
+- online meeting with dual-stream capture
+
+Near-future profile:
+
+- in-person meeting with a single room microphone
+
+#### Architectural Rule
+
+The system processes audio through explicit `Capture Profiles` and `Capture Sources`, not through filename conventions or hidden interface assumptions.
+
+A `Capture Profile` defines:
+
+- expected source topology
+- meaning of each source
+- diarization expectations
+- whether speaker identity is structurally known
+- how downstream processing should interpret captured artifacts
+
+A `Capture Source` records:
+
+- logical source identity
+- technical source kind
+- semantic role
+- selected device or route
+- channel layout
+- diarization policy
+- expected pollution risk where relevant
+
+`Device / Route Selection` binds a logical capture source to a concrete operating-system device or route.
+
+#### Initial Profiles
+
+`online_dual_stream`:
+
+- source: `local_mic`
+- semantic role: local user
+- diarization: not needed
+- source: `system_audio`
+- semantic role: remote participant mix, with possible pollution from non-meeting system audio
+- diarization: optional or expected when speaker attribution matters
+
+`in_person_single_mic`:
+
+- source: `room_mic`
+- semantic role: mixed room speakers
+- diarization: expected when speaker attribution matters
+- status: future profile, not current PoC requirement
+
+#### User Interaction Rule
+
+If only one profile is active, the system may default to it.
+
+If multiple devices or routes plausibly match a required source, the interface adapter should ask the user to confirm the selected device or route.
+
+Example:
+
+- headset microphone and laptop microphone are both available
+- `mena` should surface the choice instead of silently assuming the correct one
+
+The operating system may provide default devices and available routes, but the system must not assume that the operating-system default is necessarily the best meeting source.
+
+#### Affected Parts
+
+- `Capture Worker Process`
+- `Session Orchestrator Process`
+- `Session Record`
+- `Capture Port`
+- artifact metadata
+- processing orchestration
+- future interface adapters
+
+#### Failure Mode Prevented
+
+Without this concept, the PoC may hard-code:
+
+- local file means the user
+- remote file means everyone else
+
+That works for online dual-stream capture but breaks once in-person single-mic capture is added.
+
+#### Open Questions
+
+- exact minimum source metadata for the first implementation
+- user-facing command shape for profile selection once multiple profiles exist
+- capture-source health checks
+- Linux-specific routing mechanics
+
+Research link:
+
+- [R-02 Linux Audio Capture and Routing Strategy](../research/backlog/architecture-research-backlog.md#r-02-linux-audio-capture-and-routing-strategy)
