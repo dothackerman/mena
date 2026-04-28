@@ -1249,3 +1249,106 @@ That works for online dual-stream capture but breaks once in-person single-mic c
 Research link:
 
 - [R-02 Linux Audio Capture and Routing Strategy](../research/backlog/architecture-research-backlog.md#r-02-linux-audio-capture-and-routing-strategy)
+
+### 11.2 Artifact Lifecycle and Integrity
+
+Status: Confirmed
+
+#### Problem
+
+Recording, processing, correction, and export all touch persisted artifacts.
+Without shared lifecycle and integrity rules, the system can silently mutate source material, confuse raw output with corrected output, or trust stale/corrupt files.
+
+#### Architectural Rule
+
+Artifacts are classified by role and lifecycle.
+Downstream artifacts must never mutate upstream artifacts in place.
+
+The architecture uses this evidence chain:
+
+```text
+raw audio
+  -> raw ASR transcript
+      -> correction overlay
+          -> corrected transcript view
+              -> summary / exports
+```
+
+#### Artifact Categories
+
+`Source artifacts`:
+
+- canonical captured inputs
+- highest evidentiary value
+- sealed after capture
+- examples: raw audio segments, finalized raw audio
+
+`Derived artifacts`:
+
+- generated from source artifacts
+- preserved for transparency
+- may be regenerated if upstream artifacts remain valid
+- examples: raw ASR transcript, diarization output, merged transcript
+
+`Review artifacts`:
+
+- represent human or system review state
+- change interpretation without rewriting raw derived output
+- examples: review queue, correction overlay
+
+`Export artifacts`:
+
+- final or user-facing composed outputs
+- may be regenerated from valid upstream artifacts and overlays
+- examples: corrected transcript view, summary markdown, export bundle
+
+Telemetry artifacts are intentionally excluded for now.
+Telemetry remains a research topic until its event model, storage rules, identifiers, and privacy constraints are defined.
+
+#### Integrity Rules
+
+- raw audio source artifacts are canonical and must not be mutated after sealing
+- raw ASR transcripts are preserved as original derived outputs, but are not canonical truth
+- corrections are stored as overlays and do not rewrite raw transcripts
+- corrected transcript views and summaries are composed outputs
+- downstream processing must verify required upstream artifacts before trusting them
+- if a source artifact fails integrity verification, downstream trust stops
+
+#### Provisional Lifecycle States
+
+Initial lifecycle vocabulary:
+
+- `open`: artifact is still being written or produced
+- `sealed`: artifact production is complete and the artifact should not be modified in place
+- `verified`: artifact integrity has been checked successfully
+- `tainted`: artifact failed verification or is otherwise not trustworthy
+- `derived`: artifact was generated from upstream artifacts
+- `superseded`: artifact was replaced by a newer generated version but remains available for traceability
+
+The exact lifecycle vocabulary may be refined during implementation, but the source/derived/review/export distinction is architectural.
+
+#### Affected Parts
+
+- `Capture Worker Process`
+- `Session Orchestrator Process`
+- `Artifact Store Port`
+- `Processing Orchestrator`
+- `Review Workflow Service`
+- `Export Service`
+- `Session Record`
+- global index projection
+
+#### Failure Mode Prevented
+
+Without this concept, the system may:
+
+- overwrite raw transcripts with corrected text
+- lose the distinction between model output and user correction
+- trust corrupted audio or stale derived artifacts
+- make future regeneration with improved models difficult
+
+#### Open Questions
+
+- exact hash algorithm and integrity metadata format
+- exact artifact directory layout inside a `Session Bundle`
+- exact lifecycle state names used in implementation
