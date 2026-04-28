@@ -28,3 +28,10 @@ This repository separates documentation by role so agents do not have to guess w
 - `architecture/` = working synthesis
 - `research/notes/` = evidence outputs
 - `research/backlog/` = pending investigation
+
+## Primary Documents
+
+- [arc42 Working Draft](architecture/arc42-working-draft.md)
+- [Architecture Research Backlog](research/backlog/architecture-research-backlog.md)
+- [PoC Requirements](requirements/poc-requirements.md)
+- [Discovery Meeting Report](requirements/discovery-meeting-report.md)
