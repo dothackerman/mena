@@ -2016,3 +2016,112 @@ Without this concept, the system may:
 Research link:
 
 - [R-08 Internal Protocol Implementation Strategy](../research/backlog/architecture-research-backlog.md#r-08-internal-protocol-implementation-strategy)
+
+### 11.8 Testing and Replayability
+
+Status: Provisional
+
+#### Problem
+
+`mena` depends on audio capture, transcription, diarization, summarization, and local/remote provider behavior.
+These are difficult to test reliably through live end-to-end runs only.
+
+The project is also expected to be implemented with heavy use of coding agents.
+Coding agents need tight feedback loops, stable fixtures, and explicit contracts to avoid accidentally breaking cross-module behavior.
+
+#### Architectural Rule
+
+The system must be designed so core workflows can be tested through replayable artifacts and provider contracts, not only through live recording sessions.
+
+Live audio capture should be tested separately from downstream processing where possible.
+
+#### Replayable Test Inputs
+
+The architecture should support test fixtures such as:
+
+- short synthetic or consent-safe audio files
+- prepared session bundles
+- sample session records
+- sample raw transcripts
+- sample diarization outputs
+- sample correction overlays
+- expected final markdown outputs
+
+Real meeting recordings must not become default test fixtures.
+
+#### Contract Test Boundaries
+
+The following boundaries should have focused tests:
+
+- capture profile interpretation
+- session record schema loading and validation
+- artifact lifecycle and integrity checks
+- internal protocol message handling
+- provider capability and policy resolution
+- provider adapter contracts
+- correction overlay application
+- export generation
+
+#### Provider Testing Rule
+
+Provider-backed stages must be testable without always invoking the real provider.
+
+Examples:
+
+- transcription workflow can be tested with a fake ASR provider returning a known transcript
+- diarization workflow can be tested with a fake diarization provider returning known speaker segments
+- summarization workflow can be tested with deterministic fake summaries
+- policy resolver can be tested against local/unavailable/fallback scenarios
+
+Real provider integration tests may exist, but they should be separated from fast deterministic tests.
+
+#### Golden Output Rule
+
+For stable pipeline behavior, selected fixture runs should have expected outputs.
+
+Golden outputs may include:
+
+- merged transcript structure
+- review queue contents
+- corrected transcript view
+- final markdown summary shape
+
+Golden outputs should be used carefully:
+
+- stable structure should be asserted
+- brittle exact wording from generative models should not be over-asserted unless the provider is fake or deterministic
+
+#### Privacy Rule
+
+Test fixtures must not depend on private real meeting content by default.
+
+If real recordings are ever used for evaluation, they must be handled outside normal committed fixtures unless explicitly consented and sanitized.
+
+#### Affected Parts
+
+- repository scaffold
+- test fixture layout
+- provider ports and adapters
+- session bundle format
+- artifact store
+- correction workflow
+- export workflow
+- CI/local test commands
+- future coding-agent issue design
+
+#### Failure Mode Prevented
+
+Without this concept, the system may:
+
+- require live meetings to test basic pipeline behavior
+- make coding-agent changes hard to verify
+- accidentally commit private meeting data as fixtures
+- couple tests to one provider runtime or one laptop setup
+- miss contract drift between core workflow and provider adapters
+
+#### Deferred
+
+- exact test framework
+- exact fixture format and size limits
+- exact golden-output approval workflow
+- whether real provider integration tests run locally, manually, or in CI
