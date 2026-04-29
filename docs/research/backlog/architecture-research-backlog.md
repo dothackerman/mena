@@ -6,9 +6,9 @@ This document captures research tasks that surfaced during architecture work and
 These are not yet implementation issues.
 They exist because the architecture depends on their outcomes.
 
-Companion architecture draft:
+Companion architecture overview:
 
-- [arc42 Working Draft](../../architecture/arc42-working-draft.md)
+- [Architecture Overview](../../architecture/architecture-overview.md)
 
 ## Current Research Tasks
 
@@ -17,6 +17,7 @@ Companion architecture draft:
 Question:
 
 - how should local model-backed stages be accessed on user machines?
+- is local summarization viable on the first target laptop and on weaker representative tester machines?
 
 Current options to evaluate:
 
@@ -37,6 +38,7 @@ Why it matters:
 Question:
 
 - what is the most reliable Linux approach for dual-stream capture and controlled capture-source routing?
+- what is the incremental implementation cost of adding `in_person_single_mic` after or alongside `online_dual_stream`?
 
 Why it matters:
 
@@ -83,6 +85,16 @@ Why it matters:
 Question:
 
 - which remote fallback providers are acceptable under sovereignty constraints, and for which stages exactly?
+
+Current candidates to evaluate:
+
+- Mistral models through direct Mistral API access
+- Mistral models through OpenRouter or a similar broker
+
+Critical distinction:
+
+- model family, direct provider, and brokered access path are separate policy concerns
+- broker jurisdiction, routing, retention, logging, contractual guarantees, and zero-data-retention claims must be evaluated independently from the underlying model family
 
 Why it matters:
 

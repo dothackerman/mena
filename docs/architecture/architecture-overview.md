@@ -1,9 +1,9 @@
-# mena Architecture Working Draft
+# mena Architecture Overview
 
-Status: working draft for interactive architecture decisions
+Status: arc42-structured architecture overview; provisional where marked
 
-This document captures architecture decisions incrementally while they are being discussed.
-Sections may be revised as later decisions sharpen earlier wording.
+This document captures the current architecture baseline.
+Sections may be revised as research, review, and implementation sharpen earlier wording.
 
 ## 1. Introduction and Goals
 
@@ -12,9 +12,9 @@ Sections may be revised as later decisions sharpen earlier wording.
 This document records the current architecture baseline for `mena` using an `arc42`-style structure.
 It is deliberately iterative. The goal is to preserve decisions early without pretending that all details are final.
 
-### 1.2 Scope of This Draft
+### 1.2 Scope of This Overview
 
-This draft currently covers:
+This overview currently covers:
 
 - current system context
 - current runtime pipeline
@@ -25,7 +25,7 @@ This draft currently covers:
 - session model and persistence semantics
 - architecture-derived research backlog
 
-Later sections will be added as decisions are made.
+Sections may be expanded as decisions are made.
 
 ### 1.3 Decision Status Convention
 
@@ -61,7 +61,7 @@ Current interpretation:
 Status: Provisional
 
 This section captures constraints that are already strong enough to shape architecture.
-Open choices are called out explicitly where customer/product judgment is still needed.
+Open choices are called out explicitly where research, PoC validation, or customer/product judgment is still needed.
 
 ### 2.1 Product and Scope Constraints
 
@@ -103,15 +103,18 @@ Status: Confirmed
 - Internal coordination protocols and durable schemas must be versioned from day one.
 - The architecture must be legible enough for coding agents to implement work in parallel without violating boundaries.
 
-### 2.5 Constraints Needing Customer or Product Judgment
+### 2.5 Constraints Needing Research or PoC Validation
 
 Status: Open
 
-- Whether the in-person single-mic profile should become a PoC extension before the online dual-stream path is validated.
-- Whether remote fallback for summarization is enabled in the first PoC or only architecturally prepared.
-- Which jurisdictions/providers qualify as acceptable fallback providers for non-audio stages.
-- What minimum output quality makes the PoC useful enough for continued investment.
-- How much CLI configuration is acceptable for first testers when capture profiles and device selection become visible.
+These questions should not block the architecture overview.
+They should be answered through research, first implementation experience, and user testing.
+
+- The incremental complexity of `in_person_single_mic` needs validation, but it does not currently justify interrupting the `online_dual_stream` sequence. The expected difference is source topology and diarization quality risk from microphone, room, and speaker overlap conditions.
+- Remote summarization fallback cannot be decided fully until local runtime research and early tests show whether local summarization is viable on target hardware.
+- Candidate remote fallback paths include Mistral models directly and Mistral models through OpenRouter or a similar broker. These are not equivalent sovereignty profiles; provider jurisdiction, broker jurisdiction, retention, and routing must be evaluated separately.
+- "Good enough" output quality is an empirical PoC learning outcome. The architecture must provide a fast feedback loop and traceable artifacts rather than pretending a threshold is known upfront.
+- CLI device/profile confirmation friction is an empirical UX learning outcome. The architecture must expose profile and device choices cleanly so the CLI can evolve without changing core logic.
 
 ## 3. Context and Scope
 
@@ -214,7 +217,9 @@ Status: Provisional
 
 - Optimize the first implementation for a fast Linux CLI PoC, but keep OS-specific behavior behind adapters.
 - Prepare for `online_dual_stream` first while keeping `in_person_single_mic` as an intended profile rather than a later conceptual rewrite.
+- Treat `in_person_single_mic` as a capture-profile extension unless research or early implementation proves the incremental complexity is materially higher than expected.
 - Use replayable artifacts, fake providers, and consent-safe fixtures so coding agents can implement and test most behavior without live meetings.
+- Use the first runnable PoC to discover practical quality thresholds and CLI friction rather than trying to define them in advance.
 - Keep architecture, research backlog, and implementation tasks separate so unresolved research does not become accidental implementation policy.
 
 ## 5. Building Block View
@@ -821,7 +826,12 @@ A `Capture Source` records:
 - source: `room_mic`
 - semantic role: mixed room speakers
 - diarization: expected when speaker attribution matters
-- status: future profile, not current PoC requirement
+- status: near-future profile; not expected to require a core pipeline rewrite
+
+Current assumption:
+
+- `in_person_single_mic` should be a lower-incremental-cost profile if the capture profile abstraction holds.
+- the main uncertainty is quality, especially diarization quality under imperfect microphones, room acoustics, overlap, and speaker distance
 
 #### User Interaction Rule
 
@@ -1155,6 +1165,12 @@ Provider selection must consider:
 - local preferred
 - policy-approved fallback may be allowed
 - likely first stage where a more capable remote model might be useful
+
+Current fallback candidate:
+
+- Mistral models are the provisional candidate for remote summarization fallback research.
+- Direct Mistral API access and OpenRouter-brokered access to Mistral models must be evaluated as separate provider-chain options.
+- Choosing a model family does not by itself decide sovereignty; the access path, jurisdiction, routing, retention, and contractual guarantees matter.
 
 #### User Configuration Rule
 
@@ -1817,7 +1833,7 @@ If an implementation choice affects:
 - resumability
 - future interface independence
 
-then it is not a mere implementation detail and must either appear in this architecture draft or be tracked as an open architecture question.
+then it is not a mere implementation detail and must either appear in this architecture overview or be tracked as an open architecture question.
 
 ### 8.10 Session Model and Persistence Semantics
 
@@ -1977,7 +1993,7 @@ The detailed architecture-derived research backlog lives in:
 
 This separation is intentional:
 
-- the `arc42` draft remains the architectural narrative and decision trail
+- the architecture overview remains the architectural narrative and decision trail
 - the research backlog remains the execution-oriented list of questions that need bounded or deep research
 
 ### 9.1 Decision Log
@@ -2003,13 +2019,15 @@ If a decision becomes contentious, expensive, or implementation-critical, it sho
 | AD-012 | Keep runtime data outside the repository and preserve user session data on uninstall. | Confirmed | Development checkout, installed application, and user-owned data remain separate. |
 | AD-013 | Design for replayability and contract testing. | Confirmed | Coding agents can test core behavior with fixtures and fake providers instead of relying on live meetings. |
 | AD-014 | Defer privacy-preserving UX telemetry until research provides a concrete model. | Deferred | Telemetry must not be implemented ad hoc or mixed into session content artifacts. |
+| AD-015 | Treat output quality and CLI friction thresholds as PoC learning outcomes. | Confirmed | Architecture must enable fast test loops and traceable artifacts instead of requiring invented acceptance thresholds upfront. |
 
 ### 9.2 Decisions Needing Follow-Up
 
 Status: Open
 
-- Whether `in_person_single_mic` becomes part of the immediate PoC scope or the first post-PoC extension.
-- Whether remote fallback for summarization is enabled in the first PoC.
+- Validate actual incremental implementation cost of `in_person_single_mic`; current architecture assumes it is a capture-profile extension, not a sequence interrupt.
+- Research whether local summarization is viable on first target hardware and representative weaker tester hardware before deciding whether first PoC fallback is necessary.
+- Evaluate Mistral direct API access and Mistral-through-OpenRouter access as separate provider-chain options before declaring fallback policy acceptable.
 - Whether the internal protocol remains a simple local JSON-like protocol or moves to a stronger contract format after research.
 - Whether the first implementation uses direct local model libraries, Ollama, LM Studio, or a different runtime abstraction.
 
@@ -2261,10 +2279,10 @@ It is not a full project risk register.
 
 | Risk | Current Assessment | Mitigation / Follow-Up |
 | --- | --- | --- |
-| In-person single-mic demand may become urgent before the online dual-stream PoC is validated. | Medium likelihood, medium impact. | Keep capture profiles explicit now; customer must decide near-term scope priority. |
+| In-person single-mic demand may become urgent before the online dual-stream PoC is validated. | Medium likelihood, medium impact. | Keep capture profiles explicit now; validate incremental implementation cost before treating it as a sequence change. |
 | The CLI may accidentally shape core product behavior too strongly. | Medium likelihood, high impact. | Keep workflow logic interface-independent and document CLI-specific behavior as adapter behavior. |
 | The PoC may optimize for the first technical user and fail less technical testers. | Medium likelihood, high impact. | Keep install/uninstall, device confirmation, and minimal configuration as architectural concerns, not late UX polish. |
-| Minimum useful output quality is not yet quantified. | High likelihood, high impact. | Define practical acceptance criteria before large implementation effort. |
+| Minimum useful output quality is not yet quantified. | High likelihood, high impact. | Use first runnable PoC sessions to establish practical acceptance criteria before deeper optimization. |
 
 ### 11.2 Technical Risks
 
@@ -2274,7 +2292,7 @@ It is not a full project risk register.
 | Local model runtime choice may create installation or hardware lock-in. | High likelihood, high impact. | Research task R-01; keep provider/runtime access behind ports. |
 | ASR quality may be insufficient for target meetings, accents, or mixed languages. | Medium likelihood, high impact. | Research task R-04; preserve raw audio so transcripts can be regenerated. |
 | Diarization may fail for overlap, poor microphones, or in-person single-mic meetings. | High likelihood, medium impact. | Research task R-05; do not make diarization correctness a hidden prerequisite for preserving source artifacts. |
-| Fallback providers may violate sovereignty expectations if policy is vague. | Medium likelihood, high impact. | Research task R-06; remote fallback is limited to allowed non-audio stages. |
+| Fallback providers may violate sovereignty expectations if policy is vague. | Medium likelihood, high impact. | Research task R-06; remote fallback is limited to allowed non-audio stages and must evaluate direct providers and brokers separately. |
 | Internal protocol may be under-specified for parallel agent implementation. | Medium likelihood, medium impact. | Research task R-08; version protocol and schemas early. |
 | Local install/update/uninstall may be harder than expected. | Medium likelihood, medium impact. | Research task R-07; keep repo, install, config, session data, cache, and logs separate. |
 
@@ -2282,19 +2300,19 @@ It is not a full project risk register.
 
 | Debt Item | Current Assessment | Mitigation / Follow-Up |
 | --- | --- | --- |
-| Decisions are captured in one working draft rather than separate ADRs. | Acceptable for current phase. | Promote contentious or expensive decisions to ADRs when implementation starts. |
+| Decisions are captured in one architecture overview rather than separate ADRs. | Acceptable for current phase. | Promote contentious or expensive decisions to ADRs when implementation starts. |
 | Research backlog items are broad. | Acceptable if each has verifiable start and finish criteria. | Refine individual tasks before assigning deep research agents. |
 | Telemetry is intentionally not designed yet. | Acceptable because privacy failure would be worse than delayed telemetry. | Research task R-09 before any telemetry implementation. |
 | Coding agents may drift from intended boundaries. | Material risk for implementation phase. | Use folder-level `AGENTS.md`, contract tests, architecture tests where useful, and issue templates that reference relevant decisions. |
 
-### 11.4 Items Requiring Customer or Product Judgment
+### 11.4 Items Requiring Product Validation or Research
 
 Status: Open
 
-- Decide whether the in-person meeting use case should interrupt the current online dual-stream PoC sequence.
-- Decide what "good enough" means for notes, corrections, speaker labels, and summaries in first-user testing.
-- Decide whether first testers may use remote summarization fallback or whether the first PoC should be strictly local end-to-end except for explicitly disabled future hooks.
-- Decide how much device/profile confirmation is acceptable in the CLI before it becomes friction.
+- Validate whether `in_person_single_mic` is low-incremental enough to include early without delaying the online dual-stream PoC path.
+- Use first-user testing to determine what "good enough" means for notes, corrections, speaker labels, and summaries.
+- After local runtime and fallback-provider research, decide whether first testers may use remote summarization fallback.
+- Use first CLI testing to determine how much device/profile confirmation is helpful before it becomes friction.
 
 ## 12. Glossary
 

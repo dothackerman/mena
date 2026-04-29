@@ -11,7 +11,7 @@ This repository separates documentation by role so agents do not have to guess w
 
 ### `architecture/`
 
-- evolving architecture drafts
+- evolving architecture synthesis
 - decisions, open questions, tradeoffs, and diagrams
 
 ### `research/notes/`
@@ -31,7 +31,7 @@ This repository separates documentation by role so agents do not have to guess w
 
 ## Primary Documents
 
-- [arc42 Working Draft](architecture/arc42-working-draft.md)
+- [Architecture Overview](architecture/architecture-overview.md)
 - [Architecture Research Backlog](research/backlog/architecture-research-backlog.md)
 - [PoC Requirements](requirements/poc-requirements.md)
 - [Discovery Meeting Report](requirements/discovery-meeting-report.md)
