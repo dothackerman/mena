@@ -1618,3 +1618,89 @@ Research links:
 
 - [R-01 Local Model Runtime Strategy](../research/backlog/architecture-research-backlog.md#r-01-local-model-runtime-strategy)
 - [R-06 Fallback Provider Policy](../research/backlog/architecture-research-backlog.md#r-06-fallback-provider-policy)
+
+### 11.5 Schema and Protocol Versioning
+
+Status: Confirmed
+
+#### Problem
+
+`mena` stores local artifacts and metadata that may outlive a single implementation version.
+It also uses an internal protocol between the `Session Orchestrator Process` and the `Capture Worker Process`.
+
+Without explicit versioning, iterative development can silently break older session records, artifact metadata, or process messages.
+This risk is higher because the project is expected to be implemented incrementally by coding agents.
+
+#### Architectural Rule
+
+Persisted schemas and internal protocol messages must carry explicit versions from day one.
+
+Versioning applies to:
+
+- `Session Record`
+- artifact metadata
+- correction overlay format
+- review queue format
+- internal protocol messages
+- global index projection, if introduced
+
+Versioning does not mean every format must be perfect or stable immediately.
+It means the system can identify what format it is reading and fail or migrate deliberately.
+
+#### Compatibility Rules
+
+Current PoC compatibility rules:
+
+- readers must reject unknown incompatible major versions
+- readers may accept compatible minor additions when safe
+- migrations must be explicit, not accidental
+- local development may use simple migration paths, but silent reinterpretation is not allowed
+- protocol peers must agree on a supported protocol version before relying on messages
+
+#### Internal Protocol Rule
+
+The internal protocol should distinguish:
+
+- protocol version
+- message type
+- message schema version where needed
+
+The exact transport and encoding are deferred, but versioning is not.
+
+#### Storage Schema Rule
+
+Stored session and artifact metadata should include enough version information to support:
+
+- safe reading
+- safe rejection
+- future migration
+- debugging older sessions
+
+#### What Is Not Decided
+
+- exact version numbering convention
+- exact migration mechanism
+- exact schema definition language
+- exact protocol encoding
+
+#### Affected Parts
+
+- `Session Record`
+- `Capture Worker Process`
+- `Session Orchestrator Process`
+- internal protocol
+- artifact metadata
+- correction overlays
+- review workflow
+- global index projection
+- future migration tooling
+
+#### Failure Mode Prevented
+
+Without this concept, the system may:
+
+- misread older session records
+- silently treat stale metadata as current
+- make old sessions unrecoverable after implementation changes
+- allow two process versions to exchange messages they interpret differently
+- make coding-agent parallel work unsafe because contracts drift invisibly
