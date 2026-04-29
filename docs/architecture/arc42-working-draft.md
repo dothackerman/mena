@@ -60,15 +60,58 @@ Current interpretation:
 
 Status: Provisional
 
-This section is not yet fully extracted. Binding constraints currently appear in the requirements document and throughout this draft.
+This section captures constraints that are already strong enough to shape architecture.
+Open choices are called out explicitly where customer/product judgment is still needed.
 
-Known architectural constraints include:
+### 2.1 Product and Scope Constraints
 
-- PoC target platform is Linux.
-- PoC user interface is CLI-first.
-- Recording, transcription, and diarization are local-only.
-- User-created session data must remain local unless an explicit policy-approved fallback applies to an allowed stage.
-- Existing products such as Meetily, Notion AI Meeting Notes, and Otter.ai are references to watch, not runtime dependencies.
+Status: Confirmed
+
+- The PoC is a standalone local product, not an OpenClaw plugin and not a fork of an existing meeting-notes product.
+- The PoC is CLI-first for speed of testing and because it is naturally compatible with agent harnesses.
+- The CLI is only an interface adapter. Core workflow logic must not depend on CLI-specific behavior.
+- The PoC focuses on recorded meeting processing. Fully live meeting assistance is out of scope for the first PoC.
+- Existing tools such as Meetily, Notion AI Meeting Notes, and Otter.ai are products to observe, not architectural baselines or runtime dependencies.
+
+### 2.2 Platform Constraints
+
+Status: Confirmed for PoC, Provisional for Product
+
+- Linux is the first implementation and test platform.
+- Linux-first must not mean Linux-coupled core logic. OS-specific capture, paths, process supervision, and packaging belong behind adapters.
+- Future product direction should remain compatible with a desktop app on Linux, macOS, and Windows unless research proves a strong reason to narrow scope.
+- Runtime data must not live inside the source repository.
+
+### 2.3 Data Sovereignty and Provider Constraints
+
+Status: Confirmed
+
+- Audio recording, transcription, and diarization are local-only stages. `mena` must not send audio to a remote service.
+- Summarization and semantic coherence checks are local-preferred stages and may use policy-approved fallback providers only when explicitly allowed.
+- Model and provider choices must be behind ports and a policy/capability resolver. Workflow code must not call concrete providers directly.
+- User-created session data remains local and survives uninstall by default.
+- Raw audio is the canonical source artifact and must be treated as sealed after capture.
+
+### 2.4 Architecture and Implementation Constraints
+
+Status: Confirmed
+
+- The codebase must support dependency inversion and strict separation between core workflow logic, adapters, provider integrations, and user interfaces.
+- Durable artifacts are file-based for the PoC. The session index is for discovery and convenience, not the source of truth.
+- The `Session Orchestrator Process` is the canonical writer of the `Session Record`.
+- The `Capture Worker Process` owns real-time audio capture and emits facts, events, and artifact references.
+- Internal coordination protocols and durable schemas must be versioned from day one.
+- The architecture must be legible enough for coding agents to implement work in parallel without violating boundaries.
+
+### 2.5 Constraints Needing Customer or Product Judgment
+
+Status: Open
+
+- Whether the in-person single-mic profile should become a PoC extension before the online dual-stream path is validated.
+- Whether remote fallback for summarization is enabled in the first PoC or only architecturally prepared.
+- Which jurisdictions/providers qualify as acceptable fallback providers for non-audio stages.
+- What minimum output quality makes the PoC useful enough for continued investment.
+- How much CLI configuration is acceptable for first testers when capture profiles and device selection become visible.
 
 ## 3. Context and Scope
 
@@ -133,15 +176,46 @@ flowchart LR
 
 Status: Provisional
 
-Current solution strategy:
+The architecture uses a local, artifact-first pipeline with explicit process, provider, and interface boundaries.
+The goal is to validate product usefulness quickly without making PoC shortcuts the long-term product architecture.
 
-- use artifact-first persistence with session bundles
-- isolate capture in a dedicated `Capture Worker Process`
-- keep orchestration, review, export, and policy decisions in the `Session Orchestrator Process`
-- keep the CLI as the first interface adapter, not the product architecture
-- select model/runtime providers through ports and a policy-aware resolver
-- keep recording, transcription, and diarization local-only
-- design core concepts so future in-person capture and future desktop interfaces do not require a pipeline rewrite
+### 4.1 Core Strategy
+
+Status: Confirmed
+
+- Treat each meeting as a durable session bundle containing source artifacts, derived artifacts, overlays, exports, and a compact session record.
+- Keep raw audio as the canonical source artifact.
+- Preserve generated transcripts and user corrections separately so the product can explain what came from the model and what came from review.
+- Keep the first user interface as a CLI adapter while designing the workflow core so desktop and agent adapters can be added later.
+- Use capture profiles to model different meeting setups without changing the core capture port.
+
+### 4.2 Runtime Strategy
+
+Status: Confirmed
+
+- Split the PoC into a `Session Orchestrator Process` and a `Capture Worker Process`.
+- Use the capture worker for real-time audio ownership and failure isolation.
+- Use the orchestrator for session lifecycle, artifact decisions, user-facing workflow, provider policy, and canonical session record updates.
+- Use files for durable artifacts and the internal protocol only for live coordination.
+- If the orchestrator disappears in the CLI PoC, the capture worker should attempt a graceful stop and seal capture artifacts rather than record indefinitely.
+
+### 4.3 Provider Strategy
+
+Status: Confirmed
+
+- Keep recording, transcription, and diarization local-only.
+- Route all model/runtime access through provider ports and a policy-aware resolver.
+- Allow local-preferred non-audio stages, such as summarization, to use fallback providers only under an explicit sovereignty policy.
+- Defer the concrete local runtime strategy, for example direct libraries versus Ollama or LM Studio, to research.
+
+### 4.4 Evolution Strategy
+
+Status: Provisional
+
+- Optimize the first implementation for a fast Linux CLI PoC, but keep OS-specific behavior behind adapters.
+- Prepare for `online_dual_stream` first while keeping `in_person_single_mic` as an intended profile rather than a later conceptual rewrite.
+- Use replayable artifacts, fake providers, and consent-safe fixtures so coding agents can implement and test most behavior without live meetings.
+- Keep architecture, research backlog, and implementation tasks separate so unresolved research does not become accidental implementation policy.
 
 ## 5. Building Block View
 
@@ -1906,12 +1980,38 @@ This separation is intentional:
 - the `arc42` draft remains the architectural narrative and decision trail
 - the research backlog remains the execution-oriented list of questions that need bounded or deep research
 
-### 9.1 Decision Log Status
+### 9.1 Decision Log
 
-Status: Deferred
+Status: Provisional
 
-Architecture decisions are currently embedded near the sections they affect.
-A later pass should extract key decisions into ADRs or a concise decision log.
+This is a compact decision log, not a full ADR set yet.
+If a decision becomes contentious, expensive, or implementation-critical, it should be promoted to a separate ADR.
+
+| ID | Decision | Status | Consequence |
+| --- | --- | --- | --- |
+| AD-001 | Build a standalone local PoC. | Confirmed | OpenClaw remains a future adapter/integration path, not a PoC dependency. |
+| AD-002 | Treat the CLI as an adapter. | Confirmed | Core workflow logic must not depend on command-line control flow, prompts, or terminal behavior. |
+| AD-003 | Use one generic `Capture Port` with capture profiles. | Confirmed | `online_dual_stream` and `in_person_single_mic` can share core capture concepts while differing in adapter behavior. |
+| AD-004 | Use a `Session Orchestrator Process` and a `Capture Worker Process`. | Confirmed | Capture has failure isolation and real-time ownership without turning every workflow step into a separate service. |
+| AD-005 | Use explicit criteria before adding more processes. | Confirmed | New processes must justify themselves through failure isolation, real-time ownership, resource isolation, lifecycle independence, privilege boundary, or runtime incompatibility. |
+| AD-006 | Make the orchestrator the canonical `Session Record` writer. | Confirmed | Capture workers and future workers emit facts/events/artifact references instead of independently mutating session truth. |
+| AD-007 | Use files for durable artifacts and protocol for live coordination. | Confirmed | The protocol stays small and avoids transporting raw audio or large generated artifacts. |
+| AD-008 | Keep raw audio sealed and separate corrections from generated transcript output. | Confirmed | Review transparency is preserved and transcripts can be regenerated from source audio when needed. |
+| AD-009 | Make recording, transcription, and diarization local-only. | Confirmed | No audio leaves the user's machine due to `mena`; quality/runtime tradeoffs must be solved locally for these stages. |
+| AD-010 | Use provider ports plus policy/capability resolution. | Confirmed | Model/runtime implementations can vary without changing workflow logic. |
+| AD-011 | Version durable schemas and internal protocol from day one. | Confirmed | Future migrations and adapter changes have an explicit compatibility path. |
+| AD-012 | Keep runtime data outside the repository and preserve user session data on uninstall. | Confirmed | Development checkout, installed application, and user-owned data remain separate. |
+| AD-013 | Design for replayability and contract testing. | Confirmed | Coding agents can test core behavior with fixtures and fake providers instead of relying on live meetings. |
+| AD-014 | Defer privacy-preserving UX telemetry until research provides a concrete model. | Deferred | Telemetry must not be implemented ad hoc or mixed into session content artifacts. |
+
+### 9.2 Decisions Needing Follow-Up
+
+Status: Open
+
+- Whether `in_person_single_mic` becomes part of the immediate PoC scope or the first post-PoC extension.
+- Whether remote fallback for summarization is enabled in the first PoC.
+- Whether the internal protocol remains a simple local JSON-like protocol or moves to a stronger contract format after research.
+- Whether the first implementation uses direct local model libraries, Ollama, LM Studio, or a different runtime abstraction.
 
 ## 10. Quality Requirements
 
@@ -2152,18 +2252,49 @@ Expected:
 
 ## 11. Risks and Technical Debt
 
-Status: Deferred
+Status: Provisional
 
-This section still needs a focused pass after the current cross-cutting concepts are reviewed.
-Known candidates include:
+This section lists risks that are already visible from the architecture discussion.
+It is not a full project risk register.
 
-- Linux audio routing uncertainty
-- local model runtime uncertainty
-- diarization quality and dependency risk
-- local install/update/uninstall complexity
-- in-person single-mic capture uncertainty
-- provider fallback policy and sovereignty validation
-- keeping coding-agent implementation aligned with architecture boundaries
+### 11.1 Product and Scope Risks
+
+| Risk | Current Assessment | Mitigation / Follow-Up |
+| --- | --- | --- |
+| In-person single-mic demand may become urgent before the online dual-stream PoC is validated. | Medium likelihood, medium impact. | Keep capture profiles explicit now; customer must decide near-term scope priority. |
+| The CLI may accidentally shape core product behavior too strongly. | Medium likelihood, high impact. | Keep workflow logic interface-independent and document CLI-specific behavior as adapter behavior. |
+| The PoC may optimize for the first technical user and fail less technical testers. | Medium likelihood, high impact. | Keep install/uninstall, device confirmation, and minimal configuration as architectural concerns, not late UX polish. |
+| Minimum useful output quality is not yet quantified. | High likelihood, high impact. | Define practical acceptance criteria before large implementation effort. |
+
+### 11.2 Technical Risks
+
+| Risk | Current Assessment | Mitigation / Follow-Up |
+| --- | --- | --- |
+| Linux audio routing may be fragile across devices and meeting tools. | High likelihood, high impact. | Research task R-02; isolate capture behind adapters and profiles. |
+| Local model runtime choice may create installation or hardware lock-in. | High likelihood, high impact. | Research task R-01; keep provider/runtime access behind ports. |
+| ASR quality may be insufficient for target meetings, accents, or mixed languages. | Medium likelihood, high impact. | Research task R-04; preserve raw audio so transcripts can be regenerated. |
+| Diarization may fail for overlap, poor microphones, or in-person single-mic meetings. | High likelihood, medium impact. | Research task R-05; do not make diarization correctness a hidden prerequisite for preserving source artifacts. |
+| Fallback providers may violate sovereignty expectations if policy is vague. | Medium likelihood, high impact. | Research task R-06; remote fallback is limited to allowed non-audio stages. |
+| Internal protocol may be under-specified for parallel agent implementation. | Medium likelihood, medium impact. | Research task R-08; version protocol and schemas early. |
+| Local install/update/uninstall may be harder than expected. | Medium likelihood, medium impact. | Research task R-07; keep repo, install, config, session data, cache, and logs separate. |
+
+### 11.3 Architecture Debt
+
+| Debt Item | Current Assessment | Mitigation / Follow-Up |
+| --- | --- | --- |
+| Decisions are captured in one working draft rather than separate ADRs. | Acceptable for current phase. | Promote contentious or expensive decisions to ADRs when implementation starts. |
+| Research backlog items are broad. | Acceptable if each has verifiable start and finish criteria. | Refine individual tasks before assigning deep research agents. |
+| Telemetry is intentionally not designed yet. | Acceptable because privacy failure would be worse than delayed telemetry. | Research task R-09 before any telemetry implementation. |
+| Coding agents may drift from intended boundaries. | Material risk for implementation phase. | Use folder-level `AGENTS.md`, contract tests, architecture tests where useful, and issue templates that reference relevant decisions. |
+
+### 11.4 Items Requiring Customer or Product Judgment
+
+Status: Open
+
+- Decide whether the in-person meeting use case should interrupt the current online dual-stream PoC sequence.
+- Decide what "good enough" means for notes, corrections, speaker labels, and summaries in first-user testing.
+- Decide whether first testers may use remote summarization fallback or whether the first PoC should be strictly local end-to-end except for explicitly disabled future hooks.
+- Decide how much device/profile confirmation is acceptable in the CLI before it becomes friction.
 
 ## 12. Glossary
 
