@@ -1704,3 +1704,179 @@ Without this concept, the system may:
 - make old sessions unrecoverable after implementation changes
 - allow two process versions to exchange messages they interpret differently
 - make coding-agent parallel work unsafe because contracts drift invisibly
+
+### 11.6 Local Data Location and Retention Model
+
+Status: Provisional
+
+#### Problem
+
+For the PoC, the development machine and the first user machine may be the same machine.
+Later product direction may move toward a desktop application and additional operating systems.
+
+Without explicit local data rules, the system may mix source code, runtime data, user meeting data, model caches, logs, exports, and test fixtures.
+That creates privacy, operability, uninstall, and future packaging problems.
+
+#### Architectural Rule
+
+The repository is not the product runtime home.
+
+The architecture distinguishes:
+
+- repository data
+- application installation data
+- configuration data
+- session/user data
+- cache/model data
+- logs and diagnostics
+- exports
+- test fixtures
+
+These categories may live on the same machine, but they have different ownership and retention rules.
+
+#### Data Classes
+
+`Repository data`:
+
+- source code
+- architecture and requirements documents
+- tests
+- fixtures
+- agent instructions
+- managed by git
+- should not contain real meeting recordings by default
+
+`Application installation data`:
+
+- installed CLI/application files
+- packaged code
+- helper binaries where applicable
+- removed by uninstall
+
+`Configuration data`:
+
+- user preferences
+- allowed provider settings
+- credential references or secure credential pointers
+- default capture/profile choices
+- usually preserved across upgrades
+
+`Session/user data`:
+
+- session bundles
+- raw audio
+- transcripts
+- correction overlays
+- session records
+- user-owned
+- not deleted by uninstall by default
+
+`Cache/model data`:
+
+- downloaded models
+- runtime caches
+- temporary model files
+- clearable separately from session data
+
+`Logs and diagnostics`:
+
+- operational logs
+- warnings/errors
+- crash and recovery diagnostics
+- must avoid meeting substance unless explicitly unavoidable and documented
+
+`Exports`:
+
+- final markdown summaries
+- user-facing transcripts
+- export bundles
+- user-owned
+
+#### Uninstall and Retention Rule
+
+Uninstalling `mena` means removing the application, not deleting user-created meeting data.
+
+Architectural rule:
+
+```text
+uninstall != delete sessions
+uninstall != delete exports
+uninstall != delete repository
+```
+
+Any destructive cleanup or purge operation must be explicit and separate from normal uninstall.
+
+#### Cross-Platform Rule
+
+Linux is the first platform adapter, not the shape of the core.
+
+Platform-specific concerns include:
+
+- audio capture adapter
+- device and route discovery
+- install/update/uninstall mechanics
+- local data path conventions
+- future desktop packaging
+
+Core concepts must remain platform-independent:
+
+- session bundle model
+- artifact lifecycle
+- correction overlay model
+- provider capability model
+- summarization/export workflow
+- quality and recovery semantics
+
+Local paths must be resolved through a platform-aware layer.
+Linux path conventions may be the first implementation, but must not be embedded in core session or workflow logic.
+
+#### Commercial Direction Note
+
+Pricing, licensing, and entitlement models are deferred.
+
+Future commercial licensing must not redefine ownership of user-created session data or weaken local-first sovereignty guarantees without an explicit architecture decision.
+
+#### Decided Now
+
+- repository root is not runtime home
+- user session data survives normal uninstall by default
+- runtime data classes have distinct ownership and retention rules
+- platform-specific paths belong behind a platform-aware boundary
+- Linux-first PoC must not make core concepts Linux-shaped
+
+#### Deferred
+
+- exact Linux path conventions
+- future macOS and Windows path conventions
+- install/update/uninstall mechanism
+- cleanup/purge UX
+- model cache retention policy
+- commercial licensing and entitlement architecture
+
+#### Affected Parts
+
+- CLI adapter
+- future desktop adapter
+- configuration handling
+- artifact store
+- session bundle storage
+- logging
+- installer/packaging flow
+- test fixtures
+- future cross-platform adapters
+
+#### Failure Mode Prevented
+
+Without this concept, the system may:
+
+- write real sessions into the repository
+- accidentally commit sensitive meeting data
+- delete user-created data during uninstall
+- hard-code Linux filesystem assumptions into the core pipeline
+- mix tests, runtime cache, and real user data
+- make future desktop packaging more expensive than necessary
+
+Research links:
+
+- [R-03 Future OS Compatibility Implications](../research/backlog/architecture-research-backlog.md#r-03-future-os-compatibility-implications)
+- [R-07 Install / Update / Uninstall Path for Local CLI Distribution](../research/backlog/architecture-research-backlog.md#r-07-install--update--uninstall-path-for-local-cli-distribution)
