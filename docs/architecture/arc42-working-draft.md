@@ -1880,3 +1880,139 @@ Research links:
 
 - [R-03 Future OS Compatibility Implications](../research/backlog/architecture-research-backlog.md#r-03-future-os-compatibility-implications)
 - [R-07 Install / Update / Uninstall Path for Local CLI Distribution](../research/backlog/architecture-research-backlog.md#r-07-install--update--uninstall-path-for-local-cli-distribution)
+
+### 11.7 Internal Process Contract and Supervision
+
+Status: Provisional
+
+#### Problem
+
+The architecture separates capture from orchestration using:
+
+- `Session Orchestrator Process`
+- `Capture Worker Process`
+
+This split only improves robustness if ownership, coordination, and shutdown behavior are explicit.
+Otherwise the system can still leave dangling capture workers, corrupt finalization, or infer live state from files.
+
+#### Architectural Rule
+
+Live coordination happens through the internal protocol.
+Durable facts live in artifacts and session records.
+Process supervision must protect the recording path first.
+
+Adapter-specific triggers must map to neutral lifecycle semantics.
+
+Examples of adapter or platform triggers:
+
+- CLI interruption
+- desktop app quit
+- OS termination signal
+- user stop request
+- parent process death
+- process crash
+- laptop shutdown
+
+Examples of neutral lifecycle semantics:
+
+- request graceful stop
+- force stop
+- capture worker lost
+- orchestrator lost
+- capture finalized
+- capture interrupted
+
+#### Process Authority
+
+`Session Orchestrator Process` owns:
+
+- user intent
+- workflow state
+- canonical `Session Record` writes
+- processing/review/export orchestration
+
+`Capture Worker Process` owns:
+
+- actual capture state
+- capture health
+- segment flushing
+- finalization facts
+- source-artifact references
+
+#### Protocol Boundary
+
+Protocol messages may carry:
+
+- commands
+- responses
+- events
+- health/status
+- artifact references
+
+Protocol messages must not carry:
+
+- raw audio payloads
+- full transcripts
+- large binary data
+- unframed human-readable logs
+
+#### Supervision Rules
+
+- duplicate `StopCapture` must be safe
+- finalization must be idempotent where possible
+- capture worker must emit explicit finalization facts
+- orchestrator must not assume capture stopped until it receives confirmation or detects failure
+- if the capture worker dies, the orchestrator must mark capture state as interrupted or failed
+- logs and protocol traffic must be separated or explicitly framed
+
+#### Orchestrator Loss Behavior
+
+For the CLI PoC:
+
+- if the `Capture Worker Process` loses its controlling `Session Orchestrator Process`, it should attempt graceful stop and seal usable artifacts
+- it should not run indefinitely as an orphan process
+- already flushed data must remain usable
+
+This behavior is provisional.
+Future desktop-app architecture may revisit it because background lifecycle expectations can differ from CLI expectations.
+
+#### Decided Now
+
+- live coordination belongs in the internal protocol
+- durable capture results belong in artifacts and session records
+- raw audio must not flow through the control protocol
+- adapter-specific termination triggers map to neutral lifecycle semantics
+- duplicate stop/finalization paths must be safe
+- CLI PoC orphan behavior is graceful stop and seal, not indefinite recording
+
+#### Deferred
+
+- exact supervision mechanism
+- exact orphan timeout behavior
+- exact transport/logging mechanism
+- future desktop background-process behavior
+
+#### Affected Parts
+
+- `Session Orchestrator Process`
+- `Capture Worker Process`
+- internal protocol
+- session state model
+- artifact finalization
+- logging
+- CLI adapter
+- future desktop adapter
+
+#### Failure Mode Prevented
+
+Without this concept, the system may:
+
+- leave capture running after the user-facing process exits
+- corrupt or duplicate finalization
+- infer live capture state from files alone
+- break protocol parsing with logs
+- fail to distinguish graceful stop from interrupted capture
+
+Research link:
+
+- [R-08 Internal Protocol Implementation Strategy](../research/backlog/architecture-research-backlog.md#r-08-internal-protocol-implementation-strategy)
