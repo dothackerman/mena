@@ -1473,3 +1473,148 @@ Without this concept, the system may:
 - show exports that appear current but were generated from stale corrections
 - recover by guessing from file presence alone
 - treat user cancellation and system failure as the same event
+
+### 11.4 Provider Capability and Policy Model
+
+Status: Provisional
+
+#### Problem
+
+Different pipeline stages need different execution providers.
+Some stages must remain strictly local because they handle audio or speaker-sensitive data.
+Other stages may use a policy-approved remote fallback if local execution is unavailable or insufficient.
+
+Without a shared provider and policy model, provider selection logic can become scattered across workflows and adapters.
+That creates risk of laptop-specific assumptions, accidental remote calls, or inconsistent sovereignty enforcement.
+
+#### Architectural Rule
+
+Provider-backed stages must go through:
+
+```text
+Workflow
+  -> capability request
+      -> policy-aware capability resolver
+          -> provider adapter
+```
+
+Workflow code must not call concrete providers directly.
+
+Provider selection must consider:
+
+- required capability
+- stage policy
+- local availability
+- configured credentials
+- sovereignty constraints
+- allowed fallback rules
+
+#### Current Stage Policy
+
+`recording`:
+
+- local only
+- no remote fallback
+
+`transcription`:
+
+- local only
+- no remote fallback
+- reason: audio must not leave the machine due to `mena`
+
+`diarization`:
+
+- local only
+- no remote fallback
+- reason: audio and speaker-sensitive data must not leave the machine due to `mena`
+
+`semantic coherence flagging`:
+
+- local preferred
+- policy-approved fallback may be allowed
+- details pending research
+
+`summarization`:
+
+- local preferred
+- policy-approved fallback may be allowed
+- likely first stage where a more capable remote model might be useful
+
+#### User Configuration Rule
+
+Local provider configuration may be flexible during PoC and research.
+
+Remote fallback configuration must be narrower:
+
+- the user may provide required credentials
+- the user must not be able to arbitrarily choose disallowed remote providers or models
+- allowed remote fallback options must be constrained by policy
+
+#### Scaffold Implication
+
+The future repository scaffold should preserve this boundary.
+
+Expected conceptual areas:
+
+- capability contracts or ports
+- policy/capability resolver
+- local provider adapters
+- remote provider adapters where allowed
+- tests for provider selection and policy enforcement
+
+Example conceptual shape:
+
+```text
+workflow
+  asks for summarize(...)
+
+resolver
+  chooses local provider if available and sufficient
+  or chooses policy-approved fallback if allowed
+  or fails with an actionable reason
+
+provider adapter
+  executes the selected local runtime or remote API
+```
+
+#### Decided Now
+
+- recording, transcription, and diarization are local-only
+- summarization and semantic coherence flagging may support policy-approved fallback
+- provider selection must be centralized behind a policy-aware resolver
+- workflow code must not directly call concrete providers
+- remote provider/model choice is policy-constrained
+
+#### Deferred
+
+- exact local model runtime strategy
+- exact fallback provider list
+- exact policy/config format
+- exact hardware or capability detection thresholds
+- whether fallback is enabled in the first PoC implementation or only architecture-enabled
+
+#### Affected Parts
+
+- `Processing Orchestrator`
+- `Capability / Policy Resolver`
+- transcription provider port
+- diarization provider port
+- summarization provider port
+- semantic flagging provider port
+- CLI and future interface adapters
+- installation and configuration flow
+
+#### Failure Mode Prevented
+
+Without this concept, the system may:
+
+- hard-code a local runtime such as `Ollama` directly inside workflow logic
+- scatter sovereignty checks across provider adapters
+- allow accidental remote processing of audio
+- make weaker-machine support depend on ad hoc implementation choices
+- make future provider replacement unnecessarily expensive
+
+Research links:
+
+- [R-01 Local Model Runtime Strategy](../research/backlog/architecture-research-backlog.md#r-01-local-model-runtime-strategy)
+- [R-06 Fallback Provider Policy](../research/backlog/architecture-research-backlog.md#r-06-fallback-provider-policy)
