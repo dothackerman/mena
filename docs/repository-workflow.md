@@ -36,7 +36,7 @@ Work branches:
 - branch from `main`
 - open a pull request back to `main`
 - keep branches scoped to one issue or tightly related issue slice
-- prefer small PRs that map to one implementation or research issue
+- prefer small PRs that map to one implementation or documentation issue
 
 ## Branch Naming
 
@@ -53,17 +53,14 @@ Common branch types:
 - `feature/`
 - `fix/`
 - `docs/`
-- `research/`
-- `scaffold/`
 - `chore/`
 
 Examples:
 
 ```text
 feature/12-capture-worker-start-stop
-research/7-linux-audio-routing
-scaffold/3-python-project-layout
 docs/9-architecture-guardrails
+chore/3-python-project-layout
 fix/18-session-lock-recovery
 ```
 
@@ -95,7 +92,7 @@ Implement capture worker start command (#12)
 ## Issue Discipline
 
 Implementation issues should use the GitHub implementation template.
-Research issues should use the GitHub research template.
+Research tasks are tracked in `docs/research/backlog/` unless explicitly promoted into implementation or documentation work.
 
 Issues should cite:
 
@@ -108,4 +105,3 @@ Issues should cite:
 
 Issues are the executable work contract for coding agents.
 The architecture remains the reference manual; issues name the specific slice to implement.
-

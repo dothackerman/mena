@@ -2,7 +2,7 @@
 
 Status: provisional backlog derived from architecture work
 
-This document captures research tasks that surfaced during architecture work and must not be lost.
+This document indexes research tasks that surfaced during architecture work and must not be lost.
 These are not yet implementation issues.
 They exist because the architecture depends on their outcomes.
 
@@ -12,145 +12,17 @@ Companion architecture overview:
 
 ## Current Research Tasks
 
-### R-01 Local Model Runtime Strategy
-
-Question:
-
-- how should local model-backed stages be accessed on user machines?
-- is local summarization viable on the first target laptop and on weaker representative tester machines?
-
-Current options to evaluate:
-
-- direct library integration
-- `Ollama`
-- `LM Studio`
-- other suitable local runtime approaches
-
-Why it matters:
-
-- affects installation complexity
-- affects runtime operability
-- affects portability to weaker tester machines
-- affects how local and fallback providers are abstracted behind ports
-
-### R-02 Linux Audio Capture and Routing Strategy
-
-Question:
-
-- what is the most reliable Linux approach for dual-stream capture and controlled capture-source routing?
-- what is the incremental implementation cost of adding `in_person_single_mic` after `online_dual_stream`?
-
-Why it matters:
-
-- affects recording robustness
-- affects capture-profile design
-- affects PoC in-person meeting support
-
-### R-03 Future OS Compatibility Implications
-
-Question:
-
-- what parts of the chosen Linux capture approach create future cross-platform constraints?
-
-Why it matters:
-
-- architecture should not accidentally assume Linux-specific behavior in the core pipeline
-
-### R-04 ASR Provider Strategy
-
-Question:
-
-- which ASR approach best fits the PoC and future product direction under sovereignty and operability constraints?
-
-Why it matters:
-
-- affects provider abstraction
-- affects runtime profile
-- affects output quality
-
-### R-05 Diarization Provider Strategy
-
-Question:
-
-- which diarization approach best fits the PoC and future product direction under sovereignty and operability constraints?
-
-Why it matters:
-
-- affects processing reliability
-- affects model/runtime dependencies
-- affects later speaker-related features
-
-### R-06 Fallback Provider Policy
-
-Question:
-
-- is direct Mistral API acceptable as the PoC summarization fallback under sovereignty constraints, and what policy limits apply?
-
-Current PoC fallback candidate:
-
-- Mistral models through direct Mistral API access for summarization only
-
-Critical distinction:
-
-- model family, direct provider, and brokered access path are separate policy concerns
-- brokered access paths such as OpenRouter are deferred to ideas and must not be treated as equivalent to direct Mistral API access
-
-Why it matters:
-
-- affects policy enforcement
-- affects tester operability on weaker machines
-- affects what the user may or may not configure directly
-
-### R-07 Install / Update / Uninstall Path for Local CLI Distribution
-
-Question:
-
-- what should the local install, upgrade, and uninstall path look like for a Linux CLI product used on the same machine as development and testing?
-
-Why it matters:
-
-- affects local operability
-- affects repo-vs-runtime-data separation
-- affects future packaging direction
-
-### R-08 Internal Protocol Implementation Strategy
-
-Question:
-
-- which concrete transport and encoding approach best fits the private internal protocol?
-
-Current candidates:
-
-- `stdio`
-- local socket
-- JSON-based schema messages
-- stronger schema tooling later if justified
-
-Why it matters:
-
-- affects process supervision
-- affects contract testing
-- affects implementation complexity
-
-### R-09 Privacy-Preserving UX Telemetry Design
-
-Question:
-
-- how should product-quality telemetry be modeled so that it yields useful UX insight without exposing meeting substance, participant identity, or meaningful user identity?
-
-Specific questions to answer:
-
-- what events or aggregates are useful for product improvement?
-- what identifiers are required, if any?
-- how can telemetry stay useful without storing transcript text, meeting topic, participant names, or customer identity?
-- should telemetry be local-only for the PoC, exportable on explicit user action, or never exported?
-
-Why it matters:
-
-- affects product improvement
-- affects privacy guarantees
-- affects future analytics structure
-- affects whether telemetry becomes a cross-cutting concept later
+| ID | Task | Status |
+| --- | --- | --- |
+| R-01 | [Local Model Runtime Strategy](r-01-local-model-runtime-strategy.md) | Open |
+| R-02 | [Linux Audio Capture and Routing Strategy](r-02-linux-audio-capture-and-routing-strategy.md) | Open |
+| R-03 | [Future OS Compatibility Implications](r-03-future-os-compatibility-implications.md) | Open |
+| R-04 | [ASR Provider Strategy](r-04-asr-provider-strategy.md) | Open |
+| R-05 | [Diarization Provider Strategy](r-05-diarization-provider-strategy.md) | Open |
+| R-06 | [Fallback Provider Policy](r-06-fallback-provider-policy.md) | Open |
+| R-07 | [Install / Update / Uninstall Path for Local CLI Distribution](r-07-install-update-uninstall-path-for-local-cli-distribution.md) | Open |
+| R-08 | [Internal Protocol Implementation Strategy](r-08-internal-protocol-implementation-strategy.md) | Open |
+| R-09 | [Privacy-Preserving UX Telemetry Design](r-09-privacy-preserving-ux-telemetry-design.md) | Open |
 
 ## Rule for New Research Tasks
 

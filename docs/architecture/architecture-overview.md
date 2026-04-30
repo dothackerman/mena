@@ -935,7 +935,7 @@ That works for online dual-stream capture but breaks for in-person single-mic ca
 
 Research link:
 
-- [R-02 Linux Audio Capture and Routing Strategy](../research/backlog/architecture-research-backlog.md#r-02-linux-audio-capture-and-routing-strategy)
+- [R-02 Linux Audio Capture and Routing Strategy](../research/backlog/r-02-linux-audio-capture-and-routing-strategy.md)
 
 ### 8.2 Artifact Lifecycle and Integrity
 
@@ -1345,8 +1345,8 @@ Without this concept, the system may:
 
 Research links:
 
-- [R-01 Local Model Runtime Strategy](../research/backlog/architecture-research-backlog.md#r-01-local-model-runtime-strategy)
-- [R-06 Fallback Provider Policy](../research/backlog/architecture-research-backlog.md#r-06-fallback-provider-policy)
+- [R-01 Local Model Runtime Strategy](../research/backlog/r-01-local-model-runtime-strategy.md)
+- [R-06 Fallback Provider Policy](../research/backlog/r-06-fallback-provider-policy.md)
 
 ### 8.5 Schema and Protocol Versioning
 
@@ -1618,8 +1618,8 @@ Without this concept, the system may:
 
 Research links:
 
-- [R-03 Future OS Compatibility Implications](../research/backlog/architecture-research-backlog.md#r-03-future-os-compatibility-implications)
-- [R-07 Install / Update / Uninstall Path for Local CLI Distribution](../research/backlog/architecture-research-backlog.md#r-07-install--update--uninstall-path-for-local-cli-distribution)
+- [R-03 Future OS Compatibility Implications](../research/backlog/r-03-future-os-compatibility-implications.md)
+- [R-07 Install / Update / Uninstall Path for Local CLI Distribution](../research/backlog/r-07-install-update-uninstall-path-for-local-cli-distribution.md)
 
 ### 8.7 Internal Process Contract and Supervision
 
@@ -1760,7 +1760,7 @@ Without this concept, the system may:
 
 Research link:
 
-- [R-08 Internal Protocol Implementation Strategy](../research/backlog/architecture-research-backlog.md#r-08-internal-protocol-implementation-strategy)
+- [R-08 Internal Protocol Implementation Strategy](../research/backlog/r-08-internal-protocol-implementation-strategy.md)
 
 ### 8.8 Testing and Replayability
 
