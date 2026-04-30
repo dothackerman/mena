@@ -97,7 +97,9 @@ Status: Confirmed for PoC, Provisional for Product
 Status: Confirmed
 
 - Audio recording, transcription, and diarization are local-only stages. `mena` must not send audio to a remote service.
-- Summarization is local-preferred and may fall back to direct Mistral API for the PoC when local execution is unavailable or insufficient.
+- Summarization is local-preferred and may fall back to ZDR-bearing direct Mistral API for the PoC when local execution is unavailable or insufficient.
+- The direct Mistral API fallback is architecture-allowed only through a Zero Data Retention access path that satisfies `CON-01`; default-retention API access is not an architecture-compliant fallback.
+- Legal and policy validation of the fallback access tier remains tracked in [R-06 Fallback Provider Policy](../research/backlog/r-06-fallback-provider-policy.md).
 - Semantic coherence checks are local-preferred; fallback behavior remains deferred unless needed by the PoC pipeline.
 - Model and provider choices must be behind ports and a policy/capability resolver. Workflow code must not call concrete providers directly.
 - User-created session data remains local and survives uninstall by default.
@@ -122,7 +124,7 @@ These questions should not block the architecture overview.
 They should be answered through research, first implementation experience, and user testing.
 
 - The incremental complexity of `in_person_single_mic` needs validation during implementation, but it is now part of PoC v0 scope rather than a post-PoC idea.
-- Direct Mistral API is the PoC fallback path for summarization when local execution is unavailable or insufficient. Brokering through OpenRouter or similar services is deferred outside the PoC because the broker becomes part of the provider chain.
+- Legal and policy validation of the confirmed direct Mistral summarization fallback remains open; R-06 must verify the ZDR access path, jurisdiction, routing, retention, and contractual guarantees before product hardening.
 - "Good enough" output quality is an empirical PoC learning outcome. The architecture must provide a fast feedback loop and traceable artifacts rather than pretending a threshold is known upfront.
 - CLI device/profile confirmation friction is an empirical UX learning outcome. The architecture must expose profile and device choices cleanly so the CLI can evolve without changing core logic.
 
@@ -161,7 +163,7 @@ flowchart LR
     Call[Video Call Platform\nZoom / Meet / kMeet / etc.]
     Store[Local Artifact Store]
     Notes[Manual Notes File]
-    Mistral[Optional Direct Mistral API\nSummarization Fallback]
+    Mistral[Optional ZDR Direct Mistral API\nSummarization Fallback]
     OpenClaw[OpenClaw\nFuture Adapter Only]
 
     subgraph M[mena system boundary]
@@ -221,7 +223,7 @@ Status: Confirmed
 
 - Keep recording, transcription, and diarization local-only.
 - Route all model/runtime access through provider ports and a policy-aware resolver.
-- Allow summarization to use direct Mistral API as the PoC fallback when local execution is unavailable or insufficient.
+- Allow summarization to use ZDR-bearing direct Mistral API as the PoC fallback when local execution is unavailable or insufficient and policy, credentials, and per-session consent allow it.
 - Defer the concrete local runtime strategy, for example direct libraries versus Ollama or LM Studio, to research.
 
 ### 4.4 Evolution Strategy
@@ -301,7 +303,7 @@ flowchart TD
         FW[faster-whisper Adapter]
         PW[pyannote / WhisperX Adapter]
         LLM[Local LLM Adapter]
-        Mistral[Direct Mistral API Adapter\nSummarization Fallback]
+        Mistral[ZDR Direct Mistral API Adapter\nSummarization Fallback]
         FS[File Storage Adapter]
         IDX[Optional Metadata Index Adapter]
     end
@@ -356,7 +358,7 @@ flowchart TD
 - ASR provider integration
 - diarization provider integration
 - local LLM integration
-- direct Mistral API fallback integration for summarization where allowed
+- ZDR-bearing direct Mistral API fallback integration for summarization where allowed
 - file storage and optional metadata indexing
 
 ### 5.4 Capture Port Decision
@@ -983,6 +985,13 @@ raw audio
 - change interpretation without rewriting raw derived output
 - examples: review queue, correction overlay
 
+`Speaker anchor artifacts`:
+
+- forward-compatibility artifacts produced from diarization output plus human correction
+- persist corrected or confirmed speaker labels together with their associated voice embeddings when such embeddings are produced
+- examples: corrected speaker label to embedding mapping, provider/model metadata, source segment references
+- not a cross-session speaker profile, matching index, or automatic identification feature
+
 `Export artifacts`:
 
 - final or user-facing composed outputs
@@ -1136,9 +1145,9 @@ Examples:
 - recording failure preserves flushed segments, marks capture interrupted, and informs the user; no fallback replaces failed capture
 - transcription may automatically switch from local GPU to local CPU when available, but must not use remote fallback
 - missing local model is a setup/preflight problem and should produce an actionable message
-- diarization failure may offer retry, skip diarization, or continue with profile-based labels
+- diarization failure may offer retry, skip diarization, or continue with capture-profile default labels
 - semantic flagging failure may allow correction to continue with available flags if the step is optional
-- summarization tries local first and may offer direct Mistral API fallback for that session when policy and credentials allow it
+- summarization tries local first and may offer ZDR-bearing direct Mistral API fallback for that session when policy, credentials, and consent allow it
 - export failure is retryable and must not invalidate upstream artifacts
 
 For the PoC, remote summarization fallback consent is per session.
@@ -1257,12 +1266,14 @@ Provider selection must consider:
 `summarization`:
 
 - local preferred
-- direct Mistral API fallback may be allowed in the PoC
+- ZDR-bearing direct Mistral API fallback may be allowed in the PoC
 - likely first stage where a more capable remote model might be useful
 
 Current fallback decision:
 
 - direct Mistral API is the PoC fallback candidate for summarization when local execution is unavailable or insufficient
+- it is allowed only when the configured access path provides Zero Data Retention for request and response content and satisfies `CON-01`
+- default-retention API access is not an architecture-compliant fallback, even when the provider is European
 - OpenRouter or similar brokers are not part of the PoC fallback path
 - choosing a model family does not by itself decide sovereignty; the access path, jurisdiction, routing, retention, and contractual guarantees matter
 
@@ -1272,10 +1283,10 @@ Local provider configuration may be flexible during PoC and research.
 
 Remote fallback configuration must be narrower:
 
-- the user may provide required credentials
+- the user may provide required credentials for the approved ZDR-bearing access path
 - the user must not be able to arbitrarily choose disallowed remote providers or models
 - allowed remote fallback options must be constrained by policy
-- for the PoC, direct Mistral API summarization fallback requires per-session user consent
+- for the PoC, direct Mistral API summarization fallback requires ZDR-bearing access, valid credentials, and per-session user consent
 - a later product may support an installation-level setting, but it must remain user-facing and changeable
 
 #### Scaffold Implication
@@ -1308,7 +1319,7 @@ provider adapter
 #### Decided Now
 
 - recording, transcription, and diarization are local-only
-- summarization may support direct Mistral API fallback in the PoC
+- summarization may support ZDR-bearing direct Mistral API fallback in the PoC
 - semantic coherence flagging fallback remains deferred unless required by the PoC pipeline
 - provider selection must be centralized behind a policy-aware resolver
 - workflow code must not directly call concrete providers
@@ -1318,7 +1329,7 @@ provider adapter
 #### Deferred
 
 - exact local model runtime strategy
-- final legal/policy validation for fallback provider use
+- final legal/policy validation for ZDR-bearing fallback provider use
 - exact policy/config format
 - exact hardware or capability detection thresholds
 
@@ -1894,7 +1905,7 @@ The goal is to prevent early implementation convenience from hard-coding the PoC
 | Capture implementation | Linux audio stack | Partly | PoC is Linux-only, but capture stays behind `Capture Port` |
 | ASR provider | Not fixed yet | Yes | Must remain behind `Transcription Port` |
 | Diarization provider | Not fixed yet | Yes | Must remain behind `Diarization Port` |
-| Summarization provider | Local-first with direct Mistral API fallback | Yes | Fallback is constrained to the summarization stage in the PoC |
+| Summarization provider | Local-first with ZDR-bearing direct Mistral API fallback | Yes | Fallback is constrained to the summarization stage in the PoC |
 | Semantic flagging provider | Not fixed yet | Yes | Same policy constraints as summarization |
 | Artifact persistence pattern | Local artifact store | Partly | First-class subsystem; exact implementation still open |
 | Metadata/index store | Not fixed yet | Yes | May begin minimal and grow later |
@@ -1973,6 +1984,7 @@ Session Bundle
 ├── Source Artifacts
 ├── Derived Artifacts
 ├── Review Artifacts
+├── Speaker Anchor Artifacts
 ├── Input Artifacts
 └── Export Artifacts
 ```
@@ -1993,6 +2005,28 @@ Reasoning:
 - it supports resumability cleanly
 - it supports artifact integrity checks
 - it avoids treating the repository or a global index as the canonical home of session data
+
+#### REQ-F18 Forward-Compatibility Speaker Anchors
+
+Status: Confirmed
+
+When diarization produces speaker embeddings and the correction workflow confirms or corrects speaker labels, `mena` must persist a versioned speaker-anchor artifact inside the `Session Bundle`.
+This artifact satisfies `REQ-F18` as per-session forward-compatibility storage only.
+It does not implement cross-session speaker matching, profile clustering, enrollment, or automatic identification; those remain deferred in [Speaker Profile Learning](../ideas/speaker-profile-learning.md).
+
+The speaker-anchor artifact should link:
+
+- stable source-audio or segment references
+- the diarization provider, model, and schema version
+- the anonymous speaker identifier produced by diarization
+- the corrected or confirmed speaker label
+- the embedding vector or a local reference to the sealed embedding artifact
+- correction provenance
+- confidence or quality metadata where available
+
+Diarization adapters that are used for REQ-F18-compliant PoC runs must expose exportable speaker embeddings through the `Diarization Port` or declare that the capability is unavailable.
+The orchestrator must record unavailable embeddings explicitly rather than silently dropping them.
+If diarization is skipped or no embeddings are produced, the `Session Record` must make that absence explicit.
 
 #### Session Record Role
 
@@ -2161,7 +2195,7 @@ If a decision becomes contentious, expensive, or implementation-critical, it sho
 | AD-007 | Use files for durable artifacts and protocol for live coordination. | Confirmed | The protocol stays small and avoids transporting raw audio or large generated artifacts. |
 | AD-008 | Keep raw audio sealed and separate corrections from generated transcript output. | Confirmed | Review transparency is preserved and transcripts can be regenerated from source audio when needed. |
 | AD-009 | Make recording, transcription, and diarization local-only. | Confirmed | No audio leaves the user's machine due to `mena`; quality/runtime tradeoffs must be solved locally for these stages. |
-| AD-010 | Use provider ports plus policy/capability resolution. | Confirmed | Model/runtime implementations can vary without changing workflow logic; direct Mistral API is the PoC summarization fallback when local execution is insufficient. |
+| AD-010 | Use provider ports plus policy/capability resolution. | Confirmed | Model/runtime implementations can vary without changing workflow logic; ZDR-bearing direct Mistral API is the PoC summarization fallback when local execution is insufficient. |
 | AD-011 | Version durable schemas and internal protocol from day one. | Confirmed | Future migrations and adapter changes have an explicit compatibility path; protocol initialization includes version agreement and minimal capabilities. |
 | AD-012 | Keep runtime data outside the repository and preserve user session data on uninstall. | Confirmed | Development checkout, installed application, and user-owned data remain separate. |
 | AD-013 | Design for replayability and contract testing. | Confirmed | Coding agents can test core behavior with fixtures and fake providers instead of relying on live meetings. |
@@ -2171,14 +2205,15 @@ If a decision becomes contentious, expensive, or implementation-critical, it sho
 | AD-017 | Use versioned manual-notes input artifacts for summarization. | Confirmed | Edited notes produce new notes artifact versions and new summary candidates instead of silently mutating prior summaries. |
 | AD-018 | Use a narrow rebuildable global index. | Confirmed | The index supports session discovery only and does not become canonical meeting-content storage. |
 | AD-019 | Centralize error recovery authority in the active orchestrator. | Confirmed | Adapters report typed failures; the orchestrator chooses bounded recovery according to stage policy, artifact state, and user intent. |
+| AD-020 | Persist per-session speaker anchor artifacts for `REQ-F18`. | Confirmed | Corrected speaker labels and associated embeddings are stored inside session bundles for forward compatibility, while cross-session matching remains deferred. |
 
 ### 9.2 Decisions Needing Follow-Up
 
 Status: Open
 
 - Validate actual incremental implementation cost of `in_person_single_mic`; current architecture assumes it is a capture-profile extension implemented after `online_dual_stream`.
-- Research local summarization quality and compare it with direct Mistral API fallback during PoC testing.
-- Validate the legal/policy suitability of direct Mistral API for fallback use; OpenRouter-style broker experimentation is deferred to ideas.
+- Research local summarization quality and compare it with ZDR-bearing direct Mistral API fallback during PoC testing where policy allows.
+- Validate the legal/policy suitability of ZDR-bearing direct Mistral API for fallback use; OpenRouter-style broker experimentation is deferred to ideas.
 - Whether the internal protocol remains a simple local JSON-like protocol or moves to a stronger contract format after research.
 - Whether the first implementation uses direct local model libraries, Ollama, LM Studio, or a different runtime abstraction.
 
@@ -2443,7 +2478,7 @@ It is not a full project risk register.
 | Local model runtime choice may create installation or hardware lock-in. | High likelihood, high impact. | Research task R-01; keep provider/runtime access behind ports. |
 | ASR quality may be insufficient for target meetings, accents, or mixed languages. | Medium likelihood, high impact. | Research task R-04; preserve raw audio so transcripts can be regenerated. |
 | Diarization may fail for overlap, poor microphones, or in-person single-mic meetings. | High likelihood, medium impact. | Research task R-05; do not make diarization correctness a hidden prerequisite for preserving source artifacts. |
-| Fallback providers may violate sovereignty expectations if policy is vague. | Medium likelihood, high impact. | PoC fallback uses direct Mistral API for summarization only; R-06 must validate legal/policy suitability before product hardening. |
+| Fallback providers may violate sovereignty expectations if policy is vague. | Medium likelihood, high impact. | PoC fallback uses ZDR-bearing direct Mistral API for summarization only; R-06 must validate legal/policy suitability before product hardening. |
 | Internal protocol may be under-specified for parallel agent implementation. | Medium likelihood, medium impact. | Research task R-08; version protocol and schemas early. |
 | Local install/update/uninstall may be harder than expected. | Medium likelihood, medium impact. | Research task R-07; keep repo, install, config, session data, cache, and logs separate. |
 
@@ -2461,7 +2496,7 @@ It is not a full project risk register.
 Status: Open
 
 - Use first-user testing to determine what "good enough" means for notes, corrections, speaker labels, and summaries.
-- Use first-user testing to compare local summarization output against direct Mistral API fallback output.
+- Use first-user testing to compare local summarization output against ZDR-bearing direct Mistral API fallback output where policy allows.
 - Use first CLI testing to determine how much device/profile confirmation is helpful before it becomes friction.
 
 ## 12. Glossary
@@ -2472,5 +2507,6 @@ Status: Open
 - `Artifact`: a persisted file or data object produced by the pipeline
 - `Diarization`: identifying who spoke when
 - `Manifest` / `Session Record`: persisted metadata and checkpoints for a meeting session and its processing lifecycle
+- `Speaker anchor artifact`: per-session artifact that links corrected speaker labels to local voice embeddings for forward compatibility; not a cross-session speaker profile
 - `System audio`: audio captured from the operating system output path
 - `ZDR`: Zero Data Retention

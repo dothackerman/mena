@@ -23,18 +23,32 @@ Python packaging, dependency, formatter, linter, test, and local-check configura
 
 ## Branching Model
 
-Use GitHub Flow with issue-based branch names.
-
-This intentionally avoids classic GitFlow with long-lived `develop`, `release`, and `hotfix` branches until the project has a release process that needs them.
+Use a lightweight Git Flow variant with `develop` as the active integration branch.
 
 Default branch:
 
 - `main`
 
-Work branches:
+Role:
 
-- branch from `main`
-- open a pull request back to `main`
+- preserved until the first shippable version
+- not used as the normal target for current documentation, research, scaffolding, or implementation work
+- updated only when the user explicitly decides to promote a shippable baseline or gives a direct instruction
+
+Integration branch:
+
+- `develop`
+
+Role:
+
+- current active product-development line
+- normal target for documentation, research, scaffolding, and implementation changes
+- may receive direct commits while the repository is still in early architecture/scaffolding mode and no issue exists yet
+
+Issue work branches:
+
+- branch from `develop`
+- open a pull request back to `develop`
 - keep branches scoped to one issue or tightly related issue slice
 - prefer small PRs that map to one implementation or documentation issue
 
@@ -65,7 +79,7 @@ fix/18-session-lock-recovery
 ```
 
 If no issue exists yet, create or request an issue before starting substantial work.
-Tiny documentation corrections may use a descriptive branch without an issue only when explicitly approved.
+Tiny documentation corrections or early architecture/scaffolding updates may be committed directly to `develop` when the user explicitly asks to sync `develop`.
 
 ## Commit and Pull Request References
 
