@@ -33,6 +33,13 @@ Default handling:
 - do not silently reinterpret or rewrite
 - only edit when explicitly asked to revise the source artifact itself
 
+Scope evolution:
+
+- `docs/requirements/poc-requirements.md` is a v1.0 snapshot dated 2026-04-14 and remains read-only by design
+- subsequent scope decisions live in `docs/architecture/architecture-overview.md` §9.1 Decision Log
+- deferred items live in `docs/ideas/`, each with a "Where It Comes From" back-reference to the originating requirement
+- before treating any requirement as authoritative, check the AD log and `docs/ideas/` for supersedences
+
 ### `docs/architecture/`
 
 Purpose:
