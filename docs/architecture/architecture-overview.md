@@ -7,7 +7,7 @@ Metadata:
 - Last updated: 2026-04-30
 - Maintainer: architecture session between customer and Codex
 - Source inputs: requirements documents, architecture review, and recorded architecture discussions in this repository
-- Review status: architecture-review feedback partially incorporated; `G11` error decision authority remains open for discussion
+- Review status: architecture-review feedback incorporated for current architecture baseline
 
 This document captures the current architecture baseline.
 Sections may be revised as research, review, and implementation sharpen earlier wording.
@@ -1111,7 +1111,38 @@ Processing failure:
 - the failed job should record enough reason to support recovery
 - examples: GPU out-of-memory, missing model, provider failure, invalid input artifact
 - recovery options may include retrying, using another local backend, using an allowed fallback, skipping optional work, or aborting the workflow
-- exact error decision authority remains open for separate discussion
+- retries must be bounded and must eventually resolve to success, user action, skipped optional work, or abort
+- aborted work must leave machine-readable diagnostics for analysis and a human-facing message for the user
+
+#### Error Classification and Recovery Authority
+
+Status: Confirmed
+
+Adapters detect concrete failures, but they do not decide product recovery.
+The active `Session Orchestrator Process` owns recovery decisions because it has access to stage policy, session state, artifact integrity, and user intent.
+
+Authority split:
+
+- provider, capture, storage, and protocol adapters report typed failures with structured context
+- the policy/capability layer defines which recovery paths are allowed for the current stage
+- the active orchestrator chooses the next action according to stage policy and session state
+- the user is prompted when recovery changes privacy, cost, quality, requires credentials, requires setup, or requires human judgment
+
+Recovery decisions must be bounded.
+The system must not retry indefinitely.
+
+Examples:
+
+- recording failure preserves flushed segments, marks capture interrupted, and informs the user; no fallback replaces failed capture
+- transcription may automatically switch from local GPU to local CPU when available, but must not use remote fallback
+- missing local model is a setup/preflight problem and should produce an actionable message
+- diarization failure may offer retry, skip diarization, or continue with profile-based labels
+- semantic flagging failure may allow correction to continue with available flags if the step is optional
+- summarization tries local first and may offer direct Mistral API fallback for that session when policy and credentials allow it
+- export failure is retryable and must not invalidate upstream artifacts
+
+For the PoC, remote summarization fallback consent is per session.
+For a later product, this may evolve into an installation-level setting that remains user-facing and changeable.
 
 #### Regeneration and Superseding
 
@@ -1244,6 +1275,8 @@ Remote fallback configuration must be narrower:
 - the user may provide required credentials
 - the user must not be able to arbitrarily choose disallowed remote providers or models
 - allowed remote fallback options must be constrained by policy
+- for the PoC, direct Mistral API summarization fallback requires per-session user consent
+- a later product may support an installation-level setting, but it must remain user-facing and changeable
 
 #### Scaffold Implication
 
@@ -1280,6 +1313,7 @@ provider adapter
 - provider selection must be centralized behind a policy-aware resolver
 - workflow code must not directly call concrete providers
 - remote provider/model choice is policy-constrained
+- remote summarization fallback requires per-session consent in the PoC
 
 #### Deferred
 
@@ -2136,6 +2170,7 @@ If a decision becomes contentious, expensive, or implementation-critical, it sho
 | AD-016 | Include both `online_dual_stream` and `in_person_single_mic` in CLI PoC scope. | Confirmed | Build order is online first, in-person second; both use capture profiles rather than separate pipelines. |
 | AD-017 | Use versioned manual-notes input artifacts for summarization. | Confirmed | Edited notes produce new notes artifact versions and new summary candidates instead of silently mutating prior summaries. |
 | AD-018 | Use a narrow rebuildable global index. | Confirmed | The index supports session discovery only and does not become canonical meeting-content storage. |
+| AD-019 | Centralize error recovery authority in the active orchestrator. | Confirmed | Adapters report typed failures; the orchestrator chooses bounded recovery according to stage policy, artifact state, and user intent. |
 
 ### 9.2 Decisions Needing Follow-Up
 
@@ -2146,7 +2181,6 @@ Status: Open
 - Validate the legal/policy suitability of direct Mistral API for fallback use; OpenRouter-style broker experimentation is deferred to ideas.
 - Whether the internal protocol remains a simple local JSON-like protocol or moves to a stronger contract format after research.
 - Whether the first implementation uses direct local model libraries, Ollama, LM Studio, or a different runtime abstraction.
-- Error decision authority across stages remains open for focused discussion.
 
 ## 10. Quality Requirements
 
@@ -2429,7 +2463,6 @@ Status: Open
 - Use first-user testing to determine what "good enough" means for notes, corrections, speaker labels, and summaries.
 - Use first-user testing to compare local summarization output against direct Mistral API fallback output.
 - Use first CLI testing to determine how much device/profile confirmation is helpful before it becomes friction.
-- Resolve error decision authority separately before implementation issues are cut too narrowly.
 
 ## 12. Glossary
 
