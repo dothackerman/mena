@@ -1,0 +1,103 @@
+name: Implementation Slice
+description: Scoped implementation task for coding agents
+title: "[Implementation]: "
+labels:
+  - implementation
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What should this issue deliver?
+      placeholder: "Implement the minimal PoC slice for ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: requirements
+    attributes:
+      label: Requirement References
+      description: Link or cite the relevant requirements sections.
+      placeholder: |
+        - docs/requirements/poc-requirements.md §...
+    validations:
+      required: true
+
+  - type: textarea
+    id: architecture
+    attributes:
+      label: Architecture References
+      description: Link or cite the relevant architecture sections.
+      placeholder: |
+        - docs/architecture/architecture-overview.md §8.4 Provider Capability and Policy Model
+        - docs/architecture/implementation-guardrails.md §Application Surface: Keep Minimal
+    validations:
+      required: true
+
+  - type: textarea
+    id: interpretation
+    attributes:
+      label: Implementation Interpretation
+      description: Explain how the referenced architecture should be interpreted for this specific PoC slice.
+      placeholder: |
+        - Preserve ...
+        - Implement ...
+        - Do not build ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: research
+    attributes:
+      label: Research Inputs
+      description: Link completed research notes or backlog items. State "None" if not applicable.
+      placeholder: |
+        - docs/research/backlog/architecture-research-backlog.md#r-...
+    validations:
+      required: true
+
+  - type: textarea
+    id: in_scope
+    attributes:
+      label: In Scope
+      description: Concrete work this issue should do.
+      placeholder: |
+        - ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: out_of_scope
+    attributes:
+      label: Out of Scope
+      description: Explicitly exclude adjacent ideas or future architecture surface.
+      placeholder: |
+        - Do not ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification
+      description: Tests, checks, or manual verification required.
+      placeholder: |
+        - Run ...
+        - Add ...
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: guardrails
+    attributes:
+      label: Guardrail Checklist
+      options:
+        - label: The issue preserves architecture boundaries without implementing unused application surface.
+          required: true
+        - label: The issue has explicit out-of-scope items.
+          required: true
+        - label: The issue includes deterministic verification.
+          required: true
+        - label: The issue does not use docs/ideas as implementation scope unless explicitly promoted.
+          required: true
+

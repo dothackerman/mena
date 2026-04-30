@@ -1,0 +1,57 @@
+name: Research Task
+description: Bounded research task that informs architecture or implementation
+title: "[Research]: "
+labels:
+  - research
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: Research Question
+      description: What question must the research answer?
+      placeholder: "What is the best ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: source
+    attributes:
+      label: Source / Provenance
+      description: Where did this research need come from?
+      placeholder: |
+        - docs/research/backlog/architecture-research-backlog.md#r-...
+        - docs/architecture/architecture-overview.md §...
+    validations:
+      required: true
+
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints
+      description: Architectural, product, legal, privacy, or platform constraints the research must respect.
+      placeholder: |
+        - ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: finish_line
+    attributes:
+      label: Verifiable Finish Line
+      description: What output proves the research is done?
+      placeholder: |
+        - Compare ...
+        - Recommend ...
+        - Identify ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Expected Output Location
+      description: Where should the research note be persisted?
+      placeholder: "docs/research/notes/<topic>.md"
+    validations:
+      required: true
+

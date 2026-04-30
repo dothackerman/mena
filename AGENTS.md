@@ -77,6 +77,7 @@ Use `docs/architecture/` for:
 - current decisions
 - open architectural questions
 - tradeoff reasoning
+- implementation guardrails that explain how coding agents should interpret architecture during PoC work
 
 Use `docs/research/backlog/` for:
 
