@@ -1,47 +1,116 @@
 # R-06 Fallback Provider Policy
 
-Status: Open
+Status: Ready
 
-## Question
+## Purpose
 
-- what exact account, contract, retention, routing, and policy conditions make direct Mistral API acceptable as the PoC summarization fallback under `CON-01`?
-- how should `mena` verify or configure that a ZDR-bearing access path is active before allowing fallback?
+Determine whether and under what exact conditions direct Mistral API use is acceptable as the PoC summarization fallback.
+
+This task is policy-sensitive and must produce a concrete go/no-go recommendation rather than vague reassurance.
+
+## Product Context
+
+`mena` is a privacy-first local meeting notes product.
+
+The current architecture keeps:
+
+- audio recording local-only
+- transcription local-only
+- diarization local-only
+
+Summarization is local-preferred.
+The only currently architecture-allowed remote fallback candidate is direct Mistral API access, and only for summarization.
+
+The reason this task exists is not to pick the best general cloud model provider.
+It exists to determine whether the current fallback idea is actually policy-compatible with the product's sovereignty and privacy posture.
+
+## Fixed Constraints
+
+Treat the following as fixed:
+
+- no remote audio processing
+- default-retention remote access is not architecture-compliant for product fallback
+- brokered access paths such as OpenRouter are not equivalent to direct Mistral API access and are out of current scope
+- if fallback is allowed at all, it must be tightly constrained and explicit
+- the product must not silently imply stronger guarantees than it can really verify
 
 ## Current Architecture Baseline
 
-- direct Mistral API is the confirmed PoC fallback candidate for summarization only
-- fallback is allowed only through a Zero Data Retention access path that satisfies `CON-01`
-- default-retention API access is not an architecture-compliant product fallback, even if used only for summarization
+Relevant baseline assumptions:
 
-## Current External Facts To Validate
+- fallback is for summarization only
+- current candidate is direct Mistral API only
+- a Zero Data Retention path is currently treated as the minimum acceptable policy baseline
+- legal/policy suitability is not yet confirmed
+- architecture needs to know what the application can verify automatically versus what must remain contractual, documented, or user-attested
 
-As of April 30, 2026, official Mistral AI pages state:
+## Current Facts To Validate
 
-- API data is not used for model training.
-- API input and output are retained for a rolling 30-day abuse-monitoring period unless Zero Data Retention is activated.
-- Zero Data Retention for Mistral AI Studio can be requested through the Help Center or support and is approved at Mistral's discretion.
+As of April 30, 2026, the current repo baseline records the following external claims as needing validation rather than blind trust:
 
-Sources:
+- API data is not used for model training
+- API input and output may be retained for abuse monitoring unless Zero Data Retention is activated
+- Zero Data Retention may require support approval or contract/account conditions
 
-- Mistral AI Privacy Policy: https://legal.mistral.ai/terms/privacy-policy
-- Mistral AI Privacy documentation: https://docs.mistral.ai/admin/security-access/privacy
-- Mistral AI Help Center, ZDR: https://help.mistral.ai/en/articles/347612-can-i-activate-zero-data-retention-zdr
+These are starting points, not settled truth.
+Verify current official terms and operational reality.
 
-## Critical Distinction
+## Research Question
 
-- model family, direct provider, and brokered access path are separate policy concerns
-- brokered access paths such as OpenRouter are deferred to ideas and must not be treated as equivalent to direct Mistral API access
-- a French/EU provider is not automatically sufficient if the selected access path retains request or response content
+What account, contract, retention, routing, and operational conditions make direct Mistral API acceptable as the PoC summarization fallback, and what can the application realistically verify versus only document or require by attestation?
 
-## Why It Matters
+## Decision To Unblock
 
-- affects policy enforcement
-- affects tester operability on weaker machines
-- affects what the user may or may not configure directly
+This research should unblock:
 
-## Open Validation Tasks
+- whether PoC fallback may ship at all
+- the exact allow/deny conditions for direct Mistral fallback
+- the product behavior when policy status is unknown or unverifiable
 
-- confirm the Mistral account, workspace, contract, or support-approved setting needed for ZDR
-- define what the application can verify automatically versus what must be configured or attested by the user
-- define the failure behavior when credentials exist but ZDR status is unknown
-- decide whether any non-ZDR personal experimentation is allowed as an explicit out-of-architecture exception, or prohibited entirely
+## Evaluation Criteria
+
+Evaluate primarily in this order:
+
+1. real retention behavior and ZDR conditions
+2. clarity and enforceability of the provider's guarantees
+3. jurisdiction and routing implications relevant to the product posture
+4. whether the application can verify anything programmatically or must rely on account-level state and user attestation
+5. operational practicality for testers on weaker hardware
+6. risk of user misunderstanding or accidental policy drift
+
+## Required Questions To Answer
+
+Answer at least the following:
+
+- is direct Mistral fallback a go or a no-go for the current PoC?
+- if it is a go, under exactly what conditions?
+- what account, contract, workspace, or support configuration is required?
+- what can the application verify technically?
+- what cannot be verified and therefore must be treated as documentation, operator setup, or explicit user attestation?
+- what should the product do when credentials exist but policy status is unknown?
+- should the architecture allow any explicit out-of-architecture personal experimentation path, or prohibit it entirely?
+
+## Out Of Scope
+
+Do not spend time on:
+
+- general provider shopping beyond what is needed for this exact decision
+- brokered access paths
+- implementation of fallback code
+
+## Expected Output
+
+The final research note should include:
+
+- a clear go/no-go recommendation
+- exact allow/deny conditions
+- application-verifiable versus non-verifiable controls
+- recommended product behavior for unknown or non-compliant states
+- documentation requirements and residual risks
+
+## References
+
+Primary references:
+
+- `docs/architecture/architecture-overview.md`
+- current Mistral policy, privacy, and security documentation
