@@ -56,6 +56,20 @@ Default handling:
 - distinguish backlog items from completed research notes
 - do not mix implementation task lists into this folder
 
+### `docs/ideas/`
+
+Purpose:
+
+- deferred product or architecture ideas that surfaced during discovery, architecture, review, or implementation
+- provenance records for ideas that are explicitly outside current PoC implementation scope
+
+Default handling:
+
+- do not read this folder for normal coding tasks unless a user request or issue explicitly references a specific idea
+- do not expand implementation scope based on ideas in this folder
+- keep each idea in its own markdown file with a clear "where it comes from" section
+- ideas are not requirements, research results, or implementation tasks
+
 ## Decision vs Research Distinction
 
 Use `docs/architecture/` for:
@@ -72,6 +86,11 @@ Use `docs/research/backlog/` for:
 Use `docs/research/notes/` for:
 
 - completed research outputs
+
+Use `docs/ideas/` for:
+
+- deferred ideas and provenance only
+- non-binding future direction that should not distract coding agents
 
 ## Working Style
 

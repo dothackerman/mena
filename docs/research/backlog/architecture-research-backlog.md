@@ -38,13 +38,13 @@ Why it matters:
 Question:
 
 - what is the most reliable Linux approach for dual-stream capture and controlled capture-source routing?
-- what is the incremental implementation cost of adding `in_person_single_mic` after or alongside `online_dual_stream`?
+- what is the incremental implementation cost of adding `in_person_single_mic` after `online_dual_stream`?
 
 Why it matters:
 
 - affects recording robustness
 - affects capture-profile design
-- affects future in-person meeting support
+- affects PoC in-person meeting support
 
 ### R-03 Future OS Compatibility Implications
 
@@ -84,17 +84,16 @@ Why it matters:
 
 Question:
 
-- which remote fallback providers are acceptable under sovereignty constraints, and for which stages exactly?
+- is direct Mistral API acceptable as the PoC summarization fallback under sovereignty constraints, and what policy limits apply?
 
-Current candidates to evaluate:
+Current PoC fallback candidate:
 
-- Mistral models through direct Mistral API access
-- Mistral models through OpenRouter or a similar broker
+- Mistral models through direct Mistral API access for summarization only
 
 Critical distinction:
 
 - model family, direct provider, and brokered access path are separate policy concerns
-- broker jurisdiction, routing, retention, logging, contractual guarantees, and zero-data-retention claims must be evaluated independently from the underlying model family
+- brokered access paths such as OpenRouter are deferred to ideas and must not be treated as equivalent to direct Mistral API access
 
 Why it matters:
 

@@ -2,6 +2,13 @@
 
 Status: arc42-structured architecture overview; provisional where marked
 
+Metadata:
+
+- Last updated: 2026-04-30
+- Maintainer: architecture session between customer and Codex
+- Source inputs: requirements documents, architecture review, and recorded architecture discussions in this repository
+- Review status: architecture-review feedback partially incorporated; `G11` error decision authority remains open for discussion
+
 This document captures the current architecture baseline.
 Sections may be revised as research, review, and implementation sharpen earlier wording.
 
@@ -17,6 +24,7 @@ It is deliberately iterative. The goal is to preserve decisions early without pr
 This overview currently covers:
 
 - current system context
+- PoC v0 scope and build sequence
 - current runtime pipeline
 - initial glossary
 - building block view
@@ -70,6 +78,8 @@ Status: Confirmed
 - The PoC is a standalone local product, not an OpenClaw plugin and not a fork of an existing meeting-notes product.
 - The PoC is CLI-first for speed of testing and because it is naturally compatible with agent harnesses.
 - The CLI is only an interface adapter. Core workflow logic must not depend on CLI-specific behavior.
+- PoC v0 user-facing scope includes both `online_dual_stream` and `in_person_single_mic` capture profiles in CLI form.
+- The implementation sequence remains `online_dual_stream` first, then `in_person_single_mic`.
 - The PoC focuses on recorded meeting processing. Fully live meeting assistance is out of scope for the first PoC.
 - Existing tools such as Meetily, Notion AI Meeting Notes, and Otter.ai are products to observe, not architectural baselines or runtime dependencies.
 
@@ -87,7 +97,8 @@ Status: Confirmed for PoC, Provisional for Product
 Status: Confirmed
 
 - Audio recording, transcription, and diarization are local-only stages. `mena` must not send audio to a remote service.
-- Summarization and semantic coherence checks are local-preferred stages and may use policy-approved fallback providers only when explicitly allowed.
+- Summarization is local-preferred and may fall back to direct Mistral API for the PoC when local execution is unavailable or insufficient.
+- Semantic coherence checks are local-preferred; fallback behavior remains deferred unless needed by the PoC pipeline.
 - Model and provider choices must be behind ports and a policy/capability resolver. Workflow code must not call concrete providers directly.
 - User-created session data remains local and survives uninstall by default.
 - Raw audio is the canonical source artifact and must be treated as sealed after capture.
@@ -98,7 +109,7 @@ Status: Confirmed
 
 - The codebase must support dependency inversion and strict separation between core workflow logic, adapters, provider integrations, and user interfaces.
 - Durable artifacts are file-based for the PoC. The session index is for discovery and convenience, not the source of truth.
-- The `Session Orchestrator Process` is the canonical writer of the `Session Record`.
+- The active `Session Orchestrator Process` is the canonical writer of the `Session Record` while it holds session authority.
 - The `Capture Worker Process` owns real-time audio capture and emits facts, events, and artifact references.
 - Internal coordination protocols and durable schemas must be versioned from day one.
 - The architecture must be legible enough for coding agents to implement work in parallel without violating boundaries.
@@ -110,9 +121,8 @@ Status: Open
 These questions should not block the architecture overview.
 They should be answered through research, first implementation experience, and user testing.
 
-- The incremental complexity of `in_person_single_mic` needs validation, but it does not currently justify interrupting the `online_dual_stream` sequence. The expected difference is source topology and diarization quality risk from microphone, room, and speaker overlap conditions.
-- Remote summarization fallback cannot be decided fully until local runtime research and early tests show whether local summarization is viable on target hardware.
-- Candidate remote fallback paths include Mistral models directly and Mistral models through OpenRouter or a similar broker. These are not equivalent sovereignty profiles; provider jurisdiction, broker jurisdiction, retention, and routing must be evaluated separately.
+- The incremental complexity of `in_person_single_mic` needs validation during implementation, but it is now part of PoC v0 scope rather than a post-PoC idea.
+- Direct Mistral API is the PoC fallback path for summarization when local execution is unavailable or insufficient. Brokering through OpenRouter or similar services is deferred outside the PoC because the broker becomes part of the provider chain.
 - "Good enough" output quality is an empirical PoC learning outcome. The architecture must provide a fast feedback loop and traceable artifacts rather than pretending a threshold is known upfront.
 - CLI device/profile confirmation friction is an empirical UX learning outcome. The architecture must expose profile and device choices cleanly so the CLI can evolve without changing core logic.
 
@@ -123,10 +133,13 @@ Status: Confirmed
 ### 3.1 Context Statement
 
 `mena` is a standalone privacy-first meeting notes system.
-For the PoC, the primary scenario is an online meeting on Linux using dual-stream capture:
+For the PoC, the primary implementation sequence starts with an online meeting on Linux using dual-stream capture:
 
 - local microphone input
 - system-audio capture, typically carrying remote participants from a conference tool
+
+The same PoC also includes an in-person meeting profile using one room microphone.
+That profile follows after `online_dual_stream` in the build sequence.
 
 The core pipeline must remain independent from:
 
@@ -148,7 +161,7 @@ flowchart LR
     Call[Video Call Platform\nZoom / Meet / kMeet / etc.]
     Store[Local Artifact Store]
     Notes[Manual Notes File]
-    ZDR[Optional EU/Swiss ZDR LLM Fallback]
+    Mistral[Optional Direct Mistral API\nSummarization Fallback]
     OpenClaw[OpenClaw\nFuture Adapter Only]
 
     subgraph M[mena system boundary]
@@ -164,7 +177,7 @@ flowchart LR
     Audio --> Ports
     Notes --> Core
     Ports <--> Store
-    Ports -. optional where allowed .-> ZDR
+    Ports -. summarization fallback where allowed .-> Mistral
     Core -. future integration .-> OpenClaw
     Watch -. no runtime dependency .- M
 ```
@@ -173,7 +186,7 @@ flowchart LR
 
 - `OpenClaw` remains outside the PoC system boundary, even though its current integration path is expected to overlap heavily with the `CLI` command surface.
 - `Local artifact storage` is a first-class subsystem from day one.
-- `System audio` is a convenient PoC term, but architecturally the broader concern is controlled capture-source routing. This matters because future scenarios include both conference-tool output capture and in-person microphone capture.
+- `System audio` is a convenient PoC term for online meetings, but architecturally the broader concern is controlled capture-source routing. This matters because PoC scope includes both conference-tool output capture and in-person microphone capture.
 
 ## 4. Solution Strategy
 
@@ -208,7 +221,7 @@ Status: Confirmed
 
 - Keep recording, transcription, and diarization local-only.
 - Route all model/runtime access through provider ports and a policy-aware resolver.
-- Allow local-preferred non-audio stages, such as summarization, to use fallback providers only under an explicit sovereignty policy.
+- Allow summarization to use direct Mistral API as the PoC fallback when local execution is unavailable or insufficient.
 - Defer the concrete local runtime strategy, for example direct libraries versus Ollama or LM Studio, to research.
 
 ### 4.4 Evolution Strategy
@@ -216,8 +229,8 @@ Status: Confirmed
 Status: Provisional
 
 - Optimize the first implementation for a fast Linux CLI PoC, but keep OS-specific behavior behind adapters.
-- Prepare for `online_dual_stream` first while keeping `in_person_single_mic` as an intended profile rather than a later conceptual rewrite.
-- Treat `in_person_single_mic` as a capture-profile extension unless research or early implementation proves the incremental complexity is materially higher than expected.
+- Build `online_dual_stream` first, then add `in_person_single_mic` through the same capture-profile model.
+- Treat `in_person_single_mic` as a capture-profile extension unless implementation proves the incremental complexity is materially higher than expected.
 - Use replayable artifacts, fake providers, and consent-safe fixtures so coding agents can implement and test most behavior without live meetings.
 - Use the first runnable PoC to discover practical quality thresholds and CLI friction rather than trying to define them in advance.
 - Keep architecture, research backlog, and implementation tasks separate so unresolved research does not become accidental implementation policy.
@@ -288,7 +301,7 @@ flowchart TD
         FW[faster-whisper Adapter]
         PW[pyannote / WhisperX Adapter]
         LLM[Local LLM Adapter]
-        ZDR[EU/Swiss ZDR LLM Adapter]
+        Mistral[Direct Mistral API Adapter\nSummarization Fallback]
         FS[File Storage Adapter]
         IDX[Optional Metadata Index Adapter]
     end
@@ -343,7 +356,7 @@ flowchart TD
 - ASR provider integration
 - diarization provider integration
 - local LLM integration
-- EU/Swiss jurisdiction-safe fallback integration where allowed
+- direct Mistral API fallback integration for summarization where allowed
 - file storage and optional metadata indexing
 
 ### 5.4 Capture Port Decision
@@ -360,8 +373,8 @@ This means the core pipeline depends on a stable capture contract rather than on
 Current reasoning:
 
 - the PoC should move fast
-- online dual-stream is the first active profile
-- future in-person support should reuse the same core pipeline rather than fork it
+- online dual-stream is implemented first
+- in-person single-mic support should reuse the same core pipeline rather than fork it
 
 Current failure mode to watch:
 
@@ -405,18 +418,25 @@ Most other fields are generated by the system, for example:
 #### Phase 1: Recording
 
 Recording is the most critical runtime path.
-The recording subsystem captures:
+For `online_dual_stream`, the recording subsystem captures:
 
 - local microphone segments
 - system-audio segments
 
 For the current PoC, `system-audio segments` usually represent audio coming from a remote conference tool such as `Zoom`, `Google Meet`, or `kMeet`.
 
+For `in_person_single_mic`, the recording subsystem captures:
+
+- room microphone segments
+
 The system continuously flushes recorded segments to local storage and updates the session record with capture state and checkpoints.
+The user-facing interface should expose a minimal recording health heartbeat, for example elapsed recording time and flushed segment count.
+The exact refresh cadence is an interface detail to tune during testing.
 
 Architectural rule:
 
 - recording is isolated from downstream processing
+- capture progress must be visible enough that the user can detect obvious "is it recording?" failures
 
 #### Phase 2: Session Finalization
 
@@ -434,13 +454,17 @@ The concrete hashing algorithm is an implementation decision unless stronger req
 
 The processing orchestrator reads persisted source artifacts and performs:
 
-- local stream transcription
-- system-audio stream transcription
+- applicable source transcription
 - optional diarization where enabled
 - timestamp-based transcript merging
 - flagging of low-confidence, overlap, or incoherent segments
 
 Derived artifacts are written separately from source artifacts.
+
+Speaker-label rule when diarization is disabled:
+
+- `online_dual_stream`: `local_mic` is labeled `Local`; `system_audio` is labeled `Remote`
+- `in_person_single_mic`: `room_mic` is labeled `Room`
 
 #### Phase 4: Human Correction
 
@@ -457,15 +481,19 @@ Corrections are stored as an overlay rather than rewriting the source transcript
 Architectural rule:
 
 - each review item must carry a stable source reference so that playback and traceability remain reliable
+- playback must always be reachable from a flagged segment, but the user may choose to resolve a flag without playing audio
 
 #### Phase 5: Finalization
 
 The finalization step combines:
 
 - corrected transcript view
-- optional manual notes
+- optional sealed manual-notes artifact
 
 It then performs summarization and export generation.
+
+Manual notes are imported explicitly before summarization, copied into the session bundle, and treated as a versioned sealed input artifact.
+If the user changes the original notes later, the changed notes are imported as a new notes artifact version and summarization is rerun to produce a new summary candidate.
 
 ### 6.2 Runtime Diagram
 
@@ -513,8 +541,26 @@ flowchart TD
 
 ### 6.3 Clarifications and Open Precision Work
 
-- `System-audio capture` is the current PoC expression for online meetings. The broader architectural concern is `capture source routing`, which must allow future scenarios such as in-person microphone-based meetings without rewriting the core pipeline.
-- `Audio playback during correction` is treated as mandatory, not optional.
+- `System-audio capture` is the current PoC expression for online meetings. The broader architectural concern is `capture source routing`, which must also support the PoC `in_person_single_mic` profile without rewriting the core pipeline.
+- `Audio playback during correction` is mandatory as an available feature. It is not mandatory for the user to listen before resolving every flag.
+
+#### PoC Application Command Surface
+
+Status: Confirmed
+
+The PoC CLI is an adapter, but the application layer still needs a stable verb surface.
+The initial architecture-facing command set is:
+
+- `record`: create a session, select/confirm capture profile and devices, and run recording
+- `list`: list known sessions from the rebuildable global index
+- `show`: inspect one session's state and artifacts
+- `process`: run or resume automated post-meeting processing
+- `correct`: run or resume the correction workflow
+- `export`: generate or inspect final markdown outputs
+- `resume`: continue the next pending step for a session where that is unambiguous
+
+Exact CLI flags and prompt wording are interface-adapter details.
+The application services must not depend on terminal-specific control flow.
 
 ### 6.4 Process Topology Decision
 
@@ -540,6 +586,10 @@ The `Session Orchestrator Process` owns:
 - correction workflow
 - export generation
 - capability and policy resolution
+
+For the CLI PoC, the `Session Orchestrator Process` is per CLI invocation.
+There is no daemon.
+Continuity across commands comes from reconstructing session state from the session bundle and global index.
 
 Reasoning:
 
@@ -594,7 +644,7 @@ Architectural note:
 
 ### 6.7 Most Likely Next Process Boundary
 
-Status: Provisional
+Status: Deferred
 
 If the architecture grows beyond two processes, the most likely next candidate is a dedicated `Processing Worker Process`, not a separate correction process.
 
@@ -616,6 +666,7 @@ The architecture currently assumes a private but disciplined internal protocol b
 Current direction:
 
 - version the protocol from day one
+- include protocol version agreement and minimal peer capability declaration in initialization
 - use a schema-defined `command + event` shape
 - keep live coordination in the protocol
 - keep durable artifacts in files
@@ -638,6 +689,12 @@ Current authority split:
 - `Session Orchestrator Process` is the primary writer of the canonical `Session Record`
 - `Capture Worker Process` writes source artifacts and emits capture facts through the internal protocol
 - the `Session Orchestrator Process` updates the `Session Record` based on durable artifact references and capture facts
+
+For the CLI PoC, this single-writer rule means:
+
+- only one active orchestrator may operate on a given session bundle at a time
+- each new CLI invocation reconstructs authority from the session bundle before acting
+- concurrent orchestrator access to the same session must be rejected or made to wait
 
 Reasoning:
 
@@ -670,7 +727,7 @@ The protocol currently assumes:
 
 #### Host-to-Capture Commands
 
-- `InitializeCaptureWorker`
+- `InitializeCaptureWorker`, including protocol version agreement and minimal capability declaration
 - `StartCapture`
 - `StopCapture`
 - `GetCaptureStatus`
@@ -701,7 +758,6 @@ The protocol currently assumes:
 
 - concrete transport mechanism
 - concrete encoding mechanism
-- whether capability exchange is needed in the first implementation
 - exact error-code taxonomy
 
 Deferred:
@@ -778,12 +834,9 @@ Status: Confirmed
 
 `mena` must support different ways of obtaining meeting audio without rewriting the rest of the processing pipeline.
 
-Current PoC profile:
+PoC profiles:
 
 - online meeting with dual-stream capture
-
-Near-future profile:
-
 - in-person meeting with a single room microphone
 
 #### Architectural Rule
@@ -826,12 +879,20 @@ A `Capture Source` records:
 - source: `room_mic`
 - semantic role: mixed room speakers
 - diarization: expected when speaker attribution matters
-- status: near-future profile; not expected to require a core pipeline rewrite
+- status: PoC profile implemented after `online_dual_stream`; not expected to require a core pipeline rewrite
 
 Current assumption:
 
 - `in_person_single_mic` should be a lower-incremental-cost profile if the capture profile abstraction holds.
 - the main uncertainty is quality, especially diarization quality under imperfect microphones, room acoustics, overlap, and speaker distance
+
+Speaker-label rule when diarization is disabled:
+
+- `online_dual_stream`: `local_mic` becomes `Local`, `system_audio` becomes `Remote`
+- `in_person_single_mic`: `room_mic` becomes `Room`
+
+The `Room` label is intentionally a soft signal.
+It tells the user the system has a mixed room source without claiming reliable speaker attribution.
 
 #### User Interaction Rule
 
@@ -863,7 +924,7 @@ Without this concept, the PoC may hard-code:
 - local file means the user
 - remote file means everyone else
 
-That works for online dual-stream capture but breaks once in-person single-mic capture is added.
+That works for online dual-stream capture but breaks for in-person single-mic capture.
 
 #### Open Questions
 
@@ -944,14 +1005,14 @@ Telemetry remains a research topic until its event model, storage rules, identif
 
 Initial lifecycle vocabulary:
 
-- `open`: artifact is still being written or produced
-- `sealed`: artifact production is complete and the artifact should not be modified in place
-- `verified`: artifact integrity has been checked successfully
-- `tainted`: artifact failed verification or is otherwise not trustworthy
-- `derived`: artifact was generated from upstream artifacts
-- `superseded`: artifact was replaced by a newer generated version but remains available for traceability
+- `being-written`: artifact production is in progress and the artifact is not safe as input
+- `sealed`: artifact production is complete and integrity metadata is available
+- `invalidated`: artifact failed verification, was superseded, or must not be used as current input
 
-The exact lifecycle vocabulary may be refined during implementation, but the source/derived/review/export distinction is architectural.
+Artifact category remains orthogonal to lifecycle state.
+For example, a `derived` transcript can be `sealed` or `invalidated`; `derived` is not itself a lifecycle state.
+
+The exact implementation names may be refined during implementation, but the source/derived/review/export distinction and the write/seal/invalidate lifecycle gates are architectural.
 
 #### Affected Parts
 
@@ -1021,7 +1082,7 @@ The current architectural commitment is:
 `Artifact state`:
 
 - trust and freshness of persisted artifacts
-- examples: source audio sealed/verified/tainted; summary current/stale/superseded
+- examples: source audio sealed/invalidated; summary current/stale/superseded
 - this connects directly to `Artifact Lifecycle and Integrity`
 
 `Review state`:
@@ -1037,6 +1098,7 @@ System or process interruption:
 - the system should detect interrupted work on next start
 - already completed work should be reused where safe
 - recovery should be based on session records and artifact integrity, not guesswork
+- in-progress operations should be detectable through explicit operation markers, partial artifacts, atomic rename-on-complete, and integrity verification
 
 User interruption:
 
@@ -1049,6 +1111,7 @@ Processing failure:
 - the failed job should record enough reason to support recovery
 - examples: GPU out-of-memory, missing model, provider failure, invalid input artifact
 - recovery options may include retrying, using another local backend, using an allowed fallback, skipping optional work, or aborting the workflow
+- exact error decision authority remains open for separate discussion
 
 #### Regeneration and Superseding
 
@@ -1163,14 +1226,14 @@ Provider selection must consider:
 `summarization`:
 
 - local preferred
-- policy-approved fallback may be allowed
+- direct Mistral API fallback may be allowed in the PoC
 - likely first stage where a more capable remote model might be useful
 
-Current fallback candidate:
+Current fallback decision:
 
-- Mistral models are the provisional candidate for remote summarization fallback research.
-- Direct Mistral API access and OpenRouter-brokered access to Mistral models must be evaluated as separate provider-chain options.
-- Choosing a model family does not by itself decide sovereignty; the access path, jurisdiction, routing, retention, and contractual guarantees matter.
+- direct Mistral API is the PoC fallback candidate for summarization when local execution is unavailable or insufficient
+- OpenRouter or similar brokers are not part of the PoC fallback path
+- choosing a model family does not by itself decide sovereignty; the access path, jurisdiction, routing, retention, and contractual guarantees matter
 
 #### User Configuration Rule
 
@@ -1212,7 +1275,8 @@ provider adapter
 #### Decided Now
 
 - recording, transcription, and diarization are local-only
-- summarization and semantic coherence flagging may support policy-approved fallback
+- summarization may support direct Mistral API fallback in the PoC
+- semantic coherence flagging fallback remains deferred unless required by the PoC pipeline
 - provider selection must be centralized behind a policy-aware resolver
 - workflow code must not directly call concrete providers
 - remote provider/model choice is policy-constrained
@@ -1220,10 +1284,9 @@ provider adapter
 #### Deferred
 
 - exact local model runtime strategy
-- exact fallback provider list
+- final legal/policy validation for fallback provider use
 - exact policy/config format
 - exact hardware or capability detection thresholds
-- whether fallback is enabled in the first PoC implementation or only architecture-enabled
 
 #### Affected Parts
 
@@ -1274,7 +1337,7 @@ Versioning applies to:
 - correction overlay format
 - review queue format
 - internal protocol messages
-- global index projection, if introduced
+- global index projection
 
 Versioning does not mean every format must be perfect or stable immediately.
 It means the system can identify what format it is reading and fail or migrate deliberately.
@@ -1288,6 +1351,7 @@ Current PoC compatibility rules:
 - migrations must be explicit, not accidental
 - local development may use simple migration paths, but silent reinterpretation is not allowed
 - protocol peers must agree on a supported protocol version before relying on messages
+- the initial capture-worker initialization message performs this agreement and carries minimal peer capabilities
 
 #### Internal Protocol Rule
 
@@ -1298,6 +1362,7 @@ The internal protocol should distinguish:
 - message schema version where needed
 
 The exact transport and encoding are deferred, but versioning is not.
+Minimal capability exchange is not deferred; it is part of initialization.
 
 #### Storage Schema Rule
 
@@ -1410,12 +1475,21 @@ These categories may live on the same machine, but they have different ownership
 - temporary model files
 - clearable separately from session data
 
+Model downloads are setup/preflight work, not surprise recording-time work.
+The user should see what model/runtime assets are needed, where they come from, the expected size where known, and where they will be stored.
+Integrity should be verified where upstream checksums, signatures, or package mechanisms support it.
+
 `Logs and diagnostics`:
 
 - operational logs
 - warnings/errors
 - crash and recovery diagnostics
-- must avoid meeting substance unless explicitly unavoidable and documented
+- structured diagnostic events with allowlisted fields
+- human-readable CLI output
+- must avoid meeting substance by mechanism, not developer discipline
+
+Logs and diagnostics are separate from product telemetry.
+PoC logs stay local; a future product bug-report flow belongs in [docs/ideas](../ideas/).
 
 `Exports`:
 
@@ -1596,6 +1670,9 @@ Protocol messages must not carry:
 - orchestrator must not assume capture stopped until it receives confirmation or detects failure
 - if the capture worker dies, the orchestrator must mark capture state as interrupted or failed
 - logs and protocol traffic must be separated or explicitly framed
+- at most one active orchestrator may operate on a session bundle at a time
+- a session-level lock or lease must protect canonical session record writes
+- stale lock recovery is required, but exact file format and timeout behavior are implementation details
 
 #### Orchestrator Loss Behavior
 
@@ -1613,6 +1690,8 @@ Future desktop-app architecture may revisit it because background lifecycle expe
 - live coordination belongs in the internal protocol
 - durable capture results belong in artifacts and session records
 - raw audio must not flow through the control protocol
+- the CLI PoC uses per-invocation orchestrators, not a daemon
+- continuity across commands is reconstructed from session bundles and the global index
 - adapter-specific termination triggers map to neutral lifecycle semantics
 - duplicate stop/finalization paths must be safe
 - CLI PoC orphan behavior is graceful stop and seal, not indefinite recording
@@ -1777,15 +1856,15 @@ The goal is to prevent early implementation convenience from hard-coding the PoC
 | Area | Current Baseline | Replaceable? | Notes |
 |---|---|---|---|
 | User interface | `CLI` | Yes | First adapter only; future adapters include `OpenClaw`, web UI, desktop UI |
-| Capture topology | Online dual-stream | Yes | Future capture profiles include in-person microphone-based sessions |
+| Capture topology | `online_dual_stream` first, then `in_person_single_mic` | Yes | Both are PoC profiles expressed through `Capture Profiles` |
 | Capture implementation | Linux audio stack | Partly | PoC is Linux-only, but capture stays behind `Capture Port` |
 | ASR provider | Not fixed yet | Yes | Must remain behind `Transcription Port` |
 | Diarization provider | Not fixed yet | Yes | Must remain behind `Diarization Port` |
-| Summarization provider | Not fixed yet | Yes | Local-first, EU/Swiss fallback where allowed |
+| Summarization provider | Local-first with direct Mistral API fallback | Yes | Fallback is constrained to the summarization stage in the PoC |
 | Semantic flagging provider | Not fixed yet | Yes | Same policy constraints as summarization |
 | Artifact persistence pattern | Local artifact store | Partly | First-class subsystem; exact implementation still open |
 | Metadata/index store | Not fixed yet | Yes | May begin minimal and grow later |
-| Process topology | Not fixed yet | Yes | One process vs supervised workers remains open |
+| Process topology | Orchestrator plus capture worker | Partly | Additional worker processes beyond this pair are not fixed |
 | Output format | Markdown | Partly | Markdown is current baseline; additional exports may come later |
 
 #### Fixed Architectural Baseline
@@ -1794,10 +1873,10 @@ The following are currently treated as fixed unless later architecture work expl
 
 - standalone PoC product
 - Linux-only PoC scope
-- online dual-stream PoC scenario
+- CLI PoC scope with `online_dual_stream` and `in_person_single_mic`
 - local artifact store as first-class subsystem
 - correction overlay instead of source transcript rewrite
-- mandatory playback during correction
+- playback always available during correction
 - provider access through ports rather than direct tool coupling
 - capture variation handled through explicit `Capture Profiles`
 
@@ -1860,6 +1939,7 @@ Session Bundle
 ├── Source Artifacts
 ├── Derived Artifacts
 ├── Review Artifacts
+├── Input Artifacts
 └── Export Artifacts
 ```
 
@@ -1871,6 +1951,7 @@ The baseline persistence pattern is:
 
 - one `Session Bundle` per meeting session
 - one `Session Record` per `Session Bundle`
+- optional sealed input artifacts, such as imported manual notes, belong inside the session bundle
 
 Reasoning:
 
@@ -1887,6 +1968,7 @@ The `Session Record` is canonical for:
 
 - session identity
 - workflow state
+- active operation markers and recovery checkpoints
 - artifact references
 - integrity metadata
 - checkpoints and operational trace
@@ -1914,16 +1996,45 @@ That means:
 - the `Session Record` is primary for one session's lifecycle and references
 - the global index is a projection and must be rebuildable
 
+The global index is intentionally narrow in the PoC.
+It supports session discovery for commands such as `list`, `show`, and `resume`.
+It may contain:
+
+- session id
+- bundle path
+- creation and last-updated timestamps
+- current high-level lifecycle state
+- capture profile
+- optional user-facing title if one exists
+
+It must not become the canonical store for transcripts, summaries, user notes, or meeting content.
+Full-text search, cross-session entities, and analytics are future product ideas, not PoC global-index responsibilities.
+
 If divergence occurs:
 
 - missing referenced artifact -> mark session broken and stop downstream trust
 - unindexed artifact -> mark orphaned and require explicit recovery path
-- integrity mismatch -> mark artifact tainted or corrupt and stop trusting it
+- integrity mismatch -> mark artifact invalidated and stop trusting it
 - stale index with consistent bundles -> rebuild the index
+
+#### Manual Notes as Versioned Input Artifacts
+
+Status: Confirmed
+
+Manual notes are not part of recording, transcription, diarization, or correction.
+They are optional input to summarization.
+
+The user may provide manual notes after recording and before summarization.
+When provided, `mena` imports the notes file into the session bundle as a sealed input artifact.
+Summaries must reference the exact manual-notes artifact version they used.
+
+If the user edits the original notes file later, `mena` does not silently re-read it.
+The user can import the updated notes as a new input artifact version and rerun summarization.
+This produces a new summary candidate while preserving the previous notes artifact and previous summary for comparison and traceability.
 
 #### UX and Quality Telemetry Separation
 
-Status: Provisional
+Status: Deferred
 
 The architecture distinguishes between:
 
@@ -1932,7 +2043,7 @@ The architecture distinguishes between:
 
 The `Session Record` should contain only the operational data required to run, resume, verify, and inspect a session safely.
 
-Product-quality and UX telemetry must be stored separately from core session operation.
+When product-quality and UX telemetry is introduced, it must be stored separately from core session operation.
 
 Examples of telemetry that may be valuable:
 
@@ -1953,12 +2064,14 @@ Examples of data that must not be treated as product telemetry:
 - user identity beyond what is operationally required for a local installation
 - anything that reveals what was discussed
 
-Architectural direction:
+Future architectural direction:
 
 - telemetry must be privacy-preserving by design
 - telemetry must be decoupled from canonical session operation
 - telemetry should be derived from session outcomes and interaction events, not by duplicating meeting content
 - telemetry should be exportable or analyzable without exposing meeting substance
+
+Telemetry is not part of the PoC implementation scope.
 
 #### Session Lifecycle as State Machine
 
@@ -2010,26 +2123,30 @@ If a decision becomes contentious, expensive, or implementation-critical, it sho
 | AD-003 | Use one generic `Capture Port` with capture profiles. | Confirmed | `online_dual_stream` and `in_person_single_mic` can share core capture concepts while differing in adapter behavior. |
 | AD-004 | Use a `Session Orchestrator Process` and a `Capture Worker Process`. | Confirmed | Capture has failure isolation and real-time ownership without turning every workflow step into a separate service. |
 | AD-005 | Use explicit criteria before adding more processes. | Confirmed | New processes must justify themselves through failure isolation, real-time ownership, resource isolation, lifecycle independence, privilege boundary, or runtime incompatibility. |
-| AD-006 | Make the orchestrator the canonical `Session Record` writer. | Confirmed | Capture workers and future workers emit facts/events/artifact references instead of independently mutating session truth. |
+| AD-006 | Make the per-invocation orchestrator the canonical `Session Record` writer while it holds session authority. | Confirmed | Capture workers and future workers emit facts/events/artifact references instead of independently mutating session truth; cross-invocation continuity is reconstructed from files. |
 | AD-007 | Use files for durable artifacts and protocol for live coordination. | Confirmed | The protocol stays small and avoids transporting raw audio or large generated artifacts. |
 | AD-008 | Keep raw audio sealed and separate corrections from generated transcript output. | Confirmed | Review transparency is preserved and transcripts can be regenerated from source audio when needed. |
 | AD-009 | Make recording, transcription, and diarization local-only. | Confirmed | No audio leaves the user's machine due to `mena`; quality/runtime tradeoffs must be solved locally for these stages. |
-| AD-010 | Use provider ports plus policy/capability resolution. | Confirmed | Model/runtime implementations can vary without changing workflow logic. |
-| AD-011 | Version durable schemas and internal protocol from day one. | Confirmed | Future migrations and adapter changes have an explicit compatibility path. |
+| AD-010 | Use provider ports plus policy/capability resolution. | Confirmed | Model/runtime implementations can vary without changing workflow logic; direct Mistral API is the PoC summarization fallback when local execution is insufficient. |
+| AD-011 | Version durable schemas and internal protocol from day one. | Confirmed | Future migrations and adapter changes have an explicit compatibility path; protocol initialization includes version agreement and minimal capabilities. |
 | AD-012 | Keep runtime data outside the repository and preserve user session data on uninstall. | Confirmed | Development checkout, installed application, and user-owned data remain separate. |
 | AD-013 | Design for replayability and contract testing. | Confirmed | Coding agents can test core behavior with fixtures and fake providers instead of relying on live meetings. |
 | AD-014 | Defer privacy-preserving UX telemetry until research provides a concrete model. | Deferred | Telemetry must not be implemented ad hoc or mixed into session content artifacts. |
 | AD-015 | Treat output quality and CLI friction thresholds as PoC learning outcomes. | Confirmed | Architecture must enable fast test loops and traceable artifacts instead of requiring invented acceptance thresholds upfront. |
+| AD-016 | Include both `online_dual_stream` and `in_person_single_mic` in CLI PoC scope. | Confirmed | Build order is online first, in-person second; both use capture profiles rather than separate pipelines. |
+| AD-017 | Use versioned manual-notes input artifacts for summarization. | Confirmed | Edited notes produce new notes artifact versions and new summary candidates instead of silently mutating prior summaries. |
+| AD-018 | Use a narrow rebuildable global index. | Confirmed | The index supports session discovery only and does not become canonical meeting-content storage. |
 
 ### 9.2 Decisions Needing Follow-Up
 
 Status: Open
 
-- Validate actual incremental implementation cost of `in_person_single_mic`; current architecture assumes it is a capture-profile extension, not a sequence interrupt.
-- Research whether local summarization is viable on first target hardware and representative weaker tester hardware before deciding whether first PoC fallback is necessary.
-- Evaluate Mistral direct API access and Mistral-through-OpenRouter access as separate provider-chain options before declaring fallback policy acceptable.
+- Validate actual incremental implementation cost of `in_person_single_mic`; current architecture assumes it is a capture-profile extension implemented after `online_dual_stream`.
+- Research local summarization quality and compare it with direct Mistral API fallback during PoC testing.
+- Validate the legal/policy suitability of direct Mistral API for fallback use; OpenRouter-style broker experimentation is deferred to ideas.
 - Whether the internal protocol remains a simple local JSON-like protocol or moves to a stronger contract format after research.
 - Whether the first implementation uses direct local model libraries, Ollama, LM Studio, or a different runtime abstraction.
+- Error decision authority across stages remains open for focused discussion.
 
 ## 10. Quality Requirements
 
@@ -2089,11 +2206,11 @@ Expected:
 - fallback use remains constrained by sovereignty policy
 - the user may provide required credentials, but may not arbitrarily configure disallowed remote providers or models
 
-##### 2.2 Product telemetry reveals no meeting substance
+##### 2.2 Future product telemetry reveals no meeting substance
 
 Scenario:
 
-- product-quality telemetry is exported or analyzed for UX improvement
+- product-quality telemetry is added, exported, or analyzed for UX improvement
 
 Expected:
 
@@ -2206,7 +2323,7 @@ Expected:
 
 Scenario:
 
-- in-person capture is added after online dual-stream
+- the PoC implementation adds `in_person_single_mic` after `online_dual_stream`
 
 Expected:
 
@@ -2279,7 +2396,7 @@ It is not a full project risk register.
 
 | Risk | Current Assessment | Mitigation / Follow-Up |
 | --- | --- | --- |
-| In-person single-mic demand may become urgent before the online dual-stream PoC is validated. | Medium likelihood, medium impact. | Keep capture profiles explicit now; validate incremental implementation cost before treating it as a sequence change. |
+| In-person single-mic scope may delay the online dual-stream learning loop if implemented too early. | Medium likelihood, medium impact. | Build online first, then in-person through the same capture-profile model. |
 | The CLI may accidentally shape core product behavior too strongly. | Medium likelihood, high impact. | Keep workflow logic interface-independent and document CLI-specific behavior as adapter behavior. |
 | The PoC may optimize for the first technical user and fail less technical testers. | Medium likelihood, high impact. | Keep install/uninstall, device confirmation, and minimal configuration as architectural concerns, not late UX polish. |
 | Minimum useful output quality is not yet quantified. | High likelihood, high impact. | Use first runnable PoC sessions to establish practical acceptance criteria before deeper optimization. |
@@ -2292,7 +2409,7 @@ It is not a full project risk register.
 | Local model runtime choice may create installation or hardware lock-in. | High likelihood, high impact. | Research task R-01; keep provider/runtime access behind ports. |
 | ASR quality may be insufficient for target meetings, accents, or mixed languages. | Medium likelihood, high impact. | Research task R-04; preserve raw audio so transcripts can be regenerated. |
 | Diarization may fail for overlap, poor microphones, or in-person single-mic meetings. | High likelihood, medium impact. | Research task R-05; do not make diarization correctness a hidden prerequisite for preserving source artifacts. |
-| Fallback providers may violate sovereignty expectations if policy is vague. | Medium likelihood, high impact. | Research task R-06; remote fallback is limited to allowed non-audio stages and must evaluate direct providers and brokers separately. |
+| Fallback providers may violate sovereignty expectations if policy is vague. | Medium likelihood, high impact. | PoC fallback uses direct Mistral API for summarization only; R-06 must validate legal/policy suitability before product hardening. |
 | Internal protocol may be under-specified for parallel agent implementation. | Medium likelihood, medium impact. | Research task R-08; version protocol and schemas early. |
 | Local install/update/uninstall may be harder than expected. | Medium likelihood, medium impact. | Research task R-07; keep repo, install, config, session data, cache, and logs separate. |
 
@@ -2309,10 +2426,10 @@ It is not a full project risk register.
 
 Status: Open
 
-- Validate whether `in_person_single_mic` is low-incremental enough to include early without delaying the online dual-stream PoC path.
 - Use first-user testing to determine what "good enough" means for notes, corrections, speaker labels, and summaries.
-- After local runtime and fallback-provider research, decide whether first testers may use remote summarization fallback.
+- Use first-user testing to compare local summarization output against direct Mistral API fallback output.
 - Use first CLI testing to determine how much device/profile confirmation is helpful before it becomes friction.
+- Resolve error decision authority separately before implementation issues are cut too narrowly.
 
 ## 12. Glossary
 
