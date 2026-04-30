@@ -37,6 +37,7 @@ This repository separates documentation by role so agents do not have to guess w
 
 ## Primary Documents
 
+- [Repository Workflow](repository-workflow.md)
 - [Architecture Overview](architecture/architecture-overview.md)
 - [Implementation Guardrails](architecture/implementation-guardrails.md)
 - [Architecture Research Backlog](research/backlog/architecture-research-backlog.md)

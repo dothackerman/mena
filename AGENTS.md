@@ -2,6 +2,22 @@
 
 Repository-local guidance for agents working in `mena`.
 
+## Repository Scope
+
+The repository root represents the whole `mena` product suite and knowledge base, not only the Python software package.
+
+Repository-root concerns include:
+
+- requirements
+- architecture
+- research
+- deferred ideas
+- GitHub workflow metadata
+- future product and operational documentation
+
+The installable/runnable software lives under `app/` once scaffolded.
+Do not place Python package tooling or application-specific configuration in the repository root unless the tool requires a root-level location.
+
 ## Folder Semantics
 
 ### `docs/requirements/`
@@ -98,3 +114,4 @@ Use `docs/ideas/` for:
 - Prefer folder-level rules over file-specific exceptions.
 - Preserve the difference between source inputs, architecture synthesis, research backlog, and research outputs.
 - Keep repository structure legible for future coding and research agents.
+- Follow the repository workflow in `docs/repository-workflow.md` for branch naming and issue references.
