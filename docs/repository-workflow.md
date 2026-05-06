@@ -119,3 +119,19 @@ Issues should cite:
 
 Issues are the executable work contract for coding agents.
 The architecture remains the reference manual; issues name the specific slice to implement.
+
+## Decision Persistence
+
+Architecture conclusions from chat, PR review, research synthesis, or implementation experience must not remain only in conversation history.
+
+Before an implementation issue or coding agent depends on a conclusion, persist it in the narrowest durable artifact:
+
+- raw evidence or model output -> `docs/research/notes/`
+- synthesis and divergence resolution -> `docs/research/synthesis-*.md`
+- current architecture baseline or decision -> `docs/architecture/architecture-overview.md` decision log / relevant section
+- implementation-facing interpretation -> the GitHub issue body or `docs/architecture/implementation-guardrails.md`
+- future/non-binding product ideas -> `docs/ideas/`
+
+Do not duplicate full reasoning across all layers. Link forward from evidence to synthesis and from implementation issues back to the architecture sections they rely on.
+
+If a later discussion changes a decision, update the architecture baseline or create a follow-up issue before asking implementation agents to act on the new conclusion.
