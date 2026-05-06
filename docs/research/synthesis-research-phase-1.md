@@ -6,7 +6,7 @@ Metadata:
 
 - Date: 2026-05-01
 - Issue: [#1 Synthesize dual-agent research findings](https://github.com/dothackerman/mena/issues/1)
-- Inputs: completed findings in [docs/research/notes/](notes/) for R-01, R-02, R-04, R-05, R-06, R-08, R-09 (R-08 and R-09 partial — see per-task notes)
+- Inputs: completed findings in [docs/research/notes/](notes/) for R-01, R-02, R-04, R-05, R-06, R-08, R-09 (R-08 is single-source; the R-09 Nemotron note is considered but rejected in the resolution — see per-task notes and §6)
 - Audience: product owner (web developer; not a Linux/audio/ML systems engineer) and future coding/architecture agents
 - Companion documents:
   - [Architecture Overview](../architecture/architecture-overview.md)
@@ -41,7 +41,7 @@ R-03 (Future OS compatibility) and R-07 (Install / update / uninstall) are out o
 
 ## 2. Technical Onboarding Primer
 
-This primer assumes you know HTTP, REST, processes, files, JSON, CLIs, and how a frontend talks to a backend. It does not assume you have ever debugged Linux audio, served a local language model, or built a desktop process tree.
+This primer assumes you know Hypertext Transfer Protocol (HTTP), Representational State Transfer (REST), processes, files, JavaScript Object Notation (JSON), command-line interfaces (CLIs), and how a frontend talks to a backend. It does not assume you have ever debugged Linux audio, served a local language model, or built a desktop process tree.
 
 ### 2.1 Linux Audio Stack 101
 
@@ -50,7 +50,7 @@ Linux does not have one audio system. It has a stack of layers that have evolved
 - **ALSA — Advanced Linux Sound Architecture.** The kernel-level driver layer. ALSA exposes raw audio devices (cards, PCM streams) to user-space programs. It is universally present on every modern Linux kernel. Think of ALSA as the *hardware adapter*: it knows about your sound card and microphone, but not about "applications" or "meetings".
 - **PulseAudio.** A user-space sound server that sits *above* ALSA. It introduced per-application volume control, software mixing, and the concept of routing audio between applications. It is the "old desktop standard" that most non-bleeding-edge desktops used between roughly 2008 and 2022. It still exists for legacy compatibility but is being phased out.
 - **PipeWire.** The modern replacement for PulseAudio (and JACK; see below). PipeWire is also a user-space sound server, but it is built around an explicit *graph* of audio nodes, ports, and links — closer to a node-based audio editor than a simple mixer. It is the default on Fedora, Arch, and Ubuntu 22.04+. PipeWire ships a *PulseAudio compatibility layer* (`pipewire-pulse`) so existing apps that talk to PulseAudio "just work".
-- **JACK — Jack Audio Connection Kit.** A separate sound server aimed at professional/low-latency audio work (musicians, DAWs). PipeWire can speak the JACK protocol too; for mena it is mostly a footnote.
+- **JACK — Jack Audio Connection Kit.** A separate sound server aimed at professional/low-latency audio work (musicians, digital audio workstations, or DAWs). PipeWire can speak the JACK protocol too; for mena it is mostly a footnote.
 
 Some PipeWire vocabulary you will see throughout R-02:
 
@@ -64,7 +64,7 @@ The *online_dual_stream* problem is exactly this: you want to record (a) what *y
 
 ### 2.2 Local ML Model Serving 101
 
-A modern large language model (LLM) ships as a directory of weight files, possibly tens of gigabytes large, alongside a tokenizer and configuration. To *use* the model you need a **runtime** that loads those weights into memory (CPU or GPU), feeds it tokens, and reads tokens back. Some terms:
+A modern large language model (LLM) ships as a directory of weight files, possibly tens of gigabytes large, alongside a tokenizer and configuration. To *use* the model you need a **runtime** that loads those weights into memory (central processing unit, or CPU; or graphics processing unit, or GPU), feeds it tokens, and reads tokens back. Some terms:
 
 - **GGUF.** A file format for quantised model weights, primarily used by `llama.cpp` and runtimes built on top of it. Think of it as "the .zip of efficient local LLM weights".
 - **Quantisation.** Compressing the model's numeric weights from 16-bit floats to lower-precision integers (8-bit, 5-bit, 4-bit, etc.). A 4-bit quantised 7B-parameter model fits in roughly 4–5 GB instead of 14 GB, with a small but usually acceptable quality cost. Q4_K_M is a common quantisation for laptops.
@@ -98,12 +98,12 @@ Two structural facts about meeting audio shape mena's architecture:
 
 ### 2.4 Process Architecture 101
 
-mena splits into two operating-system processes for the PoC:
+mena splits into two operating-system processes for the proof of concept (PoC):
 
 - **Session Orchestrator Process.** The brain. Runs the user-facing CLI workflow, decides when to record/process/correct/export, manages provider selection, and is the *single writer* of the canonical Session Record (the per-meeting metadata file). For the CLI PoC this is created fresh per `mena …` command — there is no daemon.
 - **Capture Worker Process.** The hand. A dedicated process that owns the live audio capture: opens audio devices, writes segments to disk, and emits status events. It exists as a separate process so that if the orchestrator crashes mid-meeting, the recording survives.
 
-The two processes talk to each other through a small **internal protocol** — short JSON messages over stdio, carrying commands ("StartCapture") and events ("SegmentFlushed", "CaptureFinalized"). They do *not* shovel raw audio over this protocol; audio goes to disk and the protocol just announces "segment 17 was sealed at this path".
+The two processes talk to each other through a small **internal protocol** — short JSON messages over standard input/output (stdio), carrying commands ("StartCapture") and events ("SegmentFlushed", "CaptureFinalized"). They do *not* shovel raw audio over this protocol; audio goes to disk and the protocol just announces "segment 17 was sealed at this path".
 
 The architecture style mena follows is sometimes called **ports and adapters** (a.k.a. **hexagonal architecture**). The application core defines abstract *ports* (e.g. "Capture Port", "Transcription Port"), and concrete implementations called *adapters* satisfy those ports (e.g. "Linux PipeWire capture adapter", "faster-whisper transcription adapter"). The core never imports the adapter directly; it asks the policy/capability resolver for "the current transcription provider" and gets one back. The benefit: you can swap the Linux audio adapter for a macOS one, or `faster-whisper` for `whisper.cpp`, without touching the workflow code.
 
@@ -123,9 +123,11 @@ The architecture style mena follows is sometimes called **ports and adapters** (
 | Capture Profile | mena's explicit description of a capture topology (e.g. `online_dual_stream`, `in_person_single_mic`) |
 | Capture Worker Process | mena process that owns live audio capture |
 | CON-01 | Constraint #1 in `poc-requirements.md` — sovereignty / data residency |
+| CPU | Central Processing Unit |
 | CTranslate2 | Inference engine used by `faster-whisper` |
 | CUDA | NVIDIA's GPU compute platform |
 | DAP | Distributed Aggregation Protocol — IETF effort for privacy-preserving telemetry aggregation |
+| DAW | Digital Audio Workstation |
 | DER | Diarisation Error Rate — standard diarisation accuracy metric |
 | Diarisation | Identifying *who* spoke *when* in an audio recording |
 | DPA | Data Processing Addendum — contractual document between data controller and processor under GDPR |
@@ -178,7 +180,7 @@ The architecture style mena follows is sometimes called **ports and adapters** (
 
 ### 3.1 R-01 — Local Model Runtime Strategy
 
-**Recommendation.** Adopt **Ollama as the default local-LLM runtime adapter** behind mena's transcription/summarisation/semantic-flagging Inference Port for the PoC, with **owned `llama.cpp` (`llama-server`) as a quality-validated alternative adapter** and **`faster-whisper`/`whisper.cpp` handled outside this LLM port** for ASR (see §3.3). Default model profile: a **3B–4B-parameter quantised instruct model** (e.g. Llama 3.2 3B Q4 ~2 GB, Gemma 3 4B ~3.3 GB) for the first-target laptop tier, with a **1B–3B fallback profile** for ≤8 GB RAM testers. Treat 7B as opt-in for stronger machines, and **do not** make 12B-class models the baseline.
+**Recommendation.** Adopt **Ollama as the default local-LLM runtime adapter** behind mena's summarisation and semantic-flagging Inference Port for the PoC, with **owned `llama.cpp` (`llama-server`) as a quality-validated alternative adapter** and **`faster-whisper`/`whisper.cpp` handled outside this LLM port** for ASR (see §3.3). Default model profile: a **3B–4B-parameter quantised instruct model** (e.g. Llama 3.2 3B Q4 ~2 GB, Gemma 3 4B ~3.3 GB) for the first-target laptop tier, with a **1B–3B fallback profile** for ≤8 GB RAM testers. Treat 7B as opt-in for stronger machines, and **do not** make 12B-class models the baseline.
 
 The PoC inference architecture is two ports:
 

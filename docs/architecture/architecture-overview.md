@@ -761,7 +761,6 @@ The protocol currently assumes:
 - `CaptureStarted`
 - `CaptureStartRejected`
 - `SegmentFlushed`
-- `CaptureHeartbeat`
 - `CaptureWarning`
 - `CaptureError`
 - `CaptureStopped`
@@ -795,6 +794,7 @@ The exact error-code taxonomy and any future move to RFC 7464 JSON Text Sequence
 #### Deferred
 
 - exact error-code taxonomy
+- `CaptureHeartbeat` or equivalent liveness events
 - future framing/transport upgrades (JSON Text Sequences, LSP-style `Content-Length`, Unix-domain `socketpair`)
 - further subdivision into additional supervised workers
 
