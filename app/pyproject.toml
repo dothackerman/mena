@@ -15,11 +15,13 @@ mena = "mena.cli:main"
 
 [dependency-groups]
 dev = [
+    "jsonschema>=4.26.0",
     "mypy>=1.14",
     "pre-commit>=4.6.0",
     "pytest>=8.3",
     "pytest-cov>=7.1.0",
     "ruff>=0.8",
+    "types-jsonschema>=4.26.0.20260508",
 ]
 
 [tool.hatch.build.targets.wheel]
