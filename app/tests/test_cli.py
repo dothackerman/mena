@@ -63,7 +63,7 @@ def test_record_creates_session_bundle_and_record(
     assert record["created_at"].endswith("Z")
     assert record["name"] == "Planning"
     assert record["status"] == "created"
-    assert record["profile"] == "in-person"
+    assert record["profile"] == "in_person_single_mic"
 
 
 def test_record_requires_profile(capsys: CaptureFixture[str]) -> None:

@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-from mena.profiles import CaptureProfileName
+from mena.profiles import CaptureProfileSelection
 
 SESSION_RECORD_VERSION = 1
 SESSION_RECORD_FILENAME = "session.json"
@@ -48,7 +48,7 @@ def default_data_root() -> Path:
 
 def create_session(
     *,
-    profile: CaptureProfileName,
+    profile: CaptureProfileSelection,
     name: str | None = None,
     data_root: Path | None = None,
     now: datetime | None = None,
@@ -66,7 +66,7 @@ def create_session(
         created_at=created_at.isoformat(timespec="seconds").replace("+00:00", "Z"),
         name=name,
         status="created",
-        profile=profile.value,
+        profile=profile.id.value,
     )
     record_path = bundle_path / SESSION_RECORD_FILENAME
     record_path.write_text(

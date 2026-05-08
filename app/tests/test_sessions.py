@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from mena.profiles import CaptureProfileName, parse_capture_profile
+from mena.profiles import CaptureProfileId, parse_capture_profile
 from mena.sessions import create_session
 
 
@@ -12,7 +12,7 @@ def test_create_session_uses_uuid_and_timestamp_directory(tmp_path: Path) -> Non
     now = datetime(2026, 5, 8, 5, 30, 0, tzinfo=UTC)
 
     created_session = create_session(
-        profile=CaptureProfileName.ONLINE,
+        profile=parse_capture_profile("online"),
         name=None,
         data_root=tmp_path,
         now=now,
@@ -27,7 +27,7 @@ def test_create_session_writes_minimal_record(tmp_path: Path) -> None:
     now = datetime(2026, 5, 8, 5, 30, 0, tzinfo=UTC)
 
     created_session = create_session(
-        profile=CaptureProfileName.ONLINE,
+        profile=parse_capture_profile("online"),
         name="Demo",
         data_root=tmp_path,
         now=now,
@@ -38,10 +38,16 @@ def test_create_session_writes_minimal_record(tmp_path: Path) -> None:
         "created_at": "2026-05-08T05:30:00Z",
         "id": created_session.record.id,
         "name": "Demo",
-        "profile": "online",
+        "profile": "online_dual_stream",
         "status": "created",
         "version": 1,
     }
+
+
+def test_parse_capture_profile_maps_cli_name_to_architecture_profile() -> None:
+    profile = parse_capture_profile("in-person")
+
+    assert profile.id is CaptureProfileId.IN_PERSON_SINGLE_MIC
 
 
 def test_parse_capture_profile_rejects_unknown_profile() -> None:
