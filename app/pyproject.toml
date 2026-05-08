@@ -16,7 +16,9 @@ mena = "mena.cli:main"
 [dependency-groups]
 dev = [
     "mypy>=1.14",
+    "pre-commit>=4.6.0",
     "pytest>=8.3",
+    "pytest-cov>=7.1.0",
     "ruff>=0.8",
 ]
 
@@ -32,12 +34,20 @@ target-version = "py311"
 select = ["B", "E", "F", "I", "SIM", "UP"]
 
 [tool.pytest.ini_options]
-addopts = "-q --strict-config --strict-markers"
+addopts = "-q --strict-config --strict-markers --cov=mena --cov-report=term-missing --cov-fail-under=90"
 testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["mena"]
+omit = ["src/mena/__main__.py"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
 
 [tool.mypy]
 files = ["src", "tests"]
 mypy_path = "src"
 python_version = "3.11"
 strict = true
-
