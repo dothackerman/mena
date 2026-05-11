@@ -8,11 +8,19 @@ import pytest
 from jsonschema import Draft202012Validator, FormatChecker
 
 from mena.profiles import CaptureProfileId, parse_capture_profile
-from mena.sessions import create_session
+from mena.sessions import SESSION_RECORD_VERSION, create_session
 
 
 def test_session_record_v1_schema_is_valid() -> None:
     Draft202012Validator.check_schema(_load_session_record_schema())
+
+
+def test_session_record_version_matches_v1_schema_const() -> None:
+    schema = _load_session_record_schema()
+    properties = cast(dict[str, object], schema["properties"])
+    version = cast(dict[str, object], properties["version"])
+
+    assert version["const"] == SESSION_RECORD_VERSION
 
 
 def test_create_session_uses_uuid_and_timestamp_directory(tmp_path: Path) -> None:
