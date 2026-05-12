@@ -21,6 +21,10 @@ Root-level files should stay limited to repository coordination and platform-req
 The runnable software lives under `app/` once scaffolded.
 Python packaging, dependency, formatter, linter, test, and local-check configuration should live under `app/` unless a tool explicitly requires root-level configuration.
 
+Git hook configuration is root-level because Git installs hooks for the repository.
+The hook commands delegate into `app/` so Python tooling remains owned by the app package.
+After syncing app dependencies, run `make hooks` from `app/` to install the configured pre-commit and pre-push hooks.
+
 ## Branching Model
 
 Use a lightweight Git Flow variant with `develop` as the active integration branch.

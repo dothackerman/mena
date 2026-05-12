@@ -8,10 +8,11 @@ The repository root is the product suite and knowledge base, not the Python pack
 - runnable software lives under [app/](app/)
 - repository workflow is documented in [docs/repository-workflow.md](docs/repository-workflow.md)
 
-Initial local app checks:
+Initial local app setup and checks:
 
 ```bash
 cd app
 uv sync --all-groups
+make hooks
 make check
 ```
