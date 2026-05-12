@@ -15,6 +15,7 @@ from mena.settings import AppSettings
 SESSION_RECORD_VERSION = 1
 SESSION_RECORD_FILENAME = "session.json"
 SESSION_DISCOVERY_KEY = "discovery"
+SESSION_CAPTURE_METADATA_KEY = "capture_metadata"
 
 
 @dataclass(frozen=True)
@@ -105,6 +106,18 @@ def update_session_discovery(
     """Persist read-only audio discovery facts on the canonical session record."""
 
     return update_session_record(record_path, updates={SESSION_DISCOVERY_KEY: dict(discovery)})
+
+
+def update_session_capture_metadata(
+    record_path: Path,
+    capture_metadata: Mapping[str, object],
+) -> dict[str, object]:
+    """Persist capture metadata emitted by the worker on the canonical session record."""
+
+    return update_session_record(
+        record_path,
+        updates={SESSION_CAPTURE_METADATA_KEY: dict(capture_metadata)},
+    )
 
 
 def _sessions_root(data_root: Path | None) -> Path:

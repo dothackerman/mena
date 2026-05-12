@@ -13,6 +13,7 @@ from mena.sessions import (
     create_session,
     default_data_root,
     read_session_record,
+    update_session_capture_metadata,
     update_session_discovery,
 )
 from mena.settings import DATA_ROOT_ENV_VAR
@@ -106,6 +107,45 @@ def test_update_session_discovery_writes_schema_valid_session_record(tmp_path: P
 
     assert record["discovery"] == discovery
     assert read_session_record(created_session.record_path)["discovery"] == discovery
+    validator.validate(record)
+
+
+def test_update_session_capture_metadata_writes_schema_valid_session_record(
+    tmp_path: Path,
+) -> None:
+    created_session = create_session(
+        profile=parse_capture_profile("online"),
+        data_root=tmp_path,
+        now=datetime(2026, 5, 8, 5, 30, 0, tzinfo=UTC),
+    )
+    capture_metadata = {
+        "version": 1,
+        "sample_rate": 48000,
+        "channels": 1,
+        "segment_seconds": 30,
+        "segment_count": 1,
+        "segments": [
+            {
+                "source_id": "local_mic",
+                "index": 1,
+                "path": "/tmp/local_mic_000001.wav",
+                "sample_rate": 48000,
+                "channels": 1,
+                "byte_count": 44,
+                "sha256": "0" * 64,
+                "status": "sealed",
+                "format": "wav",
+            }
+        ],
+    }
+
+    record = update_session_capture_metadata(created_session.record_path, capture_metadata)
+    validator = Draft202012Validator(
+        _load_session_record_schema(),
+        format_checker=FormatChecker(),
+    )
+
+    assert record["capture_metadata"] == capture_metadata
     validator.validate(record)
 
 

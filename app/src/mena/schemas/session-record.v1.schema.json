@@ -4,6 +4,40 @@
   "additionalProperties": false,
   "description": "Initial canonical session record written by `mena record`.",
   "properties": {
+    "capture_metadata": {
+      "additionalProperties": true,
+      "description": "Capture facts emitted by the worker and persisted by the orchestrator.",
+      "properties": {
+        "channels": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "sample_rate": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "segment_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "segment_seconds": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "segments": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "version": {
+          "const": 1,
+          "type": "integer"
+        }
+      },
+      "required": ["version", "sample_rate", "channels", "segment_seconds", "segment_count", "segments"],
+      "type": "object"
+    },
     "created_at": {
       "description": "UTC session creation timestamp.",
       "format": "date-time",
