@@ -203,7 +203,12 @@ class WorkerProcess:
 
     def stop_capture(self) -> ProtocolMessage:
         self.send(ProtocolMessage(type="stop_capture", session_id=self.session_id))
-        return self.receive_expected("capture_finalized")
+        while True:
+            message = self.receive()
+            if message.type == "capture_finalized":
+                return message
+            if message.type == "error":
+                raise ProtocolError(str(message.payload.get("message", "Worker capture error.")))
 
     def send(self, message: ProtocolMessage) -> None:
         if self.process.stdin is None:

@@ -8,6 +8,16 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import IO, TextIO
 
+from mena.capture import (
+    ActivePipeWireCapture,
+    CaptureMetadata,
+    CaptureRoutePlan,
+    CaptureSegment,
+    PipeWireCaptureAdapter,
+    PipeWireClient,
+    SilencePcmProvider,
+    WavSegmentWriter,
+)
 from mena.protocol import (
     ProtocolError,
     ProtocolMessage,
@@ -22,6 +32,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="mena.capture_worker")
     parser.add_argument("--session-id", required=True)
     parser.add_argument("--session-dir", type=Path, required=True)
+    parser.add_argument(
+        "--capture-mode",
+        choices=("fake",),
+        default="fake",
+        help="Capture backend for deterministic worker execution.",
+    )
     return parser
 
 
@@ -49,17 +65,33 @@ def run_worker(
     hello = read_message(protocol_in)
     validate_hello(hello)
     write_message(protocol_out, hello_ack_message(session_id=session_id, request_id=hello.id))
+    capture: WorkerCaptureSession | None = None
+    finalized_metadata: CaptureMetadata | None = None
 
     while True:
         try:
             message = read_message(protocol_in)
         except EOFError:
+            if capture and finalized_metadata is None:
+                finalized_metadata = capture.finalize()
             print("orchestrator closed protocol stdin", file=diagnostics)
             return 0
 
         if message.session_id != session_id:
             raise ProtocolError("Message session_id does not match worker session.")
         if message.type == "start_capture":
+            if message.payload.get("simulate_error") is True:
+                write_message(
+                    protocol_out,
+                    ProtocolMessage(
+                        type="error",
+                        session_id=session_id,
+                        payload={"message": "simulated capture start failure"},
+                    ),
+                )
+                return 1
+            capture = WorkerCaptureSession(session_dir=session_dir)
+            flushed = capture.start()
             write_message(
                 protocol_out,
                 ProtocolMessage(
@@ -68,18 +100,87 @@ def run_worker(
                     payload={"session_dir": str(session_dir)},
                 ),
             )
+            for segment in flushed:
+                write_message(
+                    protocol_out,
+                    ProtocolMessage(
+                        type="segment_flushed",
+                        session_id=session_id,
+                        payload=segment.to_dict(),
+                    ),
+                )
         elif message.type == "stop_capture":
+            if capture and finalized_metadata is None:
+                finalized_metadata = capture.finalize()
+            payload: dict[str, object] = (
+                finalized_metadata.to_dict() if finalized_metadata else {"status": "stopped"}
+            )
             write_message(
                 protocol_out,
                 ProtocolMessage(
                     type="capture_finalized",
                     session_id=session_id,
-                    payload={"status": "stopped"},
+                    payload=payload,
                 ),
             )
             return 0
         else:
             raise ProtocolError(f"Unexpected worker command '{message.type}'.")
+
+
+class WorkerCaptureSession:
+    """Worker-owned deterministic segment writer used by the current PoC slice."""
+
+    def __init__(self, *, session_dir: Path) -> None:
+        writer = WavSegmentWriter(segment_dir=session_dir / "artifacts" / "source")
+        provider = SilencePcmProvider().read_segment
+        self.adapter = PipeWireCaptureAdapter(
+            client=NoopPipeWireClient(),
+            segment_writer=writer,
+            pcm_provider=provider,
+        )
+        self.writer = writer
+        self.segments: list[CaptureSegment] = []
+        self.active_capture: ActivePipeWireCapture | None = None
+        self.started = False
+
+    def start(self) -> tuple[CaptureSegment, ...]:
+        if self.started:
+            return ()
+        self.started = True
+        self.active_capture = self.adapter.start(
+            CaptureRoutePlan(
+                session_id="worker",
+                microphone_route_id="pipewire:node:1",
+                playback_stream_route_id="pipewire:node:2",
+                output_sink_route_id="pipewire:node:3",
+            )
+        )
+        self.segments.extend(self.active_capture.flush_segments())
+        return tuple(self.segments)
+
+    def finalize(self) -> CaptureMetadata:
+        if not self.started:
+            self.start()
+        if self.active_capture is None:
+            raise RuntimeError("capture session did not start")
+        return self.active_capture.stop()
+
+
+class NoopPipeWireClient(PipeWireClient):
+    """PipeWire client used by deterministic worker tests to avoid graph mutation."""
+
+    def create_null_sink(self, sink_name: str) -> str:
+        return f"{sink_name}-module"
+
+    def move_playback_stream(self, playback_stream_route_id: str, sink_name: str) -> None:
+        return None
+
+    def create_loopback(self, sink_name: str, output_sink_route_id: str) -> str:
+        return f"{sink_name}-loopback"
+
+    def unload_module(self, module_id: str) -> None:
+        return None
 
 
 if __name__ == "__main__":

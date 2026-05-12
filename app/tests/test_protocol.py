@@ -1,5 +1,6 @@
 import subprocess
 import sys
+import wave
 from io import BytesIO, StringIO
 from pathlib import Path
 
@@ -137,9 +138,11 @@ def test_worker_process_handshake_start_stop_round_trip(tmp_path: Path) -> None:
 
     assert hello_ack.type == "hello_ack"
     assert started.payload == {"session_dir": str(tmp_path)}
-    assert finalized.payload == {"status": "stopped"}
+    assert finalized.payload["segment_count"] == 2
     assert exit_code == 0
     assert stderr == ""
+    assert (tmp_path / "artifacts" / "source" / "local_mic" / "local_mic_000001.wav").exists()
+    assert (tmp_path / "artifacts" / "source" / "system_audio" / "system_audio_000001.wav").exists()
 
 
 def test_worker_run_loop_handles_start_stop_with_in_memory_streams(tmp_path: Path) -> None:
@@ -168,6 +171,8 @@ def test_worker_run_loop_handles_start_stop_with_in_memory_streams(tmp_path: Pat
     assert [ProtocolMessage.decode(frame).type for frame in frames] == [
         "hello_ack",
         "capture_started",
+        "segment_flushed",
+        "segment_flushed",
         "capture_finalized",
     ]
     assert stderr.getvalue() == ""
@@ -220,6 +225,63 @@ def test_worker_process_context_terminates_running_child(tmp_path: Path) -> None
         process = worker.process
 
     assert process.poll() is not None
+
+
+def test_worker_error_event_stays_on_stdout_and_diagnostics_stay_on_stderr(tmp_path: Path) -> None:
+    with WorkerProcess(session_id="session-1", session_dir=tmp_path) as worker:
+        worker.handshake()
+        worker.send(
+            ProtocolMessage(
+                type="start_capture",
+                session_id="session-1",
+                payload={"simulate_error": True},
+            )
+        )
+        message = worker.receive()
+        exit_code = worker.wait(timeout=2)
+        stderr = worker.read_stderr()
+
+    assert message.type == "error"
+    assert message.payload == {"message": "simulated capture start failure"}
+    assert exit_code == 1
+    assert stderr == ""
+
+
+def test_worker_hard_kill_preserves_sealed_prior_segments(tmp_path: Path) -> None:
+    with WorkerProcess(session_id="session-1", session_dir=tmp_path) as worker:
+        worker.handshake()
+        worker.start_capture({"profile": "online_dual_stream"})
+        worker.process.kill()
+        worker.wait(timeout=2)
+
+    local_segment = tmp_path / "artifacts" / "source" / "local_mic" / "local_mic_000001.wav"
+    remote_segment = tmp_path / "artifacts" / "source" / "system_audio" / "system_audio_000001.wav"
+    assert local_segment.exists()
+    assert remote_segment.exists()
+    with wave.open(str(local_segment), "rb") as wav:
+        assert wav.getframerate() == 48_000
+        assert wav.getnframes() == 48_000
+
+
+def test_worker_eof_after_start_finalizes_existing_segments(tmp_path: Path) -> None:
+    stdin = BytesIO(
+        hello_message("session-1").encode()
+        + ProtocolMessage(type="start_capture", session_id="session-1").encode()
+    )
+    stdout = BytesIO()
+    stderr = StringIO()
+
+    exit_code = run_worker(
+        session_id="session-1",
+        session_dir=tmp_path,
+        stdin=stdin,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == 0
+    assert "orchestrator closed protocol stdin" in stderr.getvalue()
+    assert (tmp_path / "artifacts" / "source" / "local_mic" / "local_mic_000001.wav").exists()
 
 
 def test_worker_version_mismatch_exits_with_diagnostics_only_on_stderr(tmp_path: Path) -> None:
