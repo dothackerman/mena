@@ -49,6 +49,21 @@ Examples:
 
 Unused application surface creates maintenance cost and gives coding agents extra paths to implement, test, and accidentally break.
 
+## Persisted Contract Rule
+
+Persisted contracts are meta-system scaffolding, not optional polish.
+When an implementation issue creates or changes a durable format, add the smallest concrete schema or explicit version marker that makes the contract testable.
+
+Expected early contract discipline includes:
+
+- versioned session records and artifact metadata
+- schema or version-marker tests for newly persisted contracts
+- clear PR notes when a still-forming PoC `v1` contract changes shape
+- local contract versioning per artifact or protocol, not one global app schema version
+
+This does not authorize broad migration machinery.
+Do not add generic migration registries, migration CLIs, schema-discovery frameworks, or global app schema versions unless an implementation issue explicitly asks for them or real preserved session data forces the need.
+
 ## Issue Authoring Rule
 
 Every implementation issue should name the slice it wants, not the whole architecture concept.
@@ -98,4 +113,3 @@ Before cutting implementation issues for a new area:
 - check for contradictions in nearby sections
 - prefer updating the architecture once over repeating corrections across issues
 - keep issues small enough that agents read only the cited sections
-

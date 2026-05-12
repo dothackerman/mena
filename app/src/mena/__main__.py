@@ -3,4 +3,3 @@
 from mena.cli import main
 
 raise SystemExit(main())
-

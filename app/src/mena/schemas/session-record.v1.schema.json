@@ -1,0 +1,40 @@
+{
+  "$id": "https://dothackerman.github.io/mena/schemas/session-record.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Initial canonical session record written by `mena record`.",
+  "properties": {
+    "created_at": {
+      "description": "UTC session creation timestamp.",
+      "format": "date-time",
+      "type": "string"
+    },
+    "id": {
+      "description": "Stable session UUID.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "name": {
+      "description": "Optional human-facing session label.",
+      "type": ["string", "null"]
+    },
+    "profile": {
+      "description": "Durable architecture capture profile identifier.",
+      "enum": ["online_dual_stream", "in_person_single_mic"],
+      "type": "string"
+    },
+    "status": {
+      "const": "created",
+      "description": "Initial lifecycle state for a newly created session.",
+      "type": "string"
+    },
+    "version": {
+      "const": 1,
+      "description": "Session Record schema version.",
+      "type": "integer"
+    }
+  },
+  "required": ["version", "id", "created_at", "name", "status", "profile"],
+  "title": "Mena Session Record v1",
+  "type": "object"
+}

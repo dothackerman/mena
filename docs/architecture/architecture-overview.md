@@ -1442,6 +1442,19 @@ Versioning applies to:
 
 Versioning does not mean every format must be perfect or stable immediately.
 It means the system can identify what format it is reading and fail or migrate deliberately.
+The PoC implementation is the first `v1` schema epoch: persisted contracts introduced during the PoC should start with a concrete `v1` schema or explicit version marker, not with undocumented folklore.
+
+Versioning is local to each contract.
+There is no single global application schema version that forces unrelated formats to evolve together.
+For example, the `Session Record`, the capture-worker protocol, discovery metadata, capture metadata, transcript artifacts, and export artifacts should each carry the version that belongs to that contract.
+
+#### PoC v1 Epoch Rule
+
+The PoC should establish formal persisted contracts without adding a formal migration framework yet.
+Before meaningful tester or user sessions exist, a PR may refine a still-forming `v1` contract directly, including breaking shape changes, but the PR must say that it is changing the current `v1` contract.
+Once there are PoC sessions worth preserving, additive compatible fields may remain in `v1`, while breaking changes require a new major contract such as `v2`.
+
+Do not build a generic migration registry, migration CLI, or global schema-discovery system until real persisted data, an implementation issue, or an intentional breaking `v2` requires it.
 
 #### Compatibility Rules
 
@@ -2275,7 +2288,7 @@ If a decision becomes contentious, expensive, or implementation-critical, it sho
 | AD-008 | Keep raw audio sealed and separate corrections from generated transcript output. | Confirmed | Review transparency is preserved and transcripts can be regenerated from source audio when needed. |
 | AD-009 | Make recording, transcription, and diarization local-only. | Confirmed | No audio leaves the user's machine due to `mena`; quality/runtime tradeoffs must be solved locally for these stages. |
 | AD-010 | Use provider ports plus policy/capability resolution. | Confirmed | Model/runtime implementations can vary without changing workflow logic; ZDR-bearing direct Mistral API is the PoC summarization fallback when local execution is insufficient. |
-| AD-011 | Version durable schemas and internal protocol from day one. | Confirmed | Future migrations and adapter changes have an explicit compatibility path; protocol initialization includes version agreement and minimal capabilities. |
+| AD-011 | Version durable schemas and internal protocol from day one, treating the PoC as the initial `v1` contract epoch without adding a formal migration framework yet. | Confirmed | Persisted contracts start with real schemas or version markers and evolve independently by contract; protocol initialization includes version agreement and minimal capabilities; migrations remain explicit future work, not accidental hidden behavior. |
 | AD-012 | Keep runtime data outside the repository and preserve user session data on uninstall. | Confirmed | Development checkout, installed application, and user-owned data remain separate. |
 | AD-013 | Design for replayability and contract testing. | Confirmed | Coding agents can test core behavior with fixtures and fake providers instead of relying on live meetings. |
 | AD-014 | Defer privacy-preserving UX telemetry until research provides a concrete model. | Deferred | Telemetry must not be implemented ad hoc or mixed into session content artifacts. |
