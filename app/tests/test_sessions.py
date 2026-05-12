@@ -8,7 +8,7 @@ import pytest
 from jsonschema import Draft202012Validator, FormatChecker
 
 from mena.profiles import CaptureProfileId, parse_capture_profile
-from mena.sessions import SESSION_RECORD_VERSION, create_session
+from mena.sessions import SESSION_RECORD_VERSION, create_session, default_data_root
 
 
 def test_session_record_v1_schema_is_valid() -> None:
@@ -73,6 +73,14 @@ def test_create_session_writes_record_matching_v1_schema(tmp_path: Path) -> None
     )
 
     validator.validate(record)
+
+
+def test_default_data_root_uses_env_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MENA_DATA_ROOT", str(tmp_path / "data-root"))
+
+    assert default_data_root() == tmp_path / "data-root"
 
 
 def test_parse_capture_profile_maps_cli_name_to_architecture_profile() -> None:
