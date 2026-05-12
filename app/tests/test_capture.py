@@ -9,6 +9,7 @@ from mena.capture import (
     CaptureRoutePlan,
     PipeWireCaptureAdapter,
     PipeWireClient,
+    PipeWirePcmProvider,
     SilencePcmProvider,
     WavSegmentWriter,
     make_wav_bytes,
@@ -92,6 +93,65 @@ def test_pipewire_client_rejects_unsupported_route_id() -> None:
 
     with pytest.raises(ValueError, match="Unsupported PipeWire route id"):
         client.move_playback_stream("alsa:node:51", "mena_session_remote")
+
+
+def test_pipewire_pcm_provider_reads_local_source_with_bounded_pw_record() -> None:
+    calls: list[tuple[list[str], int]] = []
+
+    def runner(
+        args: list[str],
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[bytes]:
+        timeout = kwargs["timeout"]
+        assert isinstance(timeout, int)
+        calls.append((args, timeout))
+        return subprocess.CompletedProcess(args, 0, stdout=b"\x01\x02", stderr=b"")
+
+    provider = PipeWirePcmProvider(sample_rate=8_000, runner=runner)
+
+    pcm = provider.read_segment(
+        CaptureSourceId.LOCAL_MIC,
+        plan=_route_plan(),
+        sink_name="mena_session_remote",
+        segment_seconds=30,
+    )
+
+    assert pcm == b"\x01\x02"
+    assert calls == [
+        (
+            [
+                "pw-record",
+                "--target",
+                "31",
+                "--raw",
+                "--format",
+                "s16",
+                "--rate",
+                "8000",
+                "--channels",
+                "1",
+                "-",
+            ],
+            30,
+        )
+    ]
+
+
+def test_pipewire_pcm_provider_returns_partial_output_after_timeout() -> None:
+    def runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        raise subprocess.TimeoutExpired(["pw-record"], 30, output=b"\x01\x02")
+
+    provider = PipeWirePcmProvider(runner=runner)
+
+    assert (
+        provider.read_segment(
+            CaptureSourceId.SYSTEM_AUDIO,
+            plan=_route_plan(),
+            sink_name="mena_session_remote",
+            segment_seconds=30,
+        )
+        == b"\x01\x02"
+    )
 
 
 def test_pipewire_capture_adapter_flushes_segments_and_cleans_up(tmp_path: Path) -> None:

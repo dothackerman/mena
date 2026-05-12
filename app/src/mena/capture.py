@@ -145,6 +145,67 @@ class SilencePcmProvider:
 PcmProvider = Callable[[CaptureSourceId], bytes]
 
 
+class PipeWirePcmProvider:
+    """Bounded raw PCM reader backed by pw-record."""
+
+    def __init__(
+        self,
+        *,
+        sample_rate: int = DEFAULT_SAMPLE_RATE,
+        channels: int = 1,
+        sample_width_bytes: int = DEFAULT_SAMPLE_WIDTH_BYTES,
+        runner: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
+    ) -> None:
+        self.sample_rate = sample_rate
+        self.channels = channels
+        self.sample_width_bytes = sample_width_bytes
+        self._runner = runner
+
+    def read_segment(
+        self,
+        source_id: CaptureSourceId,
+        *,
+        plan: CaptureRoutePlan,
+        sink_name: str,
+        segment_seconds: int,
+    ) -> bytes:
+        target = self._target_for_source(source_id, plan=plan, sink_name=sink_name)
+        command = [
+            "pw-record",
+            "--target",
+            target,
+            "--raw",
+            "--format",
+            "s16",
+            "--rate",
+            str(self.sample_rate),
+            "--channels",
+            str(self.channels),
+            "-",
+        ]
+        try:
+            completed = self._runner(
+                command, capture_output=True, check=True, timeout=segment_seconds
+            )
+        except subprocess.TimeoutExpired as exc:
+            output = exc.output or b""
+            return output if isinstance(output, bytes) else output.encode("utf-8")
+        return completed.stdout
+
+    def _target_for_source(
+        self,
+        source_id: CaptureSourceId,
+        *,
+        plan: CaptureRoutePlan,
+        sink_name: str,
+    ) -> str:
+        if source_id is CaptureSourceId.LOCAL_MIC:
+            return _pipewire_node_id(plan.microphone_route_id)
+        if source_id is CaptureSourceId.SYSTEM_AUDIO:
+            return f"{sink_name}.monitor"
+        raise ValueError(f"Unsupported capture source '{source_id}'.")
+
+
 class PipeWireClient:
     """Narrow command wrapper for PipeWire/Pulse-compatible routing commands."""
 
@@ -201,8 +262,11 @@ class PipeWireCaptureAdapter:
     ) -> None:
         self.client = client
         self.segment_writer = segment_writer
-        provider = SilencePcmProvider(seconds=min(segment_seconds, 1))
-        self.pcm_provider = pcm_provider or provider.read_segment
+        self.pcm_provider = pcm_provider
+        self.pipewire_pcm_provider = PipeWirePcmProvider(
+            sample_rate=segment_writer.sample_rate,
+            channels=segment_writer.channels,
+        )
         self.segment_seconds = segment_seconds
 
     def start(self, plan: CaptureRoutePlan) -> ActivePipeWireCapture:
@@ -217,21 +281,43 @@ class PipeWireCaptureAdapter:
             raise
         return ActivePipeWireCapture(
             adapter=self,
+            plan=plan,
             sink_name=sink_name,
             null_sink_module=null_sink_module,
             loopback_module=loopback_module,
         )
 
-    def _flush_once(self) -> tuple[CaptureSegment, CaptureSegment]:
+    def _flush_once(
+        self,
+        *,
+        plan: CaptureRoutePlan,
+        sink_name: str,
+    ) -> tuple[CaptureSegment, CaptureSegment]:
         local = self.segment_writer.write_segment(
             CaptureSourceId.LOCAL_MIC,
-            self.pcm_provider(CaptureSourceId.LOCAL_MIC),
+            self._read_pcm(CaptureSourceId.LOCAL_MIC, plan=plan, sink_name=sink_name),
         )
         remote = self.segment_writer.write_segment(
             CaptureSourceId.SYSTEM_AUDIO,
-            self.pcm_provider(CaptureSourceId.SYSTEM_AUDIO),
+            self._read_pcm(CaptureSourceId.SYSTEM_AUDIO, plan=plan, sink_name=sink_name),
         )
         return (local, remote)
+
+    def _read_pcm(
+        self,
+        source_id: CaptureSourceId,
+        *,
+        plan: CaptureRoutePlan,
+        sink_name: str,
+    ) -> bytes:
+        if self.pcm_provider:
+            return self.pcm_provider(source_id)
+        return self.pipewire_pcm_provider.read_segment(
+            source_id,
+            plan=plan,
+            sink_name=sink_name,
+            segment_seconds=self.segment_seconds,
+        )
 
     def _cleanup(self, *, null_sink_module: str | None, loopback_module: str | None) -> None:
         for module_id in (loopback_module, null_sink_module):
@@ -249,11 +335,13 @@ class ActivePipeWireCapture:
         self,
         *,
         adapter: PipeWireCaptureAdapter,
+        plan: CaptureRoutePlan,
         sink_name: str,
         null_sink_module: str,
         loopback_module: str | None,
     ) -> None:
         self._adapter = adapter
+        self._plan = plan
         self.sink_name = sink_name
         self.null_sink_module = null_sink_module
         self.loopback_module = loopback_module
@@ -263,7 +351,7 @@ class ActivePipeWireCapture:
     def flush_segments(self) -> tuple[CaptureSegment, ...]:
         if self._stopped:
             return ()
-        segments = self._adapter._flush_once()
+        segments = self._adapter._flush_once(plan=self._plan, sink_name=self.sink_name)
         self._segments.extend(segments)
         return segments
 
