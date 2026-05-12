@@ -8,7 +8,13 @@ import pytest
 from jsonschema import Draft202012Validator, FormatChecker
 
 from mena.profiles import CaptureProfileId, parse_capture_profile
-from mena.sessions import SESSION_RECORD_VERSION, create_session, default_data_root
+from mena.sessions import (
+    SESSION_RECORD_VERSION,
+    create_session,
+    default_data_root,
+    read_session_record,
+    update_session_discovery,
+)
 from mena.settings import DATA_ROOT_ENV_VAR
 
 
@@ -73,6 +79,33 @@ def test_create_session_writes_record_matching_v1_schema(tmp_path: Path) -> None
         format_checker=FormatChecker(),
     )
 
+    validator.validate(record)
+
+
+def test_update_session_discovery_writes_schema_valid_session_record(tmp_path: Path) -> None:
+    created_session = create_session(
+        profile=parse_capture_profile("online"),
+        data_root=tmp_path,
+        now=datetime(2026, 5, 8, 5, 30, 0, tzinfo=UTC),
+    )
+    discovery = {
+        "version": 1,
+        "profile": "online_dual_stream",
+        "status": "available",
+        "sources": [],
+        "sinks": [],
+        "playback_streams": [],
+        "error": None,
+    }
+
+    record = update_session_discovery(created_session.record_path, discovery)
+    validator = Draft202012Validator(
+        _load_session_record_schema(),
+        format_checker=FormatChecker(),
+    )
+
+    assert record["discovery"] == discovery
+    assert read_session_record(created_session.record_path)["discovery"] == discovery
     validator.validate(record)
 
 

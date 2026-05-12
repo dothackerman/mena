@@ -5,6 +5,8 @@ import pytest
 from pytest import CaptureFixture
 
 from mena.cli import COMMANDS, main
+from mena.discovery import AudioDiscovery, DiscoveryStatus
+from mena.profiles import CaptureProfileId
 
 
 def test_main_prints_help_without_command(capsys: CaptureFixture[str]) -> None:
@@ -40,6 +42,7 @@ def test_record_help_lists_profile_options(capsys: CaptureFixture[str]) -> None:
     assert exc_info.value.code == 0
     assert "--profile {online,in-person}" in captured.out
     assert "--name NAME" in captured.out
+    assert "--dry-run" in captured.out
 
 
 def test_record_creates_session_bundle_and_record(
@@ -84,3 +87,33 @@ def test_record_rejects_invalid_profile(capsys: CaptureFixture[str]) -> None:
     assert "invalid choice: 'room'" in captured.err
     assert "online" in captured.err
     assert "in-person" in captured.err
+
+
+def test_record_dry_run_persists_discovery_and_prints_routes(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    def discoverer(profile: CaptureProfileId) -> AudioDiscovery:
+        return AudioDiscovery(
+            version=1,
+            profile=profile,
+            status=DiscoveryStatus.UNAVAILABLE,
+            sources=(),
+            sinks=(),
+            playback_streams=(),
+            error="PipeWire command 'pw-dump' was not found.",
+        )
+
+    exit_code = main(
+        ["record", "--profile", "online", "--dry-run"],
+        data_root=tmp_path,
+        discoverer=discoverer,
+    )
+
+    captured = capsys.readouterr()
+    record_path = next((tmp_path / "sessions").iterdir()) / "session.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert "Audio discovery: unavailable (online_dual_stream)" in captured.out
+    assert "PipeWire command 'pw-dump' was not found." in captured.out
+    assert record["discovery"]["status"] == "unavailable"
+    assert record["discovery"]["profile"] == "online_dual_stream"

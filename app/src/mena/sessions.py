@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,6 +14,7 @@ from mena.settings import AppSettings
 
 SESSION_RECORD_VERSION = 1
 SESSION_RECORD_FILENAME = "session.json"
+SESSION_DISCOVERY_KEY = "discovery"
 
 
 @dataclass(frozen=True)
@@ -70,6 +72,39 @@ def create_session(
         encoding="utf-8",
     )
     return CreatedSession(bundle_path=bundle_path, record_path=record_path, record=record)
+
+
+def read_session_record(record_path: Path) -> dict[str, object]:
+    """Read a session record JSON object from disk."""
+
+    data = json.loads(record_path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("Session record must be a JSON object.")
+    return data
+
+
+def update_session_record(
+    record_path: Path,
+    *,
+    updates: Mapping[str, object],
+) -> dict[str, object]:
+    """Apply orchestrator-owned updates to a session record."""
+
+    record = read_session_record(record_path)
+    record.update(updates)
+    record_path.write_text(
+        json.dumps(record, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return record
+
+
+def update_session_discovery(
+    record_path: Path, discovery: Mapping[str, object]
+) -> dict[str, object]:
+    """Persist read-only audio discovery facts on the canonical session record."""
+
+    return update_session_record(record_path, updates={SESSION_DISCOVERY_KEY: dict(discovery)})
 
 
 def _sessions_root(data_root: Path | None) -> Path:

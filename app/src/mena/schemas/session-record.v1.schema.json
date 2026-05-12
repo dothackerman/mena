@@ -9,6 +9,47 @@
       "format": "date-time",
       "type": "string"
     },
+    "discovery": {
+      "additionalProperties": true,
+      "description": "Read-only audio discovery facts captured by the orchestrator.",
+      "properties": {
+        "error": {
+          "type": ["string", "null"]
+        },
+        "playback_streams": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "profile": {
+          "enum": ["online_dual_stream", "in_person_single_mic"],
+          "type": "string"
+        },
+        "sinks": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "sources": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "status": {
+          "enum": ["available", "unavailable"],
+          "type": "string"
+        },
+        "version": {
+          "const": 1,
+          "type": "integer"
+        }
+      },
+      "required": ["version", "profile", "status", "sources", "sinks", "playback_streams", "error"],
+      "type": "object"
+    },
     "id": {
       "description": "Stable session UUID.",
       "format": "uuid",
