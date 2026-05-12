@@ -3,17 +3,16 @@
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
 from mena.profiles import CaptureProfileSelection
+from mena.settings import AppSettings
 
 SESSION_RECORD_VERSION = 1
 SESSION_RECORD_FILENAME = "session.json"
-DATA_ROOT_ENV_VAR = "MENA_DATA_ROOT"
 
 
 @dataclass(frozen=True)
@@ -40,10 +39,7 @@ class CreatedSession:
 def default_data_root() -> Path:
     """Return the local data root for runtime session bundles."""
 
-    configured_root = os.environ.get(DATA_ROOT_ENV_VAR)
-    if configured_root:
-        return Path(configured_root).expanduser()
-    return Path.home() / ".local" / "share" / "mena"
+    return AppSettings.from_env().paths.data_home
 
 
 def create_session(
@@ -77,7 +73,9 @@ def create_session(
 
 
 def _sessions_root(data_root: Path | None) -> Path:
-    return (data_root or default_data_root()) / "sessions"
+    if data_root:
+        return data_root / "sessions"
+    return AppSettings.from_env().paths.sessions_dir
 
 
 def _bundle_directory_name(session_id: str, created_at: datetime) -> str:
