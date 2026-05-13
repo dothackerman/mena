@@ -11,8 +11,8 @@ Name persisted schema files as:
 Examples:
 
 - `session-record.v1.schema.json`
-- `capture-metadata.v1.schema.json`
-- `transcript-artifact.v1.schema.json`
+- `artifact-manifest.v1.schema.json`
+- `processing-state.v1.schema.json`
 
 Schema versions are local to the contract they describe.
 Do not introduce a global application schema version just to coordinate unrelated persisted formats.
