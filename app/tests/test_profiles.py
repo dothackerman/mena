@@ -1,5 +1,6 @@
 import pytest
 
+import mena.profiles as profiles_module
 from mena.profiles import (
     CaptureProfile,
     CaptureProfileId,
@@ -156,3 +157,20 @@ def test_capture_profile_rejects_modified_hardcoded_definition() -> None:
 def test_get_capture_profile_rejects_unknown_durable_id() -> None:
     with pytest.raises(ValueError, match="Unknown capture profile 'online'"):
         get_capture_profile("online")
+
+
+def test_get_capture_profile_rejects_missing_definition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        profiles_module,
+        "_PROFILE_DEFINITIONS_BY_ID",
+        {
+            key: value
+            for key, value in profiles_module._PROFILE_DEFINITIONS_BY_ID.items()
+            if key is not CaptureProfileId.ONLINE_DUAL_STREAM
+        },
+    )
+
+    with pytest.raises(ValueError, match="Unknown capture profile 'online_dual_stream'"):
+        get_capture_profile(CaptureProfileId.ONLINE_DUAL_STREAM)

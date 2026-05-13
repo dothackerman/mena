@@ -1,6 +1,61 @@
 {
   "$id": "https://dothackerman.github.io/mena/schemas/session-record.v1.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "capture_segment": {
+      "additionalProperties": false,
+      "properties": {
+        "byte_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "channels": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "format": {
+          "const": "wav",
+          "type": "string"
+        },
+        "index": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "path": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "sample_rate": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "source_id": {
+          "enum": ["local_mic", "system_audio", "room_mic"],
+          "type": "string"
+        },
+        "status": {
+          "const": "sealed",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id",
+        "index",
+        "path",
+        "sample_rate",
+        "channels",
+        "byte_count",
+        "sha256",
+        "status",
+        "format"
+      ],
+      "type": "object"
+    }
+  },
   "additionalProperties": false,
   "description": "Initial canonical session record written by `mena record`.",
   "properties": {
@@ -26,7 +81,7 @@
         },
         "segments": {
           "items": {
-            "type": "object"
+            "$ref": "#/$defs/capture_segment"
           },
           "type": "array"
         },

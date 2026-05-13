@@ -247,8 +247,14 @@ def get_capture_profile(profile_id: CaptureProfileId | str) -> CaptureProfile:
 
     try:
         durable_id = CaptureProfileId(profile_id)
-        return _PROFILE_DEFINITIONS_BY_ID[durable_id]
     except ValueError as exc:
+        valid_profiles = ", ".join(profile.value for profile in CaptureProfileId)
+        raise ValueError(
+            f"Unknown capture profile '{profile_id}'. Valid profiles: {valid_profiles}."
+        ) from exc
+    try:
+        return _PROFILE_DEFINITIONS_BY_ID[durable_id]
+    except KeyError as exc:
         valid_profiles = ", ".join(profile.value for profile in CaptureProfileId)
         raise ValueError(
             f"Unknown capture profile '{profile_id}'. Valid profiles: {valid_profiles}."

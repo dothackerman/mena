@@ -99,7 +99,9 @@ def main(
                 worker.handshake()
                 worker.start_capture({"profile": profile.id.value})
                 finalized = worker.stop_capture()
-                worker.wait(timeout=2)
+                exit_code = worker.wait(timeout=2)
+                if exit_code != 0:
+                    raise WorkerExitedError(f"Worker exited with status {exit_code}.")
             except (ProtocolError, WorkerExitedError, subprocess.TimeoutExpired) as exc:
                 print(f"Capture failed: {exc}")
                 return 1

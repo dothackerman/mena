@@ -197,10 +197,15 @@ class WorkerProcess:
             self.terminate()
 
     def handshake(self) -> ProtocolMessage:
-        self.send(hello_message(self.session_id))
+        hello = hello_message(self.session_id)
+        self.send(hello)
         response = self.receive()
         if response.type != "hello_ack":
             raise ProtocolError(f"Expected hello_ack, got {response.type}.")
+        if response.id != hello.id:
+            raise ProtocolError("hello_ack id does not match hello id.")
+        if response.session_id != self.session_id:
+            raise ProtocolError("hello_ack session_id does not match worker session_id.")
         if response.payload.get("accepted") is not True:
             raise ProtocolError("Worker rejected protocol handshake.")
         return response

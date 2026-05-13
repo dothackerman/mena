@@ -164,6 +164,54 @@ def test_worker_process_handshake_start_stop_round_trip(tmp_path: Path) -> None:
     assert (tmp_path / "artifacts" / "source" / "system_audio" / "system_audio_000001.wav").exists()
 
 
+def test_worker_process_handshake_rejects_mismatched_ack_id(tmp_path: Path) -> None:
+    with (
+        WorkerProcess(
+            session_id="session-1",
+            session_dir=tmp_path,
+            argv=[
+                sys.executable,
+                "-c",
+                (
+                    "import sys; "
+                    "sys.stdin.readline(); "
+                    "sys.stdout.write("
+                    '\'{"v":1,"type":"hello_ack","id":"wrong",'
+                    '"session_id":"session-1","payload":{"accepted":true}}\\n\''
+                    "); "
+                    "sys.stdout.flush()"
+                ),
+            ],
+        ) as worker,
+        pytest.raises(ProtocolError, match="hello_ack id does not match"),
+    ):
+        worker.handshake()
+
+
+def test_worker_process_handshake_rejects_mismatched_ack_session(tmp_path: Path) -> None:
+    with (
+        WorkerProcess(
+            session_id="session-1",
+            session_dir=tmp_path,
+            argv=[
+                sys.executable,
+                "-c",
+                (
+                    "import sys, json; "
+                    "hello=json.loads(sys.stdin.readline()); "
+                    "hello['type']='hello_ack'; "
+                    "hello['session_id']='session-2'; "
+                    "hello['payload']={'accepted': True}; "
+                    "sys.stdout.write(json.dumps(hello) + '\\n'); "
+                    "sys.stdout.flush()"
+                ),
+            ],
+        ) as worker,
+        pytest.raises(ProtocolError, match="hello_ack session_id does not match"),
+    ):
+        worker.handshake()
+
+
 def test_worker_run_loop_handles_start_stop_with_in_memory_streams(tmp_path: Path) -> None:
     stdin = BytesIO(
         b"".join(
