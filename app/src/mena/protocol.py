@@ -13,6 +13,7 @@ from uuid import uuid4
 
 PROTOCOL_MAJOR = 1
 PROTOCOL_MINOR = 0
+ENVELOPE_VERSION = 1
 MAX_FRAME_BYTES = 64 * 1024
 
 MESSAGE_TYPES = frozenset(
@@ -45,7 +46,7 @@ class ProtocolMessage:
     session_id: str
     payload: dict[str, object] = field(default_factory=dict)
     id: str = field(default_factory=lambda: str(uuid4()))
-    v: int = PROTOCOL_MAJOR
+    v: int = ENVELOPE_VERSION
 
     def encode(self) -> bytes:
         validate_message_type(self.type)
@@ -56,7 +57,12 @@ class ProtocolMessage:
             "session_id": self.session_id,
             "payload": self.payload,
         }
-        return json.dumps(frame, ensure_ascii=True, separators=(",", ":")).encode("utf-8") + b"\n"
+        encoded = (
+            json.dumps(frame, ensure_ascii=True, separators=(",", ":")).encode("utf-8") + b"\n"
+        )
+        if len(encoded) > MAX_FRAME_BYTES:
+            raise ProtocolError(f"Protocol frame exceeds {MAX_FRAME_BYTES} bytes.")
+        return encoded
 
     @classmethod
     def decode(cls, line: bytes) -> Self:
@@ -74,9 +80,9 @@ class ProtocolMessage:
             raise ProtocolError("Protocol frame must be a JSON object.")
 
         version = _required_int(data, "v")
-        if version != PROTOCOL_MAJOR:
+        if version != ENVELOPE_VERSION:
             raise ProtocolError(
-                f"Unsupported protocol envelope version {version}; expected {PROTOCOL_MAJOR}."
+                f"Unsupported protocol envelope version {version}; expected {ENVELOPE_VERSION}."
             )
         message_type = _required_str(data, "type")
         validate_message_type(message_type)

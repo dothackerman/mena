@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
 from mena.discovery import AudioDiscovery, DiscoveryStatus, discover_audio_routes, format_discovery
 from mena.profiles import capture_profile_choices, parse_capture_profile
-from mena.protocol import WorkerProcess
+from mena.protocol import ProtocolError, WorkerExitedError, WorkerProcess
 from mena.sessions import create_session, update_session_capture_metadata, update_session_discovery
 
 COMMANDS = (
@@ -94,10 +95,14 @@ def main(
             session_id=created_session.record.id,
             session_dir=created_session.bundle_path,
         ) as worker:
-            worker.handshake()
-            worker.start_capture({"profile": profile.id.value})
-            finalized = worker.stop_capture()
-            worker.wait(timeout=2)
+            try:
+                worker.handshake()
+                worker.start_capture({"profile": profile.id.value})
+                finalized = worker.stop_capture()
+                worker.wait(timeout=2)
+            except (ProtocolError, WorkerExitedError, subprocess.TimeoutExpired) as exc:
+                print(f"Capture failed: {exc}")
+                return 1
         update_session_capture_metadata(created_session.record_path, finalized.payload)
         print("Capture finalized")
         return 0

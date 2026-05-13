@@ -8,6 +8,7 @@ import pytest
 
 from mena.capture_worker import build_parser, run_worker
 from mena.protocol import (
+    ENVELOPE_VERSION,
     MAX_FRAME_BYTES,
     PROTOCOL_MAJOR,
     ProtocolError,
@@ -33,6 +34,16 @@ def test_protocol_message_encodes_compact_json_line() -> None:
     assert encoded.endswith(b"\n")
     assert b" " not in encoded
     assert ProtocolMessage.decode(encoded) == message
+    assert ProtocolMessage.decode(encoded).v == ENVELOPE_VERSION
+
+
+def test_protocol_encode_rejects_oversized_frame() -> None:
+    with pytest.raises(ProtocolError, match="exceeds"):
+        ProtocolMessage(
+            type="start_capture",
+            session_id="session-1",
+            payload={"data": "x" * MAX_FRAME_BYTES},
+        ).encode()
 
 
 def test_protocol_rejects_unknown_message_type() -> None:
@@ -220,6 +231,13 @@ def test_worker_run_loop_rejects_mismatched_session_id(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ProtocolError, match="session_id does not match"):
+        run_worker(session_id="session-1", session_dir=tmp_path, stdin=stdin, stdout=BytesIO())
+
+
+def test_worker_run_loop_rejects_mismatched_hello_session_id(tmp_path: Path) -> None:
+    stdin = BytesIO(hello_message("session-2").encode())
+
+    with pytest.raises(ProtocolError, match="Hello session_id does not match"):
         run_worker(session_id="session-1", session_dir=tmp_path, stdin=stdin, stdout=BytesIO())
 
 

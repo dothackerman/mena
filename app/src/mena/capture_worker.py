@@ -65,6 +65,8 @@ def run_worker(
 
     hello = read_message(protocol_in)
     validate_hello(hello)
+    if hello.session_id != session_id:
+        raise ProtocolError("Hello session_id does not match worker session.")
     write_message(protocol_out, hello_ack_message(session_id=session_id, request_id=hello.id))
     capture: WorkerCaptureSession | None = None
     finalized_metadata: CaptureMetadata | None = None

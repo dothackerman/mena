@@ -192,14 +192,18 @@ class PipeWirePcmProvider:
         """Record both sources inside the same bounded segment window."""
 
         sources = (CaptureSourceId.LOCAL_MIC, CaptureSourceId.SYSTEM_AUDIO)
+        commands = {
+            source_id: self._command_for_source(source_id, plan=plan, sink_name=sink_name)
+            for source_id in sources
+        }
         processes = {
             source_id: self._popen_factory(
-                self._command_for_source(source_id, plan=plan, sink_name=sink_name),
+                command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 shell=False,
             )
-            for source_id in sources
+            for source_id, command in commands.items()
         }
         deadline = time.monotonic() + segment_seconds
         output: dict[CaptureSourceId, bytes] = {}
@@ -210,6 +214,14 @@ class PipeWirePcmProvider:
             except subprocess.TimeoutExpired:
                 process.kill()
                 stdout, _stderr = process.communicate()
+            returncode = getattr(process, "returncode", 0)
+            if returncode:
+                raise subprocess.CalledProcessError(
+                    returncode,
+                    commands[source_id],
+                    output=stdout,
+                    stderr=_stderr,
+                )
             output[source_id] = stdout
         return output
 
@@ -382,7 +394,7 @@ class PipeWireCaptureAdapter:
             if module_id:
                 try:
                     self.client.unload_module(module_id)
-                except subprocess.CalledProcessError:
+                except (subprocess.CalledProcessError, OSError):
                     continue
 
 

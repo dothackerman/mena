@@ -7,7 +7,7 @@ from pytest import CaptureFixture
 from mena.cli import COMMANDS, main
 from mena.discovery import AudioDiscovery, AudioRoute, DiscoveryStatus, PlaybackStream
 from mena.profiles import CaptureProfileId
-from mena.protocol import ProtocolMessage
+from mena.protocol import ProtocolError, ProtocolMessage
 
 
 def test_main_prints_help_without_command(capsys: CaptureFixture[str]) -> None:
@@ -133,6 +133,25 @@ def test_record_does_not_start_capture_when_discovery_unavailable(
     assert "capture_metadata" not in record
 
 
+def test_record_reports_worker_failure_without_capture_metadata(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    exit_code = main(
+        ["record", "--profile", "online"],
+        data_root=tmp_path,
+        discoverer=_available_discoverer,
+        worker_factory=FailingWorkerProcess,
+    )
+
+    captured = capsys.readouterr()
+    record_path = next((tmp_path / "sessions").iterdir()) / "session.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    assert exit_code == 1
+    assert "Capture failed: worker refused handshake" in captured.out
+    assert record["discovery"]["status"] == "available"
+    assert "capture_metadata" not in record
+
+
 class FakeWorkerProcess:
     def __init__(self, *, session_id: str, session_dir: Path) -> None:
         self.session_id = session_id
@@ -173,6 +192,11 @@ class FakeWorkerProcess:
 
     def wait(self, timeout: float | None = None) -> int:
         return 0
+
+
+class FailingWorkerProcess(FakeWorkerProcess):
+    def handshake(self) -> ProtocolMessage:
+        raise ProtocolError("worker refused handshake")
 
 
 def _unavailable_discoverer(profile: CaptureProfileId) -> AudioDiscovery:

@@ -196,6 +196,33 @@ def test_pipewire_pcm_provider_starts_sources_before_collecting_output() -> None
     }
 
 
+def test_pipewire_pcm_provider_rejects_failed_aligned_process() -> None:
+    class FakeProcess:
+        def __init__(self, args: list[str], **_kwargs: object) -> None:
+            self.args = args
+            self.returncode = 1 if "--target" in args and "31" in args else 0
+
+        def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
+            return b"", b"capture failed"
+
+        def kill(self) -> None:
+            raise AssertionError("process should not be killed")
+
+    provider = PipeWirePcmProvider(
+        sample_rate=8_000,
+        popen_factory=cast(Any, FakeProcess),
+    )
+
+    with pytest.raises(subprocess.CalledProcessError) as exc_info:
+        provider.read_aligned_segments(
+            plan=_route_plan(),
+            sink_name="mena_session_remote",
+            segment_seconds=30,
+        )
+
+    assert exc_info.value.stderr == b"capture failed"
+
+
 def test_pipewire_capture_adapter_default_flush_uses_aligned_segments(tmp_path: Path) -> None:
     calls: list[list[str]] = []
     module_ids = iter(["101\n", "", "202\n", "", ""])
@@ -299,6 +326,30 @@ def test_pipewire_capture_adapter_cleans_up_partial_setup_on_failure(tmp_path: P
     )
 
     with pytest.raises(subprocess.CalledProcessError):
+        adapter.start(_route_plan())
+
+    assert calls[-1] == ["pactl", "unload-module", "101"]
+
+
+def test_pipewire_capture_adapter_preserves_setup_failure_when_cleanup_fails(
+    tmp_path: Path,
+) -> None:
+    calls: list[list[str]] = []
+
+    def runner(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        if args[:2] == ["pactl", "move-sink-input"]:
+            raise subprocess.CalledProcessError(1, args, stderr="move failed")
+        if args[:2] == ["pactl", "unload-module"]:
+            raise FileNotFoundError("pactl")
+        return subprocess.CompletedProcess(args, 0, stdout="101\n", stderr="")
+
+    adapter = PipeWireCaptureAdapter(
+        client=PipeWireClient(runner=runner),
+        segment_writer=WavSegmentWriter(segment_dir=tmp_path),
+    )
+
+    with pytest.raises(subprocess.CalledProcessError, match="move-sink-input"):
         adapter.start(_route_plan())
 
     assert calls[-1] == ["pactl", "unload-module", "101"]
