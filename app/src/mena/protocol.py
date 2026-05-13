@@ -74,6 +74,10 @@ class ProtocolMessage:
             raise ProtocolError("Protocol frame must be a JSON object.")
 
         version = _required_int(data, "v")
+        if version != PROTOCOL_MAJOR:
+            raise ProtocolError(
+                f"Unsupported protocol envelope version {version}; expected {PROTOCOL_MAJOR}."
+            )
         message_type = _required_str(data, "type")
         validate_message_type(message_type)
         payload = data.get("payload")
@@ -100,7 +104,7 @@ def validate_message_type(message_type: str) -> None:
 def read_message(stream: IO[bytes]) -> ProtocolMessage:
     line = stream.readline(MAX_FRAME_BYTES + 1)
     if line == b"":
-        raise EOFError("Protocol peer closed stdout.")
+        raise EOFError("Protocol peer closed the stream.")
     return ProtocolMessage.decode(line)
 
 

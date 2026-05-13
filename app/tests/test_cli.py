@@ -5,8 +5,9 @@ import pytest
 from pytest import CaptureFixture
 
 from mena.cli import COMMANDS, main
-from mena.discovery import AudioDiscovery, DiscoveryStatus
+from mena.discovery import AudioDiscovery, AudioRoute, DiscoveryStatus, PlaybackStream
 from mena.profiles import CaptureProfileId
+from mena.protocol import ProtocolMessage
 
 
 def test_main_prints_help_without_command(capsys: CaptureFixture[str]) -> None:
@@ -49,8 +50,10 @@ def test_record_creates_session_bundle_and_record(
     tmp_path: Path, capsys: CaptureFixture[str]
 ) -> None:
     exit_code = main(
-        ["record", "--profile", "in-person", "--name", "Planning"],
+        ["record", "--profile", "online", "--name", "Planning"],
         data_root=tmp_path,
+        discoverer=_available_discoverer,
+        worker_factory=FakeWorkerProcess,
     )
 
     captured = capsys.readouterr()
@@ -66,7 +69,9 @@ def test_record_creates_session_bundle_and_record(
     assert record["created_at"].endswith("Z")
     assert record["name"] == "Planning"
     assert record["status"] == "created"
-    assert record["profile"] == "in_person_single_mic"
+    assert record["profile"] == "online_dual_stream"
+    assert record["discovery"]["status"] == "available"
+    assert record["capture_metadata"]["segment_count"] == 0
 
 
 def test_record_requires_profile(capsys: CaptureFixture[str]) -> None:
@@ -92,21 +97,10 @@ def test_record_rejects_invalid_profile(capsys: CaptureFixture[str]) -> None:
 def test_record_dry_run_persists_discovery_and_prints_routes(
     tmp_path: Path, capsys: CaptureFixture[str]
 ) -> None:
-    def discoverer(profile: CaptureProfileId) -> AudioDiscovery:
-        return AudioDiscovery(
-            version=1,
-            profile=profile,
-            status=DiscoveryStatus.UNAVAILABLE,
-            sources=(),
-            sinks=(),
-            playback_streams=(),
-            error="PipeWire command 'pw-dump' was not found.",
-        )
-
     exit_code = main(
         ["record", "--profile", "online", "--dry-run"],
         data_root=tmp_path,
-        discoverer=discoverer,
+        discoverer=_unavailable_discoverer,
     )
 
     captured = capsys.readouterr()
@@ -117,3 +111,117 @@ def test_record_dry_run_persists_discovery_and_prints_routes(
     assert "PipeWire command 'pw-dump' was not found." in captured.out
     assert record["discovery"]["status"] == "unavailable"
     assert record["discovery"]["profile"] == "online_dual_stream"
+    assert "capture_metadata" not in record
+
+
+def test_record_does_not_start_capture_when_discovery_unavailable(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    exit_code = main(
+        ["record", "--profile", "online"],
+        data_root=tmp_path,
+        discoverer=_unavailable_discoverer,
+        worker_factory=FakeWorkerProcess,
+    )
+
+    captured = capsys.readouterr()
+    record_path = next((tmp_path / "sessions").iterdir()) / "session.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    assert exit_code == 1
+    assert "Capture not started: audio discovery is unavailable." in captured.out
+    assert record["discovery"]["status"] == "unavailable"
+    assert "capture_metadata" not in record
+
+
+class FakeWorkerProcess:
+    def __init__(self, *, session_id: str, session_dir: Path) -> None:
+        self.session_id = session_id
+        self.session_dir = session_dir
+
+    def __enter__(self) -> "FakeWorkerProcess":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def handshake(self) -> ProtocolMessage:
+        return ProtocolMessage(type="hello_ack", session_id=self.session_id)
+
+    def start_capture(self, payload: dict[str, object] | None = None) -> ProtocolMessage:
+        return ProtocolMessage(
+            type="capture_started",
+            session_id=self.session_id,
+            payload={
+                "session_dir": str(self.session_dir),
+                "profile": payload["profile"] if payload else None,
+            },
+        )
+
+    def stop_capture(self) -> ProtocolMessage:
+        return ProtocolMessage(
+            type="capture_finalized",
+            session_id=self.session_id,
+            payload={
+                "version": 1,
+                "sample_rate": 48000,
+                "channels": 1,
+                "segment_seconds": 30,
+                "segment_count": 0,
+                "segments": [],
+            },
+        )
+
+    def wait(self, timeout: float | None = None) -> int:
+        return 0
+
+
+def _unavailable_discoverer(profile: CaptureProfileId) -> AudioDiscovery:
+    return AudioDiscovery(
+        version=1,
+        profile=profile,
+        status=DiscoveryStatus.UNAVAILABLE,
+        sources=(),
+        sinks=(),
+        playback_streams=(),
+        error="PipeWire command 'pw-dump' was not found.",
+    )
+
+
+def _available_discoverer(profile: CaptureProfileId) -> AudioDiscovery:
+    return AudioDiscovery(
+        version=1,
+        profile=profile,
+        status=DiscoveryStatus.AVAILABLE,
+        sources=(
+            AudioRoute(
+                id=31,
+                route_id="pipewire:node:31",
+                name="Headset Mic",
+                description=None,
+                media_class="Audio/Source",
+                active=True,
+            ),
+        ),
+        sinks=(
+            AudioRoute(
+                id=42,
+                route_id="pipewire:node:42",
+                name="Speakers",
+                description=None,
+                media_class="Audio/Sink",
+                active=True,
+            ),
+        ),
+        playback_streams=(
+            PlaybackStream(
+                id=51,
+                route_id="pulse:sink-input:151",
+                name="Meeting Stream",
+                app_binary_name="firefox",
+                stream_name="WebRTC playback",
+                media_name="Meet",
+                sink_input_id="151",
+                active=True,
+            ),
+        ),
+    )

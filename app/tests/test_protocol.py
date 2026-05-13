@@ -102,6 +102,13 @@ def test_hello_version_mismatch_is_protocol_error() -> None:
         validate_hello(bad_hello)
 
 
+def test_protocol_rejects_unsupported_envelope_version() -> None:
+    line = b'{"v":99,"type":"hello","id":"message-1","session_id":"session-1","payload":{}}\n'
+
+    with pytest.raises(ProtocolError, match="Unsupported protocol envelope version"):
+        ProtocolMessage.decode(line)
+
+
 def test_validate_hello_requires_hello_type_and_worker_role() -> None:
     with pytest.raises(ProtocolError, match="First protocol message must be hello"):
         validate_hello(ProtocolMessage(type="start_capture", session_id="session-1"))
@@ -117,7 +124,7 @@ def test_validate_hello_requires_hello_type_and_worker_role() -> None:
 
 
 def test_read_message_reports_eof() -> None:
-    with pytest.raises(EOFError, match="closed stdout"):
+    with pytest.raises(EOFError, match="closed the stream"):
         read_message(BytesIO())
 
 
@@ -216,6 +223,17 @@ def test_worker_run_loop_rejects_mismatched_session_id(tmp_path: Path) -> None:
         run_worker(session_id="session-1", session_dir=tmp_path, stdin=stdin, stdout=BytesIO())
 
 
+def test_worker_run_loop_rejects_duplicate_start(tmp_path: Path) -> None:
+    stdin = BytesIO(
+        hello_message("session-1").encode()
+        + ProtocolMessage(type="start_capture", session_id="session-1").encode()
+        + ProtocolMessage(type="start_capture", session_id="session-1").encode()
+    )
+
+    with pytest.raises(ProtocolError, match="already started"):
+        run_worker(session_id="session-1", session_dir=tmp_path, stdin=stdin, stdout=BytesIO())
+
+
 def test_worker_process_context_terminates_running_child(tmp_path: Path) -> None:
     with WorkerProcess(
         session_id="session-1",
@@ -260,7 +278,7 @@ def test_worker_hard_kill_preserves_sealed_prior_segments(tmp_path: Path) -> Non
     assert remote_segment.exists()
     with wave.open(str(local_segment), "rb") as wav:
         assert wav.getframerate() == 48_000
-        assert wav.getnframes() == 48_000
+        assert wav.getnframes() == 1_440_000
 
 
 def test_worker_eof_after_start_finalizes_existing_segments(tmp_path: Path) -> None:

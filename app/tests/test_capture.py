@@ -1,6 +1,7 @@
 import subprocess
 import wave
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -50,6 +51,11 @@ def test_make_wav_bytes_rejects_oversized_segments() -> None:
         make_wav_bytes(b"\x00" * (MAX_SEGMENT_BYTES + 1))
 
 
+def test_make_wav_bytes_rejects_unaligned_pcm() -> None:
+    with pytest.raises(ValueError, match="complete WAV frames"):
+        make_wav_bytes(b"\x00", channels=1, sample_width_bytes=2)
+
+
 def test_session_null_sink_name_sanitizes_session_id() -> None:
     assert session_null_sink_name("abc-123 / Demo!") == "mena_abc_123___Demo_remote"
     assert session_null_sink_name("!!!") == "mena_session_remote"
@@ -64,7 +70,7 @@ def test_pipewire_client_uses_argument_list_commands() -> None:
 
     client = PipeWireClient(runner=runner)
     assert client.create_null_sink("mena_session_remote") == "77"
-    client.move_playback_stream("pipewire:node:51", "mena_session_remote")
+    client.move_playback_stream("pulse:sink-input:51", "mena_session_remote")
     assert client.create_loopback("mena_session_remote", "pipewire:node:42") == "77"
     client.unload_module("77")
 
@@ -91,7 +97,7 @@ def test_pipewire_client_uses_argument_list_commands() -> None:
 def test_pipewire_client_rejects_unsupported_route_id() -> None:
     client = PipeWireClient(runner=lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0))
 
-    with pytest.raises(ValueError, match="Unsupported PipeWire route id"):
+    with pytest.raises(ValueError, match="Unsupported Pulse sink-input route id"):
         client.move_playback_stream("alsa:node:51", "mena_session_remote")
 
 
@@ -154,6 +160,98 @@ def test_pipewire_pcm_provider_returns_partial_output_after_timeout() -> None:
     )
 
 
+def test_pipewire_pcm_provider_starts_sources_before_collecting_output() -> None:
+    started_commands: list[list[str]] = []
+    communicated: list[list[str]] = []
+
+    class FakeProcess:
+        def __init__(self, args: list[str], **_kwargs: object) -> None:
+            self.args = args
+            started_commands.append(args)
+
+        def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
+            assert timeout is not None
+            communicated.append(self.args)
+            return b"\x00\x00", b""
+
+        def kill(self) -> None:
+            raise AssertionError("process should not be killed")
+
+    provider = PipeWirePcmProvider(
+        sample_rate=8_000,
+        popen_factory=cast(Any, FakeProcess),
+    )
+
+    pcm = provider.read_aligned_segments(
+        plan=_route_plan(),
+        sink_name="mena_session_remote",
+        segment_seconds=30,
+    )
+
+    assert len(started_commands) == 2
+    assert communicated == started_commands
+    assert pcm == {
+        CaptureSourceId.LOCAL_MIC: b"\x00\x00",
+        CaptureSourceId.SYSTEM_AUDIO: b"\x00\x00",
+    }
+
+
+def test_pipewire_capture_adapter_default_flush_uses_aligned_segments(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+    module_ids = iter(["101\n", "", "202\n", "", ""])
+
+    def runner(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout=next(module_ids), stderr="")
+
+    class FakeAlignedProvider:
+        def read_aligned_segments(
+            self,
+            *,
+            plan: CaptureRoutePlan,
+            sink_name: str,
+            segment_seconds: int,
+        ) -> dict[CaptureSourceId, bytes]:
+            assert plan == _route_plan()
+            assert sink_name == "mena_session_1_remote"
+            assert segment_seconds == 30
+            return {
+                CaptureSourceId.LOCAL_MIC: b"\x00\x00",
+                CaptureSourceId.SYSTEM_AUDIO: b"\x00\x00",
+            }
+
+    adapter = PipeWireCaptureAdapter(
+        client=PipeWireClient(runner=runner),
+        segment_writer=WavSegmentWriter(segment_dir=tmp_path),
+    )
+    adapter.pipewire_pcm_provider = cast(Any, FakeAlignedProvider())
+
+    active = adapter.start(_route_plan())
+    flushed = active.flush_segments()
+
+    assert [segment.source_id for segment in flushed] == [
+        CaptureSourceId.LOCAL_MIC,
+        CaptureSourceId.SYSTEM_AUDIO,
+    ]
+    assert calls[:3] == [
+        [
+            "pactl",
+            "load-module",
+            "module-null-sink",
+            "sink_name=mena_session_1_remote",
+            "sink_properties=device.description=mena_session_1_remote",
+        ],
+        ["pactl", "move-sink-input", "51", "mena_session_1_remote"],
+        [
+            "pactl",
+            "load-module",
+            "module-loopback",
+            "source=mena_session_1_remote.monitor",
+            "sink=42",
+        ],
+    ]
+
+
 def test_pipewire_capture_adapter_flushes_segments_and_cleans_up(tmp_path: Path) -> None:
     calls: list[list[str]] = []
     module_ids = iter(["101\n", "", "202\n", "", ""])
@@ -210,6 +308,6 @@ def _route_plan() -> CaptureRoutePlan:
     return CaptureRoutePlan(
         session_id="session-1",
         microphone_route_id="pipewire:node:31",
-        playback_stream_route_id="pipewire:node:51",
+        playback_stream_route_id="pulse:sink-input:51",
         output_sink_route_id="pipewire:node:42",
     )

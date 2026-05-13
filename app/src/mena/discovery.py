@@ -62,6 +62,7 @@ class PlaybackStream:
     app_binary_name: str | None
     stream_name: str | None
     media_name: str | None
+    sink_input_id: str | None
     active: bool
 
     def to_dict(self) -> dict[str, object]:
@@ -72,6 +73,7 @@ class PlaybackStream:
             "app_binary_name": self.app_binary_name,
             "stream_name": self.stream_name,
             "media_name": self.media_name,
+            "sink_input_id": self.sink_input_id,
             "active": self.active,
         }
 
@@ -84,6 +86,7 @@ class PlaybackStream:
             app_binary_name=_optional_str(data, "app_binary_name"),
             stream_name=_optional_str(data, "stream_name"),
             media_name=_optional_str(data, "media_name"),
+            sink_input_id=_optional_str(data, "sink_input_id"),
             active=_required_bool(data, "active"),
         )
 
@@ -243,13 +246,17 @@ def _stream_from_props(
     info: dict[str, object],
     props: dict[object, object],
 ) -> PlaybackStream:
+    sink_input_id = _object_serial(props)
     return PlaybackStream(
         id=node_id,
-        route_id=f"pipewire:node:{node_id}",
+        route_id=(
+            f"pulse:sink-input:{sink_input_id}" if sink_input_id else f"pipewire:node:{node_id}"
+        ),
         name=_prop(props, "node.name") or f"node-{node_id}",
         app_binary_name=_prop(props, "application.process.binary"),
         stream_name=_prop(props, "stream.name"),
         media_name=_prop(props, "media.name"),
+        sink_input_id=sink_input_id,
         active=_is_active(info),
     )
 
@@ -262,6 +269,15 @@ def _is_active(info: dict[str, object]) -> bool:
 def _prop(props: dict[object, object], key: str) -> str | None:
     value = props.get(key)
     return value if isinstance(value, str) and value else None
+
+
+def _object_serial(props: dict[object, object]) -> str | None:
+    value = props.get("object.serial")
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str) and value.isdigit():
+        return value
+    return None
 
 
 def _unavailable(profile: CaptureProfileId, error: str) -> AudioDiscovery:

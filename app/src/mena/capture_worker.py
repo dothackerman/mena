@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import IO, TextIO
 
 from mena.capture import (
+    DEFAULT_SEGMENT_SECONDS,
     ActivePipeWireCapture,
     CaptureMetadata,
     CaptureRoutePlan,
@@ -80,6 +81,8 @@ def run_worker(
         if message.session_id != session_id:
             raise ProtocolError("Message session_id does not match worker session.")
         if message.type == "start_capture":
+            if capture is not None:
+                raise ProtocolError("Capture has already started.")
             if message.payload.get("simulate_error") is True:
                 write_message(
                     protocol_out,
@@ -133,7 +136,7 @@ class WorkerCaptureSession:
 
     def __init__(self, *, session_dir: Path) -> None:
         writer = WavSegmentWriter(segment_dir=session_dir / "artifacts" / "source")
-        provider = SilencePcmProvider().read_segment
+        provider = SilencePcmProvider(seconds=DEFAULT_SEGMENT_SECONDS).read_segment
         self.adapter = PipeWireCaptureAdapter(
             client=NoopPipeWireClient(),
             segment_writer=writer,

@@ -25,8 +25,10 @@ def test_discover_online_profile_parses_sources_streams_and_sinks() -> None:
     assert discovery.sources[0].active is True
     assert [sink.route_id for sink in discovery.sinks] == ["pipewire:node:42"]
     assert discovery.sinks[0].active is False
+    assert [stream.route_id for stream in discovery.playback_streams] == ["pulse:sink-input:151"]
     assert [stream.app_binary_name for stream in discovery.playback_streams] == ["firefox"]
     assert discovery.playback_streams[0].media_name == "Meet"
+    assert discovery.playback_streams[0].sink_input_id == "151"
 
 
 def test_discover_in_person_profile_only_returns_microphones() -> None:

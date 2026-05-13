@@ -6,6 +6,7 @@ import hashlib
 import re
 import struct
 import subprocess
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -155,11 +156,13 @@ class PipeWirePcmProvider:
         channels: int = 1,
         sample_width_bytes: int = DEFAULT_SAMPLE_WIDTH_BYTES,
         runner: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
+        popen_factory: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
     ) -> None:
         self.sample_rate = sample_rate
         self.channels = channels
         self.sample_width_bytes = sample_width_bytes
         self._runner = runner
+        self._popen_factory = popen_factory
 
     def read_segment(
         self,
@@ -169,8 +172,56 @@ class PipeWirePcmProvider:
         sink_name: str,
         segment_seconds: int,
     ) -> bytes:
+        command = self._command_for_source(source_id, plan=plan, sink_name=sink_name)
+        try:
+            completed = self._runner(
+                command, capture_output=True, check=True, timeout=segment_seconds
+            )
+        except subprocess.TimeoutExpired as exc:
+            output = exc.output or b""
+            return output if isinstance(output, bytes) else output.encode("utf-8")
+        return completed.stdout
+
+    def read_aligned_segments(
+        self,
+        *,
+        plan: CaptureRoutePlan,
+        sink_name: str,
+        segment_seconds: int,
+    ) -> dict[CaptureSourceId, bytes]:
+        """Record both sources inside the same bounded segment window."""
+
+        sources = (CaptureSourceId.LOCAL_MIC, CaptureSourceId.SYSTEM_AUDIO)
+        processes = {
+            source_id: self._popen_factory(
+                self._command_for_source(source_id, plan=plan, sink_name=sink_name),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                shell=False,
+            )
+            for source_id in sources
+        }
+        deadline = time.monotonic() + segment_seconds
+        output: dict[CaptureSourceId, bytes] = {}
+        for source_id, process in processes.items():
+            remaining = max(deadline - time.monotonic(), 0.001)
+            try:
+                stdout, _stderr = process.communicate(timeout=remaining)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                stdout, _stderr = process.communicate()
+            output[source_id] = stdout
+        return output
+
+    def _command_for_source(
+        self,
+        source_id: CaptureSourceId,
+        *,
+        plan: CaptureRoutePlan,
+        sink_name: str,
+    ) -> list[str]:
         target = self._target_for_source(source_id, plan=plan, sink_name=sink_name)
-        command = [
+        return [
             "pw-record",
             "--target",
             target,
@@ -183,14 +234,6 @@ class PipeWirePcmProvider:
             str(self.channels),
             "-",
         ]
-        try:
-            completed = self._runner(
-                command, capture_output=True, check=True, timeout=segment_seconds
-            )
-        except subprocess.TimeoutExpired as exc:
-            output = exc.output or b""
-            return output if isinstance(output, bytes) else output.encode("utf-8")
-        return completed.stdout
 
     def _target_for_source(
         self,
@@ -227,7 +270,7 @@ class PipeWireClient:
 
     def move_playback_stream(self, playback_stream_route_id: str, sink_name: str) -> None:
         self._run(
-            ["pactl", "move-sink-input", _pipewire_node_id(playback_stream_route_id), sink_name]
+            ["pactl", "move-sink-input", _pulse_sink_input_id(playback_stream_route_id), sink_name]
         )
 
     def create_loopback(self, sink_name: str, output_sink_route_id: str) -> str:
@@ -293,6 +336,21 @@ class PipeWireCaptureAdapter:
         plan: CaptureRoutePlan,
         sink_name: str,
     ) -> tuple[CaptureSegment, CaptureSegment]:
+        if self.pcm_provider is None:
+            pcm_by_source = self.pipewire_pcm_provider.read_aligned_segments(
+                plan=plan,
+                sink_name=sink_name,
+                segment_seconds=self.segment_seconds,
+            )
+            local = self.segment_writer.write_segment(
+                CaptureSourceId.LOCAL_MIC,
+                pcm_by_source[CaptureSourceId.LOCAL_MIC],
+            )
+            remote = self.segment_writer.write_segment(
+                CaptureSourceId.SYSTEM_AUDIO,
+                pcm_by_source[CaptureSourceId.SYSTEM_AUDIO],
+            )
+            return (local, remote)
         local = self.segment_writer.write_segment(
             CaptureSourceId.LOCAL_MIC,
             self._read_pcm(CaptureSourceId.LOCAL_MIC, plan=plan, sink_name=sink_name),
@@ -390,8 +448,12 @@ def make_wav_bytes(
     data_size = len(pcm_bytes)
     if data_size > MAX_SEGMENT_BYTES:
         raise ValueError(f"Segment exceeds {MAX_SEGMENT_BYTES} byte limit.")
-    byte_rate = sample_rate * channels * sample_width_bytes
     block_align = channels * sample_width_bytes
+    if block_align <= 0:
+        raise ValueError("WAV block alignment must be positive.")
+    if data_size % block_align != 0:
+        raise ValueError("PCM byte length must align to complete WAV frames.")
+    byte_rate = sample_rate * channels * sample_width_bytes
     bits_per_sample = sample_width_bytes * 8
     header = struct.pack(
         "<4sI4s4sIHHIIHH4sI",
@@ -420,3 +482,13 @@ def _pipewire_node_id(route_id: str) -> str:
     if not node_id.isdigit():
         raise ValueError(f"Unsupported PipeWire route id '{route_id}'.")
     return node_id
+
+
+def _pulse_sink_input_id(route_id: str) -> str:
+    prefix = "pulse:sink-input:"
+    if not route_id.startswith(prefix):
+        raise ValueError(f"Unsupported Pulse sink-input route id '{route_id}'.")
+    sink_input_id = route_id.removeprefix(prefix)
+    if not sink_input_id.isdigit():
+        raise ValueError(f"Unsupported Pulse sink-input route id '{route_id}'.")
+    return sink_input_id

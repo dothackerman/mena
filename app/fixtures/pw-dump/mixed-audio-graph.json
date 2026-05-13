@@ -30,6 +30,7 @@
       "state": "running",
       "props": {
         "media.class": "Stream/Output/Audio",
+        "object.serial": 151,
         "node.name": "Firefox Audio Stream",
         "application.process.binary": "firefox",
         "stream.name": "WebRTC playback",
