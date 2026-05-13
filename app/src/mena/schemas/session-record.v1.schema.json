@@ -2,6 +2,35 @@
   "$id": "https://dothackerman.github.io/mena/schemas/session-record.v1.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$defs": {
+    "audio_route": {
+      "additionalProperties": false,
+      "properties": {
+        "active": {
+          "type": "boolean"
+        },
+        "description": {
+          "type": ["string", "null"]
+        },
+        "id": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "media_class": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "name": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "route_id": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": ["id", "route_id", "name", "description", "media_class", "active"],
+      "type": "object"
+    },
     "capture_segment": {
       "additionalProperties": false,
       "properties": {
@@ -52,6 +81,49 @@
         "sha256",
         "status",
         "format"
+      ],
+      "type": "object"
+    },
+    "playback_stream": {
+      "additionalProperties": false,
+      "properties": {
+        "active": {
+          "type": "boolean"
+        },
+        "app_binary_name": {
+          "type": ["string", "null"]
+        },
+        "id": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "media_name": {
+          "type": ["string", "null"]
+        },
+        "name": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "route_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "sink_input_id": {
+          "type": ["string", "null"]
+        },
+        "stream_name": {
+          "type": ["string", "null"]
+        }
+      },
+      "required": [
+        "id",
+        "route_id",
+        "name",
+        "app_binary_name",
+        "stream_name",
+        "media_name",
+        "sink_input_id",
+        "active"
       ],
       "type": "object"
     }
@@ -107,7 +179,7 @@
         },
         "playback_streams": {
           "items": {
-            "type": "object"
+            "$ref": "#/$defs/playback_stream"
           },
           "type": "array"
         },
@@ -117,13 +189,13 @@
         },
         "sinks": {
           "items": {
-            "type": "object"
+            "$ref": "#/$defs/audio_route"
           },
           "type": "array"
         },
         "sources": {
           "items": {
-            "type": "object"
+            "$ref": "#/$defs/audio_route"
           },
           "type": "array"
         },

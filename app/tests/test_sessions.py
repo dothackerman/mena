@@ -6,6 +6,7 @@ from typing import cast
 
 import pytest
 from jsonschema import Draft202012Validator, FormatChecker
+from jsonschema.exceptions import ValidationError
 
 from mena.profiles import CaptureProfileId, parse_capture_profile
 from mena.sessions import (
@@ -108,6 +109,32 @@ def test_update_session_discovery_writes_schema_valid_session_record(tmp_path: P
     assert record["discovery"] == discovery
     assert read_session_record(created_session.record_path)["discovery"] == discovery
     validator.validate(record)
+
+
+def test_session_record_schema_rejects_malformed_discovery_route() -> None:
+    schema = _load_session_record_schema()
+    record = {
+        "version": 1,
+        "id": "00000000-0000-0000-0000-000000000001",
+        "created_at": "2026-05-08T05:30:00Z",
+        "name": None,
+        "status": "created",
+        "profile": "online_dual_stream",
+        "discovery": {
+            "version": 1,
+            "profile": "online_dual_stream",
+            "status": "available",
+            "sources": [{"route_id": "pipewire:node:31"}],
+            "sinks": [],
+            "playback_streams": [],
+            "error": None,
+        },
+    }
+
+    validator = Draft202012Validator(schema, format_checker=FormatChecker())
+
+    with pytest.raises(ValidationError, match="'id' is a required property"):
+        validator.validate(record)
 
 
 def test_update_session_capture_metadata_writes_schema_valid_session_record(
