@@ -68,10 +68,7 @@ def create_session(
         profile=profile.id.value,
     )
     record_path = bundle_path / SESSION_RECORD_FILENAME
-    record_path.write_text(
-        json.dumps(asdict(record), indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    _write_json_atomically(record_path, asdict(record))
     return CreatedSession(bundle_path=bundle_path, record_path=record_path, record=record)
 
 
@@ -93,10 +90,7 @@ def update_session_record(
 
     record = read_session_record(record_path)
     record.update(updates)
-    record_path.write_text(
-        json.dumps(record, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    _write_json_atomically(record_path, record)
     return record
 
 
@@ -129,3 +123,12 @@ def _sessions_root(data_root: Path | None) -> Path:
 def _bundle_directory_name(session_id: str, created_at: datetime) -> str:
     timestamp = created_at.isoformat(timespec="seconds").replace("+00:00", "Z").replace(":", "")
     return f"{session_id}_{timestamp}"
+
+
+def _write_json_atomically(path: Path, data: Mapping[str, object]) -> None:
+    temp_path = path.with_name(f".{path.name}.tmp")
+    temp_path.write_text(
+        json.dumps(data, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temp_path.replace(path)

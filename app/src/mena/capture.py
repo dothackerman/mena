@@ -211,15 +211,20 @@ class PipeWirePcmProvider:
             source_id: self._command_for_source(source_id, plan=plan, sink_name=sink_name)
             for source_id in sources
         }
-        processes = {
-            source_id: self._popen_factory(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                shell=False,
-            )
-            for source_id, command in commands.items()
-        }
+        processes: dict[CaptureSourceId, subprocess.Popen[bytes]] = {}
+        try:
+            for source_id, command in commands.items():
+                processes[source_id] = self._popen_factory(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    shell=False,
+                )
+        except Exception:
+            for process in processes.values():
+                process.kill()
+                process.communicate()
+            raise
         with ThreadPoolExecutor(max_workers=len(processes)) as executor:
             results = {
                 source_id: executor.submit(_communicate_bounded, process, segment_seconds)
@@ -475,9 +480,13 @@ def make_wav_bytes(
     data_size = len(pcm_bytes)
     if data_size > MAX_SEGMENT_BYTES:
         raise ValueError(f"Segment exceeds {MAX_SEGMENT_BYTES} byte limit.")
+    if sample_rate < 1:
+        raise ValueError("WAV sample_rate must be positive.")
+    if channels < 1:
+        raise ValueError("WAV channels must be positive.")
+    if sample_width_bytes < 1:
+        raise ValueError("WAV sample_width_bytes must be positive.")
     block_align = channels * sample_width_bytes
-    if block_align <= 0:
-        raise ValueError("WAV block alignment must be positive.")
     if data_size % block_align != 0:
         raise ValueError("PCM byte length must align to complete WAV frames.")
     byte_rate = sample_rate * channels * sample_width_bytes

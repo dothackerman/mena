@@ -69,6 +69,22 @@ def test_make_wav_bytes_rejects_unaligned_pcm() -> None:
         make_wav_bytes(b"\x00", channels=1, sample_width_bytes=2)
 
 
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"sample_rate": 0}, "sample_rate"),
+        ({"channels": 0}, "channels"),
+        ({"sample_width_bytes": 0}, "sample_width_bytes"),
+    ],
+)
+def test_make_wav_bytes_rejects_non_positive_parameters(
+    kwargs: dict[str, int],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        make_wav_bytes(b"\x00\x00", **kwargs)
+
+
 def test_session_null_sink_name_sanitizes_session_id() -> None:
     assert session_null_sink_name("abc-123 / Demo!") == "mena_abc_123___Demo_remote"
     assert session_null_sink_name("!!!") == "mena_session_remote"
@@ -234,6 +250,39 @@ def test_pipewire_pcm_provider_rejects_failed_aligned_process() -> None:
         )
 
     assert exc_info.value.stderr == b"capture failed"
+
+
+def test_pipewire_pcm_provider_cleans_up_started_processes_on_spawn_failure() -> None:
+    started: list[object] = []
+
+    class FakeProcess:
+        def __init__(self, args: list[str], **_kwargs: object) -> None:
+            self.args = args
+            self.killed = False
+            started.append(self)
+            if "--target" in args and "mena_session_remote.monitor" in args:
+                raise FileNotFoundError("pw-record")
+
+        def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
+            return b"", b""
+
+        def kill(self) -> None:
+            self.killed = True
+
+    provider = PipeWirePcmProvider(
+        sample_rate=8_000,
+        popen_factory=cast(Any, FakeProcess),
+    )
+
+    with pytest.raises(FileNotFoundError):
+        provider.read_aligned_segments(
+            plan=_route_plan(),
+            sink_name="mena_session_remote",
+            segment_seconds=30,
+        )
+
+    assert isinstance(started[0], FakeProcess)
+    assert started[0].killed is True
 
 
 def test_pipewire_capture_adapter_default_flush_uses_aligned_segments(tmp_path: Path) -> None:

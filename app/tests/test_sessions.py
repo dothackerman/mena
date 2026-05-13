@@ -84,6 +84,34 @@ def test_create_session_writes_record_matching_v1_schema(tmp_path: Path) -> None
     validator.validate(record)
 
 
+def test_update_session_record_writes_atomically(tmp_path: Path) -> None:
+    created_session = create_session(
+        profile=parse_capture_profile("online"),
+        data_root=tmp_path,
+        now=datetime(2026, 5, 8, 5, 30, 0, tzinfo=UTC),
+    )
+    record_path = created_session.record_path
+
+    update_session_discovery(
+        record_path,
+        {
+            "version": 1,
+            "profile": "online_dual_stream",
+            "status": "available",
+            "sources": [],
+            "sinks": [],
+            "playback_streams": [],
+            "error": None,
+        },
+    )
+
+    assert not (record_path.parent / f".{record_path.name}.tmp").exists()
+    record = read_session_record(record_path)
+    discovery = record["discovery"]
+    assert isinstance(discovery, dict)
+    assert discovery["status"] == "available"
+
+
 def test_update_session_discovery_writes_schema_valid_session_record(tmp_path: Path) -> None:
     created_session = create_session(
         profile=parse_capture_profile("online"),
