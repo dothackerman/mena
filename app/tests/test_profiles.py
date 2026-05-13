@@ -138,6 +138,24 @@ def test_capture_source_rejects_invalid_device_route() -> None:
         )
 
 
+def test_capture_source_rejects_empty_device_route() -> None:
+    source_data = get_capture_profile(CaptureProfileId.ONLINE_DUAL_STREAM).sources[0].to_dict()
+    source_data["device_route"] = {}
+
+    with pytest.raises(ValueError, match="device_route.backend"):
+        CaptureProfile.from_dict(
+            {
+                "name": "online_dual_stream",
+                "cli_name": "online",
+                "sources": [
+                    source_data,
+                    get_capture_profile(CaptureProfileId.ONLINE_DUAL_STREAM).sources[1].to_dict(),
+                ],
+                "metadata": {"routing_schema": "pipewire_dual_stream.v1"},
+            }
+        )
+
+
 def test_capture_profile_rejects_invalid_metadata_shape() -> None:
     profile_data = get_capture_profile(CaptureProfileId.ONLINE_DUAL_STREAM).to_dict()
     profile_data["metadata"] = {"routing_schema": 1}

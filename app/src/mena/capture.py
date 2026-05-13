@@ -97,10 +97,9 @@ class WavSegmentWriter:
         self._indexes: dict[CaptureSourceId, int] = {}
 
     def write_segment(self, source_id: CaptureSourceId, pcm_bytes: bytes) -> CaptureSegment:
-        index = self._indexes.get(source_id, 0) + 1
-        self._indexes[source_id] = index
         source_dir = self.segment_dir / source_id.value
         source_dir.mkdir(parents=True, exist_ok=True)
+        index = self._next_index(source_id, source_dir)
         path = source_dir / f"{source_id.value}_{index:06d}.wav"
         temp_path = path.with_suffix(".wav.tmp")
         wav_bytes = make_wav_bytes(
@@ -110,7 +109,11 @@ class WavSegmentWriter:
             sample_width_bytes=self.sample_width_bytes,
         )
         temp_path.write_bytes(wav_bytes)
+        if path.exists():
+            temp_path.unlink(missing_ok=True)
+            raise FileExistsError(f"Capture segment already exists: {path}")
         temp_path.replace(path)
+        self._indexes[source_id] = index
         return CaptureSegment(
             source_id=source_id,
             index=index,
@@ -120,6 +123,18 @@ class WavSegmentWriter:
             byte_count=len(wav_bytes),
             sha256=hashlib.sha256(wav_bytes).hexdigest(),
         )
+
+    def _next_index(self, source_id: CaptureSourceId, source_dir: Path) -> int:
+        highest_index = self._indexes.get(source_id, 0)
+        prefix = f"{source_id.value}_"
+        for path in source_dir.glob(f"{prefix}*.wav"):
+            stem = path.stem
+            if not stem.startswith(prefix):
+                continue
+            suffix = stem.removeprefix(prefix)
+            if suffix.isdigit():
+                highest_index = max(highest_index, int(suffix))
+        return highest_index + 1
 
 
 class SilencePcmProvider:

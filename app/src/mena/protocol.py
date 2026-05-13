@@ -50,6 +50,12 @@ class ProtocolMessage:
 
     def encode(self) -> bytes:
         validate_message_type(self.type)
+        if not isinstance(self.id, str) or not self.id:
+            raise ProtocolError("Protocol id must be a non-empty string.")
+        if not isinstance(self.session_id, str) or not self.session_id:
+            raise ProtocolError("Protocol session_id must be a non-empty string.")
+        if not isinstance(self.payload, dict):
+            raise ProtocolError("Protocol payload must be a JSON object.")
         frame = {
             "v": self.v,
             "type": self.type,

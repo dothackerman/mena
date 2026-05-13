@@ -222,7 +222,19 @@ def _parse_pw_dump(
         elif media_class == "Stream/Output/Audio":
             playback_streams.append(_stream_from_props(node_id, info, props))
 
-    return (tuple(sources), tuple(sinks), tuple(playback_streams))
+    return (
+        tuple(sorted(sources, key=_route_sort_key)),
+        tuple(sorted(sinks, key=_route_sort_key)),
+        tuple(sorted(playback_streams, key=_stream_sort_key)),
+    )
+
+
+def _route_sort_key(route: AudioRoute) -> tuple[int, str]:
+    return (route.id, route.route_id)
+
+
+def _stream_sort_key(stream: PlaybackStream) -> tuple[int, str]:
+    return (stream.id, stream.route_id)
 
 
 def _route_from_props(

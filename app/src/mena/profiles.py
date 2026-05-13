@@ -121,7 +121,7 @@ class CaptureSource:
                 "diarisation_policy",
                 "capture source",
             ),
-            device_route=DeviceRoute.from_dict(route_data) if route_data else None,
+            device_route=DeviceRoute.from_dict(route_data) if route_data is not None else None,
         )
 
 

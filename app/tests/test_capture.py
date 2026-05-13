@@ -46,6 +46,19 @@ def test_wav_segment_writer_increments_per_source_indexes(tmp_path: Path) -> Non
     assert remote_two.index == 2
 
 
+def test_wav_segment_writer_continues_after_existing_sealed_segment(tmp_path: Path) -> None:
+    first_writer = WavSegmentWriter(segment_dir=tmp_path)
+    first = first_writer.write_segment(CaptureSourceId.LOCAL_MIC, b"\x00\x00")
+    restarted_writer = WavSegmentWriter(segment_dir=tmp_path)
+
+    second = restarted_writer.write_segment(CaptureSourceId.LOCAL_MIC, b"\x00\x00")
+
+    assert first.index == 1
+    assert second.index == 2
+    assert first.path.exists()
+    assert second.path.exists()
+
+
 def test_make_wav_bytes_rejects_oversized_segments() -> None:
     with pytest.raises(ValueError, match="Segment exceeds"):
         make_wav_bytes(b"\x00" * (MAX_SEGMENT_BYTES + 1))

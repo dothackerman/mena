@@ -47,6 +47,25 @@ def test_protocol_encode_rejects_oversized_frame() -> None:
         ).encode()
 
 
+@pytest.mark.parametrize(
+    ("message", "error"),
+    [
+        (ProtocolMessage(type="hello", id="", session_id="session-1"), "id"),
+        (ProtocolMessage(type="hello", session_id=""), "session_id"),
+        (
+            ProtocolMessage(type="hello", session_id="session-1", payload=None),  # type: ignore[arg-type]
+            "payload",
+        ),
+    ],
+)
+def test_protocol_encode_rejects_invalid_outbound_fields(
+    message: ProtocolMessage,
+    error: str,
+) -> None:
+    with pytest.raises(ProtocolError, match=error):
+        message.encode()
+
+
 def test_protocol_rejects_unknown_message_type() -> None:
     line = (
         b'{"v":1,"type":"pause_capture","id":"message-1","session_id":"session-1","payload":{}}\n'

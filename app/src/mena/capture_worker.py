@@ -33,12 +33,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="mena.capture_worker")
     parser.add_argument("--session-id", required=True)
     parser.add_argument("--session-dir", type=Path, required=True)
-    parser.add_argument(
-        "--capture-mode",
-        choices=("fake",),
-        default="fake",
-        help="Capture backend for deterministic worker execution.",
-    )
     return parser
 
 
@@ -145,7 +139,6 @@ class WorkerCaptureSession:
             segment_writer=writer,
             pcm_provider=provider,
         )
-        self.writer = writer
         self.segments: list[CaptureSegment] = []
         self.active_capture: ActivePipeWireCapture | None = None
         self.started = False
