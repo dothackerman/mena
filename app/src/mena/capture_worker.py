@@ -115,17 +115,18 @@ def run_worker(
                     ),
                 )
         elif message.type == "stop_capture":
+            if capture is None:
+                raise ProtocolError("Cannot stop capture before it has started.")
             if capture and finalized_metadata is None:
                 finalized_metadata = capture.finalize()
-            payload: dict[str, object] = (
-                finalized_metadata.to_dict() if finalized_metadata else {"status": "stopped"}
-            )
+            if finalized_metadata is None:
+                raise ProtocolError("Capture did not finalize.")
             write_message(
                 protocol_out,
                 ProtocolMessage(
                     type="capture_finalized",
                     session_id=session_id,
-                    payload=payload,
+                    payload=finalized_metadata.to_dict(),
                 ),
             )
             return 0

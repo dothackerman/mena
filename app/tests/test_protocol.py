@@ -32,7 +32,8 @@ def test_protocol_message_encodes_compact_json_line() -> None:
     encoded = message.encode()
 
     assert encoded.endswith(b"\n")
-    assert b" " not in encoded
+    assert b": " not in encoded
+    assert b", " not in encoded
     assert ProtocolMessage.decode(encoded) == message
     assert ProtocolMessage.decode(encoded).v == ENVELOPE_VERSION
 
@@ -249,6 +250,16 @@ def test_worker_run_loop_rejects_duplicate_start(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ProtocolError, match="already started"):
+        run_worker(session_id="session-1", session_dir=tmp_path, stdin=stdin, stdout=BytesIO())
+
+
+def test_worker_run_loop_rejects_stop_before_start(tmp_path: Path) -> None:
+    stdin = BytesIO(
+        hello_message("session-1").encode()
+        + ProtocolMessage(type="stop_capture", session_id="session-1").encode()
+    )
+
+    with pytest.raises(ProtocolError, match="Cannot stop capture before it has started"):
         run_worker(session_id="session-1", session_dir=tmp_path, stdin=stdin, stdout=BytesIO())
 
 
