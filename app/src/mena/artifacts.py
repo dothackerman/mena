@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, Self
+from uuid import uuid4
 
 ARTIFACT_MANIFEST_FILENAME = "artifact-manifest.v1.json"
 ARTIFACT_MANIFEST_VERSION = 1
@@ -60,8 +62,7 @@ class ArtifactRecord:
         sha256 = _required_str(data, "sha256")
         status = _required_str(data, "status")
         metadata = data.get("metadata", {})
-        if not isinstance(metadata, dict):
-            raise ArtifactStoreError("Artifact metadata must be a JSON object.")
+        metadata = _metadata_dict(metadata)
         _validate_artifact_type(artifact_type)
         if version < 1:
             raise ArtifactStoreError("Artifact version must be positive.")
@@ -171,15 +172,6 @@ class FileSystemArtifactStore:
         if artifact_id in records:
             raise FileExistsError(f"Artifact already exists: {artifact_id}")
 
-        path = self.session_dir / relative_path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = path.with_name(f".{path.name}.tmp")
-        temp_path.write_bytes(data)
-        if path.exists():
-            temp_path.unlink(missing_ok=True)
-            raise FileExistsError(f"Artifact path already exists: {relative_path}")
-        temp_path.replace(path)
-
         record = _record_for_bytes(
             session_id=self.session_id,
             artifact_type=artifact_type,
@@ -189,8 +181,17 @@ class FileSystemArtifactStore:
             status=status,
             metadata=metadata,
         )
-        records[record.id] = record
-        self._write_records(records)
+        next_records = {**records, record.id: record}
+        self._manifest_bytes(next_records)
+
+        path = self.session_dir / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _write_bytes_exclusive(path, data)
+        try:
+            self._write_records(next_records)
+        except Exception:
+            path.unlink(missing_ok=True)
+            raise
         return record
 
     def retrieve(self, artifact_id: str) -> bytes:
@@ -255,10 +256,24 @@ class FileSystemArtifactStore:
         artifacts = data.get("artifacts")
         if not isinstance(artifacts, list):
             raise ArtifactStoreError("Artifact manifest artifacts must be an array.")
-        records = [ArtifactRecord.from_dict(_mapping(item)) for item in artifacts]
-        return {record.id: record for record in records}
+        records: dict[str, ArtifactRecord] = {}
+        for item in artifacts:
+            record = ArtifactRecord.from_dict(_mapping(item))
+            if record.session_id != self.session_id:
+                raise ArtifactStoreError("Artifact record session_id does not match store.")
+            if record.id in records:
+                raise ArtifactStoreError(f"Duplicate artifact id in manifest: {record.id}")
+            records[record.id] = record
+        return records
 
     def _write_records(self, records: Mapping[str, ArtifactRecord]) -> None:
+        encoded = self._manifest_bytes(records)
+        self.artifact_root.mkdir(parents=True, exist_ok=True)
+        temp_path = self.manifest_path.with_name(f".{self.manifest_path.name}.tmp")
+        temp_path.write_bytes(encoded)
+        temp_path.replace(self.manifest_path)
+
+    def _manifest_bytes(self, records: Mapping[str, ArtifactRecord]) -> bytes:
         manifest = {
             "version": ARTIFACT_MANIFEST_VERSION,
             "session_id": self.session_id,
@@ -266,11 +281,7 @@ class FileSystemArtifactStore:
                 record.to_dict() for record in sorted(records.values(), key=lambda item: item.path)
             ],
         }
-        temp_path = self.manifest_path.with_name(f".{self.manifest_path.name}.tmp")
-        temp_path.write_text(
-            json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
-        temp_path.replace(self.manifest_path)
+        return (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
 class InMemoryArtifactStore:
@@ -360,8 +371,9 @@ def _record_for_bytes(
 ) -> ArtifactRecord:
     _validate_artifact_type(artifact_type)
     _validate_status(status)
-    if version < 1:
+    if type(version) is not int or version < 1:
         raise ArtifactStoreError("Artifact version must be positive.")
+    metadata_dict = _metadata_dict({} if metadata is None else metadata)
     path = relative_path.as_posix()
     return ArtifactRecord(
         id=_artifact_id(session_id, relative_path),
@@ -372,7 +384,7 @@ def _record_for_bytes(
         byte_count=len(data),
         sha256=_sha256(data),
         status=status,
-        metadata={} if metadata is None else dict(metadata),
+        metadata=metadata_dict,
     )
 
 
@@ -418,6 +430,30 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _write_bytes_exclusive(path: Path, data: bytes) -> None:
+    temp_path = path.with_name(f".{path.name}.{uuid4()}.tmp")
+    try:
+        temp_path.write_bytes(data)
+        try:
+            os.link(temp_path, path)
+        except FileExistsError as exc:
+            raise FileExistsError(f"Artifact path already exists: {path}") from exc
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def _metadata_dict(metadata: object) -> dict[str, object]:
+    if not isinstance(metadata, dict):
+        raise ArtifactStoreError("Artifact metadata must be a JSON object.")
+    if any(not isinstance(key, str) for key in metadata):
+        raise ArtifactStoreError("Artifact metadata keys must be strings.")
+    try:
+        json.dumps(metadata)
+    except TypeError as exc:
+        raise ArtifactStoreError("Artifact metadata must be JSON serializable.") from exc
+    return metadata
+
+
 def _verification(
     record: ArtifactRecord,
     *,
@@ -448,7 +484,7 @@ def _required_str(data: Mapping[str, object], key: str) -> str:
 
 def _required_int(data: Mapping[str, object], key: str) -> int:
     value = data.get(key)
-    if not isinstance(value, int):
+    if type(value) is not int:
         raise ArtifactStoreError(f"Artifact field '{key}' must be an integer.")
     return value
 

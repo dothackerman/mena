@@ -193,6 +193,84 @@ def test_file_system_artifact_store_rejects_manifest_path_escape(tmp_path: Path)
         reader.list()
 
 
+def test_file_system_artifact_store_rejects_cross_session_manifest_record(
+    tmp_path: Path,
+) -> None:
+    store = _file_system_store(tmp_path)
+    store.store(artifact_type="transcript", name="same.json", data=b"first")
+    manifest_path = tmp_path / "artifacts" / ARTIFACT_MANIFEST_FILENAME
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["artifacts"][0]["session_id"] = "00000000-0000-0000-0000-000000000002"
+    manifest["artifacts"][0]["id"] = (
+        "00000000-0000-0000-0000-000000000002:artifacts/transcript/same.json"
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    reader = _file_system_store(tmp_path)
+
+    with pytest.raises(ArtifactStoreError, match="session_id"):
+        reader.list()
+
+
+def test_file_system_artifact_store_rejects_duplicate_manifest_ids(tmp_path: Path) -> None:
+    store = _file_system_store(tmp_path)
+    store.store(artifact_type="transcript", name="same.json", data=b"first")
+    manifest_path = tmp_path / "artifacts" / ARTIFACT_MANIFEST_FILENAME
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["artifacts"].append(dict(manifest["artifacts"][0]))
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    reader = _file_system_store(tmp_path)
+
+    with pytest.raises(ArtifactStoreError, match="Duplicate artifact id"):
+        reader.list()
+
+
+def test_file_system_artifact_store_rejects_boolean_integer_fields(tmp_path: Path) -> None:
+    store = _file_system_store(tmp_path)
+    store.store(artifact_type="transcript", name="same.json", data=b"first")
+    manifest_path = tmp_path / "artifacts" / ARTIFACT_MANIFEST_FILENAME
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["artifacts"][0]["version"] = True
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    reader = _file_system_store(tmp_path)
+
+    with pytest.raises(ArtifactStoreError, match="integer"):
+        reader.list()
+
+
+def test_file_system_artifact_store_rejects_non_json_metadata_before_writing(
+    tmp_path: Path,
+) -> None:
+    store = _file_system_store(tmp_path)
+
+    with pytest.raises(ArtifactStoreError, match="JSON serializable"):
+        store.store(
+            artifact_type="transcript",
+            name="same.json",
+            data=b"first",
+            metadata={"bad": {"not-json"}},
+        )
+
+    assert not (tmp_path / "artifacts" / "transcript" / "same.json").exists()
+    assert store.list() == ()
+
+
+def test_file_system_artifact_store_rolls_back_artifact_when_manifest_write_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=tmp_path)
+
+    def fail_write(_records: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(store, "_write_records", fail_write)
+
+    with pytest.raises(OSError, match="disk full"):
+        store.store(artifact_type="transcript", name="same.json", data=b"first")
+
+    assert not (tmp_path / "artifacts" / "transcript" / "same.json").exists()
+
+
 def test_artifact_store_rejects_invalid_artifact_type(tmp_path: Path) -> None:
     store = _file_system_store(tmp_path)
 
