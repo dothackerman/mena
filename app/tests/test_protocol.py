@@ -47,6 +47,11 @@ def test_protocol_encode_rejects_oversized_frame() -> None:
         ).encode()
 
 
+def test_protocol_encode_rejects_unsupported_envelope_version() -> None:
+    with pytest.raises(ProtocolError, match="Unsupported protocol envelope version"):
+        ProtocolMessage(type="hello", session_id="session-1", v=ENVELOPE_VERSION + 1).encode()
+
+
 @pytest.mark.parametrize(
     ("message", "error"),
     [
@@ -64,6 +69,15 @@ def test_protocol_encode_rejects_invalid_outbound_fields(
 ) -> None:
     with pytest.raises(ProtocolError, match=error):
         message.encode()
+
+
+def test_protocol_encode_rejects_non_json_payload() -> None:
+    with pytest.raises(ProtocolError, match="JSON serializable"):
+        ProtocolMessage(
+            type="hello",
+            session_id="session-1",
+            payload={"path": Path("not-json")},
+        ).encode()
 
 
 def test_protocol_rejects_unknown_message_type() -> None:

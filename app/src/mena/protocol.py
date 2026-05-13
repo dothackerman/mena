@@ -49,6 +49,10 @@ class ProtocolMessage:
     v: int = ENVELOPE_VERSION
 
     def encode(self) -> bytes:
+        if self.v != ENVELOPE_VERSION:
+            raise ProtocolError(
+                f"Unsupported protocol envelope version {self.v}; expected {ENVELOPE_VERSION}."
+            )
         validate_message_type(self.type)
         if not isinstance(self.id, str) or not self.id:
             raise ProtocolError("Protocol id must be a non-empty string.")
@@ -63,9 +67,12 @@ class ProtocolMessage:
             "session_id": self.session_id,
             "payload": self.payload,
         }
-        encoded = (
-            json.dumps(frame, ensure_ascii=True, separators=(",", ":")).encode("utf-8") + b"\n"
-        )
+        try:
+            encoded = (
+                json.dumps(frame, ensure_ascii=True, separators=(",", ":")).encode("utf-8") + b"\n"
+            )
+        except TypeError as exc:
+            raise ProtocolError("Protocol payload must be JSON serializable.") from exc
         if len(encoded) > MAX_FRAME_BYTES:
             raise ProtocolError(f"Protocol frame exceeds {MAX_FRAME_BYTES} bytes.")
         return encoded

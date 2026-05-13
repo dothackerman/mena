@@ -132,7 +132,7 @@
   "description": "Initial canonical session record written by `mena record`.",
   "properties": {
     "capture_metadata": {
-      "additionalProperties": true,
+      "additionalProperties": false,
       "description": "Capture facts emitted by the worker and persisted by the orchestrator.",
       "properties": {
         "channels": {
@@ -171,7 +171,7 @@
       "type": "string"
     },
     "discovery": {
-      "additionalProperties": true,
+      "additionalProperties": false,
       "description": "Read-only audio discovery facts captured by the orchestrator.",
       "properties": {
         "error": {

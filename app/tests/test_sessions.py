@@ -137,6 +137,31 @@ def test_session_record_schema_rejects_malformed_discovery_route() -> None:
         validator.validate(record)
 
 
+def test_session_record_schema_rejects_extra_discovery_fields() -> None:
+    record = {
+        "version": 1,
+        "id": "00000000-0000-0000-0000-000000000001",
+        "created_at": "2026-05-08T05:30:00Z",
+        "name": None,
+        "status": "created",
+        "profile": "online_dual_stream",
+        "discovery": {
+            "version": 1,
+            "profile": "online_dual_stream",
+            "status": "available",
+            "sources": [],
+            "sinks": [],
+            "playback_streams": [],
+            "error": None,
+            "extra": True,
+        },
+    }
+    validator = Draft202012Validator(_load_session_record_schema(), format_checker=FormatChecker())
+
+    with pytest.raises(ValidationError, match="Additional properties are not allowed"):
+        validator.validate(record)
+
+
 def test_update_session_capture_metadata_writes_schema_valid_session_record(
     tmp_path: Path,
 ) -> None:
