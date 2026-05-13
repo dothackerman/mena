@@ -6,9 +6,17 @@ from typing import cast
 
 import pytest
 from jsonschema import Draft202012Validator, FormatChecker
+from jsonschema.exceptions import ValidationError
 
 from mena.profiles import CaptureProfileId, parse_capture_profile
-from mena.sessions import SESSION_RECORD_VERSION, create_session, default_data_root
+from mena.sessions import (
+    SESSION_RECORD_VERSION,
+    create_session,
+    default_data_root,
+    read_session_record,
+    update_session_capture_metadata,
+    update_session_discovery,
+)
 from mena.settings import DATA_ROOT_ENV_VAR
 
 
@@ -73,6 +81,151 @@ def test_create_session_writes_record_matching_v1_schema(tmp_path: Path) -> None
         format_checker=FormatChecker(),
     )
 
+    validator.validate(record)
+
+
+def test_update_session_record_writes_atomically(tmp_path: Path) -> None:
+    created_session = create_session(
+        profile=parse_capture_profile("online"),
+        data_root=tmp_path,
+        now=datetime(2026, 5, 8, 5, 30, 0, tzinfo=UTC),
+    )
+    record_path = created_session.record_path
+
+    update_session_discovery(
+        record_path,
+        {
+            "version": 1,
+            "profile": "online_dual_stream",
+            "status": "available",
+            "sources": [],
+            "sinks": [],
+            "playback_streams": [],
+            "error": None,
+        },
+    )
+
+    assert not (record_path.parent / f".{record_path.name}.tmp").exists()
+    record = read_session_record(record_path)
+    discovery = record["discovery"]
+    assert isinstance(discovery, dict)
+    assert discovery["status"] == "available"
+
+
+def test_update_session_discovery_writes_schema_valid_session_record(tmp_path: Path) -> None:
+    created_session = create_session(
+        profile=parse_capture_profile("online"),
+        data_root=tmp_path,
+        now=datetime(2026, 5, 8, 5, 30, 0, tzinfo=UTC),
+    )
+    discovery = {
+        "version": 1,
+        "profile": "online_dual_stream",
+        "status": "available",
+        "sources": [],
+        "sinks": [],
+        "playback_streams": [],
+        "error": None,
+    }
+
+    record = update_session_discovery(created_session.record_path, discovery)
+    validator = Draft202012Validator(
+        _load_session_record_schema(),
+        format_checker=FormatChecker(),
+    )
+
+    assert record["discovery"] == discovery
+    assert read_session_record(created_session.record_path)["discovery"] == discovery
+    validator.validate(record)
+
+
+def test_session_record_schema_rejects_malformed_discovery_route() -> None:
+    schema = _load_session_record_schema()
+    record = {
+        "version": 1,
+        "id": "00000000-0000-0000-0000-000000000001",
+        "created_at": "2026-05-08T05:30:00Z",
+        "name": None,
+        "status": "created",
+        "profile": "online_dual_stream",
+        "discovery": {
+            "version": 1,
+            "profile": "online_dual_stream",
+            "status": "available",
+            "sources": [{"route_id": "pipewire:node:31"}],
+            "sinks": [],
+            "playback_streams": [],
+            "error": None,
+        },
+    }
+
+    validator = Draft202012Validator(schema, format_checker=FormatChecker())
+
+    with pytest.raises(ValidationError, match="'id' is a required property"):
+        validator.validate(record)
+
+
+def test_session_record_schema_rejects_extra_discovery_fields() -> None:
+    record = {
+        "version": 1,
+        "id": "00000000-0000-0000-0000-000000000001",
+        "created_at": "2026-05-08T05:30:00Z",
+        "name": None,
+        "status": "created",
+        "profile": "online_dual_stream",
+        "discovery": {
+            "version": 1,
+            "profile": "online_dual_stream",
+            "status": "available",
+            "sources": [],
+            "sinks": [],
+            "playback_streams": [],
+            "error": None,
+            "extra": True,
+        },
+    }
+    validator = Draft202012Validator(_load_session_record_schema(), format_checker=FormatChecker())
+
+    with pytest.raises(ValidationError, match="Additional properties are not allowed"):
+        validator.validate(record)
+
+
+def test_update_session_capture_metadata_writes_schema_valid_session_record(
+    tmp_path: Path,
+) -> None:
+    created_session = create_session(
+        profile=parse_capture_profile("online"),
+        data_root=tmp_path,
+        now=datetime(2026, 5, 8, 5, 30, 0, tzinfo=UTC),
+    )
+    capture_metadata = {
+        "version": 1,
+        "sample_rate": 48000,
+        "channels": 1,
+        "segment_seconds": 30,
+        "segment_count": 1,
+        "segments": [
+            {
+                "source_id": "local_mic",
+                "index": 1,
+                "path": "/tmp/local_mic_000001.wav",
+                "sample_rate": 48000,
+                "channels": 1,
+                "byte_count": 44,
+                "sha256": "0" * 64,
+                "status": "sealed",
+                "format": "wav",
+            }
+        ],
+    }
+
+    record = update_session_capture_metadata(created_session.record_path, capture_metadata)
+    validator = Draft202012Validator(
+        _load_session_record_schema(),
+        format_checker=FormatChecker(),
+    )
+
+    assert record["capture_metadata"] == capture_metadata
     validator.validate(record)
 
 
