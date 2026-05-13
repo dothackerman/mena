@@ -22,6 +22,7 @@ COMMANDS = (
     "export",
     "resume",
 )
+WORKER_EXIT_TIMEOUT_SECONDS = 30.0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -44,6 +45,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="Create a session and print read-only audio discovery without starting capture.",
+    )
+    record_parser.add_argument(
+        "--worker-exit-timeout",
+        type=float,
+        default=WORKER_EXIT_TIMEOUT_SECONDS,
+        help="Seconds to wait for capture worker teardown after stop_capture.",
     )
     record_parser.set_defaults(command="record")
 
@@ -99,7 +106,7 @@ def main(
                 worker.handshake()
                 worker.start_capture({"profile": profile.id.value})
                 finalized = worker.stop_capture()
-                exit_code = worker.wait(timeout=2)
+                exit_code = worker.wait(timeout=args.worker_exit_timeout)
                 if exit_code != 0:
                     raise WorkerExitedError(f"Worker exited with status {exit_code}.")
             except (ProtocolError, WorkerExitedError, subprocess.TimeoutExpired) as exc:

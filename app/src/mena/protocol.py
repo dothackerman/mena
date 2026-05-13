@@ -180,6 +180,9 @@ class WorkerProcess:
         argv: list[str] | None = None,
     ) -> None:
         self.session_id = session_id
+        session_dir.mkdir(parents=True, exist_ok=True)
+        self._stderr_path = session_dir / "worker.stderr.log"
+        self._stderr_stream = self._stderr_path.open("w+b")
         command = argv or [
             sys.executable,
             "-m",
@@ -189,13 +192,17 @@ class WorkerProcess:
             "--session-dir",
             str(session_dir),
         ]
-        self.process = subprocess.Popen(
-            command,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            shell=False,
-        )
+        try:
+            self.process = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=self._stderr_stream,
+                shell=False,
+            )
+        except Exception:
+            self._stderr_stream.close()
+            raise
 
     def __enter__(self) -> Self:
         return self
@@ -208,6 +215,7 @@ class WorkerProcess:
     ) -> None:
         if self.process.poll() is None:
             self.terminate()
+        self._stderr_stream.close()
 
     def handshake(self) -> ProtocolMessage:
         hello = hello_message(self.session_id)
@@ -276,9 +284,13 @@ class WorkerProcess:
         return self.process.wait(timeout=timeout)
 
     def read_stderr(self) -> str:
-        if self.process.stderr is None:
-            return ""
-        return self.process.stderr.read().decode("utf-8", errors="replace")
+        if self._stderr_stream.closed:
+            return self._stderr_path.read_text(encoding="utf-8", errors="replace")
+        self._stderr_stream.flush()
+        self._stderr_stream.seek(0)
+        stderr = self._stderr_stream.read().decode("utf-8", errors="replace")
+        self._stderr_stream.seek(0, 2)
+        return stderr
 
 
 def _required_str(data: dict[str, object], key: str) -> str:

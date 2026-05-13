@@ -57,7 +57,11 @@ def run_worker(
     protocol_out = stdout or sys.stdout.buffer
     diagnostics = stderr or sys.stderr
 
-    hello = read_message(protocol_in)
+    try:
+        hello = read_message(protocol_in)
+    except EOFError:
+        print("orchestrator closed protocol stdin before hello", file=diagnostics)
+        return 0
     validate_hello(hello)
     if hello.session_id != session_id:
         raise ProtocolError("Hello session_id does not match worker session.")

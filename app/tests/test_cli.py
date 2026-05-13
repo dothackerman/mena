@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 from pytest import CaptureFixture
 
-from mena.cli import COMMANDS, main
+from mena.cli import COMMANDS, WORKER_EXIT_TIMEOUT_SECONDS, main
 from mena.discovery import AudioDiscovery, AudioRoute, DiscoveryStatus, PlaybackStream
 from mena.profiles import CaptureProfileId
 from mena.protocol import ProtocolError, ProtocolMessage
@@ -170,6 +170,24 @@ def test_record_rejects_nonzero_worker_exit_without_capture_metadata(
     assert "capture_metadata" not in record
 
 
+def test_record_uses_configurable_worker_exit_timeout(tmp_path: Path) -> None:
+    TimeoutCapturingWorkerProcess.last_timeout = None
+
+    exit_code = main(
+        ["record", "--profile", "online", "--worker-exit-timeout", "7.5"],
+        data_root=tmp_path,
+        discoverer=_available_discoverer,
+        worker_factory=TimeoutCapturingWorkerProcess,
+    )
+
+    assert exit_code == 0
+    assert TimeoutCapturingWorkerProcess.last_timeout == 7.5
+
+
+def test_record_worker_exit_timeout_default_is_generous() -> None:
+    assert WORKER_EXIT_TIMEOUT_SECONDS == 30.0
+
+
 class FakeWorkerProcess:
     def __init__(self, *, session_id: str, session_dir: Path) -> None:
         self.session_id = session_id
@@ -220,6 +238,14 @@ class FailingWorkerProcess(FakeWorkerProcess):
 class NonzeroExitWorkerProcess(FakeWorkerProcess):
     def wait(self, timeout: float | None = None) -> int:
         return 3
+
+
+class TimeoutCapturingWorkerProcess(FakeWorkerProcess):
+    last_timeout: float | None = None
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.__class__.last_timeout = timeout
+        return 0
 
 
 def _unavailable_discoverer(profile: CaptureProfileId) -> AudioDiscovery:

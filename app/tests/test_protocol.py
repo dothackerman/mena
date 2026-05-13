@@ -296,6 +296,23 @@ def test_worker_run_loop_stops_on_orchestrator_eof(tmp_path: Path) -> None:
     assert "orchestrator closed protocol stdin" in stderr.getvalue()
 
 
+def test_worker_run_loop_handles_eof_before_hello(tmp_path: Path) -> None:
+    stdout = BytesIO()
+    stderr = StringIO()
+
+    exit_code = run_worker(
+        session_id="session-1",
+        session_dir=tmp_path,
+        stdin=BytesIO(),
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == 0
+    assert stdout.getvalue() == b""
+    assert "before hello" in stderr.getvalue()
+
+
 def test_worker_run_loop_rejects_unexpected_command(tmp_path: Path) -> None:
     stdin = BytesIO(
         hello_message("session-1").encode()
@@ -373,6 +390,23 @@ def test_worker_error_event_stays_on_stdout_and_diagnostics_stay_on_stderr(tmp_p
     assert message.payload == {"message": "simulated capture start failure"}
     assert exit_code == 1
     assert stderr == ""
+
+
+def test_worker_process_redirects_stderr_to_session_log(tmp_path: Path) -> None:
+    with (
+        WorkerProcess(
+            session_id="session-1",
+            session_dir=tmp_path,
+            argv=[
+                sys.executable,
+                "-c",
+                "import sys; sys.stderr.write('worker diagnostic\\n'); raise SystemExit(3)",
+            ],
+        ) as worker,
+        pytest.raises(WorkerExitedError, match="worker diagnostic"),
+    ):
+        assert worker.process.stderr is None
+        worker.handshake()
 
 
 def test_worker_hard_kill_preserves_sealed_prior_segments(tmp_path: Path) -> None:
