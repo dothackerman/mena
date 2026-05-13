@@ -6,8 +6,8 @@ import hashlib
 import re
 import struct
 import subprocess
-import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -205,22 +205,20 @@ class PipeWirePcmProvider:
             )
             for source_id, command in commands.items()
         }
-        deadline = time.monotonic() + segment_seconds
+        with ThreadPoolExecutor(max_workers=len(processes)) as executor:
+            results = {
+                source_id: executor.submit(_communicate_bounded, process, segment_seconds)
+                for source_id, process in processes.items()
+            }
         output: dict[CaptureSourceId, bytes] = {}
-        for source_id, process in processes.items():
-            remaining = max(deadline - time.monotonic(), 0.001)
-            try:
-                stdout, _stderr = process.communicate(timeout=remaining)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                stdout, _stderr = process.communicate()
-            returncode = getattr(process, "returncode", 0)
+        for source_id, future in results.items():
+            stdout, stderr, returncode = future.result()
             if returncode:
                 raise subprocess.CalledProcessError(
                     returncode,
                     commands[source_id],
                     output=stdout,
-                    stderr=_stderr,
+                    stderr=stderr,
                 )
             output[source_id] = stdout
         return output
@@ -427,13 +425,15 @@ class ActivePipeWireCapture:
 
     def stop(self) -> CaptureMetadata:
         if not self._stopped:
-            if not self._segments:
-                self.flush_segments()
-            self._adapter._cleanup(
-                null_sink_module=self.null_sink_module,
-                loopback_module=self.loopback_module,
-            )
-            self._stopped = True
+            try:
+                if not self._segments:
+                    self.flush_segments()
+            finally:
+                self._adapter._cleanup(
+                    null_sink_module=self.null_sink_module,
+                    loopback_module=self.loopback_module,
+                )
+                self._stopped = True
         return CaptureMetadata(
             version=CAPTURE_METADATA_VERSION,
             sample_rate=self._adapter.segment_writer.sample_rate,
@@ -494,6 +494,19 @@ def _pipewire_node_id(route_id: str) -> str:
     if not node_id.isdigit():
         raise ValueError(f"Unsupported PipeWire route id '{route_id}'.")
     return node_id
+
+
+def _communicate_bounded(
+    process: subprocess.Popen[bytes],
+    timeout: int,
+) -> tuple[bytes, bytes, int]:
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        stdout, stderr = process.communicate()
+    returncode = getattr(process, "returncode", 0)
+    return stdout, stderr, returncode
 
 
 def _pulse_sink_input_id(route_id: str) -> str:

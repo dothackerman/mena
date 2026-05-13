@@ -311,6 +311,30 @@ def test_pipewire_capture_adapter_flushes_segments_and_cleans_up(tmp_path: Path)
     assert all(segment.path.exists() for segment in metadata.segments)
 
 
+def test_pipewire_capture_adapter_cleans_up_when_stop_flush_fails(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+    module_ids = iter(["101\n", "", "202\n", "", ""])
+
+    def runner(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout=next(module_ids), stderr="")
+
+    def failing_provider(_source_id: CaptureSourceId) -> bytes:
+        raise subprocess.CalledProcessError(1, ["pw-record"], stderr="capture failed")
+
+    adapter = PipeWireCaptureAdapter(
+        client=PipeWireClient(runner=runner),
+        segment_writer=WavSegmentWriter(segment_dir=tmp_path),
+        pcm_provider=failing_provider,
+    )
+    active = adapter.start(_route_plan())
+
+    with pytest.raises(subprocess.CalledProcessError):
+        active.stop()
+
+    assert calls[-2:] == [["pactl", "unload-module", "202"], ["pactl", "unload-module", "101"]]
+
+
 def test_pipewire_capture_adapter_cleans_up_partial_setup_on_failure(tmp_path: Path) -> None:
     calls: list[list[str]] = []
 

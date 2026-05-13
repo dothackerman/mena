@@ -47,6 +47,29 @@ def test_capture_profile_round_trips_through_json_dict() -> None:
     assert restored == profile
 
 
+def test_capture_profile_accepts_discovered_device_routes() -> None:
+    profile_data = get_capture_profile(CaptureProfileId.ONLINE_DUAL_STREAM).to_dict()
+    sources = profile_data["sources"]
+    assert isinstance(sources, list)
+    first_source = sources[0]
+    assert isinstance(first_source, dict)
+    first_source["device_route"] = {
+        "backend": "pipewire",
+        "route_id": "pipewire:node:31",
+        "label": "Headset Mic",
+        "metadata": {"node.name": "alsa_input.usb"},
+    }
+
+    restored = CaptureProfile.from_dict(profile_data)
+
+    assert restored.sources[0].device_route == DeviceRoute(
+        backend="pipewire",
+        route_id="pipewire:node:31",
+        label="Headset Mic",
+        metadata={"node.name": "alsa_input.usb"},
+    )
+
+
 def test_capture_profile_rejects_unknown_name() -> None:
     profile_data = get_capture_profile(CaptureProfileId.ONLINE_DUAL_STREAM).to_dict()
     profile_data["name"] = "boardroom_array"

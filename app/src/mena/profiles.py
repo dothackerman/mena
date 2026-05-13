@@ -272,8 +272,21 @@ def _validate_profile(profile: CaptureProfile) -> None:
         raise ValueError(
             f"Capture profile '{profile.name}' must use CLI alias '{expected.cli_name}'."
         )
-    if profile.sources != expected.sources:
+    if tuple(_source_contract(source) for source in profile.sources) != tuple(
+        _source_contract(source) for source in expected.sources
+    ):
         raise ValueError(f"Capture profile '{profile.name}' has an invalid source definition.")
+
+
+def _source_contract(
+    source: CaptureSource,
+) -> tuple[CaptureSourceId, CaptureSemanticRole, ChannelLayout, DiarisationPolicy]:
+    return (
+        source.logical_id,
+        source.semantic_role,
+        source.channel_layout,
+        source.diarisation_policy,
+    )
 
 
 def _required_str(data: dict[str, object], key: str, label: str) -> str:
