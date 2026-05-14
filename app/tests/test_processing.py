@@ -106,7 +106,9 @@ def test_processing_ledger_does_not_skip_when_output_file_is_corrupt(tmp_path: P
     assert ledger.should_skip_completed("transcription") is False
 
 
-def test_processing_ledger_does_not_skip_when_output_ref_contract_drifts(tmp_path: Path) -> None:
+def test_processing_ledger_rejects_completed_stage_when_output_type_drifts(
+    tmp_path: Path,
+) -> None:
     store = _memory_store(tmp_path)
     output = store.store(artifact_type="transcript", name="segments.json", data=b"[]")
     mismatched_ref = ArtifactRef(
@@ -116,14 +118,14 @@ def test_processing_ledger_does_not_skip_when_output_ref_contract_drifts(tmp_pat
         sha256=output.sha256,
     )
     ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
-    ledger.mark_completed(
-        stage="transcription",
-        input_artifacts=(),
-        output_artifacts=(mismatched_ref,),
-        now=NOW,
-    )
 
-    assert ledger.should_skip_completed("transcription") is False
+    with pytest.raises(ProcessingStateError, match="stored and verified output artifacts"):
+        ledger.mark_completed(
+            stage="transcription",
+            input_artifacts=(),
+            output_artifacts=(mismatched_ref,),
+            now=NOW,
+        )
 
 
 def test_processing_ledger_does_not_skip_unknown_stage_or_missing_output(tmp_path: Path) -> None:
@@ -138,14 +140,37 @@ def test_processing_ledger_does_not_skip_unknown_stage_or_missing_output(tmp_pat
 
     assert ledger.should_skip_completed("transcription") is False
 
-    ledger.mark_completed(
-        stage="transcription",
-        input_artifacts=(),
-        output_artifacts=(missing_ref,),
-        now=NOW,
-    )
+    with pytest.raises(ProcessingStateError, match="stored and verified output artifacts"):
+        ledger.mark_completed(
+            stage="transcription",
+            input_artifacts=(),
+            output_artifacts=(missing_ref,),
+            now=NOW,
+        )
 
     assert ledger.should_skip_completed("transcription") is False
+
+
+def test_processing_ledger_rejects_completed_stage_when_output_ref_drifts(
+    tmp_path: Path,
+) -> None:
+    store = _memory_store(tmp_path)
+    output = store.store(artifact_type="transcript", name="segments.json", data=b"[]")
+    mismatched_ref = ArtifactRef(
+        id=output.id,
+        artifact_type="transcript",
+        version=output.version,
+        sha256="0" * 64,
+    )
+    ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+
+    with pytest.raises(ProcessingStateError, match="stored and verified output artifacts"):
+        ledger.mark_completed(
+            stage="transcription",
+            input_artifacts=(),
+            output_artifacts=(mismatched_ref,),
+            now=NOW,
+        )
 
 
 def test_processing_ledger_tracks_latest_retryable_failure(tmp_path: Path) -> None:
@@ -275,7 +300,9 @@ def test_processing_state_validation_rejects_boolean_integer_fields() -> None:
 def test_artifact_ref_validation_rejects_invalid_payloads() -> None:
     cases = [
         ("not-an-object", "JSON object"),
+        ({**_artifact_ref_dict(), "artifact_type": "Transcript"}, "stable identifier"),
         ({**_artifact_ref_dict(), "version": 0}, "positive"),
+        ({**_artifact_ref_dict(), "sha256": "not-a-digest"}, "lowercase hex digest"),
     ]
 
     for payload, message in cases:

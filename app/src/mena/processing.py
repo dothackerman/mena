@@ -13,6 +13,8 @@ from mena.artifacts import ArtifactRecord, ArtifactStore
 PROCESSING_STATE_ARTIFACT_TYPE = "processing_state"
 PROCESSING_STATE_VERSION = 1
 PROCESSING_STAGE_STATUSES = frozenset({"pending", "running", "completed", "failed", "skipped"})
+_ARTIFACT_TYPE_PATTERN = re.compile(r"^[a-z][a-z0-9_:-]*$")
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _STAGE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
@@ -46,8 +48,12 @@ class ArtifactRef:
         artifact_type = _required_str(data, "artifact_type")
         version = _required_int(data, "version")
         sha256 = _required_str(data, "sha256")
+        if not _ARTIFACT_TYPE_PATTERN.fullmatch(artifact_type):
+            raise ProcessingStateError("Artifact ref artifact_type must be a stable identifier.")
         if version < 1:
             raise ProcessingStateError("Artifact ref version must be positive.")
+        if not _SHA256_PATTERN.fullmatch(sha256):
+            raise ProcessingStateError("Artifact ref sha256 must be a lowercase hex digest.")
         return cls(id=artifact_id, artifact_type=artifact_type, version=version, sha256=sha256)
 
     def to_dict(self) -> dict[str, object]:
@@ -232,6 +238,12 @@ class ProcessingStageLedger:
             raise ProcessingStateError("Stage state session_id does not match ledger.")
         if state.run_id != self.run_id:
             raise ProcessingStateError("Stage state run_id does not match ledger.")
+        if state.status == "completed" and not all(
+            self._verified_output(artifact) for artifact in state.output_artifacts
+        ):
+            raise ProcessingStateError(
+                "Completed stages must declare stored and verified output artifacts."
+            )
         name = self._state_name(state)
         self.store.store(
             artifact_type=PROCESSING_STATE_ARTIFACT_TYPE,
