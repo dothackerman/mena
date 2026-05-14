@@ -1,0 +1,273 @@
+{
+  "$id": "https://dothackerman.github.io/mena/schemas/transcript.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "artifact_ref": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_type": {
+          "pattern": "^[a-z][a-z0-9_:-]*$",
+          "minLength": 1,
+          "type": "string"
+        },
+        "id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "version": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": ["id", "artifact_type", "version", "sha256"],
+      "type": "object"
+    },
+    "language": {
+      "additionalProperties": false,
+      "properties": {
+        "detected": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "detection_probability": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "requested": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": ["requested", "detected", "detection_probability"],
+      "type": "object"
+    },
+    "provider": {
+      "additionalProperties": false,
+      "properties": {
+        "checkpoint": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "decode_parameters": {
+          "type": "object"
+        },
+        "device": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "name": {
+          "pattern": "^[a-z][a-z0-9_:-]*$",
+          "type": "string"
+        },
+        "quantization": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "timestamp_mode": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "checkpoint",
+        "quantization",
+        "device",
+        "timestamp_mode",
+        "decode_parameters",
+        "metadata"
+      ],
+      "type": "object"
+    },
+    "segment": {
+      "additionalProperties": false,
+      "properties": {
+        "avg_logprob": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "compression_ratio": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "end_seconds": {
+          "minimum": 0,
+          "type": "number"
+        },
+        "id": {
+          "pattern": "^[a-z][a-z0-9_:-]*$",
+          "type": "string"
+        },
+        "no_speech_probability": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "start_seconds": {
+          "minimum": 0,
+          "type": "number"
+        },
+        "text": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "words": {
+          "items": {
+            "$ref": "#/$defs/word"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "text",
+        "start_seconds",
+        "end_seconds",
+        "avg_logprob",
+        "no_speech_probability",
+        "compression_ratio",
+        "words"
+      ],
+      "type": "object"
+    },
+    "word": {
+      "additionalProperties": false,
+      "properties": {
+        "end_seconds": {
+          "minimum": 0,
+          "type": "number"
+        },
+        "probability": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "start_seconds": {
+          "minimum": 0,
+          "type": "number"
+        },
+        "text": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": ["text", "start_seconds", "end_seconds", "probability"],
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Versioned raw ASR transcript artifact emitted by the transcription port.",
+  "properties": {
+    "created_at": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "language": {
+      "$ref": "#/$defs/language"
+    },
+    "provider": {
+      "$ref": "#/$defs/provider"
+    },
+    "segments": {
+      "items": {
+        "$ref": "#/$defs/segment"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "session_id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "source_artifact": {
+      "$ref": "#/$defs/artifact_ref"
+    },
+    "source_id": {
+      "anyOf": [
+        {
+          "pattern": "^[a-z][a-z0-9_:-]*$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "text": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "version": {
+      "const": 1,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version",
+    "session_id",
+    "source_artifact",
+    "source_id",
+    "provider",
+    "language",
+    "text",
+    "segments",
+    "created_at"
+  ],
+  "title": "Mena Transcript v1",
+  "type": "object"
+}
