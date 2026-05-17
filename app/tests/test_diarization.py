@@ -618,6 +618,19 @@ def test_diarization_contract_requires_schema_required_nullable_and_object_field
     with pytest.raises(DiarizationContractError, match="artifact"):
         DiarizationArtifact.from_dict(payload)
 
+    payload = _diarization_artifact(source_ref=source_ref).to_dict()
+    speaker = cast(list[dict[str, object]], payload["speakers"])[0]
+    del speaker["embedding"]
+
+    with pytest.raises(DiarizationContractError, match="embedding"):
+        DiarizationArtifact.from_dict(payload)
+
+    payload = _diarization_artifact(source_ref=source_ref).to_dict()
+    payload["overlay_entries"] = [None]
+
+    with pytest.raises(DiarizationContractError, match="correction overlay entry"):
+        DiarizationArtifact.from_dict(payload)
+
 
 def test_diarization_context_rejects_non_positive_remote_speaker_count() -> None:
     with pytest.raises(DiarizationContractError, match="at least 1"):

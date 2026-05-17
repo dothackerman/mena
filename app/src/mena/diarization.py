@@ -106,7 +106,9 @@ class DiarizedSpeaker:
         speaker = cls(
             id=_required_str(item, "id", "Diarized speaker"),
             label=_required_str(item, "label", "Diarized speaker"),
-            embedding=SpeakerEmbeddingRef.from_dict(item.get("embedding")),
+            embedding=SpeakerEmbeddingRef.from_dict(
+                _required_field(item, "embedding", "Diarized speaker")
+            ),
             metadata=_required_json_object(item, "metadata", "Diarized speaker metadata"),
         )
         _validate_stable_id(speaker.id, "Diarized speaker id")
@@ -337,7 +339,7 @@ class DiarizationArtifact:
                 for artifact_ref in _list(item, "base_artifacts")
             ),
             overlay_entries=tuple(
-                _json_object(entry, "Diarization correction overlay entry")
+                _json_object(entry, "Diarization correction overlay entry", optional=False)
                 for entry in _list(item, "overlay_entries")
             ),
             created_at=_required_str(item, "created_at", "Diarization artifact"),
@@ -1155,6 +1157,12 @@ def _required_str(data: Mapping[str, object], key: str, label: str) -> str:
     return value
 
 
+def _required_field(data: Mapping[str, object], key: str, label: str) -> object:
+    if key not in data:
+        raise DiarizationContractError(f"{label} field '{key}' is required.")
+    return data[key]
+
+
 def _optional_str(data: Mapping[str, object], key: str, label: str) -> str | None:
     value = data.get(key)
     if value is None:
@@ -1206,8 +1214,10 @@ def _required_number(data: Mapping[str, object], key: str, label: str) -> float:
     return float(value)
 
 
-def _json_object(data: object, label: str) -> Mapping[str, object]:
+def _json_object(data: object, label: str, *, optional: bool = True) -> Mapping[str, object]:
     if data is None:
+        if not optional:
+            raise DiarizationContractError(f"{label} must be a JSON object.")
         return {}
     if not isinstance(data, dict) or any(not isinstance(key, str) for key in data):
         raise DiarizationContractError(f"{label} must be a JSON object.")
