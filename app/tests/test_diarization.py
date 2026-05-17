@@ -122,8 +122,15 @@ def test_diarization_stage_reuses_completed_output_for_same_context_and_provider
 
     assert second.skipped is True
     assert second.skip_reason == "completed_output_reused"
+    assert second.state.status == "skipped"
+    assert second.state.output_artifacts == first.state.output_artifacts
     assert second.artifact_records == first.artifact_records
     assert second_provider.calls == []
+    assert [state.status for state in ledger.states(stage=DIARIZATION_STAGE)] == [
+        "running",
+        "completed",
+        "skipped",
+    ]
 
 
 def test_diarization_stage_reuse_is_scoped_to_provider_config_and_context() -> None:
@@ -455,6 +462,55 @@ def test_diarization_completed_reuse_fails_closed_when_output_ref_is_missing() -
 
     assert second.skipped is False
     assert provider.calls
+
+
+def test_diarization_completed_reuse_fails_closed_when_output_payload_is_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    source = store.store(artifact_type="source_audio", name="system_audio.wav", data=b"audio")
+    ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+    context = DiarizationContext(
+        capture_profile="online_dual_stream",
+        source_id="system_audio",
+        remote_speaker_count=2,
+    )
+    first = run_diarization_stage(
+        store=store,
+        ledger=ledger,
+        provider=FakeDiarizationProvider(),
+        source_artifact=source,
+        context=context,
+        now=NOW,
+    )
+    original_retrieve = store.retrieve
+
+    def retrieve_with_invalid_reused_payload(artifact_id: str) -> bytes:
+        if artifact_id == first.artifact_records[0].id:
+            return b"{not-json"
+        return original_retrieve(artifact_id)
+
+    monkeypatch.setattr(store, "retrieve", retrieve_with_invalid_reused_payload)
+    provider = FakeDiarizationProvider()
+
+    second = run_diarization_stage(
+        store=store,
+        ledger=ledger,
+        provider=provider,
+        source_artifact=source,
+        context=context,
+        attempt=2,
+        now=NOW,
+    )
+
+    assert second.skipped is False
+    assert provider.calls
+    assert [state.status for state in ledger.states(stage=DIARIZATION_STAGE)] == [
+        "running",
+        "completed",
+        "running",
+        "completed",
+    ]
 
 
 def test_persist_diarization_artifact_validates_contract_before_writing() -> None:

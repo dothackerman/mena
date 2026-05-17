@@ -678,20 +678,32 @@ def run_diarization_stage(
             context=context,
         )
         if completed is not None:
-            records = tuple(
-                _record_for_ref(store=store, artifact_ref=ref) for ref in completed.output_artifacts
-            )
-            artifacts = tuple(
-                DiarizationArtifact.from_dict(json.loads(store.retrieve(record.id)))
-                for record in records
-            )
-            return DiarizationStageResult(
-                state=completed,
-                artifacts=artifacts,
-                artifact_records=records,
-                skipped=True,
-                skip_reason="completed_output_reused",
-            )
+            reused = _load_reusable_outputs(store=store, completed=completed)
+            if reused is not None:
+                records, artifacts = reused
+                timestamp = _timestamp(now)
+                state = ledger.record(
+                    ProcessingStageState(
+                        version=PROCESSING_STATE_VERSION,
+                        session_id=ledger.session_id,
+                        run_id=ledger.run_id,
+                        stage=stage,
+                        status="skipped",
+                        input_artifacts=(input_ref,),
+                        output_artifacts=completed.output_artifacts,
+                        started_at=timestamp,
+                        completed_at=timestamp,
+                        error=None,
+                        attempt=attempt,
+                    )
+                )
+                return DiarizationStageResult(
+                    state=state,
+                    artifacts=artifacts,
+                    artifact_records=records,
+                    skipped=True,
+                    skip_reason="completed_output_reused",
+                )
 
     started = ledger.mark_running(
         stage=stage,
@@ -937,6 +949,24 @@ def _completed_state_for_context(
         ):
             return state
     return None
+
+
+def _load_reusable_outputs(
+    *,
+    store: ArtifactStore,
+    completed: ProcessingStageState,
+) -> tuple[tuple[ArtifactRecord, ...], tuple[DiarizationArtifact, ...]] | None:
+    try:
+        records = tuple(
+            _record_for_ref(store=store, artifact_ref=ref) for ref in completed.output_artifacts
+        )
+        artifacts = tuple(
+            DiarizationArtifact.from_dict(json.loads(store.retrieve(record.id)))
+            for record in records
+        )
+    except (DiarizationError, json.JSONDecodeError, KeyError, UnicodeDecodeError):
+        return None
+    return records, artifacts
 
 
 def _mark_diarization_failed(
