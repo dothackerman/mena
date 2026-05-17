@@ -14,6 +14,7 @@ Examples:
 - `artifact-manifest.v1.schema.json`
 - `processing-state.v1.schema.json`
 - `transcript.v1.schema.json`
+- `diarization.v1.schema.json`
 
 Schema versions are local to the contract they describe.
 Do not introduce a global application schema version just to coordinate unrelated persisted formats.
