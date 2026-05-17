@@ -262,6 +262,35 @@ def test_diarization_stage_fails_before_provider_when_source_artifact_is_corrupt
     assert store.list(artifact_type=DIARIZATION_ARTIFACT_TYPE) == ()
 
 
+def test_diarization_stage_records_failed_checkpoint_for_missing_input_artifact() -> None:
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    source = store.store(artifact_type="source_audio", name="system_audio.wav", data=b"audio")
+    del store._records[source.id]
+    ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+    provider = FakeDiarizationProvider()
+
+    with pytest.raises(DiarizationInputError, match="not available"):
+        run_diarization_stage(
+            store=store,
+            ledger=ledger,
+            provider=provider,
+            source_artifact=source,
+            context=DiarizationContext(
+                capture_profile="online_dual_stream",
+                source_id="system_audio",
+                remote_speaker_count=2,
+            ),
+            now=NOW,
+        )
+
+    assert provider.calls == []
+    latest = ledger.latest(DIARIZATION_STAGE)
+    assert latest is not None
+    assert latest.status == "failed"
+    assert latest.error is not None
+    assert latest.error.code == "input_artifact_invalid"
+
+
 def test_diarization_stage_records_retryable_provider_unavailable() -> None:
     class UnavailableProvider:
         name = "unavailable"
@@ -328,6 +357,73 @@ def test_diarization_stage_records_nonretryable_provider_failure() -> None:
     assert latest.error.code == "diarization_failed"
 
 
+def test_diarization_stage_records_failed_checkpoint_for_untyped_provider_exception() -> None:
+    class CrashingProvider:
+        name = "crashing"
+        config_id = "crashing"
+
+        def diarize(self, request: DiarizationRequest) -> Any:
+            raise ValueError("library exploded")
+
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    source = store.store(artifact_type="source_audio", name="system_audio.wav", data=b"audio")
+    ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+
+    with pytest.raises(DiarizationError, match="library exploded"):
+        run_diarization_stage(
+            store=store,
+            ledger=ledger,
+            provider=CrashingProvider(),
+            source_artifact=source,
+            context=DiarizationContext(
+                capture_profile="online_dual_stream",
+                source_id="system_audio",
+            ),
+            now=NOW,
+        )
+
+    latest = ledger.latest(DIARIZATION_STAGE)
+    assert latest is not None
+    assert latest.status == "failed"
+    assert latest.error is not None
+    assert latest.error.retryable is False
+    assert latest.error.code == "provider_exception"
+
+
+def test_diarization_completed_reuse_fails_closed_when_output_ref_is_missing() -> None:
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    source = store.store(artifact_type="source_audio", name="system_audio.wav", data=b"audio")
+    ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+    context = DiarizationContext(
+        capture_profile="online_dual_stream",
+        source_id="system_audio",
+        remote_speaker_count=2,
+    )
+    first = run_diarization_stage(
+        store=store,
+        ledger=ledger,
+        provider=FakeDiarizationProvider(),
+        source_artifact=source,
+        context=context,
+        now=NOW,
+    )
+    for record in first.artifact_records:
+        del store._records[record.id]
+    provider = FakeDiarizationProvider()
+
+    second = run_diarization_stage(
+        store=store,
+        ledger=ledger,
+        provider=provider,
+        source_artifact=source,
+        context=context,
+        now=NOW,
+    )
+
+    assert second.skipped is False
+    assert provider.calls
+
+
 def test_persist_diarization_artifact_validates_contract_before_writing() -> None:
     store = InMemoryArtifactStore(session_id=SESSION_ID)
     source = store.store(artifact_type="source_audio", name="room.wav", data=b"audio")
@@ -354,6 +450,41 @@ def test_diarization_schema_rejects_incomplete_provider_metadata() -> None:
     validator = Draft202012Validator(_load_diarization_schema(), format_checker=FormatChecker())
 
     with pytest.raises(ValidationError, match="'checkpoint' is a required property"):
+        validator.validate(payload)
+
+
+def test_diarization_schema_rejects_python_contract_mismatches() -> None:
+    source_ref = ArtifactRef(
+        id=f"{SESSION_ID}:artifacts/source_audio/system.wav",
+        artifact_type="source_audio",
+        version=1,
+        sha256="0" * 64,
+    )
+    validator = Draft202012Validator(_load_diarization_schema(), format_checker=FormatChecker())
+
+    payload = _diarization_artifact(source_ref=source_ref).to_dict()
+    cast(dict[str, object], payload["context"])["remote_speaker_count"] = 0
+    with pytest.raises(ValidationError, match="minimum"):
+        validator.validate(payload)
+
+    payload = _diarization_artifact(source_ref=source_ref).to_dict()
+    embedding = cast(
+        dict[str, object],
+        cast(list[dict[str, object]], payload["speakers"])[0]["embedding"],
+    )
+    embedding["status"] = "unavailable"
+    embedding["reason"] = None
+    with pytest.raises(ValidationError, match="not of type 'string'"):
+        validator.validate(payload)
+
+    payload = _diarization_artifact(source_ref=source_ref).to_dict()
+    embedding = cast(
+        dict[str, object],
+        cast(list[dict[str, object]], payload["speakers"])[0]["embedding"],
+    )
+    embedding["status"] = "available"
+    embedding["artifact"] = None
+    with pytest.raises(ValidationError, match="not of type 'object'"):
         validator.validate(payload)
 
 
@@ -403,6 +534,15 @@ def test_diarization_contract_rejects_unknown_speaker_and_bad_embedding() -> Non
 
     with pytest.raises(DiarizationContractError, match="record a reason"):
         DiarizationArtifact.from_dict(payload)
+
+
+def test_diarization_context_rejects_non_positive_remote_speaker_count() -> None:
+    with pytest.raises(DiarizationContractError, match="at least 1"):
+        DiarizationContext(
+            capture_profile="online_dual_stream",
+            source_id="system_audio",
+            remote_speaker_count=0,
+        )
 
 
 def test_pyannote_provider_reports_missing_optional_dependency(tmp_path: Path) -> None:

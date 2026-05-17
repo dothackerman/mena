@@ -14,6 +14,7 @@ from typing import Any, Protocol, Self, cast
 
 from mena.artifacts import ArtifactRecord, ArtifactStore
 from mena.processing import (
+    PROCESSING_STATE_VERSION,
     ArtifactRef,
     ProcessingErrorInfo,
     ProcessingStageLedger,
@@ -207,6 +208,14 @@ class DiarizationContext:
     source_id: str
     enabled: bool = True
     remote_speaker_count: int | None = None
+
+    def __post_init__(self) -> None:
+        _validate_stable_id(self.capture_profile, "Diarization capture_profile")
+        _validate_stable_id(self.source_id, "Diarization source_id")
+        if self.remote_speaker_count is not None and self.remote_speaker_count < 1:
+            raise DiarizationContractError(
+                "Diarization remote_speaker_count must be null or at least 1."
+            )
 
     @property
     def policy_id(self) -> str:
@@ -604,7 +613,7 @@ def run_diarization_stage(
     if not decision.should_run:
         state = ledger.record(
             ProcessingStageState(
-                version=1,
+                version=PROCESSING_STATE_VERSION,
                 session_id=ledger.session_id,
                 run_id=ledger.run_id,
                 stage=stage,
@@ -650,7 +659,23 @@ def run_diarization_stage(
         attempt=attempt,
         now=now,
     )
-    verification = store.verify(source_artifact.id)
+    try:
+        verification = store.verify(source_artifact.id)
+    except KeyError as exc:
+        failed = _mark_diarization_failed(
+            ledger=ledger,
+            stage=stage,
+            input_ref=input_ref,
+            attempt=attempt,
+            started_at=started.started_at,
+            now=now,
+            message=f"source artifact is not available in this store: {source_artifact.id}",
+            retryable=False,
+            code="input_artifact_invalid",
+        )
+        raise DiarizationInputError(
+            failed.error.message if failed.error else "invalid input"
+        ) from exc
     if not verification.ok:
         failed = _mark_diarization_failed(
             ledger=ledger,
@@ -710,6 +735,19 @@ def run_diarization_stage(
             message=str(exc),
             retryable=False,
             code="diarization_failed",
+        )
+        raise DiarizationError(failed.error.message if failed.error else str(exc)) from exc
+    except Exception as exc:
+        failed = _mark_diarization_failed(
+            ledger=ledger,
+            stage=stage,
+            input_ref=input_ref,
+            attempt=attempt,
+            started_at=started.started_at,
+            now=now,
+            message=str(exc) or exc.__class__.__name__,
+            retryable=False,
+            code="provider_exception",
         )
         raise DiarizationError(failed.error.message if failed.error else str(exc)) from exc
 
@@ -842,9 +880,12 @@ def _completed_state_for_context(
             continue
         if len(state.output_artifacts) != 3:
             continue
-        records = tuple(
-            _record_for_ref(store=store, artifact_ref=ref) for ref in state.output_artifacts
-        )
+        try:
+            records = tuple(
+                _record_for_ref(store=store, artifact_ref=ref) for ref in state.output_artifacts
+            )
+        except DiarizationContractError:
+            continue
         if {str(record.metadata.get("kind")) for record in records} != expected_kinds:
             continue
         if all(
@@ -895,7 +936,7 @@ def _artifact_ref_verifies(*, store: ArtifactStore, artifact_ref: ArtifactRef) -
     try:
         record = _record_for_ref(store=store, artifact_ref=artifact_ref)
         verification = store.verify(record.id)
-    except KeyError:
+    except (DiarizationContractError, KeyError):
         return False
     return verification.ok
 
