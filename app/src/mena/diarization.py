@@ -554,7 +554,14 @@ class PyannoteCommunityDiarizationProvider:
                 raise DiarizationProviderUnavailable(
                     "pyannote.audio is not installed in this environment."
                 ) from exc
-            self._pipeline_factory = cast(PipelineFactory, module.Pipeline.from_pretrained)
+            pipeline_class = getattr(module, "Pipeline", None)
+            pipeline_factory = getattr(pipeline_class, "from_pretrained", None)
+            if not callable(pipeline_factory):
+                raise DiarizationProviderUnavailable(
+                    "pyannote.audio Pipeline.from_pretrained is unavailable; "
+                    "installed pyannote.audio version is incompatible."
+                )
+            self._pipeline_factory = cast(PipelineFactory, pipeline_factory)
         try:
             pipeline = self._build_pipeline()
         except TypeError as exc:

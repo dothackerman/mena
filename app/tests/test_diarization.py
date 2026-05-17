@@ -723,6 +723,36 @@ def test_pyannote_provider_reports_missing_optional_dependency(tmp_path: Path) -
         )
 
 
+def test_pyannote_provider_reports_incompatible_optional_dependency(tmp_path: Path) -> None:
+    source_ref = ArtifactRef(
+        id=f"{SESSION_ID}:artifacts/source_audio/system.wav",
+        artifact_type="source_audio",
+        version=1,
+        sha256="0" * 64,
+    )
+
+    class ModuleWithoutPipeline:
+        pass
+
+    provider = PyannoteCommunityDiarizationProvider(
+        module_loader=lambda _name: ModuleWithoutPipeline(),
+    )
+
+    with pytest.raises(DiarizationProviderUnavailable, match="Pipeline.from_pretrained"):
+        provider.diarize(
+            DiarizationRequest(
+                session_id=SESSION_ID,
+                source_artifact=source_ref,
+                source_id="system_audio",
+                context=DiarizationContext(
+                    capture_profile="online_dual_stream",
+                    source_id="system_audio",
+                ),
+                audio_path=tmp_path / "system.wav",
+            )
+        )
+
+
 def test_pyannote_provider_requires_audio_path() -> None:
     source_ref = ArtifactRef(
         id=f"{SESSION_ID}:artifacts/source_audio/system.wav",
