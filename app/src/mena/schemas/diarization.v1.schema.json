@@ -1,0 +1,329 @@
+{
+  "$id": "https://dothackerman.github.io/mena/schemas/diarization.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "artifact_ref": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_type": {
+          "pattern": "^[a-z][a-z0-9_:-]*$",
+          "minLength": 1,
+          "type": "string"
+        },
+        "id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "version": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": ["id", "artifact_type", "version", "sha256"],
+      "type": "object"
+    },
+    "context": {
+      "additionalProperties": false,
+      "properties": {
+        "capture_profile": {
+          "pattern": "^[a-z][a-z0-9_:-]*$",
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "policy_version": {
+          "const": 1,
+          "type": "integer"
+        },
+        "remote_speaker_count": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_id": {
+          "pattern": "^[a-z][a-z0-9_:-]*$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "policy_version",
+        "capture_profile",
+        "source_id",
+        "enabled",
+        "remote_speaker_count"
+      ],
+      "type": "object"
+    },
+    "embedding": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "available"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "artifact": {
+                "$ref": "#/$defs/artifact_ref"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "unavailable"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "minLength": 1,
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "artifact": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/artifact_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "enum": ["available", "unavailable"],
+          "type": "string"
+        }
+      },
+      "required": ["status", "artifact", "reason"],
+      "type": "object"
+    },
+    "provider": {
+      "additionalProperties": false,
+      "properties": {
+        "checkpoint": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "device": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "name": {
+          "pattern": "^[a-z][a-z0-9_:-]*$",
+          "type": "string"
+        },
+        "parameters": {
+          "type": "object"
+        }
+      },
+      "required": ["name", "checkpoint", "device", "parameters", "metadata"],
+      "type": "object"
+    },
+    "segment": {
+      "additionalProperties": false,
+      "properties": {
+        "end_seconds": {
+          "minimum": 0,
+          "type": "number"
+        },
+        "id": {
+          "pattern": "^[a-z][a-z0-9_:-]*$",
+          "type": "string"
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "overlapped": {
+          "type": "boolean"
+        },
+        "speaker_id": {
+          "pattern": "^[a-z][a-z0-9_:-]*$",
+          "type": "string"
+        },
+        "start_seconds": {
+          "minimum": 0,
+          "type": "number"
+        }
+      },
+      "required": [
+        "id",
+        "speaker_id",
+        "start_seconds",
+        "end_seconds",
+        "overlapped",
+        "metadata"
+      ],
+      "type": "object"
+    },
+    "speaker": {
+      "additionalProperties": false,
+      "properties": {
+        "embedding": {
+          "$ref": "#/$defs/embedding"
+        },
+        "id": {
+          "pattern": "^[a-z][a-z0-9_:-]*$",
+          "type": "string"
+        },
+        "label": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "metadata": {
+          "type": "object"
+        }
+      },
+      "required": ["id", "label", "embedding", "metadata"],
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "enum": ["regular_timeline", "exclusive_projection"]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "segments": {
+            "minItems": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "correction_overlay"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "base_artifacts": {
+            "maxItems": 2,
+            "minItems": 2
+          },
+          "segments": {
+            "maxItems": 0
+          }
+        }
+      }
+    }
+  ],
+  "description": "Versioned diarization artifact emitted by the diarization port.",
+  "properties": {
+    "base_artifacts": {
+      "items": {
+        "$ref": "#/$defs/artifact_ref"
+      },
+      "type": "array"
+    },
+    "context": {
+      "$ref": "#/$defs/context"
+    },
+    "created_at": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "kind": {
+      "enum": ["regular_timeline", "exclusive_projection", "correction_overlay"],
+      "type": "string"
+    },
+    "overlay_entries": {
+      "items": {
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "provider": {
+      "$ref": "#/$defs/provider"
+    },
+    "segments": {
+      "items": {
+        "$ref": "#/$defs/segment"
+      },
+      "type": "array"
+    },
+    "session_id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "source_artifact": {
+      "$ref": "#/$defs/artifact_ref"
+    },
+    "source_id": {
+      "pattern": "^[a-z][a-z0-9_:-]*$",
+      "type": "string"
+    },
+    "speakers": {
+      "items": {
+        "$ref": "#/$defs/speaker"
+      },
+      "type": "array"
+    },
+    "version": {
+      "const": 1,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version",
+    "kind",
+    "session_id",
+    "source_artifact",
+    "source_id",
+    "context",
+    "provider",
+    "speakers",
+    "segments",
+    "base_artifacts",
+    "overlay_entries",
+    "created_at"
+  ],
+  "title": "Mena Diarization v1",
+  "type": "object"
+}
