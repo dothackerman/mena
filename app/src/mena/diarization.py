@@ -6,7 +6,7 @@ import importlib
 import json
 import re
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
@@ -64,12 +64,12 @@ class SpeakerEmbeddingRef:
     @classmethod
     def from_dict(cls, data: object) -> Self:
         item = _mapping(data, "Speaker embedding")
+        if "artifact" not in item:
+            raise DiarizationContractError("Speaker embedding field 'artifact' is required.")
         embedding = cls(
             status=_required_str(item, "status", "Speaker embedding"),
-            artifact=None
-            if item.get("artifact") is None
-            else ArtifactRef.from_dict(item.get("artifact")),
-            reason=_optional_str(item, "reason", "Speaker embedding"),
+            artifact=None if item["artifact"] is None else ArtifactRef.from_dict(item["artifact"]),
+            reason=_required_optional_str(item, "reason", "Speaker embedding"),
         )
         if embedding.status not in EMBEDDING_STATUSES:
             raise DiarizationContractError("Speaker embedding status is invalid.")
@@ -105,7 +105,7 @@ class DiarizedSpeaker:
             id=_required_str(item, "id", "Diarized speaker"),
             label=_required_str(item, "label", "Diarized speaker"),
             embedding=SpeakerEmbeddingRef.from_dict(item.get("embedding")),
-            metadata=_json_object(item.get("metadata"), "Diarized speaker metadata"),
+            metadata=_required_json_object(item, "metadata", "Diarized speaker metadata"),
         )
         _validate_stable_id(speaker.id, "Diarized speaker id")
         return speaker
@@ -139,7 +139,7 @@ class DiarizationSegment:
             start_seconds=_required_number(item, "start_seconds", "Diarization segment"),
             end_seconds=_required_number(item, "end_seconds", "Diarization segment"),
             overlapped=_required_bool(item, "overlapped", "Diarization segment"),
-            metadata=_json_object(item.get("metadata"), "Diarization segment metadata"),
+            metadata=_required_json_object(item, "metadata", "Diarization segment metadata"),
         )
         _validate_stable_id(segment.id, "Diarization segment id")
         _validate_stable_id(segment.speaker_id, "Diarization segment speaker_id")
@@ -174,8 +174,8 @@ class DiarizationProviderMetadata:
             name=_required_str(item, "name", "Diarization provider"),
             checkpoint=_required_str(item, "checkpoint", "Diarization provider"),
             device=_required_str(item, "device", "Diarization provider"),
-            parameters=_json_object(item.get("parameters"), "Diarization provider parameters"),
-            metadata=_json_object(item.get("metadata"), "Diarization provider metadata"),
+            parameters=_required_json_object(item, "parameters", "Diarization provider parameters"),
+            metadata=_required_json_object(item, "metadata", "Diarization provider metadata"),
         )
         _validate_stable_id(provider.name, "Diarization provider name")
         return provider
@@ -317,7 +317,7 @@ class DiarizationArtifact:
                 ),
                 source_id=_required_str(context_data, "source_id", "Diarization context"),
                 enabled=_required_bool(context_data, "enabled", "Diarization context"),
-                remote_speaker_count=_optional_int(
+                remote_speaker_count=_required_optional_int(
                     context_data,
                     "remote_speaker_count",
                     "Diarization context",
@@ -616,6 +616,7 @@ def run_diarization_stage(
     input_ref = ArtifactRef.from_record(source_artifact)
     decision = decide_diarization(context)
     if not decision.should_run:
+        timestamp = _timestamp(now)
         state = ledger.record(
             ProcessingStageState(
                 version=PROCESSING_STATE_VERSION,
@@ -625,8 +626,8 @@ def run_diarization_stage(
                 status="skipped",
                 input_artifacts=(input_ref,),
                 output_artifacts=(),
-                started_at=_timestamp(now),
-                completed_at=_timestamp(now),
+                started_at=timestamp,
+                completed_at=timestamp,
                 error=None,
                 attempt=attempt,
             )
@@ -972,6 +973,7 @@ def _segments_from_pyannote(output: object) -> Iterable[DiarizationSegment]:
     itertracks = getattr(output, "itertracks", None)
     if itertracks is None:
         raise DiarizationContractError("pyannote output must expose itertracks.")
+    segments: list[DiarizationSegment] = []
     for index, item in enumerate(itertracks(yield_label=True), start=1):
         try:
             turn, _track, label = item
@@ -980,13 +982,28 @@ def _segments_from_pyannote(output: object) -> Iterable[DiarizationSegment]:
                 "pyannote itertracks must yield turn, track, label."
             ) from exc
         speaker_id = _stable_speaker_id(str(label))
-        yield DiarizationSegment(
-            id=f"turn_{index:06d}",
-            speaker_id=speaker_id,
-            start_seconds=_required_attr_number(turn, "start"),
-            end_seconds=_required_attr_number(turn, "end"),
-            overlapped=False,
+        segments.append(
+            DiarizationSegment(
+                id=f"turn_{index:06d}",
+                speaker_id=speaker_id,
+                start_seconds=_required_attr_number(turn, "start"),
+                end_seconds=_required_attr_number(turn, "end"),
+                overlapped=False,
+            )
         )
+    overlapped = {
+        index
+        for index, segment in enumerate(segments)
+        if any(
+            index != other_index
+            and segment.start_seconds < other.end_seconds
+            and other.start_seconds < segment.end_seconds
+            for other_index, other in enumerate(segments)
+        )
+    }
+    return tuple(
+        replace(segment, overlapped=index in overlapped) for index, segment in enumerate(segments)
+    )
 
 
 def _exclusive_projection(
@@ -1095,6 +1112,12 @@ def _optional_str(data: Mapping[str, object], key: str, label: str) -> str | Non
     return value
 
 
+def _required_optional_str(data: Mapping[str, object], key: str, label: str) -> str | None:
+    if key not in data:
+        raise DiarizationContractError(f"{label} field '{key}' is required.")
+    return _optional_str(data, key, label)
+
+
 def _required_int(data: Mapping[str, object], key: str, label: str) -> int:
     value = data.get(key)
     if type(value) is not int:
@@ -1109,6 +1132,12 @@ def _optional_int(data: Mapping[str, object], key: str, label: str) -> int | Non
     if type(value) is not int:
         raise DiarizationContractError(f"{label} field '{key}' must be null or an integer.")
     return value
+
+
+def _required_optional_int(data: Mapping[str, object], key: str, label: str) -> int | None:
+    if key not in data:
+        raise DiarizationContractError(f"{label} field '{key}' is required.")
+    return _optional_int(data, key, label)
 
 
 def _required_bool(data: Mapping[str, object], key: str, label: str) -> bool:
@@ -1135,6 +1164,14 @@ def _json_object(data: object, label: str) -> Mapping[str, object]:
     except TypeError as exc:
         raise DiarizationContractError(f"{label} must be JSON serializable.") from exc
     return data
+
+
+def _required_json_object(data: Mapping[str, object], key: str, label: str) -> Mapping[str, object]:
+    if key not in data:
+        raise DiarizationContractError(f"{label} field '{key}' is required.")
+    if data[key] is None:
+        raise DiarizationContractError(f"{label} field '{key}' must be a JSON object.")
+    return _json_object(data[key], label)
 
 
 def _validate_stable_id(value: str, label: str) -> None:

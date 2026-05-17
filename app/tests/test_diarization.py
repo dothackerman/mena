@@ -8,6 +8,7 @@ import pytest
 from jsonschema import Draft202012Validator, FormatChecker
 from jsonschema.exceptions import ValidationError
 
+import mena.diarization as diarization_module
 from mena.artifacts import FileSystemArtifactStore, InMemoryArtifactStore
 from mena.diarization import (
     DIARIZATION_ARTIFACT_TYPE,
@@ -193,6 +194,38 @@ def test_diarization_stage_records_explicit_skip_for_local_mic() -> None:
     assert result.state.output_artifacts == ()
     assert provider.calls == []
     assert store.list(artifact_type=DIARIZATION_ARTIFACT_TYPE) == ()
+
+
+def test_diarization_stage_reuses_one_timestamp_for_skipped_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class TickingDatetime:
+        calls = iter(
+            (
+                datetime(2026, 5, 17, 10, 0, 0, tzinfo=UTC),
+                datetime(2026, 5, 17, 10, 0, 1, tzinfo=UTC),
+            )
+        )
+
+        @staticmethod
+        def now(tz: object) -> datetime:
+            return next(TickingDatetime.calls)
+
+    monkeypatch.setattr(diarization_module, "datetime", TickingDatetime)
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    source = store.store(artifact_type="source_audio", name="local_mic.wav", data=b"audio")
+    ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+
+    result = run_diarization_stage(
+        store=store,
+        ledger=ledger,
+        provider=FakeDiarizationProvider(),
+        source_artifact=source,
+        context=DiarizationContext(capture_profile="online_dual_stream", source_id="local_mic"),
+    )
+
+    assert result.state.started_at == "2026-05-17T10:00:00Z"
+    assert result.state.completed_at == result.state.started_at
 
 
 def test_diarization_policy_runs_room_mic_and_skips_single_remote_speaker() -> None:
@@ -487,6 +520,12 @@ def test_diarization_schema_rejects_python_contract_mismatches() -> None:
     with pytest.raises(ValidationError, match="not of type 'object'"):
         validator.validate(payload)
 
+    payload = _diarization_artifact(source_ref=source_ref, kind="correction_overlay").to_dict()
+    payload["segments"] = []
+    payload["base_artifacts"] = [source_ref.to_dict(), source_ref.to_dict(), source_ref.to_dict()]
+    with pytest.raises(ValidationError, match="is too long"):
+        validator.validate(payload)
+
 
 def test_diarization_schema_is_valid() -> None:
     Draft202012Validator.check_schema(_load_diarization_schema())
@@ -548,6 +587,35 @@ def test_diarization_contract_rejects_unknown_policy_version() -> None:
     context["policy_version"] = 999
 
     with pytest.raises(DiarizationContractError, match="policy_version"):
+        DiarizationArtifact.from_dict(payload)
+
+
+def test_diarization_contract_requires_schema_required_nullable_and_object_fields() -> None:
+    source_ref = ArtifactRef(
+        id=f"{SESSION_ID}:artifacts/source_audio/system.wav",
+        artifact_type="source_audio",
+        version=1,
+        sha256="0" * 64,
+    )
+    payload = _diarization_artifact(source_ref=source_ref).to_dict()
+    del cast(dict[str, object], payload["context"])["remote_speaker_count"]
+
+    with pytest.raises(DiarizationContractError, match="remote_speaker_count"):
+        DiarizationArtifact.from_dict(payload)
+
+    payload = _diarization_artifact(source_ref=source_ref).to_dict()
+    segment = cast(list[dict[str, object]], payload["segments"])[0]
+    del segment["metadata"]
+
+    with pytest.raises(DiarizationContractError, match="metadata"):
+        DiarizationArtifact.from_dict(payload)
+
+    payload = _diarization_artifact(source_ref=source_ref).to_dict()
+    speaker = cast(list[dict[str, object]], payload["speakers"])[0]
+    embedding = cast(dict[str, object], speaker["embedding"])
+    del embedding["artifact"]
+
+    with pytest.raises(DiarizationContractError, match="artifact"):
         DiarizationArtifact.from_dict(payload)
 
 
@@ -622,7 +690,7 @@ def test_pyannote_provider_maps_turns_without_confidence_scores(tmp_path: Path) 
             assert yield_label is True
             return [
                 (FakeTurn(0.0, 1.0), "track-a", "SPEAKER_00"),
-                (FakeTurn(1.0, 2.0), "track-b", "SPEAKER_01"),
+                (FakeTurn(0.8, 2.0), "track-b", "SPEAKER_01"),
             ]
 
     class FakePipeline:
@@ -664,6 +732,7 @@ def test_pyannote_provider_maps_turns_without_confidence_scores(tmp_path: Path) 
     assert calls[1]["audio_path"] == str(tmp_path / "system.wav")
     assert [speaker.id for speaker in result.speakers] == ["speaker_00", "speaker_01"]
     assert result.regular_segments[0].speaker_id == "speaker_00"
+    assert [segment.overlapped for segment in result.regular_segments] == [True, True]
     assert result.speakers[0].embedding.status == "unavailable"
 
 
