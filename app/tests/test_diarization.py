@@ -736,6 +736,112 @@ def test_pyannote_provider_maps_turns_without_confidence_scores(tmp_path: Path) 
     assert result.speakers[0].embedding.status == "unavailable"
 
 
+def test_pyannote_provider_applies_non_cpu_device(tmp_path: Path) -> None:
+    class FakeTurn:
+        start = 0.0
+        end = 1.0
+
+    class FakeAnnotation:
+        def itertracks(self, *, yield_label: bool) -> list[tuple[FakeTurn, str, str]]:
+            assert yield_label is True
+            return [(FakeTurn(), "track-a", "SPEAKER_00")]
+
+    class FakePipeline:
+        def __init__(self) -> None:
+            self.devices: list[str] = []
+
+        def to(self, device: str) -> "FakePipeline":
+            self.devices.append(device)
+            return self
+
+        def __call__(self, audio_path: str) -> FakeAnnotation:
+            return FakeAnnotation()
+
+    pipeline = FakePipeline()
+    source_ref = ArtifactRef(
+        id=f"{SESSION_ID}:artifacts/source_audio/system.wav",
+        artifact_type="source_audio",
+        version=1,
+        sha256="0" * 64,
+    )
+    provider = PyannoteCommunityDiarizationProvider(
+        device="cuda",
+        pipeline_factory=lambda _checkpoint: pipeline,
+    )
+
+    provider.diarize(
+        DiarizationRequest(
+            session_id=SESSION_ID,
+            source_artifact=source_ref,
+            source_id="system_audio",
+            context=DiarizationContext(
+                capture_profile="online_dual_stream",
+                source_id="system_audio",
+            ),
+            audio_path=tmp_path / "system.wav",
+        )
+    )
+
+    assert pipeline.devices == ["cuda"]
+
+
+def test_pyannote_provider_rejects_unapplied_non_cpu_device(tmp_path: Path) -> None:
+    source_ref = ArtifactRef(
+        id=f"{SESSION_ID}:artifacts/source_audio/system.wav",
+        artifact_type="source_audio",
+        version=1,
+        sha256="0" * 64,
+    )
+    provider = PyannoteCommunityDiarizationProvider(
+        device="cuda",
+        pipeline_factory=lambda _checkpoint: object(),
+    )
+
+    with pytest.raises(DiarizationProviderUnavailable, match="does not support moving"):
+        provider.diarize(
+            DiarizationRequest(
+                session_id=SESSION_ID,
+                source_artifact=source_ref,
+                source_id="system_audio",
+                context=DiarizationContext(
+                    capture_profile="online_dual_stream",
+                    source_id="system_audio",
+                ),
+                audio_path=tmp_path / "system.wav",
+            )
+        )
+
+
+def test_pyannote_provider_does_not_mask_factory_type_errors(tmp_path: Path) -> None:
+    def pipeline_factory(_checkpoint: str, *, token: str) -> object:
+        raise TypeError("internal construction error")
+
+    source_ref = ArtifactRef(
+        id=f"{SESSION_ID}:artifacts/source_audio/system.wav",
+        artifact_type="source_audio",
+        version=1,
+        sha256="0" * 64,
+    )
+    provider = PyannoteCommunityDiarizationProvider(
+        token="token",
+        pipeline_factory=pipeline_factory,
+    )
+
+    with pytest.raises(DiarizationProviderUnavailable, match="internal construction error"):
+        provider.diarize(
+            DiarizationRequest(
+                session_id=SESSION_ID,
+                source_artifact=source_ref,
+                source_id="system_audio",
+                context=DiarizationContext(
+                    capture_profile="online_dual_stream",
+                    source_id="system_audio",
+                ),
+                audio_path=tmp_path / "system.wav",
+            )
+        )
+
+
 def test_pyannote_provider_handles_no_token_factory_and_empty_output(tmp_path: Path) -> None:
     class EmptyAnnotation:
         def itertracks(self, *, yield_label: bool) -> list[tuple[object, str, str]]:
@@ -748,10 +854,8 @@ def test_pyannote_provider_handles_no_token_factory_and_empty_output(tmp_path: P
 
     calls: list[tuple[object, ...]] = []
 
-    def pipeline_factory(*args: object, **kwargs: object) -> FakePipeline:
+    def pipeline_factory(*args: object) -> FakePipeline:
         calls.append(args)
-        if "token" in kwargs:
-            raise TypeError("token unsupported")
         return FakePipeline()
 
     source_ref = ArtifactRef(
@@ -776,7 +880,7 @@ def test_pyannote_provider_handles_no_token_factory_and_empty_output(tmp_path: P
             )
         )
 
-    assert calls == [("pyannote/speaker-diarization-community-1",)] * 2
+    assert calls == [("pyannote/speaker-diarization-community-1",)]
 
 
 def test_pyannote_provider_rejects_invalid_itertracks_output(tmp_path: Path) -> None:

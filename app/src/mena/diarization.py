@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 import json
 import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from hashlib import sha256
+from heapq import heappop, heappush
 from pathlib import Path
 from typing import Any, Protocol, Self, cast
 
@@ -552,10 +554,40 @@ class PyannoteCommunityDiarizationProvider:
                 ) from exc
             self._pipeline_factory = cast(PipelineFactory, module.Pipeline.from_pretrained)
         try:
-            self._pipeline = self._pipeline_factory(self.checkpoint, token=self.token)
-        except TypeError:
-            self._pipeline = self._pipeline_factory(self.checkpoint)
+            pipeline = self._build_pipeline()
+        except TypeError as exc:
+            raise DiarizationProviderUnavailable(
+                f"pyannote pipeline could not be constructed: {exc}"
+            ) from exc
+        self._pipeline = self._apply_device(pipeline)
         return self._pipeline
+
+    def _build_pipeline(self) -> Any:
+        if self._pipeline_factory is None:
+            raise DiarizationProviderUnavailable("pyannote pipeline factory is unavailable.")
+        if self.token is None:
+            return self._pipeline_factory(self.checkpoint)
+        if not _callable_accepts_keyword(self._pipeline_factory, "token"):
+            raise DiarizationProviderUnavailable(
+                "pyannote pipeline factory does not accept a token argument."
+            )
+        return self._pipeline_factory(self.checkpoint, token=self.token)
+
+    def _apply_device(self, pipeline: Any) -> Any:
+        move = getattr(pipeline, "to", None)
+        if move is None:
+            if self.device == "cpu":
+                return pipeline
+            raise DiarizationProviderUnavailable(
+                f"pyannote pipeline does not support moving to device '{self.device}'."
+            )
+        try:
+            moved = move(self.device)
+        except Exception as exc:
+            raise DiarizationProviderUnavailable(
+                f"pyannote pipeline could not move to device '{self.device}': {exc}"
+            ) from exc
+        return pipeline if moved is None else moved
 
 
 @dataclass(frozen=True)
@@ -991,19 +1023,28 @@ def _segments_from_pyannote(output: object) -> Iterable[DiarizationSegment]:
                 overlapped=False,
             )
         )
-    overlapped = {
-        index
-        for index, segment in enumerate(segments)
-        if any(
-            index != other_index
-            and segment.start_seconds < other.end_seconds
-            and other.start_seconds < segment.end_seconds
-            for other_index, other in enumerate(segments)
-        )
-    }
+    overlapped = _overlapped_segment_indexes(segments)
     return tuple(
         replace(segment, overlapped=index in overlapped) for index, segment in enumerate(segments)
     )
+
+
+def _overlapped_segment_indexes(segments: list[DiarizationSegment]) -> set[int]:
+    active_by_end: list[tuple[float, int]] = []
+    active_unmarked: set[int] = set()
+    overlapped: set[int] = set()
+    for index, segment in sorted(enumerate(segments), key=lambda item: item[1].start_seconds):
+        while active_by_end and active_by_end[0][0] <= segment.start_seconds:
+            _end_seconds, expired_index = heappop(active_by_end)
+            active_unmarked.discard(expired_index)
+        if active_by_end:
+            overlapped.add(index)
+            overlapped.update(active_unmarked)
+            active_unmarked.clear()
+        else:
+            active_unmarked.add(index)
+        heappush(active_by_end, (segment.end_seconds, index))
+    return overlapped
 
 
 def _exclusive_projection(
@@ -1040,6 +1081,17 @@ def _stable_speaker_id(label: str) -> str:
     if not normalized or not normalized[0].isalpha():
         normalized = f"speaker_{normalized or 'unknown'}"
     return normalized
+
+
+def _callable_accepts_keyword(callable_obj: Callable[..., object], keyword: str) -> bool:
+    try:
+        signature = inspect.signature(callable_obj)
+    except (TypeError, ValueError):
+        return True
+    return any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD or name == keyword
+        for name, parameter in signature.parameters.items()
+    )
 
 
 def _fallback_label(context: DiarizationContext) -> str:
