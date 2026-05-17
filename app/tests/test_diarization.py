@@ -536,6 +536,21 @@ def test_diarization_contract_rejects_unknown_speaker_and_bad_embedding() -> Non
         DiarizationArtifact.from_dict(payload)
 
 
+def test_diarization_contract_rejects_unknown_policy_version() -> None:
+    source_ref = ArtifactRef(
+        id=f"{SESSION_ID}:artifacts/source_audio/system.wav",
+        artifact_type="source_audio",
+        version=1,
+        sha256="0" * 64,
+    )
+    payload = _diarization_artifact(source_ref=source_ref).to_dict()
+    context = cast(dict[str, object], payload["context"])
+    context["policy_version"] = 999
+
+    with pytest.raises(DiarizationContractError, match="policy_version"):
+        DiarizationArtifact.from_dict(payload)
+
+
 def test_diarization_context_rejects_non_positive_remote_speaker_count() -> None:
     with pytest.raises(DiarizationContractError, match="at least 1"):
         DiarizationContext(

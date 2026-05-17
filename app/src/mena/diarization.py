@@ -300,6 +300,11 @@ class DiarizationArtifact:
     def from_dict(cls, data: object) -> Self:
         item = _mapping(data, "Diarization artifact")
         context_data = _mapping(item.get("context"), "Diarization context")
+        policy_version = _required_int(context_data, "policy_version", "Diarization context")
+        if policy_version != DIARIZATION_POLICY_VERSION:
+            raise DiarizationContractError(
+                f"Diarization context policy_version must match {DIARIZATION_POLICY_VERSION}."
+            )
         artifact = cls(
             version=_required_int(item, "version", "Diarization artifact"),
             kind=_required_str(item, "kind", "Diarization artifact"),
