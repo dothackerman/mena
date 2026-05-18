@@ -374,11 +374,14 @@ def run_summarization_stage(
 ) -> SummarizationStageResult:
     """Generate a structured meeting summary from a merged transcript artifact."""
 
-    input_refs = [ArtifactRef.from_record(merged_transcript_record)]
-    if manual_notes_record is not None:
-        input_refs.append(ArtifactRef.from_record(manual_notes_record))
-    input_artifacts = tuple(input_refs)
     effective_policy = policy or SummarizationPolicy()
+    manual_notes_used_record = (
+        manual_notes_record if effective_policy.include_manual_notes else None
+    )
+    input_refs = [ArtifactRef.from_record(merged_transcript_record)]
+    if manual_notes_used_record is not None:
+        input_refs.append(ArtifactRef.from_record(manual_notes_used_record))
+    input_artifacts = tuple(input_refs)
     policy_payload = effective_policy.to_dict(provider_config_id=provider.metadata.config_id)
     policy_config_id = effective_policy.config_id(provider_config_id=provider.metadata.config_id)
 
@@ -433,15 +436,15 @@ def run_summarization_stage(
                 "Merged transcript session_id must match the processing ledger."
             )
         manual_notes = None
-        if manual_notes_record is not None:
-            if not store.verify(manual_notes_record.id).ok:
+        if manual_notes_used_record is not None:
+            if not store.verify(manual_notes_used_record.id).ok:
                 raise SummarizationContractError("Manual notes artifact failed verification.")
-            manual_notes = store.retrieve(manual_notes_record.id).decode("utf-8")
+            manual_notes = store.retrieve(manual_notes_used_record.id).decode("utf-8")
         result = provider.summarize(
             SummarizationRequest(
                 session_id=merged_transcript.session_id,
                 merged_transcript=merged_transcript,
-                manual_notes=manual_notes if effective_policy.include_manual_notes else None,
+                manual_notes=manual_notes,
                 policy=effective_policy,
             )
         )
@@ -451,8 +454,8 @@ def run_summarization_stage(
             merged_transcript_artifact=ArtifactRef.from_record(merged_transcript_record),
             manual_notes_artifact=(
                 None
-                if manual_notes_record is None
-                else ArtifactRef.from_record(manual_notes_record)
+                if manual_notes_used_record is None
+                else ArtifactRef.from_record(manual_notes_used_record)
             ),
             policy=policy_payload,
             provider=provider.metadata,

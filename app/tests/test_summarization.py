@@ -70,6 +70,35 @@ def test_summarization_stage_persists_summary_and_checkpoint(tmp_path: Path) -> 
     ]
 
 
+def test_summarization_stage_ignores_manual_notes_when_policy_excludes_them() -> None:
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    merged_record = _persist_merged_transcript(store=store)
+    notes_record = store.store(
+        artifact_type="manual_notes",
+        name="invalid-notes.md",
+        data=b"\xff",
+        version=1,
+        metadata={"contract": "manual-notes.raw"},
+    )
+    provider = FakeSummarizationProvider(result=_summary_result())
+    ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+
+    result = run_summarization_stage(
+        store=store,
+        ledger=ledger,
+        merged_transcript_record=merged_record,
+        manual_notes_record=notes_record,
+        provider=provider,
+        policy=SummarizationPolicy(include_manual_notes=False),
+        now=NOW,
+    )
+
+    assert provider.requests[0].manual_notes is None
+    assert result.summary.manual_notes_artifact is None
+    assert result.summary_record.metadata["manual_notes_artifact_id"] is None
+    assert result.state.input_artifacts == (ArtifactRef.from_record(merged_record),)
+
+
 def test_summarization_stage_reuses_verified_completed_output() -> None:
     store = InMemoryArtifactStore(session_id=SESSION_ID)
     merged_record = _persist_merged_transcript(store=store)
@@ -94,6 +123,37 @@ def test_summarization_stage_reuses_verified_completed_output() -> None:
     assert second.skipped is True
     assert second.skip_reason == "completed_output_reused"
     assert second.summary_record == first.summary_record
+
+
+def test_summarization_stage_reuse_ignores_manual_notes_when_policy_excludes_them() -> None:
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    merged_record = _persist_merged_transcript(store=store)
+    notes_record = _persist_notes(store=store)
+    provider = FakeSummarizationProvider(result=_summary_result())
+    ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+    policy = SummarizationPolicy(include_manual_notes=False)
+
+    first = run_summarization_stage(
+        store=store,
+        ledger=ledger,
+        merged_transcript_record=merged_record,
+        provider=provider,
+        policy=policy,
+        now=NOW,
+    )
+    second = run_summarization_stage(
+        store=store,
+        ledger=ledger,
+        merged_transcript_record=merged_record,
+        manual_notes_record=notes_record,
+        provider=provider,
+        policy=policy,
+        now=NOW,
+    )
+
+    assert second.skipped is True
+    assert second.summary_record == first.summary_record
+    assert len(provider.requests) == 1
 
 
 def test_summarization_stage_reuse_is_scoped_to_provider_config() -> None:
