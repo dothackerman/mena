@@ -34,6 +34,7 @@ REASON_CODES = frozenset(
         "low_transcription_confidence",
         "low_speaker_confidence",
         "speaker_overlap",
+        "semantic_incoherence",
     }
 )
 _STABLE_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_:-]*$")
@@ -162,7 +163,7 @@ class ReviewQueueArtifact:
     version: int
     session_id: str
     merged_transcript_artifact: ArtifactRef
-    policy: ConfidenceFlaggingPolicy
+    policy: Mapping[str, object] | ConfidenceFlaggingPolicy
     flags: tuple[ReviewFlag, ...]
     created_at: str
 
@@ -175,7 +176,7 @@ class ReviewQueueArtifact:
             merged_transcript_artifact=ArtifactRef.from_dict(
                 item.get("merged_transcript_artifact")
             ),
-            policy=ConfidenceFlaggingPolicy.from_dict(item.get("policy")),
+            policy=_required_json_object(item, "policy", "Review queue policy"),
             flags=tuple(ReviewFlag.from_dict(flag) for flag in _list(item, "flags")),
             created_at=_required_str(item, "created_at", "Review queue artifact"),
         )
@@ -188,7 +189,7 @@ class ReviewQueueArtifact:
             "version": self.version,
             "session_id": self.session_id,
             "merged_transcript_artifact": self.merged_transcript_artifact.to_dict(),
-            "policy": self.policy.to_dict(),
+            "policy": _policy_payload(self.policy),
             "flags": [flag.to_dict() for flag in self.flags],
             "created_at": self.created_at,
         }
@@ -225,7 +226,7 @@ def persist_review_queue_artifact(
         metadata={
             "category": "review",
             "contract": "review-queue.v1",
-            "policy_config_id": artifact.policy.config_id,
+            "policy_config_id": _policy_config_id(artifact.policy),
             "merged_transcript_artifact_id": artifact.merged_transcript_artifact.id,
         },
     )
@@ -302,7 +303,7 @@ def run_confidence_flagging_stage(
             version=REVIEW_QUEUE_SCHEMA_VERSION,
             session_id=merged_transcript.session_id,
             merged_transcript_artifact=input_ref,
-            policy=effective_policy,
+            policy=effective_policy.to_dict(),
             flags=_build_flags(merged_transcript=merged_transcript, policy=effective_policy),
             created_at=_timestamp(now),
         )
@@ -553,6 +554,16 @@ def _review_queue_artifact_name(
 ) -> Path:
     scope = sha256(policy.config_id.encode("utf-8")).hexdigest()[:12]
     return Path(run_id) / merged_transcript_sha256[:12] / scope / f"attempt-{attempt:03d}.json"
+
+
+def _policy_payload(policy: Mapping[str, object] | ConfidenceFlaggingPolicy) -> dict[str, object]:
+    if isinstance(policy, ConfidenceFlaggingPolicy):
+        return policy.to_dict()
+    return dict(policy)
+
+
+def _policy_config_id(policy: Mapping[str, object] | ConfidenceFlaggingPolicy) -> str:
+    return json.dumps(_policy_payload(policy), sort_keys=True, separators=(",", ":"))
 
 
 def _mapping(data: object, label: str) -> Mapping[str, object]:

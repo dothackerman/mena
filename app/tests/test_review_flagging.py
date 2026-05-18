@@ -213,7 +213,7 @@ def test_review_queue_schema_rejects_incomplete_policy() -> None:
         format_checker=FormatChecker(),
     )
 
-    with pytest.raises(ValidationError, match="'min_word_probability' is a required property"):
+    with pytest.raises(ValidationError, match="not valid under any of the given schemas"):
         validator.validate(payload)
 
 
