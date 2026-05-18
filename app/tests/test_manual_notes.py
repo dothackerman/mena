@@ -45,6 +45,25 @@ def test_manual_notes_ingestion_reuses_existing_artifact_for_same_content(tmp_pa
     assert len(store.list(artifact_type=MANUAL_NOTES_ARTIFACT_TYPE)) == 1
 
 
+def test_manual_notes_ingestion_restores_same_content_when_existing_artifact_is_stale(
+    tmp_path: Path,
+) -> None:
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    notes_path = tmp_path / "notes.md"
+    notes_path.write_text("- Release is blocked.\n", encoding="utf-8")
+
+    first = ingest_manual_notes_file(store=store, notes_path=notes_path)
+    assert first is not None
+    store._data.pop(first.id)
+
+    second = ingest_manual_notes_file(store=store, notes_path=notes_path)
+
+    assert second is not None
+    assert second.id != first.id
+    assert store.verify(second.id).ok
+    assert store.retrieve(second.id) == b"- Release is blocked.\n"
+
+
 def test_manual_notes_ingestion_rejects_invalid_path(tmp_path: Path) -> None:
     store = InMemoryArtifactStore(session_id=SESSION_ID)
 
