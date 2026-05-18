@@ -63,6 +63,27 @@ def test_manual_notes_ingestion_rejects_non_file_path(tmp_path: Path) -> None:
     assert store.list(artifact_type=MANUAL_NOTES_ARTIFACT_TYPE) == ()
 
 
+def test_manual_notes_ingestion_rejects_unreadable_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    notes_path = tmp_path / "notes.md"
+    notes_path.write_text("- Notes\n", encoding="utf-8")
+
+    def unreadable(path: Path) -> bytes:
+        if path == notes_path:
+            raise OSError("permission denied")
+        return b""
+
+    monkeypatch.setattr(Path, "read_bytes", unreadable)
+
+    with pytest.raises(ManualNotesIngestionError, match="could not be read"):
+        ingest_manual_notes_file(store=store, notes_path=notes_path)
+
+    assert store.list(artifact_type=MANUAL_NOTES_ARTIFACT_TYPE) == ()
+
+
 def test_manual_notes_ingestion_rejects_non_utf8_file(tmp_path: Path) -> None:
     store = InMemoryArtifactStore(session_id=SESSION_ID)
     notes_path = tmp_path / "notes.md"

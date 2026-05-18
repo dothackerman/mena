@@ -65,6 +65,18 @@ def test_summary_markdown_accepts_summary_result_payload() -> None:
     assert markdown.startswith("## Timeline\n\n- Discussed database migration before Friday.")
 
 
+def test_summary_markdown_accepts_summary_artifact_mapping() -> None:
+    markdown = format_summary_markdown(_summary_artifact().to_dict())
+
+    assert markdown.startswith("## Timeline\n\n- Discussed database migration before Friday.")
+
+
+def test_summary_markdown_accepts_summary_result_mapping() -> None:
+    markdown = format_summary_markdown(_summary_result().to_dict())
+
+    assert markdown.startswith("## Timeline\n\n- Discussed database migration before Friday.")
+
+
 def _summary_artifact(
     *,
     action_items: tuple[SummaryActionItem, ...] | None = None,
