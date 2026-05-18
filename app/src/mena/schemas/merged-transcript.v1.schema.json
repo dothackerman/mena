@@ -1,0 +1,315 @@
+{
+  "$id": "https://dothackerman.github.io/mena/schemas/merged-transcript.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "artifact_ref": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_type": {
+          "pattern": "^[a-z][a-z0-9_:-]*$",
+          "type": "string"
+        },
+        "id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "version": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": ["id", "artifact_type", "version", "sha256"],
+      "type": "object"
+    },
+    "confidence": {
+      "additionalProperties": false,
+      "properties": {
+        "metric": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "enum": ["available", "unavailable"],
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": ["status", "metric", "value", "reason"],
+      "type": "object"
+    },
+    "policy": {
+      "additionalProperties": false,
+      "properties": {
+        "capture_profile": {
+          "pattern": "^[a-z][a-z0-9_:-]*$",
+          "type": "string"
+        },
+        "local_source_id": {
+          "pattern": "^[a-z][a-z0-9_:-]*$",
+          "type": "string"
+        },
+        "local_speaker_id": {
+          "pattern": "^[a-z][a-z0-9_:-]*$",
+          "type": "string"
+        },
+        "local_speaker_label": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "policy_version": {
+          "const": 1,
+          "type": "integer"
+        },
+        "remote_fallback_speaker_id": {
+          "pattern": "^[a-z][a-z0-9_:-]*$",
+          "type": "string"
+        },
+        "remote_fallback_speaker_label": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "remote_source_id": {
+          "pattern": "^[a-z][a-z0-9_:-]*$",
+          "type": "string"
+        },
+        "sort_order": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "policy_version",
+        "capture_profile",
+        "local_source_id",
+        "remote_source_id",
+        "local_speaker_id",
+        "local_speaker_label",
+        "remote_fallback_speaker_id",
+        "remote_fallback_speaker_label",
+        "sort_order"
+      ],
+      "type": "object"
+    },
+    "source": {
+      "additionalProperties": false,
+      "properties": {
+        "channel": {
+          "enum": ["local", "remote"],
+          "type": "string"
+        },
+        "diarization_reason": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "diarization_status": {
+          "enum": ["used", "skipped", "unavailable", "not_applicable"],
+          "type": "string"
+        },
+        "exclusive_diarization_artifact": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/artifact_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "regular_diarization_artifact": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/artifact_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_id": {
+          "pattern": "^[a-z][a-z0-9_:-]*$",
+          "type": "string"
+        },
+        "transcript_artifact": {
+          "$ref": "#/$defs/artifact_ref"
+        }
+      },
+      "required": [
+        "source_id",
+        "channel",
+        "transcript_artifact",
+        "diarization_status",
+        "diarization_reason",
+        "regular_diarization_artifact",
+        "exclusive_diarization_artifact"
+      ],
+      "type": "object"
+    },
+    "speaker": {
+      "additionalProperties": false,
+      "properties": {
+        "confidence": {
+          "$ref": "#/$defs/confidence"
+        },
+        "kind": {
+          "enum": ["local_user", "diarized_remote", "fallback_remote"],
+          "type": "string"
+        },
+        "label": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "speaker_id": {
+          "pattern": "^[a-z][a-z0-9_:-]*$",
+          "type": "string"
+        }
+      },
+      "required": ["speaker_id", "label", "kind", "confidence"],
+      "type": "object"
+    },
+    "segment": {
+      "additionalProperties": false,
+      "properties": {
+        "channel": {
+          "enum": ["local", "remote"],
+          "type": "string"
+        },
+        "diarization_segment_ids": {
+          "items": {
+            "pattern": "^[a-z][a-z0-9_:-]*$",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "end_seconds": {
+          "minimum": 0,
+          "type": "number"
+        },
+        "id": {
+          "pattern": "^[a-z][a-z0-9_:-]*$",
+          "type": "string"
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "overlap_detected": {
+          "type": "boolean"
+        },
+        "source_id": {
+          "pattern": "^[a-z][a-z0-9_:-]*$",
+          "type": "string"
+        },
+        "speaker": {
+          "$ref": "#/$defs/speaker"
+        },
+        "start_seconds": {
+          "minimum": 0,
+          "type": "number"
+        },
+        "text": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "transcript_segment_id": {
+          "pattern": "^[a-z][a-z0-9_:-]*$",
+          "type": "string"
+        },
+        "transcription_confidence": {
+          "$ref": "#/$defs/confidence"
+        }
+      },
+      "required": [
+        "id",
+        "text",
+        "start_seconds",
+        "end_seconds",
+        "source_id",
+        "channel",
+        "speaker",
+        "transcription_confidence",
+        "overlap_detected",
+        "transcript_segment_id",
+        "diarization_segment_ids",
+        "metadata"
+      ],
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Versioned merged transcript artifact emitted by the merge/timing stage.",
+  "properties": {
+    "created_at": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "policy": {
+      "$ref": "#/$defs/policy"
+    },
+    "segments": {
+      "items": {
+        "$ref": "#/$defs/segment"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "session_id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "sources": {
+      "items": {
+        "$ref": "#/$defs/source"
+      },
+      "minItems": 2,
+      "maxItems": 2,
+      "type": "array"
+    },
+    "text": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "version": {
+      "const": 1,
+      "type": "integer"
+    }
+  },
+  "required": ["version", "session_id", "policy", "sources", "text", "segments", "created_at"],
+  "type": "object"
+}
