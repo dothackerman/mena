@@ -10,6 +10,7 @@ from jsonschema import Draft202012Validator, FormatChecker
 from jsonschema.exceptions import ValidationError
 
 from mena.artifacts import ArtifactRecord, FileSystemArtifactStore, InMemoryArtifactStore
+from mena.manual_notes import ManualNotesIngestionError, ingest_manual_notes_file
 from mena.merge_timing import (
     MERGED_TRANSCRIPT_SCHEMA_VERSION,
     MergedTranscriptArtifact,
@@ -104,6 +105,76 @@ def test_summarization_stage_ignores_manual_notes_when_policy_excludes_them() ->
     assert result.summary.manual_notes_artifact is None
     assert result.summary_record.metadata["manual_notes_artifact_id"] is None
     assert result.state.input_artifacts == (ArtifactRef.from_record(merged_record),)
+
+
+def test_manual_notes_file_boundary_feeds_summarization_input(tmp_path: Path) -> None:
+    store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=tmp_path)
+    merged_record = _persist_merged_transcript(store=store)
+    notes_input_path = tmp_path / "inputs" / "notes.md"
+    notes_input_path.parent.mkdir()
+    notes_input_path.write_text("- Manual note from file.", encoding="utf-8")
+    provider = FakeSummarizationProvider(result=_summary_result())
+    ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+
+    notes_record = ingest_manual_notes_file(store=store, notes_path=notes_input_path)
+    result = run_summarization_stage(
+        store=store,
+        ledger=ledger,
+        merged_transcript_record=merged_record,
+        manual_notes_record=notes_record,
+        provider=provider,
+        now=NOW,
+    )
+
+    assert notes_record is not None
+    assert result.summary.manual_notes_artifact == ArtifactRef.from_record(notes_record)
+    assert provider.requests[0].manual_notes == "- Manual note from file."
+
+
+def test_summarization_stage_preserves_transcript_only_when_notes_file_absent() -> None:
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    merged_record = _persist_merged_transcript(store=store)
+    provider = FakeSummarizationProvider(result=_summary_result())
+    ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+
+    notes_record = ingest_manual_notes_file(store=store, notes_path=None)
+    result = run_summarization_stage(
+        store=store,
+        ledger=ledger,
+        merged_transcript_record=merged_record,
+        manual_notes_record=notes_record,
+        provider=provider,
+        now=NOW,
+    )
+
+    assert notes_record is None
+    assert provider.requests[0].manual_notes is None
+    assert result.summary.manual_notes_artifact is None
+    assert store.list(artifact_type="manual_notes") == ()
+
+
+def test_manual_notes_file_boundary_fails_before_provider_invocation(tmp_path: Path) -> None:
+    store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=tmp_path)
+    merged_record = _persist_merged_transcript(store=store)
+    provider = FakeSummarizationProvider(result=_summary_result())
+    ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+
+    def run_with_notes_file(notes_path: Path) -> None:
+        notes_record = ingest_manual_notes_file(store=store, notes_path=notes_path)
+        run_summarization_stage(
+            store=store,
+            ledger=ledger,
+            merged_transcript_record=merged_record,
+            manual_notes_record=notes_record,
+            provider=provider,
+            now=NOW,
+        )
+
+    with pytest.raises(ManualNotesIngestionError, match="does not exist"):
+        run_with_notes_file(tmp_path / "missing.md")
+
+    assert provider.requests == []
+    assert ledger.states(stage=SUMMARIZATION_STAGE) == ()
 
 
 def test_summarization_stage_reuses_verified_completed_output() -> None:
