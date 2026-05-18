@@ -1,0 +1,197 @@
+{
+  "$id": "https://dothackerman.github.io/mena/schemas/summary.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "action_item": {
+      "additionalProperties": false,
+      "properties": {
+        "due": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "owner": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "text": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": ["text", "owner", "due"],
+      "type": "object"
+    },
+    "artifact_ref": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_type": {
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_:-]*$",
+          "type": "string"
+        },
+        "id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "version": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": ["id", "artifact_type", "version", "sha256"],
+      "type": "object"
+    },
+    "policy": {
+      "additionalProperties": false,
+      "properties": {
+        "include_manual_notes": {
+          "type": "boolean"
+        },
+        "language": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "policy_version": {
+          "const": 1,
+          "type": "integer"
+        },
+        "prompt_policy": {
+          "const": "meeting-summary-json-v1",
+          "type": "string"
+        }
+      },
+      "required": [
+        "policy_version",
+        "prompt_policy",
+        "language",
+        "include_manual_notes"
+      ],
+      "type": "object"
+    },
+    "provider": {
+      "additionalProperties": false,
+      "properties": {
+        "endpoint": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "model": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "name": {
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_:-]*$",
+          "type": "string"
+        },
+        "prompt_policy": {
+          "const": "meeting-summary-json-v1",
+          "type": "string"
+        }
+      },
+      "required": ["name", "model", "endpoint", "prompt_policy"],
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Versioned structured meeting summary artifact emitted by the summarization port.",
+  "properties": {
+    "action_items": {
+      "items": {
+        "$ref": "#/$defs/action_item"
+      },
+      "type": "array"
+    },
+    "created_at": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "general_summary": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "important_points": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "manual_notes_artifact": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/artifact_ref"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "merged_transcript_artifact": {
+      "$ref": "#/$defs/artifact_ref"
+    },
+    "policy": {
+      "$ref": "#/$defs/policy"
+    },
+    "provider": {
+      "$ref": "#/$defs/provider"
+    },
+    "session_id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "timeline": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "version": {
+      "const": 1,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version",
+    "session_id",
+    "merged_transcript_artifact",
+    "manual_notes_artifact",
+    "policy",
+    "provider",
+    "timeline",
+    "important_points",
+    "action_items",
+    "general_summary",
+    "created_at"
+  ],
+  "title": "Mena Summary v1",
+  "type": "object"
+}

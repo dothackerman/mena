@@ -497,20 +497,20 @@ def test_ollama_post_json_handles_success_invalid_json_and_unavailable(
         assert timeout == provider.timeout_seconds
         return FakeResponse(b'{"ok": true}')
 
-    monkeypatch.setattr("mena.semantic_coherence.urllib.request.urlopen", good_urlopen)
+    monkeypatch.setattr("mena.local_llm.urllib.request.urlopen", good_urlopen)
     assert provider._post_json("/api/chat", {"model": "test-model"}) == {"ok": True}
 
     def bad_json_urlopen(request: object, *, timeout: float) -> FakeResponse:
         return FakeResponse(b"not-json")
 
-    monkeypatch.setattr("mena.semantic_coherence.urllib.request.urlopen", bad_json_urlopen)
+    monkeypatch.setattr("mena.local_llm.urllib.request.urlopen", bad_json_urlopen)
     with pytest.raises(SemanticCoherenceContractError, match="envelope was not JSON"):
         provider._post_json("/api/chat", {"model": "test-model"})
 
     def unavailable_urlopen(request: object, *, timeout: float) -> FakeResponse:
         raise OSError("connection refused")
 
-    monkeypatch.setattr("mena.semantic_coherence.urllib.request.urlopen", unavailable_urlopen)
+    monkeypatch.setattr("mena.local_llm.urllib.request.urlopen", unavailable_urlopen)
     with pytest.raises(SemanticCoherenceProviderUnavailable, match="provider is unavailable"):
         provider._post_json("/api/chat", {"model": "test-model"})
 
