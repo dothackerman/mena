@@ -283,6 +283,20 @@ def test_review_queue_artifact_from_dict_rejects_unsupported_version() -> None:
         ReviewQueueArtifact.from_dict(payload)
 
 
+def test_review_queue_artifact_from_dict_rejects_invalid_semantic_policy() -> None:
+    payload = _review_queue_payload().to_dict()
+    payload["policy"] = {
+        "policy_version": 1,
+        "context_window_segments": -1,
+        "min_flag_confidence": 0.8,
+        "prompt_policy": "semantic-coherence-json-v1",
+        "provider_config_id": "provider",
+    }
+
+    with pytest.raises(ReviewFlaggingContractError, match="must be non-negative"):
+        ReviewQueueArtifact.from_dict(payload)
+
+
 def test_confidence_flagging_stage_marks_failed_checkpoint_on_corrupt_input_artifact(
     tmp_path: Path,
 ) -> None:

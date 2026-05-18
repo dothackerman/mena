@@ -37,6 +37,15 @@ REASON_CODES = frozenset(
         "semantic_incoherence",
     }
 )
+SEMANTIC_FLAGGING_POLICY_KEYS = frozenset(
+    {
+        "policy_version",
+        "context_window_segments",
+        "min_flag_confidence",
+        "prompt_policy",
+        "provider_config_id",
+    }
+)
 _STABLE_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_:-]*$")
 
 
@@ -176,7 +185,7 @@ class ReviewQueueArtifact:
             merged_transcript_artifact=ArtifactRef.from_dict(
                 item.get("merged_transcript_artifact")
             ),
-            policy=_required_json_object(item, "policy", "Review queue policy"),
+            policy=_review_policy_from_dict(item.get("policy")),
             flags=tuple(ReviewFlag.from_dict(flag) for flag in _list(item, "flags")),
             created_at=_required_str(item, "created_at", "Review queue artifact"),
         )
@@ -564,6 +573,37 @@ def _policy_payload(policy: Mapping[str, object] | ConfidenceFlaggingPolicy) -> 
 
 def _policy_config_id(policy: Mapping[str, object] | ConfidenceFlaggingPolicy) -> str:
     return json.dumps(_policy_payload(policy), sort_keys=True, separators=(",", ":"))
+
+
+def _review_policy_from_dict(data: object) -> dict[str, object]:
+    policy = _mapping(data, "Review queue policy")
+    if set(policy) == SEMANTIC_FLAGGING_POLICY_KEYS:
+        _validate_semantic_policy(policy)
+        return dict(policy)
+    return ConfidenceFlaggingPolicy.from_dict(policy).to_dict()
+
+
+def _validate_semantic_policy(policy: Mapping[str, object]) -> None:
+    policy_version = _required_int(policy, "policy_version", "Semantic review policy")
+    context_window_segments = _required_int(
+        policy,
+        "context_window_segments",
+        "Semantic review policy",
+    )
+    min_flag_confidence = _required_number(
+        policy,
+        "min_flag_confidence",
+        "Semantic review policy",
+    )
+    _required_str(policy, "prompt_policy", "Semantic review policy")
+    _required_str(policy, "provider_config_id", "Semantic review policy")
+    if policy_version != FLAGGING_POLICY_VERSION:
+        raise ReviewFlaggingContractError("Unsupported semantic review policy version.")
+    if context_window_segments < 0:
+        raise ReviewFlaggingContractError(
+            "Semantic review policy context_window_segments must be non-negative."
+        )
+    _validate_probability(min_flag_confidence, "min_flag_confidence")
 
 
 def _mapping(data: object, label: str) -> Mapping[str, object]:
