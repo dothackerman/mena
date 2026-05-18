@@ -123,3 +123,10 @@ Use `docs/ideas/` for:
 - Keep repository structure legible for future coding and research agents.
 - Follow the repository workflow in `docs/repository-workflow.md` for branch naming and issue references.
 - Treat `develop` as the active integration branch. Do not target `main` until the first shippable version or unless the user explicitly instructs it.
+
+## Commit Hygiene
+
+- Commit iteratively while working. Do not save a whole feature run as one large final commit.
+- Group changes semantically: schema/contract changes, implementation behavior, tests, documentation, tooling, and review fixes should be separate commits unless they are tightly coupled.
+- Keep commits small enough to review. There is no arbitrary file-count limit, but a commit with thousands of changed lines across multiple concerns is not acceptable.
+- Preserve learning history. If another agent produced a poor commit shape, do not rewrite that history unless the user explicitly asks for a history rewrite. Add follow-up commits and document the issue so the team can learn from the failure.

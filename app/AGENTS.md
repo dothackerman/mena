@@ -31,3 +31,9 @@ If global or user-level Codex instructions conflict with this file for `app/` wo
 - Preserve architecture boundaries, but implement the smallest useful PoC slice behind each boundary.
 - Do not implement deferred ideas from `docs/ideas/` unless an issue or user request explicitly promotes them.
 
+## Commit Hygiene
+
+- Commit app changes iteratively in small, semantic slices.
+- Separate contracts/schemas, implementation behavior, tests, tooling, and review fixes when they are independently reviewable.
+- Do not collapse a full feature into one oversized commit. There is no hard file-count maximum, but thousands of changed lines across several concerns in one commit is a review failure.
+- Do not rewrite another agent's branch history to hide poor commit shape unless the user explicitly requests it. Prefer additive fix commits and explicit review notes.
