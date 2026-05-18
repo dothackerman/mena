@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import urllib.parse
-import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -13,6 +11,17 @@ from pathlib import Path
 from typing import Protocol, Self
 
 from mena.artifacts import ArtifactRecord, ArtifactStore
+from mena.local_llm import (
+    OLLAMA_DEFAULT_ENDPOINT,
+    OLLAMA_DEFAULT_MODEL,
+    LocalLLMContractError,
+    LocalLLMProviderMetadata,
+    LocalLLMProviderUnavailable,
+    local_ollama_endpoint,
+    ollama_message_content,
+    post_ollama_json,
+    strip_json_fence,
+)
 from mena.merge_timing import (
     MergedTranscriptArtifact,
     MergedTranscriptSegment,
@@ -35,8 +44,6 @@ from mena.review_flagging import (
 SEMANTIC_COHERENCE_STAGE = "semantic_coherence"
 SEMANTIC_COHERENCE_POLICY_VERSION = 1
 SEMANTIC_INCOHERENCE_REASON = "semantic_incoherence"
-OLLAMA_DEFAULT_ENDPOINT = "http://localhost:11434"
-OLLAMA_DEFAULT_MODEL = "llama3.2:3b"
 PROMPT_POLICY = "semantic-coherence-json-v1"
 
 
@@ -107,25 +114,11 @@ class SemanticCoherencePolicy:
 
 
 @dataclass(frozen=True)
-class SemanticCoherenceProviderMetadata:
+class SemanticCoherenceProviderMetadata(LocalLLMProviderMetadata):
     """Provider identity persisted with semantic review flags."""
 
-    name: str
-    model: str
     endpoint: str | None = None
     prompt_policy: str = PROMPT_POLICY
-
-    @property
-    def config_id(self) -> str:
-        return json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "name": self.name,
-            "model": self.model,
-            "endpoint": self.endpoint,
-            "prompt_policy": self.prompt_policy,
-        }
 
 
 @dataclass(frozen=True)
@@ -203,7 +196,7 @@ class OllamaSemanticCoherenceProvider:
         endpoint: str = OLLAMA_DEFAULT_ENDPOINT,
         timeout_seconds: float = 30.0,
     ) -> None:
-        sanitized_endpoint = _local_ollama_endpoint(endpoint)
+        sanitized_endpoint = _semantic_local_ollama_endpoint(endpoint)
         self.metadata = SemanticCoherenceProviderMetadata(
             name="ollama",
             model=model,
@@ -229,9 +222,9 @@ class OllamaSemanticCoherenceProvider:
             ],
         }
         response = self._post_json("/api/chat", payload)
-        content = _ollama_message_content(response)
+        content = _semantic_ollama_message_content(response)
         try:
-            decoded = json.loads(_strip_json_fence(content))
+            decoded = json.loads(strip_json_fence(content))
         except json.JSONDecodeError as exc:
             raise SemanticCoherenceContractError(
                 "Ollama semantic coherence response was not valid JSON."
@@ -239,26 +232,19 @@ class OllamaSemanticCoherenceProvider:
         return SemanticCoherenceResult.from_dict(decoded)
 
     def _post_json(self, path: str, payload: Mapping[str, object]) -> Mapping[str, object]:
-        url = f"{self.metadata.endpoint}{path}"
-        data = json.dumps(payload).encode("utf-8")
-        request = urllib.request.Request(
-            url,
-            data=data,
-            headers={"content-type": "application/json"},
-            method="POST",
-        )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
-                body = response.read().decode("utf-8")
-        except OSError as exc:
+            return post_ollama_json(
+                endpoint=str(self.metadata.endpoint),
+                path=path,
+                payload=payload,
+                timeout_seconds=self.timeout_seconds,
+            )
+        except LocalLLMProviderUnavailable as exc:
             raise SemanticCoherenceProviderUnavailable(
                 "Ollama semantic coherence provider is unavailable."
             ) from exc
-        try:
-            decoded = json.loads(body)
-        except json.JSONDecodeError as exc:
+        except LocalLLMContractError as exc:
             raise SemanticCoherenceContractError("Ollama response envelope was not JSON.") from exc
-        return _mapping(decoded, "Ollama response envelope")
 
 
 @dataclass(frozen=True)
@@ -584,38 +570,18 @@ def _segment_prompt_payload(segment: MergedTranscriptSegment) -> dict[str, objec
     }
 
 
-def _ollama_message_content(response: Mapping[str, object]) -> str:
-    message = response.get("message")
-    if not isinstance(message, Mapping):
-        raise SemanticCoherenceContractError("Ollama response missing message object.")
-    content = message.get("content")
-    if not isinstance(content, str) or not content.strip():
-        raise SemanticCoherenceContractError("Ollama response message content is empty.")
-    return content
+def _semantic_ollama_message_content(response: Mapping[str, object]) -> str:
+    try:
+        return ollama_message_content(response)
+    except LocalLLMContractError as exc:
+        raise SemanticCoherenceContractError(str(exc)) from exc
 
 
-def _strip_json_fence(content: str) -> str:
-    stripped = content.strip()
-    if stripped.startswith("```json") and stripped.endswith("```"):
-        return stripped.removeprefix("```json").removesuffix("```").strip()
-    if stripped.startswith("```") and stripped.endswith("```"):
-        return stripped.removeprefix("```").removesuffix("```").strip()
-    return stripped
-
-
-def _local_ollama_endpoint(endpoint: str) -> str:
-    sanitized = endpoint.rstrip("/")
-    parsed = urllib.parse.urlsplit(sanitized)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise SemanticCoherenceContractError("Ollama endpoint must be an HTTP URL.")
-    if parsed.username or parsed.password or parsed.query or parsed.fragment:
-        raise SemanticCoherenceContractError(
-            "Ollama endpoint must not contain credentials, query, or fragment."
-        )
-    hostname = parsed.hostname
-    if hostname not in {"localhost", "127.0.0.1", "::1"}:
-        raise SemanticCoherenceContractError("Ollama endpoint must be local.")
-    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+def _semantic_local_ollama_endpoint(endpoint: str) -> str:
+    try:
+        return local_ollama_endpoint(endpoint)
+    except LocalLLMContractError as exc:
+        raise SemanticCoherenceContractError(str(exc)) from exc
 
 
 def _mapping(data: object, label: str) -> Mapping[str, object]:
