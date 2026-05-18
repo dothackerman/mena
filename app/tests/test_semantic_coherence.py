@@ -20,6 +20,7 @@ from mena.merge_timing import (
     persist_merged_transcript_artifact,
 )
 from mena.processing import ArtifactRef, ProcessingStageLedger
+from mena.review_flagging import REVIEW_QUEUE_ARTIFACT_TYPE
 from mena.semantic_coherence import (
     SEMANTIC_COHERENCE_STAGE,
     FakeSemanticCoherenceProvider,
@@ -170,7 +171,7 @@ def test_semantic_coherence_stage_marks_failed_checkpoint_when_provider_unavaila
     merged_record = _persist_merged_transcript(store=store)
     ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
 
-    with pytest.raises(SemanticCoherenceError, match="provider unavailable"):
+    with pytest.raises(SemanticCoherenceProviderUnavailable, match="provider unavailable"):
         run_semantic_coherence_stage(
             store=store,
             ledger=ledger,
@@ -238,6 +239,103 @@ def test_semantic_coherence_stage_ignores_corrupt_reusable_output(tmp_path: Path
 
     assert second.skipped is False
     assert second.review_queue_record.id != first.review_queue_record.id
+
+
+def test_semantic_coherence_stage_ignores_contract_invalid_reusable_output() -> None:
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    merged_record = _persist_merged_transcript(store=store)
+    provider = FakeSemanticCoherenceProvider(results={})
+    policy = SemanticCoherencePolicy()
+    policy_config_id = policy.config_id(provider_config_id=provider.metadata.config_id)
+    review_record = store.store(
+        artifact_type=REVIEW_QUEUE_ARTIFACT_TYPE,
+        name="invalid-reusable.json",
+        data=json.dumps(
+            {
+                "version": 1,
+                "session_id": SESSION_ID,
+                "merged_transcript_artifact": ArtifactRef.from_record(merged_record).to_dict(),
+                "policy": {
+                    "policy_version": 1,
+                    "context_window_segments": -1,
+                    "min_flag_confidence": 0.8,
+                    "prompt_policy": "semantic-coherence-json-v1",
+                    "provider_config_id": provider.metadata.config_id,
+                },
+                "flags": [],
+                "created_at": "2026-05-18T10:00:00Z",
+            }
+        ).encode("utf-8"),
+        version=1,
+        metadata={"policy_config_id": policy_config_id},
+    )
+    ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+    ledger.mark_completed(
+        stage=SEMANTIC_COHERENCE_STAGE,
+        input_artifacts=(ArtifactRef.from_record(merged_record),),
+        output_artifacts=(ArtifactRef.from_record(review_record),),
+        now=NOW,
+    )
+
+    result = run_semantic_coherence_stage(
+        store=store,
+        ledger=ledger,
+        merged_transcript_record=merged_record,
+        provider=provider,
+        attempt=2,
+        now=NOW,
+    )
+
+    assert result.skipped is False
+    assert result.review_queue_record.id != review_record.id
+
+
+def test_semantic_coherence_stage_sends_configured_context_window() -> None:
+    class CaptureProvider:
+        metadata = FakeSemanticCoherenceProvider(results={}).metadata
+
+        def __init__(self) -> None:
+            self.requests: list[SemanticCoherenceRequest] = []
+
+        def check(self, request: SemanticCoherenceRequest) -> SemanticCoherenceResult:
+            self.requests.append(request)
+            return SemanticCoherenceResult(
+                coherent=True,
+                confidence=1.0,
+                reason="captured",
+                evidence={},
+            )
+
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    merged_record = _persist_merged_transcript(store=store)
+    provider = CaptureProvider()
+    ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+
+    run_semantic_coherence_stage(
+        store=store,
+        ledger=ledger,
+        merged_transcript_record=merged_record,
+        provider=provider,
+        policy=SemanticCoherencePolicy(context_window_segments=2),
+        now=NOW,
+    )
+
+    assert [request.segment.id for request in provider.requests] == [
+        "merged_segment_000001",
+        "merged_segment_000002",
+        "merged_segment_000003",
+    ]
+    assert provider.requests[0].previous_segments == ()
+    assert [segment.id for segment in provider.requests[0].next_segments] == [
+        "merged_segment_000002",
+        "merged_segment_000003",
+    ]
+    assert [segment.id for segment in provider.requests[1].previous_segments] == [
+        "merged_segment_000001"
+    ]
+    assert [segment.id for segment in provider.requests[1].next_segments] == [
+        "merged_segment_000003"
+    ]
 
 
 def test_ollama_semantic_provider_parses_strict_json_response(
@@ -331,10 +429,56 @@ def test_ollama_semantic_provider_rejects_invalid_envelope_content(
         provider.check(_semantic_request())
 
 
+def test_ollama_semantic_provider_serializes_unicode_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OllamaSemanticCoherenceProvider(model="test-model")
+    artifact = replace(
+        _merged_transcript_fixture(),
+        segments=(
+            replace(
+                _merged_transcript_fixture().segments[0],
+                text="Grüezi, wir prüfen die Übertragung.",
+            ),
+            *_merged_transcript_fixture().segments[1:],
+        ),
+    )
+    request = SemanticCoherenceRequest(
+        session_id=SESSION_ID,
+        segment=artifact.segments[0],
+        previous_segments=(),
+        next_segments=(artifact.segments[1],),
+    )
+
+    def fake_post_json(path: str, payload: object) -> dict[str, object]:
+        assert isinstance(payload, dict)
+        messages = cast(list[dict[str, str]], payload["messages"])
+        assert "Grüezi" in messages[1]["content"]
+        assert "Do not rely on language-specific dialect detection." in messages[1]["content"]
+        return {
+            "message": {
+                "content": json.dumps(
+                    {
+                        "coherent": True,
+                        "confidence": 0.99,
+                        "reason": "fits context",
+                        "evidence": {},
+                    }
+                )
+            }
+        }
+
+    monkeypatch.setattr(provider, "_post_json", fake_post_json)
+
+    assert provider.check(request).coherent is True
+
+
 def test_ollama_post_json_handles_success_invalid_json_and_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    provider = OllamaSemanticCoherenceProvider(model="test-model", endpoint="http://ollama.test")
+    provider = OllamaSemanticCoherenceProvider(
+        model="test-model", endpoint="http://localhost:11434"
+    )
 
     class FakeResponse:
         def __init__(self, body: bytes) -> None:
@@ -369,6 +513,20 @@ def test_ollama_post_json_handles_success_invalid_json_and_unavailable(
     monkeypatch.setattr("mena.semantic_coherence.urllib.request.urlopen", unavailable_urlopen)
     with pytest.raises(SemanticCoherenceProviderUnavailable, match="provider is unavailable"):
         provider._post_json("/api/chat", {"model": "test-model"})
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "http://ollama.test",
+        "http://user:secret@localhost:11434",
+        "http://localhost:11434?token=secret",
+        "http://localhost:11434/#fragment",
+    ],
+)
+def test_ollama_provider_rejects_remote_or_secret_bearing_endpoints(endpoint: str) -> None:
+    with pytest.raises(SemanticCoherenceContractError):
+        OllamaSemanticCoherenceProvider(endpoint=endpoint)
 
 
 def test_semantic_coherence_policy_from_dict_validates_contract() -> None:
@@ -409,6 +567,17 @@ def test_semantic_coherence_policy_from_dict_validates_contract() -> None:
                 "context_window_segments": 1,
                 "min_flag_confidence": 1.7,
                 "prompt_policy": "semantic-coherence-json-v1",
+            }
+        )
+    with pytest.raises(
+        SemanticCoherenceContractError, match="Unsupported semantic coherence prompt"
+    ):
+        SemanticCoherencePolicy.from_dict(
+            {
+                "policy_version": 1,
+                "context_window_segments": 1,
+                "min_flag_confidence": 0.7,
+                "prompt_policy": "other-prompt",
             }
         )
 

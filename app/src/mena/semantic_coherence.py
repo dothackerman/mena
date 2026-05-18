@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import json
-import re
-import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -28,6 +27,7 @@ from mena.processing import (
 from mena.review_flagging import (
     REVIEW_QUEUE_SCHEMA_VERSION,
     ReviewFlag,
+    ReviewFlaggingError,
     ReviewQueueArtifact,
     persist_review_queue_artifact,
 )
@@ -38,7 +38,6 @@ SEMANTIC_INCOHERENCE_REASON = "semantic_incoherence"
 OLLAMA_DEFAULT_ENDPOINT = "http://localhost:11434"
 OLLAMA_DEFAULT_MODEL = "llama3.2:3b"
 PROMPT_POLICY = "semantic-coherence-json-v1"
-_STABLE_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_:-]*$")
 
 
 class SemanticCoherenceError(RuntimeError):
@@ -85,6 +84,8 @@ class SemanticCoherencePolicy:
             raise SemanticCoherenceContractError(
                 "Semantic coherence context_window_segments must be non-negative."
             )
+        if policy.prompt_policy != PROMPT_POLICY:
+            raise SemanticCoherenceContractError("Unsupported semantic coherence prompt policy.")
         _validate_probability(policy.min_flag_confidence, "min_flag_confidence")
         return policy
 
@@ -202,10 +203,11 @@ class OllamaSemanticCoherenceProvider:
         endpoint: str = OLLAMA_DEFAULT_ENDPOINT,
         timeout_seconds: float = 30.0,
     ) -> None:
+        sanitized_endpoint = _local_ollama_endpoint(endpoint)
         self.metadata = SemanticCoherenceProviderMetadata(
             name="ollama",
             model=model,
-            endpoint=endpoint.rstrip("/"),
+            endpoint=sanitized_endpoint,
         )
         self.timeout_seconds = timeout_seconds
 
@@ -248,7 +250,7 @@ class OllamaSemanticCoherenceProvider:
         try:
             with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
                 body = response.read().decode("utf-8")
-        except (OSError, urllib.error.URLError) as exc:
+        except OSError as exc:
             raise SemanticCoherenceProviderUnavailable(
                 "Ollama semantic coherence provider is unavailable."
             ) from exc
@@ -363,6 +365,7 @@ def run_semantic_coherence_stage(
         )
     except (
         SemanticCoherenceError,
+        ReviewFlaggingError,
         MergeTimingContractError,
         json.JSONDecodeError,
         UnicodeDecodeError,
@@ -378,7 +381,10 @@ def run_semantic_coherence_stage(
             retryable=isinstance(exc, SemanticCoherenceProviderUnavailable),
             code="semantic_coherence_failed",
         )
-        raise SemanticCoherenceError(failed.error.message if failed.error else str(exc)) from exc
+        message = failed.error.message if failed.error else str(exc)
+        if isinstance(exc, SemanticCoherenceProviderUnavailable):
+            raise SemanticCoherenceProviderUnavailable(message) from exc
+        raise SemanticCoherenceError(message) from exc
 
     completed = ledger.mark_completed(
         stage=stage,
@@ -479,7 +485,13 @@ def _load_reusable_output(
     try:
         record = _record_for_ref(store=store, artifact_ref=output_ref)
         artifact = ReviewQueueArtifact.from_dict(json.loads(store.retrieve(record.id)))
-    except (SemanticCoherenceError, json.JSONDecodeError, KeyError, UnicodeDecodeError):
+    except (
+        SemanticCoherenceError,
+        ReviewFlaggingError,
+        json.JSONDecodeError,
+        KeyError,
+        UnicodeDecodeError,
+    ):
         return None
     return record, artifact
 
@@ -591,6 +603,21 @@ def _strip_json_fence(content: str) -> str:
     return stripped
 
 
+def _local_ollama_endpoint(endpoint: str) -> str:
+    sanitized = endpoint.rstrip("/")
+    parsed = urllib.parse.urlsplit(sanitized)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise SemanticCoherenceContractError("Ollama endpoint must be an HTTP URL.")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise SemanticCoherenceContractError(
+            "Ollama endpoint must not contain credentials, query, or fragment."
+        )
+    hostname = parsed.hostname
+    if hostname not in {"localhost", "127.0.0.1", "::1"}:
+        raise SemanticCoherenceContractError("Ollama endpoint must be local.")
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+
+
 def _mapping(data: object, label: str) -> Mapping[str, object]:
     if not isinstance(data, Mapping):
         raise SemanticCoherenceContractError(f"{label} must be a JSON object.")
@@ -643,11 +670,6 @@ def _optional_json_object(
 def _validate_probability(value: float, label: str) -> None:
     if not 0.0 <= value <= 1.0:
         raise SemanticCoherenceContractError(f"{label} must be within [0, 1].")
-
-
-def _validate_stable_id(value: str, label: str) -> None:
-    if not _STABLE_ID_PATTERN.fullmatch(value):
-        raise SemanticCoherenceContractError(f"{label} must be a stable identifier.")
 
 
 def _timestamp(now: datetime | None) -> str:

@@ -29,12 +29,23 @@ REVIEW_QUEUE_ARTIFACT_VERSION = 1
 REVIEW_QUEUE_SCHEMA_VERSION = 1
 CONFIDENCE_FLAGGING_STAGE = "confidence_flagging"
 FLAGGING_POLICY_VERSION = 1
+SEMANTIC_REVIEW_POLICY_VERSION = 1
+SEMANTIC_REVIEW_PROMPT_POLICY = "semantic-coherence-json-v1"
 REASON_CODES = frozenset(
     {
         "low_transcription_confidence",
         "low_speaker_confidence",
         "speaker_overlap",
         "semantic_incoherence",
+    }
+)
+CONFIDENCE_FLAGGING_POLICY_KEYS = frozenset(
+    {
+        "policy_version",
+        "min_word_probability",
+        "min_avg_logprob",
+        "min_speaker_overlap_ratio",
+        "flag_unavailable_speaker_confidence",
     }
 )
 SEMANTIC_FLAGGING_POLICY_KEYS = frozenset(
@@ -312,7 +323,7 @@ def run_confidence_flagging_stage(
             version=REVIEW_QUEUE_SCHEMA_VERSION,
             session_id=merged_transcript.session_id,
             merged_transcript_artifact=input_ref,
-            policy=effective_policy.to_dict(),
+            policy=effective_policy,
             flags=_build_flags(merged_transcript=merged_transcript, policy=effective_policy),
             created_at=_timestamp(now),
         )
@@ -575,12 +586,16 @@ def _policy_config_id(policy: Mapping[str, object] | ConfidenceFlaggingPolicy) -
     return json.dumps(_policy_payload(policy), sort_keys=True, separators=(",", ":"))
 
 
-def _review_policy_from_dict(data: object) -> dict[str, object]:
+def _review_policy_from_dict(data: object) -> Mapping[str, object] | ConfidenceFlaggingPolicy:
     policy = _mapping(data, "Review queue policy")
     if set(policy) == SEMANTIC_FLAGGING_POLICY_KEYS:
         _validate_semantic_policy(policy)
         return dict(policy)
-    return ConfidenceFlaggingPolicy.from_dict(policy).to_dict()
+    if set(policy) == CONFIDENCE_FLAGGING_POLICY_KEYS:
+        return ConfidenceFlaggingPolicy.from_dict(policy)
+    raise ReviewFlaggingContractError(
+        "Review queue policy must match confidence or semantic policy contract."
+    )
 
 
 def _validate_semantic_policy(policy: Mapping[str, object]) -> None:
@@ -595,10 +610,12 @@ def _validate_semantic_policy(policy: Mapping[str, object]) -> None:
         "min_flag_confidence",
         "Semantic review policy",
     )
-    _required_str(policy, "prompt_policy", "Semantic review policy")
+    prompt_policy = _required_str(policy, "prompt_policy", "Semantic review policy")
     _required_str(policy, "provider_config_id", "Semantic review policy")
-    if policy_version != FLAGGING_POLICY_VERSION:
+    if policy_version != SEMANTIC_REVIEW_POLICY_VERSION:
         raise ReviewFlaggingContractError("Unsupported semantic review policy version.")
+    if prompt_policy != SEMANTIC_REVIEW_PROMPT_POLICY:
+        raise ReviewFlaggingContractError("Unsupported semantic review prompt policy.")
     if context_window_segments < 0:
         raise ReviewFlaggingContractError(
             "Semantic review policy context_window_segments must be non-negative."

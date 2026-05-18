@@ -67,6 +67,8 @@ def test_confidence_flagging_stage_persists_review_queue_and_completed_checkpoin
     ).validate(payload)
     artifact = ReviewQueueArtifact.from_dict(payload)
     assert artifact.version == REVIEW_QUEUE_SCHEMA_VERSION
+    assert isinstance(result.review_queue.policy, ConfidenceFlaggingPolicy)
+    assert isinstance(artifact.policy, ConfidenceFlaggingPolicy)
     assert {flag.reason_code for flag in artifact.flags} == {
         "low_transcription_confidence",
         "low_speaker_confidence",
@@ -294,6 +296,28 @@ def test_review_queue_artifact_from_dict_rejects_invalid_semantic_policy() -> No
     }
 
     with pytest.raises(ReviewFlaggingContractError, match="must be non-negative"):
+        ReviewQueueArtifact.from_dict(payload)
+
+
+def test_review_queue_artifact_from_dict_rejects_unknown_policy_shape() -> None:
+    payload = _review_queue_payload().to_dict()
+    cast(dict[str, object], payload["policy"])["extra"] = "forbidden"
+
+    with pytest.raises(ReviewFlaggingContractError, match="must match confidence or semantic"):
+        ReviewQueueArtifact.from_dict(payload)
+
+
+def test_review_queue_artifact_from_dict_rejects_unsupported_semantic_prompt_policy() -> None:
+    payload = _review_queue_payload().to_dict()
+    payload["policy"] = {
+        "policy_version": 1,
+        "context_window_segments": 1,
+        "min_flag_confidence": 0.8,
+        "prompt_policy": "other-prompt",
+        "provider_config_id": "provider",
+    }
+
+    with pytest.raises(ReviewFlaggingContractError, match="Unsupported semantic review prompt"):
         ReviewQueueArtifact.from_dict(payload)
 
 
