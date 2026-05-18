@@ -43,7 +43,8 @@
           "enum": [
             "low_transcription_confidence",
             "low_speaker_confidence",
-            "speaker_overlap"
+            "speaker_overlap",
+            "semantic_incoherence"
           ],
           "type": "string"
         },
@@ -83,7 +84,7 @@
       ],
       "type": "object"
     },
-    "policy": {
+    "confidence_policy": {
       "additionalProperties": false,
       "properties": {
         "flag_unavailable_speaker_confidence": {
@@ -115,6 +116,50 @@
         "flag_unavailable_speaker_confidence"
       ],
       "type": "object"
+    },
+    "semantic_policy": {
+      "additionalProperties": false,
+      "properties": {
+        "context_window_segments": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "min_flag_confidence": {
+          "minimum": 0,
+          "maximum": 1,
+          "type": "number"
+        },
+        "policy_version": {
+          "const": 1,
+          "type": "integer"
+        },
+        "prompt_policy": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "provider_config_id": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "policy_version",
+        "context_window_segments",
+        "min_flag_confidence",
+        "prompt_policy",
+        "provider_config_id"
+      ],
+      "type": "object"
+    },
+    "policy": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/confidence_policy"
+        },
+        {
+          "$ref": "#/$defs/semantic_policy"
+        }
+      ]
     }
   },
   "additionalProperties": false,
