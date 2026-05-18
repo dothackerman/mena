@@ -244,7 +244,7 @@ class OllamaSemanticCoherenceProvider:
                 "Ollama semantic coherence provider is unavailable."
             ) from exc
         except LocalLLMContractError as exc:
-            raise SemanticCoherenceContractError("Ollama response envelope was not JSON.") from exc
+            raise SemanticCoherenceContractError(str(exc)) from exc
 
 
 @dataclass(frozen=True)

@@ -1,9 +1,13 @@
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
+from importlib.resources import files
 from pathlib import Path
 from typing import cast
 
 import pytest
+from jsonschema import Draft202012Validator, FormatChecker
+from jsonschema.exceptions import ValidationError
 
 from mena.artifacts import ArtifactRecord, FileSystemArtifactStore, InMemoryArtifactStore
 from mena.merge_timing import (
@@ -22,6 +26,7 @@ from mena.summarization import (
     FakeSummarizationProvider,
     OllamaSummarizationProvider,
     SummarizationContractError,
+    SummarizationError,
     SummarizationPolicy,
     SummarizationProviderUnavailable,
     SummarizationRequest,
@@ -58,8 +63,10 @@ def test_summarization_stage_persists_summary_and_checkpoint(tmp_path: Path) -> 
     assert result.summary_record.artifact_type == "summary"
     assert result.summary_record.metadata["contract"] == "summary.v1"
     payload = json.loads(store.retrieve(result.summary_record.id))
+    Draft202012Validator(_load_summary_schema(), format_checker=FormatChecker()).validate(payload)
     artifact = SummaryArtifact.from_dict(payload)
     assert artifact.provider.name == "fake"
+    assert "provider_config_id" not in artifact.policy
     assert artifact.timeline == ("Discussed database migration before Friday.",)
     assert artifact.action_items[0].owner == "You"
     assert provider.requests[0].manual_notes == "- Manual note: release is blocked."
@@ -180,6 +187,92 @@ def test_summarization_stage_reuse_is_scoped_to_provider_config() -> None:
     assert second.skipped is False
 
 
+def test_summarization_stage_uses_distinct_output_paths_for_different_manual_notes() -> None:
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    merged_record = _persist_merged_transcript(store=store)
+    first_notes = _persist_notes(store=store)
+    second_notes = store.store(
+        artifact_type="manual_notes",
+        name="other-notes.md",
+        data=b"- Manual note: migration owner changed.",
+        version=1,
+        metadata={"contract": "manual-notes.raw"},
+    )
+    provider = FakeSummarizationProvider(result=_summary_result())
+    ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+
+    first = run_summarization_stage(
+        store=store,
+        ledger=ledger,
+        merged_transcript_record=merged_record,
+        manual_notes_record=first_notes,
+        provider=provider,
+        now=NOW,
+    )
+    second = run_summarization_stage(
+        store=store,
+        ledger=ledger,
+        merged_transcript_record=merged_record,
+        manual_notes_record=second_notes,
+        provider=provider,
+        now=NOW,
+    )
+
+    assert second.skipped is False
+    assert first.summary_record.id != second.summary_record.id
+    assert len(provider.requests) == 2
+
+
+def test_summarization_stage_rejects_non_notes_artifact_when_notes_are_included() -> None:
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    merged_record = _persist_merged_transcript(store=store)
+    wrong_record = store.store(
+        artifact_type="transcript",
+        name="not-notes.txt",
+        data=b"valid utf-8 but wrong artifact type",
+        version=1,
+        metadata={"contract": "transcript.v1"},
+    )
+    provider = FakeSummarizationProvider(result=_summary_result())
+    ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+
+    with pytest.raises(SummarizationError, match="manual_notes type"):
+        run_summarization_stage(
+            store=store,
+            ledger=ledger,
+            merged_transcript_record=merged_record,
+            manual_notes_record=wrong_record,
+            provider=provider,
+            now=NOW,
+        )
+
+
+def test_summarization_stage_marks_failed_checkpoint_for_missing_input_artifact() -> None:
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    merged_record = _persist_merged_transcript(store=store)
+    missing_record = replace(
+        merged_record,
+        id=f"{SESSION_ID}:artifacts/merged_transcript/missing.json",
+        path="artifacts/merged_transcript/missing.json",
+    )
+    provider = FakeSummarizationProvider(result=_summary_result())
+    ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+
+    with pytest.raises(SummarizationError):
+        run_summarization_stage(
+            store=store,
+            ledger=ledger,
+            merged_transcript_record=missing_record,
+            provider=provider,
+            now=NOW,
+        )
+
+    failed = ledger.states(stage=SUMMARIZATION_STAGE)[-1]
+    assert failed.status == "failed"
+    assert failed.error is not None
+    assert failed.error.code == "summarization_failed"
+
+
 def test_summarization_stage_marks_failed_checkpoint_when_provider_unavailable() -> None:
     class UnavailableProvider:
         metadata = FakeSummarizationProvider(result=_summary_result()).metadata
@@ -242,6 +335,8 @@ def test_ollama_summarization_provider_rejects_invalid_json_response(
 
 
 def test_summarization_policy_and_result_validate_contract() -> None:
+    assert "provider_config_id" not in SummarizationPolicy(language="en").to_dict()
+
     with pytest.raises(SummarizationContractError, match="Unsupported summarization prompt"):
         SummarizationPolicy.from_dict(
             {
@@ -274,7 +369,7 @@ def test_summary_artifact_from_dict_validates_contract() -> None:
             sha256="1" * 64,
         ),
         manual_notes_artifact=None,
-        policy=SummarizationPolicy(language="en").to_dict(provider_config_id="provider"),
+        policy=SummarizationPolicy(language="en").to_dict(),
         provider=FakeSummarizationProvider(result=_summary_result()).metadata,
         timeline=_summary_result().timeline,
         important_points=_summary_result().important_points,
@@ -294,9 +389,72 @@ def test_summary_artifact_from_dict_validates_contract() -> None:
         SummaryArtifact.from_dict(payload)
 
 
-def test_ollama_provider_rejects_remote_or_secret_bearing_endpoints() -> None:
-    with pytest.raises(SummarizationContractError, match="must be local"):
-        OllamaSummarizationProvider(endpoint="http://ollama.test")
+def test_summary_schema_validates_contract() -> None:
+    artifact = SummaryArtifact(
+        version=1,
+        session_id=SESSION_ID,
+        merged_transcript_artifact=ArtifactRef(
+            id=f"{SESSION_ID}:artifacts/merged_transcript/merged.json",
+            artifact_type="merged_transcript",
+            version=1,
+            sha256="1" * 64,
+        ),
+        manual_notes_artifact=None,
+        policy=SummarizationPolicy(language="en").to_dict(),
+        provider=FakeSummarizationProvider(result=_summary_result()).metadata,
+        timeline=_summary_result().timeline,
+        important_points=_summary_result().important_points,
+        action_items=_summary_result().action_items,
+        general_summary=_summary_result().general_summary,
+        created_at="2026-05-18T17:00:00Z",
+    )
+    payload = artifact.to_dict()
+
+    Draft202012Validator.check_schema(_load_summary_schema())
+    Draft202012Validator(_load_summary_schema(), format_checker=FormatChecker()).validate(payload)
+
+
+def test_summary_schema_rejects_legacy_provider_config_inside_policy() -> None:
+    artifact = SummaryArtifact(
+        version=1,
+        session_id=SESSION_ID,
+        merged_transcript_artifact=ArtifactRef(
+            id=f"{SESSION_ID}:artifacts/merged_transcript/merged.json",
+            artifact_type="merged_transcript",
+            version=1,
+            sha256="1" * 64,
+        ),
+        manual_notes_artifact=None,
+        policy=SummarizationPolicy(language="en").to_dict(),
+        provider=FakeSummarizationProvider(result=_summary_result()).metadata,
+        timeline=_summary_result().timeline,
+        important_points=_summary_result().important_points,
+        action_items=_summary_result().action_items,
+        general_summary=_summary_result().general_summary,
+        created_at="2026-05-18T17:00:00Z",
+    )
+    payload = artifact.to_dict()
+    cast(dict[str, object], payload["policy"])["provider_config_id"] = "provider"
+
+    validator = Draft202012Validator(_load_summary_schema(), format_checker=FormatChecker())
+    with pytest.raises(ValidationError, match="Additional properties"):
+        validator.validate(payload)
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "http://ollama.test",
+        "http://user:secret@localhost:11434",
+        "http://localhost:11434?token=secret",
+        "http://localhost:11434/#fragment",
+        "http://localhost:notaport",
+        "http://[::1",
+    ],
+)
+def test_ollama_provider_rejects_remote_secret_or_malformed_endpoints(endpoint: str) -> None:
+    with pytest.raises(SummarizationContractError):
+        OllamaSummarizationProvider(endpoint=endpoint)
 
 
 def _persist_merged_transcript(
@@ -424,3 +582,8 @@ def _word_confidence() -> SegmentConfidence:
         value=0.98,
         reason="fixture",
     )
+
+
+def _load_summary_schema() -> dict[str, object]:
+    schema_path = files("mena.schemas").joinpath("summary.v1.schema.json")
+    return cast(dict[str, object], json.loads(schema_path.read_text(encoding="utf-8")))

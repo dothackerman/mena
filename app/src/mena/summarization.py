@@ -33,6 +33,8 @@ from mena.processing import (
 SUMMARY_ARTIFACT_TYPE = "summary"
 SUMMARY_ARTIFACT_VERSION = 1
 SUMMARY_SCHEMA_VERSION = 1
+MANUAL_NOTES_ARTIFACT_TYPE = "manual_notes"
+MANUAL_NOTES_CONTRACT = "manual-notes.raw"
 SUMMARIZATION_STAGE = "summarization"
 SUMMARIZATION_POLICY_VERSION = 1
 PROMPT_POLICY = "meeting-summary-json-v1"
@@ -79,20 +81,16 @@ class SummarizationPolicy:
             raise SummarizationContractError("Unsupported summarization prompt policy.")
         return policy
 
-    def config_id(self, *, provider_config_id: str) -> str:
-        return json.dumps(
-            self.to_dict(provider_config_id=provider_config_id),
-            sort_keys=True,
-            separators=(",", ":"),
-        )
+    @property
+    def config_id(self) -> str:
+        return json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
 
-    def to_dict(self, *, provider_config_id: str) -> dict[str, object]:
+    def to_dict(self) -> dict[str, object]:
         return {
             "policy_version": self.policy_version,
             "prompt_policy": self.prompt_policy,
             "language": self.language,
             "include_manual_notes": self.include_manual_notes,
-            "provider_config_id": provider_config_id,
         }
 
 
@@ -349,6 +347,10 @@ def persist_summary_artifact(
             "contract": "summary.v1",
             "policy_config_id": _policy_config_id(artifact.policy),
             "provider_config_id": artifact.provider.config_id,
+            "stage_config_id": _stage_config_id(
+                policy_config_id=_policy_config_id(artifact.policy),
+                provider_config_id=artifact.provider.config_id,
+            ),
             "merged_transcript_artifact_id": artifact.merged_transcript_artifact.id,
             "manual_notes_artifact_id": (
                 None
@@ -382,8 +384,12 @@ def run_summarization_stage(
     if manual_notes_used_record is not None:
         input_refs.append(ArtifactRef.from_record(manual_notes_used_record))
     input_artifacts = tuple(input_refs)
-    policy_payload = effective_policy.to_dict(provider_config_id=provider.metadata.config_id)
-    policy_config_id = effective_policy.config_id(provider_config_id=provider.metadata.config_id)
+    policy_payload = effective_policy.to_dict()
+    policy_config_id = effective_policy.config_id
+    stage_config_id = _stage_config_id(
+        policy_config_id=policy_config_id,
+        provider_config_id=provider.metadata.config_id,
+    )
 
     if skip_completed:
         completed = _completed_state_for_inputs(
@@ -392,6 +398,8 @@ def run_summarization_stage(
             stage=stage,
             input_artifacts=input_artifacts,
             policy_config_id=policy_config_id,
+            provider_config_id=provider.metadata.config_id,
+            stage_config_id=stage_config_id,
         )
         if completed is not None:
             reused = _load_reusable_output(store=store, completed=completed)
@@ -437,9 +445,9 @@ def run_summarization_stage(
             )
         manual_notes = None
         if manual_notes_used_record is not None:
-            if not store.verify(manual_notes_used_record.id).ok:
-                raise SummarizationContractError("Manual notes artifact failed verification.")
-            manual_notes = store.retrieve(manual_notes_used_record.id).decode("utf-8")
+            manual_notes = _verify_and_load_manual_notes(
+                store=store, record=manual_notes_used_record
+            )
         result = provider.summarize(
             SummarizationRequest(
                 session_id=merged_transcript.session_id,
@@ -471,7 +479,10 @@ def run_summarization_stage(
             name=_summary_artifact_name(
                 run_id=ledger.run_id,
                 merged_transcript_sha256=merged_transcript_record.sha256,
-                policy_config_id=policy_config_id,
+                stage_config_id=stage_config_id,
+                manual_notes_sha256=(
+                    None if manual_notes_used_record is None else manual_notes_used_record.sha256
+                ),
                 attempt=attempt,
             ),
         )
@@ -479,6 +490,8 @@ def run_summarization_stage(
         SummarizationError,
         MergeTimingContractError,
         json.JSONDecodeError,
+        KeyError,
+        FileExistsError,
         UnicodeDecodeError,
     ) as exc:
         failed = ledger.mark_failed(
@@ -524,6 +537,16 @@ def _verify_and_load_merged_transcript(
     return MergedTranscriptArtifact.from_dict(json.loads(store.retrieve(record.id)))
 
 
+def _verify_and_load_manual_notes(*, store: ArtifactStore, record: ArtifactRecord) -> str:
+    if record.artifact_type != MANUAL_NOTES_ARTIFACT_TYPE:
+        raise SummarizationContractError("Manual notes artifact must have manual_notes type.")
+    if record.metadata.get("contract") != MANUAL_NOTES_CONTRACT:
+        raise SummarizationContractError("Manual notes artifact has unsupported contract.")
+    if not store.verify(record.id).ok:
+        raise SummarizationContractError("Manual notes artifact failed verification.")
+    return store.retrieve(record.id).decode("utf-8")
+
+
 def _completed_state_for_inputs(
     *,
     store: ArtifactStore,
@@ -531,6 +554,8 @@ def _completed_state_for_inputs(
     stage: str,
     input_artifacts: tuple[ArtifactRef, ...],
     policy_config_id: str,
+    provider_config_id: str,
+    stage_config_id: str,
 ) -> ProcessingStageState | None:
     for state in reversed(ledger.states(stage=stage)):
         if (
@@ -543,7 +568,10 @@ def _completed_state_for_inputs(
         if not _artifact_ref_verifies(store=store, artifact_ref=output_ref):
             continue
         record = _record_for_ref(store=store, artifact_ref=output_ref)
-        if record.metadata.get("policy_config_id") == policy_config_id:
+        if record.metadata.get("stage_config_id") == stage_config_id or (
+            record.metadata.get("policy_config_id") == policy_config_id
+            and record.metadata.get("provider_config_id") == provider_config_id
+        ):
             return state
     return None
 
@@ -584,10 +612,12 @@ def _summary_artifact_name(
     *,
     run_id: str,
     merged_transcript_sha256: str,
-    policy_config_id: str,
+    stage_config_id: str,
+    manual_notes_sha256: str | None,
     attempt: int,
 ) -> Path:
-    scope = sha256(policy_config_id.encode("utf-8")).hexdigest()[:12]
+    notes_scope = manual_notes_sha256 or "no-manual-notes"
+    scope = sha256(f"{stage_config_id}:{notes_scope}".encode()).hexdigest()[:12]
     return Path(run_id) / merged_transcript_sha256[:12] / scope / f"summary-{attempt:03d}.json"
 
 
@@ -597,7 +627,6 @@ def _prompt(request: SummarizationRequest) -> str:
             "task": "meeting_summary",
             "language": request.policy.language,
             "transcript": {
-                "text": request.merged_transcript.text,
                 "segments": [
                     {
                         "speaker": segment.speaker.label,
@@ -631,7 +660,7 @@ def _summarization_ollama_message_content(response: Mapping[str, object]) -> str
 def _summarization_local_ollama_endpoint(endpoint: str) -> str:
     try:
         return local_ollama_endpoint(endpoint)
-    except LocalLLMContractError as exc:
+    except (LocalLLMContractError, ValueError) as exc:
         raise SummarizationContractError(str(exc)) from exc
 
 
@@ -655,17 +684,26 @@ def _summary_policy_payload(data: object) -> dict[str, object]:
         "prompt_policy",
         "language",
         "include_manual_notes",
-        "provider_config_id",
     }
     if set(policy) != required:
         raise SummarizationContractError("Summary policy has unsupported fields.")
     SummarizationPolicy.from_dict(policy)
-    _required_str(policy, "provider_config_id", "Summary policy")
     return dict(policy)
 
 
 def _policy_config_id(policy: Mapping[str, object]) -> str:
     return json.dumps(dict(policy), sort_keys=True, separators=(",", ":"))
+
+
+def _stage_config_id(*, policy_config_id: str, provider_config_id: str) -> str:
+    return json.dumps(
+        {
+            "policy_config_id": policy_config_id,
+            "provider_config_id": provider_config_id,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def _mapping(data: object, label: str) -> Mapping[str, object]:

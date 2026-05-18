@@ -50,14 +50,21 @@ def local_ollama_endpoint(endpoint: str) -> str:
     """Return a normalized local Ollama endpoint or reject unsafe remote/secret-bearing URLs."""
 
     sanitized = endpoint.rstrip("/")
-    parsed = urllib.parse.urlsplit(sanitized)
+    try:
+        parsed = urllib.parse.urlsplit(sanitized)
+    except ValueError as exc:
+        raise LocalLLMContractError("Ollama endpoint is malformed.") from exc
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise LocalLLMContractError("Ollama endpoint must be an HTTP URL.")
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise LocalLLMContractError(
             "Ollama endpoint must not contain credentials, query, or fragment."
         )
-    hostname = parsed.hostname
+    try:
+        hostname = parsed.hostname
+        _port = parsed.port
+    except ValueError as exc:
+        raise LocalLLMContractError("Ollama endpoint is malformed.") from exc
     if hostname not in {"localhost", "127.0.0.1", "::1"}:
         raise LocalLLMContractError("Ollama endpoint must be local.")
     return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
