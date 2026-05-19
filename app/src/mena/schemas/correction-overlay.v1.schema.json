@@ -25,6 +25,20 @@
       "required": ["id", "artifact_type", "version", "sha256"],
       "type": "object"
     },
+    "source_transcript_artifact_ref": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/artifact_ref"
+        },
+        {
+          "properties": {
+            "artifact_type": {
+              "const": "merged_transcript"
+            }
+          }
+        }
+      ]
+    },
     "base_entry": {
       "additionalProperties": false,
       "properties": {
@@ -271,7 +285,7 @@
       "type": "string"
     },
     "source_transcript_artifact": {
-      "$ref": "#/$defs/artifact_ref"
+      "$ref": "#/$defs/source_transcript_artifact_ref"
     },
     "version": {
       "const": 1,

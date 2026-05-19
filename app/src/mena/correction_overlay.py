@@ -12,6 +12,7 @@ from typing import Self
 
 from mena.artifacts import ArtifactRecord, ArtifactStore
 from mena.merge_timing import (
+    MERGED_TRANSCRIPT_ARTIFACT_TYPE,
     MergedTranscriptArtifact,
     MergedTranscriptSegment,
     SegmentConfidence,
@@ -131,6 +132,7 @@ class CorrectionOverlayArtifact:
         )
         if artifact.version != CORRECTION_OVERLAY_SCHEMA_VERSION:
             raise CorrectionOverlayContractError("Unsupported correction overlay artifact version.")
+        _validate_source_transcript_ref(artifact.source_transcript_artifact)
         _validate_unique_entry_ids(artifact.entries)
         return artifact
 
@@ -211,6 +213,10 @@ def apply_correction_overlay(
     if ArtifactRef.from_record(source_transcript_record) != overlay.source_transcript_artifact:
         raise CorrectionOverlayContractError(
             "Correction overlay source_transcript_artifact must match the source record."
+        )
+    if source_transcript_record.session_id != source_transcript.session_id:
+        raise CorrectionOverlayContractError(
+            "Correction overlay source record session_id must match the source transcript."
         )
     if overlay.session_id != source_transcript.session_id:
         raise CorrectionOverlayContractError(
@@ -309,6 +315,13 @@ def _validate_unique_entry_ids(entries: tuple[CorrectionEntry, ...]) -> None:
     ids = [entry.id for entry in entries]
     if len(ids) != len(set(ids)):
         raise CorrectionOverlayContractError("Correction overlay entry ids must be unique.")
+
+
+def _validate_source_transcript_ref(artifact_ref: ArtifactRef) -> None:
+    if artifact_ref.artifact_type != MERGED_TRANSCRIPT_ARTIFACT_TYPE:
+        raise CorrectionOverlayContractError(
+            "Correction overlay source_transcript_artifact must reference a merged transcript."
+        )
 
 
 def _mapping(data: object, label: str) -> Mapping[str, object]:

@@ -119,6 +119,23 @@ def test_create_correction_overlay_adds_version_and_timestamp() -> None:
     assert overlay.created_at == "2026-05-19T15:20:00Z"
 
 
+def test_correction_overlay_rejects_non_transcript_source_ref() -> None:
+    source_ref = ArtifactRef(
+        id=f"{SESSION_ID}:artifacts/source_audio/source.wav",
+        artifact_type="source_audio",
+        version=1,
+        sha256="0" * 64,
+    )
+
+    with pytest.raises(CorrectionOverlayContractError, match="merged transcript"):
+        create_correction_overlay(
+            session_id=SESSION_ID,
+            source_transcript_artifact=source_ref,
+            entries=(),
+            now=NOW,
+        )
+
+
 def test_correction_overlay_rejects_invalid_entry_payloads() -> None:
     with pytest.raises(CorrectionOverlayContractError, match="speaker_id and speaker_label"):
         CorrectionEntry.from_dict(
@@ -201,6 +218,37 @@ def test_apply_correction_overlay_rejects_source_ref_mismatch() -> None:
         )
 
 
+def test_apply_correction_overlay_rejects_source_record_session_mismatch() -> None:
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    other_session_id = "00000000-0000-0000-0000-000000000002"
+    source_artifact = _merged_transcript_fixture()
+    source_record = _persist_source_transcript(store, artifact=source_artifact)
+    mismatched_record = ArtifactRecord(
+        id=source_record.id.replace(SESSION_ID, other_session_id),
+        session_id=other_session_id,
+        artifact_type=source_record.artifact_type,
+        version=source_record.version,
+        path=source_record.path,
+        byte_count=source_record.byte_count,
+        sha256=source_record.sha256,
+        status=source_record.status,
+        metadata=source_record.metadata,
+    )
+    overlay = create_correction_overlay(
+        session_id=SESSION_ID,
+        source_transcript_artifact=ArtifactRef.from_record(mismatched_record),
+        entries=(),
+        now=NOW,
+    )
+
+    with pytest.raises(CorrectionOverlayContractError, match="record session_id"):
+        apply_correction_overlay(
+            source_transcript=source_artifact,
+            source_transcript_record=mismatched_record,
+            overlay=overlay,
+        )
+
+
 def test_persist_correction_overlay_validates_contract_before_writing() -> None:
     store = InMemoryArtifactStore(session_id=SESSION_ID)
     source_record = _persist_source_transcript(store)
@@ -231,6 +279,20 @@ def test_correction_overlay_schema_rejects_missing_payload_field() -> None:
     )
 
     with pytest.raises(ValidationError, match="not valid under any of the given schemas"):
+        validator.validate(payload)
+
+
+def test_correction_overlay_schema_rejects_non_transcript_source_ref() -> None:
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    source_record = _persist_source_transcript(store)
+    payload = _overlay_fixture(source_record=source_record).to_dict()
+    cast(dict[str, object], payload["source_transcript_artifact"])["artifact_type"] = "source_audio"
+    validator = Draft202012Validator(
+        _load_correction_overlay_schema(),
+        format_checker=FormatChecker(),
+    )
+
+    with pytest.raises(ValidationError, match="'merged_transcript' was expected"):
         validator.validate(payload)
 
 
