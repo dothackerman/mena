@@ -1,5 +1,6 @@
 import json
 from copy import deepcopy
+from dataclasses import replace
 from datetime import UTC, datetime
 from importlib.resources import files
 from pathlib import Path
@@ -83,7 +84,7 @@ def test_apply_correction_overlay_is_pure_and_idempotent() -> None:
         overlay=overlay,
     )
     corrected_again = apply_correction_overlay(
-        source_transcript=corrected,
+        source_transcript=source_artifact,
         source_transcript_record=source_record,
         overlay=overlay,
     )
@@ -112,7 +113,7 @@ def test_create_correction_overlay_adds_version_and_timestamp() -> None:
         session_id=SESSION_ID,
         source_transcript_artifact=source_ref,
         entries=(),
-        now=NOW,
+        now=NOW.replace(microsecond=123456),
     )
 
     assert overlay.version == CORRECTION_OVERLAY_SCHEMA_VERSION
@@ -168,6 +169,20 @@ def test_correction_overlay_rejects_invalid_entry_payloads() -> None:
                 "metadata": {},
             }
         )
+
+
+def test_correction_entry_rejects_missing_nullable_contract_fields() -> None:
+    payload = (
+        _overlay_fixture(
+            source_record=_persist_source_transcript(InMemoryArtifactStore(session_id=SESSION_ID))
+        )
+        .entries[0]
+        .to_dict()
+    )
+    del payload["speaker_id"]
+
+    with pytest.raises(CorrectionOverlayContractError, match="speaker_id is required"):
+        CorrectionEntry.from_dict(payload)
 
 
 def test_apply_correction_overlay_rejects_unknown_segment() -> None:
@@ -249,6 +264,45 @@ def test_apply_correction_overlay_rejects_source_record_session_mismatch() -> No
         )
 
 
+def test_apply_correction_overlay_rejects_source_content_mismatch() -> None:
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    source_artifact = _merged_transcript_fixture()
+    source_record = _persist_source_transcript(store, artifact=source_artifact)
+    changed_source = replace(source_artifact, text="jello remote reply")
+    overlay = _overlay_fixture(source_record=source_record)
+
+    with pytest.raises(CorrectionOverlayContractError, match="sha256"):
+        apply_correction_overlay(
+            source_transcript=changed_source,
+            source_transcript_record=source_record,
+            overlay=overlay,
+        )
+
+
+def test_apply_correction_overlay_rejects_duplicate_source_segment_ids() -> None:
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    source_artifact = _merged_transcript_fixture()
+    first, second = source_artifact.segments
+    duplicate_source = replace(
+        source_artifact,
+        segments=(first, replace(second, id=first.id)),
+    )
+    source_record = _persist_source_transcript(store, artifact=duplicate_source)
+    overlay = create_correction_overlay(
+        session_id=SESSION_ID,
+        source_transcript_artifact=ArtifactRef.from_record(source_record),
+        entries=(),
+        now=NOW,
+    )
+
+    with pytest.raises(CorrectionOverlayContractError, match="segment ids must be unique"):
+        apply_correction_overlay(
+            source_transcript=duplicate_source,
+            source_transcript_record=source_record,
+            overlay=overlay,
+        )
+
+
 def test_persist_correction_overlay_validates_contract_before_writing() -> None:
     store = InMemoryArtifactStore(session_id=SESSION_ID)
     source_record = _persist_source_transcript(store)
@@ -266,6 +320,16 @@ def test_persist_correction_overlay_validates_contract_before_writing() -> None:
         persist_correction_overlay_artifact(store=store, artifact=invalid, name="bad.json")
 
     assert store.list(artifact_type=CORRECTION_OVERLAY_ARTIFACT_TYPE) == ()
+
+
+def test_correction_overlay_rejects_missing_review_queue_artifact_field() -> None:
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    source_record = _persist_source_transcript(store)
+    payload = _overlay_fixture(source_record=source_record).to_dict()
+    del payload["review_queue_artifact"]
+
+    with pytest.raises(CorrectionOverlayContractError, match="review_queue_artifact is required"):
+        CorrectionOverlayArtifact.from_dict(payload)
 
 
 def test_correction_overlay_schema_rejects_missing_payload_field() -> None:

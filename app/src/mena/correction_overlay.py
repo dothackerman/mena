@@ -7,6 +7,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 from typing import Self
 
@@ -66,11 +67,11 @@ class CorrectionEntry:
             segment_id=_required_str(item, "segment_id", "Correction entry"),
             correction_type=_required_str(item, "correction_type", "Correction entry"),
             user_action_at=_required_str(item, "user_action_at", "Correction entry"),
-            original_flag_id=_optional_str(item, "original_flag_id", "Correction entry"),
-            speaker_id=_optional_str(item, "speaker_id", "Correction entry"),
-            speaker_label=_optional_str(item, "speaker_label", "Correction entry"),
-            text=_optional_str(item, "text", "Correction entry"),
-            overlap_detected=_optional_bool(item, "overlap_detected", "Correction entry"),
+            original_flag_id=_required_nullable_str(item, "original_flag_id", "Correction entry"),
+            speaker_id=_required_nullable_str(item, "speaker_id", "Correction entry"),
+            speaker_label=_required_nullable_str(item, "speaker_label", "Correction entry"),
+            text=_required_nullable_str(item, "text", "Correction entry"),
+            overlap_detected=_required_nullable_bool(item, "overlap_detected", "Correction entry"),
             metadata=_required_json_object(item, "metadata", "Correction entry metadata"),
         )
         for value, label in (
@@ -122,10 +123,8 @@ class CorrectionOverlayArtifact:
             source_transcript_artifact=ArtifactRef.from_dict(
                 item.get("source_transcript_artifact")
             ),
-            review_queue_artifact=(
-                None
-                if item.get("review_queue_artifact") is None
-                else ArtifactRef.from_dict(item.get("review_queue_artifact"))
+            review_queue_artifact=_required_nullable_artifact_ref(
+                item, "review_queue_artifact", "Correction overlay artifact"
             ),
             entries=tuple(CorrectionEntry.from_dict(entry) for entry in _list(item, "entries")),
             created_at=_required_str(item, "created_at", "Correction overlay artifact"),
@@ -214,14 +213,20 @@ def apply_correction_overlay(
         raise CorrectionOverlayContractError(
             "Correction overlay source_transcript_artifact must match the source record."
         )
+    _validate_source_transcript_ref(ArtifactRef.from_record(source_transcript_record))
     if source_transcript_record.session_id != source_transcript.session_id:
         raise CorrectionOverlayContractError(
             "Correction overlay source record session_id must match the source transcript."
         )
+    _validate_source_transcript_content(
+        source_transcript=source_transcript,
+        source_transcript_record=source_transcript_record,
+    )
     if overlay.session_id != source_transcript.session_id:
         raise CorrectionOverlayContractError(
             "Correction overlay session_id must match the source transcript."
         )
+    _validate_unique_segment_ids(source_transcript.segments)
     segment_ids = {segment.id for segment in source_transcript.segments}
     unknown_ids = [
         entry.segment_id for entry in overlay.entries if entry.segment_id not in segment_ids
@@ -317,10 +322,32 @@ def _validate_unique_entry_ids(entries: tuple[CorrectionEntry, ...]) -> None:
         raise CorrectionOverlayContractError("Correction overlay entry ids must be unique.")
 
 
+def _validate_unique_segment_ids(segments: tuple[MergedTranscriptSegment, ...]) -> None:
+    ids = [segment.id for segment in segments]
+    if len(ids) != len(set(ids)):
+        raise CorrectionOverlayContractError("Source transcript segment ids must be unique.")
+
+
 def _validate_source_transcript_ref(artifact_ref: ArtifactRef) -> None:
     if artifact_ref.artifact_type != MERGED_TRANSCRIPT_ARTIFACT_TYPE:
         raise CorrectionOverlayContractError(
             "Correction overlay source_transcript_artifact must reference a merged transcript."
+        )
+
+
+def _validate_source_transcript_content(
+    *,
+    source_transcript: MergedTranscriptArtifact,
+    source_transcript_record: ArtifactRecord,
+) -> None:
+    data = source_transcript.to_json_bytes()
+    if len(data) != source_transcript_record.byte_count:
+        raise CorrectionOverlayContractError(
+            "Source transcript content does not match the source record byte_count."
+        )
+    if sha256(data).hexdigest() != source_transcript_record.sha256:
+        raise CorrectionOverlayContractError(
+            "Source transcript content does not match the source record sha256."
         )
 
 
@@ -344,8 +371,8 @@ def _required_str(data: Mapping[str, object], key: str, label: str) -> str:
     return value
 
 
-def _optional_str(data: Mapping[str, object], key: str, label: str) -> str | None:
-    value = data.get(key)
+def _required_nullable_str(data: Mapping[str, object], key: str, label: str) -> str | None:
+    value = _required_key(data, key, label)
     if value is None:
         return None
     if not isinstance(value, str) or value == "":
@@ -360,13 +387,24 @@ def _required_int(data: Mapping[str, object], key: str, label: str) -> int:
     return value
 
 
-def _optional_bool(data: Mapping[str, object], key: str, label: str) -> bool | None:
-    value = data.get(key)
+def _required_nullable_bool(data: Mapping[str, object], key: str, label: str) -> bool | None:
+    value = _required_key(data, key, label)
     if value is None:
         return None
     if not isinstance(value, bool):
         raise CorrectionOverlayContractError(f"{label} {key} must be a boolean or null.")
     return value
+
+
+def _required_nullable_artifact_ref(
+    data: Mapping[str, object],
+    key: str,
+    label: str,
+) -> ArtifactRef | None:
+    value = _required_key(data, key, label)
+    if value is None:
+        return None
+    return ArtifactRef.from_dict(value)
 
 
 def _required_json_object(data: Mapping[str, object], key: str, label: str) -> Mapping[str, object]:
@@ -379,6 +417,12 @@ def _required_json_object(data: Mapping[str, object], key: str, label: str) -> M
     return value
 
 
+def _required_key(data: Mapping[str, object], key: str, label: str) -> object:
+    if key not in data:
+        raise CorrectionOverlayContractError(f"{label} {key} is required.")
+    return data[key]
+
+
 def _validate_stable_id(value: str, label: str) -> None:
     if not _STABLE_ID_PATTERN.fullmatch(value):
         raise CorrectionOverlayContractError(f"{label} must be a stable id.")
@@ -388,4 +432,4 @@ def _timestamp(now: datetime | None) -> str:
     current = now or datetime.now(tz=UTC)
     if current.tzinfo is None:
         current = current.replace(tzinfo=UTC)
-    return current.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    return current.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
