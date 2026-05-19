@@ -1,4 +1,5 @@
 import json
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -9,7 +10,21 @@ from mena.cli import main
 from mena.correction_overlay import (
     CORRECTION_OVERLAY_ARTIFACT_TYPE,
 )
-from mena.correction_workflow import CorrectionWorkflowError, run_correction_workflow
+from mena.correction_workflow import (
+    CorrectionWorkflowError,
+    _new_speaker_id,
+    _ordered_review_flags,
+    _ordered_speaker_catalog,
+    _print_review_item,
+    _prompt_overlap_mark,
+    _prompt_speaker_assignment,
+    _resolve_session,
+    _timestamp,
+    run_correction_workflow,
+)
+from mena.correction_workflow import (
+    _extract_session_id as extract_session_id,
+)
 from mena.merge_timing import (
     MERGED_TRANSCRIPT_SCHEMA_VERSION,
     MergedTranscriptArtifact,
@@ -358,6 +373,221 @@ def test_run_correction_workflow_rejects_stale_review_queue_reference(tmp_path: 
         run_correction_workflow(session_path=session_dir, now=NOW, input_fn=lambda _: "s")
 
 
+def test_resolve_session_supports_session_directory_and_session_record_file(tmp_path: Path) -> None:
+    session_dir = _create_session_record(tmp_path)
+    session_record_path = session_dir / SESSION_RECORD_FILENAME
+    resolved_dir, record = _resolve_session(session_record_path)
+
+    assert resolved_dir == session_dir
+    assert isinstance(record, dict)
+    assert record["id"] == SESSION_ID
+
+
+def test_resolve_session_handles_bad_inputs_and_read_failures(tmp_path: Path) -> None:
+    (tmp_path / SESSION_RECORD_FILENAME).write_text("{", encoding="utf-8")
+
+    with pytest.raises(
+        CorrectionWorkflowError,
+        match="Session path must be a session directory or an existing session.json path.",
+    ):
+        _resolve_session(tmp_path / "missing")
+
+    with pytest.raises(CorrectionWorkflowError, match="Cannot read session record"):
+        _resolve_session(tmp_path / SESSION_RECORD_FILENAME)
+
+
+def test_extract_session_id_validates_payload(tmp_path: Path) -> None:
+    with pytest.raises(CorrectionWorkflowError, match="non-empty id"):
+        extract_session_id({})
+
+    assert extract_session_id({"id": SESSION_ID}) == SESSION_ID
+
+
+def test_prompt_overlap_mark_reprompts_on_invalid_input() -> None:
+    values = iter(["maybe", "yes"])
+    response = _prompt_overlap_mark(input_fn=_read_with_values(values))
+
+    assert response is True
+
+
+def test_prompt_speaker_assignment_rejects_invalid_choices() -> None:
+    values = iter(["3", "", "2"])
+    input_fn = _read_with_values(values)
+
+    speaker_id, speaker_label = _prompt_speaker_assignment(
+        input_fn=input_fn,
+        candidates=[("you", "You"), ("remote", "Remote")],
+    )
+
+    assert speaker_id == "remote"
+    assert speaker_label == "Remote"
+
+
+def test_prompt_speaker_assignment_adds_new_speaker_id_for_unknown_label() -> None:
+    values = iter(["new person"])
+    input_fn = _read_with_values(values)
+    candidates: list[tuple[str, str]] = [("you", "You"), ("remote", "Remote")]
+
+    speaker_id, speaker_label = _prompt_speaker_assignment(
+        input_fn=input_fn,
+        candidates=candidates,
+    )
+
+    assert speaker_id == "new_person"
+    assert speaker_label == "new person"
+    assert ("new_person", "new person") in candidates
+
+
+def test_new_speaker_id_rewrites_and_makes_unique(tmp_path: Path) -> None:
+    used_ids = {"alice", "alice_1"}
+    assert _new_speaker_id("Alice", used_ids) == "alice_2"
+    assert _new_speaker_id("123abc", used_ids) == "speaker_123abc"
+
+
+def test_print_review_item_omits_candidates_when_empty(capsys: pytest.CaptureFixture[str]) -> None:
+    segment = _merged_transcript_fixture().segments[0]
+
+    _print_review_item(
+        index=1,
+        total=1,
+        flag=ReviewFlag(
+            id="flag",
+            segment_id=segment.id,
+            reason_code="speaker_overlap",
+            start_seconds=segment.start_seconds,
+            end_seconds=segment.end_seconds,
+            source_id=segment.source_id,
+            speaker_id=segment.speaker.speaker_id,
+            metadata={},
+        ),
+        segment=segment,
+        ordered_segments=(_merged_transcript_fixture().segments[0],),
+        segment_position=0,
+        candidates=[],
+    )
+
+    captured = capsys.readouterr()
+    assert "Candidate speakers:" not in captured.out
+
+
+def test_timestamp_normalizes_naive_datetime_and_increments_index() -> None:
+    naive = datetime(2026, 5, 19, 12, 0, 0)
+    assert _timestamp(naive) == "2026-05-19T12:00:00Z"
+    assert _timestamp(datetime(2026, 5, 19, 12, 0, 0), index=2) == "2026-05-19T12:00:02Z"
+
+
+def test_ordered_review_flags_rejects_unknown_segment_reference(tmp_path: Path) -> None:
+    session_dir, store, _ = _build_session_bundle(
+        tmp_path,
+        flags=(
+            ReviewFlag(
+                id="flag_unknown_segment",
+                segment_id="missing",
+                reason_code="low_speaker_confidence",
+                start_seconds=0.0,
+                end_seconds=0.8,
+                source_id="local_mic",
+                speaker_id="you",
+                metadata={},
+            ),
+        ),
+    )
+    with pytest.raises(CorrectionWorkflowError, match="references unknown segment_id"):
+        run_correction_workflow(session_dir, now=NOW, input_fn=lambda _: "s")
+
+
+def test_ordered_speaker_catalog_deduplicates_speakers() -> None:
+    transcript = _merged_transcript_fixture()
+    duplicated = transcript.segments + (transcript.segments[0],)
+    catalog = _ordered_speaker_catalog(
+        MergedTranscriptArtifact(
+            version=transcript.version,
+            session_id=transcript.session_id,
+            policy=transcript.policy,
+            sources=transcript.sources,
+            text=transcript.text,
+            segments=duplicated,
+            created_at=transcript.created_at,
+        )
+    )
+
+    assert catalog == [("you", "You"), ("remote", "Remote")]
+
+
+def test_ordered_review_flags_orders_and_rejects_unknown_segments() -> None:
+    transcript = _merged_transcript_fixture()
+    review_queue = _review_queue_fixture(
+        merged_record=ArtifactRef(
+            id=f"{SESSION_ID}:artifacts/merged_transcript/review-source.json",
+            artifact_type="merged_transcript",
+            version=1,
+            sha256="1" * 64,
+        ),
+        flags=(
+            ReviewFlag(
+                id="late",
+                segment_id="segment_2",
+                reason_code="speaker_overlap",
+                start_seconds=1.0,
+                end_seconds=1.8,
+                source_id="system_audio",
+                speaker_id="remote",
+                metadata={},
+            ),
+            ReviewFlag(
+                id="early",
+                segment_id="segment_1",
+                start_seconds=0.0,
+                end_seconds=0.8,
+                source_id="local_mic",
+                reason_code="low_transcript_confidence",
+                speaker_id="you",
+                metadata={},
+            ),
+        ),
+    )
+    review_flags = _ordered_review_flags(
+        review_queue=ReviewQueueArtifact(
+            version=review_queue.version,
+            session_id=review_queue.session_id,
+            merged_transcript_artifact=review_queue.merged_transcript_artifact,
+            policy=review_queue.policy,
+            flags=review_queue.flags,
+            created_at=review_queue.created_at,
+        ),
+        source_transcript=transcript,
+    )
+
+    assert [flag.id for flag, _ in review_flags] == ["early", "late"]
+
+    with pytest.raises(
+        CorrectionWorkflowError,
+        match="references unknown segment_id unknown_segment",
+    ):
+        _ordered_review_flags(
+            review_queue=ReviewQueueArtifact(
+                version=review_queue.version,
+                session_id=review_queue.session_id,
+                merged_transcript_artifact=review_queue.merged_transcript_artifact,
+                policy=review_queue.policy,
+                flags=(
+                    ReviewFlag(
+                        id="bad",
+                        segment_id="unknown_segment",
+                        reason_code="low_transcript_confidence",
+                        start_seconds=0.0,
+                        end_seconds=0.8,
+                        source_id="local_mic",
+                        speaker_id="you",
+                        metadata={},
+                    ),
+                ),
+                created_at=review_queue.created_at,
+            ),
+            source_transcript=transcript,
+        )
+
+
 def test_main_correct_rejects_missing_session_path(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -421,6 +651,13 @@ def _build_session_bundle(
         name="review/queue.json",
     )
     return session_dir, store, review_record
+
+
+def _read_with_values(values: Iterator[str]) -> Callable[[str], str]:
+    def _next(_: str) -> str:
+        return next(values)
+
+    return _next
 
 
 def _create_session_record(tmp_path: Path) -> Path:
