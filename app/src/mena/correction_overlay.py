@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -19,7 +20,7 @@ from mena.merge_timing import (
     SegmentConfidence,
     SpeakerIdentity,
 )
-from mena.processing import ArtifactRef
+from mena.processing import ArtifactRef, ProcessingStateError
 
 CORRECTION_OVERLAY_ARTIFACT_TYPE = "correction_overlay"
 CORRECTION_OVERLAY_ARTIFACT_VERSION = 1
@@ -33,6 +34,30 @@ CORRECTION_TYPES = frozenset(
     }
 )
 HUMAN_CORRECTED_SPEAKER_KIND = "human_corrected"
+CORRECTION_ENTRY_KEYS = frozenset(
+    {
+        "id",
+        "segment_id",
+        "correction_type",
+        "original_flag_id",
+        "user_action_at",
+        "speaker_id",
+        "speaker_label",
+        "text",
+        "overlap_detected",
+        "metadata",
+    }
+)
+CORRECTION_OVERLAY_KEYS = frozenset(
+    {
+        "version",
+        "session_id",
+        "source_transcript_artifact",
+        "review_queue_artifact",
+        "entries",
+        "created_at",
+    }
+)
 _STABLE_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_:-]*$")
 
 
@@ -62,6 +87,7 @@ class CorrectionEntry:
     @classmethod
     def from_dict(cls, data: object) -> Self:
         item = _mapping(data, "Correction entry")
+        _reject_unknown_keys(item, CORRECTION_ENTRY_KEYS, "Correction entry")
         entry = cls(
             id=_required_str(item, "id", "Correction entry"),
             segment_id=_required_str(item, "segment_id", "Correction entry"),
@@ -70,7 +96,7 @@ class CorrectionEntry:
             original_flag_id=_required_nullable_str(item, "original_flag_id", "Correction entry"),
             speaker_id=_required_nullable_str(item, "speaker_id", "Correction entry"),
             speaker_label=_required_nullable_str(item, "speaker_label", "Correction entry"),
-            text=_required_nullable_str(item, "text", "Correction entry"),
+            text=_required_nullable_str(item, "text", "Correction entry", allow_empty=True),
             overlap_detected=_required_nullable_bool(item, "overlap_detected", "Correction entry"),
             metadata=_required_json_object(item, "metadata", "Correction entry metadata"),
         )
@@ -85,6 +111,7 @@ class CorrectionEntry:
             _validate_stable_id(entry.speaker_id, "Correction entry speaker_id")
         if entry.correction_type not in CORRECTION_TYPES:
             raise CorrectionOverlayContractError("Correction entry correction_type is invalid.")
+        _validate_timestamp(entry.user_action_at, "Correction entry user_action_at")
         _validate_entry_payload(entry)
         return entry
 
@@ -117,11 +144,12 @@ class CorrectionOverlayArtifact:
     @classmethod
     def from_dict(cls, data: object) -> Self:
         item = _mapping(data, "Correction overlay artifact")
+        _reject_unknown_keys(item, CORRECTION_OVERLAY_KEYS, "Correction overlay artifact")
         artifact = cls(
             version=_required_int(item, "version", "Correction overlay artifact"),
             session_id=_required_str(item, "session_id", "Correction overlay artifact"),
-            source_transcript_artifact=ArtifactRef.from_dict(
-                item.get("source_transcript_artifact")
+            source_transcript_artifact=_required_artifact_ref(
+                item, "source_transcript_artifact", "Correction overlay artifact"
             ),
             review_queue_artifact=_required_nullable_artifact_ref(
                 item, "review_queue_artifact", "Correction overlay artifact"
@@ -131,6 +159,8 @@ class CorrectionOverlayArtifact:
         )
         if artifact.version != CORRECTION_OVERLAY_SCHEMA_VERSION:
             raise CorrectionOverlayContractError("Unsupported correction overlay artifact version.")
+        _validate_uuid(artifact.session_id, "Correction overlay artifact session_id")
+        _validate_timestamp(artifact.created_at, "Correction overlay artifact created_at")
         _validate_source_transcript_ref(artifact.source_transcript_artifact)
         _validate_unique_entry_ids(artifact.entries)
         return artifact
@@ -209,6 +239,7 @@ def apply_correction_overlay(
 ) -> MergedTranscriptArtifact:
     """Apply an overlay without mutating the source transcript artifact."""
 
+    overlay = CorrectionOverlayArtifact.from_dict(overlay.to_dict())
     if ArtifactRef.from_record(source_transcript_record) != overlay.source_transcript_artifact:
         raise CorrectionOverlayContractError(
             "Correction overlay source_transcript_artifact must match the source record."
@@ -274,7 +305,9 @@ def _apply_entry(
         return replace(segment, text=entry.text or "")
     if entry.correction_type == "overlap_mark":
         return replace(segment, overlap_detected=bool(entry.overlap_detected))
-    return segment
+    if entry.correction_type == "skip_mark":
+        return segment
+    raise CorrectionOverlayContractError("Correction entry correction_type is invalid.")
 
 
 def _validate_entry_payload(entry: CorrectionEntry) -> None:
@@ -357,6 +390,12 @@ def _mapping(data: object, label: str) -> Mapping[str, object]:
     return data
 
 
+def _reject_unknown_keys(data: Mapping[str, object], allowed: frozenset[str], label: str) -> None:
+    unknown = sorted(set(data) - allowed)
+    if unknown:
+        raise CorrectionOverlayContractError(f"{label} contains unknown fields: {unknown}.")
+
+
 def _list(data: Mapping[str, object], key: str) -> list[object]:
     value = data.get(key)
     if not isinstance(value, list):
@@ -371,11 +410,17 @@ def _required_str(data: Mapping[str, object], key: str, label: str) -> str:
     return value
 
 
-def _required_nullable_str(data: Mapping[str, object], key: str, label: str) -> str | None:
+def _required_nullable_str(
+    data: Mapping[str, object],
+    key: str,
+    label: str,
+    *,
+    allow_empty: bool = False,
+) -> str | None:
     value = _required_key(data, key, label)
     if value is None:
         return None
-    if not isinstance(value, str) or value == "":
+    if not isinstance(value, str) or (value == "" and not allow_empty):
         raise CorrectionOverlayContractError(f"{label} {key} must be a non-empty string or null.")
     return value
 
@@ -404,7 +449,22 @@ def _required_nullable_artifact_ref(
     value = _required_key(data, key, label)
     if value is None:
         return None
-    return ArtifactRef.from_dict(value)
+    return _artifact_ref_from_dict(value, f"{label} {key}")
+
+
+def _required_artifact_ref(
+    data: Mapping[str, object],
+    key: str,
+    label: str,
+) -> ArtifactRef:
+    return _artifact_ref_from_dict(_required_key(data, key, label), f"{label} {key}")
+
+
+def _artifact_ref_from_dict(data: object, label: str) -> ArtifactRef:
+    try:
+        return ArtifactRef.from_dict(data)
+    except ProcessingStateError as exc:
+        raise CorrectionOverlayContractError(f"{label} is invalid: {exc}") from exc
 
 
 def _required_json_object(data: Mapping[str, object], key: str, label: str) -> Mapping[str, object]:
@@ -426,6 +486,23 @@ def _required_key(data: Mapping[str, object], key: str, label: str) -> object:
 def _validate_stable_id(value: str, label: str) -> None:
     if not _STABLE_ID_PATTERN.fullmatch(value):
         raise CorrectionOverlayContractError(f"{label} must be a stable id.")
+
+
+def _validate_uuid(value: str, label: str) -> None:
+    try:
+        uuid.UUID(value)
+    except ValueError as exc:
+        raise CorrectionOverlayContractError(f"{label} must be a UUID.") from exc
+
+
+def _validate_timestamp(value: str, label: str) -> None:
+    normalized = value.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise CorrectionOverlayContractError(f"{label} must be an RFC 3339 date-time.") from exc
+    if parsed.tzinfo is None:
+        raise CorrectionOverlayContractError(f"{label} must include a timezone.")
 
 
 def _timestamp(now: datetime | None) -> str:

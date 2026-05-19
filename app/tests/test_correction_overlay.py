@@ -171,6 +171,25 @@ def test_correction_overlay_rejects_invalid_entry_payloads() -> None:
         )
 
 
+def test_correction_overlay_accepts_schema_valid_empty_text_edit() -> None:
+    entry = CorrectionEntry.from_dict(
+        {
+            "id": "entry_1",
+            "segment_id": "segment_1",
+            "correction_type": "text_edit",
+            "original_flag_id": None,
+            "user_action_at": "2026-05-19T15:20:00Z",
+            "speaker_id": None,
+            "speaker_label": None,
+            "text": "",
+            "overlap_detected": None,
+            "metadata": {},
+        }
+    )
+
+    assert entry.text == ""
+
+
 def test_correction_entry_rejects_missing_nullable_contract_fields() -> None:
     payload = (
         _overlay_fixture(
@@ -182,6 +201,34 @@ def test_correction_entry_rejects_missing_nullable_contract_fields() -> None:
     del payload["speaker_id"]
 
     with pytest.raises(CorrectionOverlayContractError, match="speaker_id is required"):
+        CorrectionEntry.from_dict(payload)
+
+
+def test_correction_entry_rejects_unknown_payload_fields() -> None:
+    payload = (
+        _overlay_fixture(
+            source_record=_persist_source_transcript(InMemoryArtifactStore(session_id=SESSION_ID))
+        )
+        .entries[0]
+        .to_dict()
+    )
+    payload["typoed_field"] = "unexpected"
+
+    with pytest.raises(CorrectionOverlayContractError, match="unknown fields"):
+        CorrectionEntry.from_dict(payload)
+
+
+def test_correction_entry_rejects_invalid_user_action_timestamp() -> None:
+    payload = (
+        _overlay_fixture(
+            source_record=_persist_source_transcript(InMemoryArtifactStore(session_id=SESSION_ID))
+        )
+        .entries[0]
+        .to_dict()
+    )
+    payload["user_action_at"] = "not-a-timestamp"
+
+    with pytest.raises(CorrectionOverlayContractError, match="date-time"):
         CorrectionEntry.from_dict(payload)
 
 
@@ -303,6 +350,29 @@ def test_apply_correction_overlay_rejects_duplicate_source_segment_ids() -> None
         )
 
 
+def test_apply_correction_overlay_revalidates_overlay_contract() -> None:
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    source_artifact = _merged_transcript_fixture()
+    source_record = _persist_source_transcript(store, artifact=source_artifact)
+    overlay = _overlay_fixture(source_record=source_record)
+    invalid_overlay = replace(
+        overlay,
+        entries=(
+            replace(
+                overlay.entries[0],
+                correction_type="bad_type",
+            ),
+        ),
+    )
+
+    with pytest.raises(CorrectionOverlayContractError, match="correction_type"):
+        apply_correction_overlay(
+            source_transcript=source_artifact,
+            source_transcript_record=source_record,
+            overlay=invalid_overlay,
+        )
+
+
 def test_persist_correction_overlay_validates_contract_before_writing() -> None:
     store = InMemoryArtifactStore(session_id=SESSION_ID)
     source_record = _persist_source_transcript(store)
@@ -329,6 +399,42 @@ def test_correction_overlay_rejects_missing_review_queue_artifact_field() -> Non
     del payload["review_queue_artifact"]
 
     with pytest.raises(CorrectionOverlayContractError, match="review_queue_artifact is required"):
+        CorrectionOverlayArtifact.from_dict(payload)
+
+
+def test_correction_overlay_rejects_invalid_session_id_and_created_at() -> None:
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    source_record = _persist_source_transcript(store)
+    payload = _overlay_fixture(source_record=source_record).to_dict()
+    payload["session_id"] = "not-a-uuid"
+
+    with pytest.raises(CorrectionOverlayContractError, match="must be a UUID"):
+        CorrectionOverlayArtifact.from_dict(payload)
+
+    payload = _overlay_fixture(source_record=source_record).to_dict()
+    payload["created_at"] = "2026-05-19 15:20:00"
+
+    with pytest.raises(CorrectionOverlayContractError, match="timezone"):
+        CorrectionOverlayArtifact.from_dict(payload)
+
+
+def test_correction_overlay_wraps_artifact_ref_parse_errors() -> None:
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    source_record = _persist_source_transcript(store)
+    payload = _overlay_fixture(source_record=source_record).to_dict()
+    cast(dict[str, object], payload["source_transcript_artifact"])["sha256"] = "bad"
+
+    with pytest.raises(CorrectionOverlayContractError, match="source_transcript_artifact"):
+        CorrectionOverlayArtifact.from_dict(payload)
+
+
+def test_correction_overlay_rejects_unknown_top_level_fields() -> None:
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    source_record = _persist_source_transcript(store)
+    payload = _overlay_fixture(source_record=source_record).to_dict()
+    payload["unexpected"] = True
+
+    with pytest.raises(CorrectionOverlayContractError, match="unknown fields"):
         CorrectionOverlayArtifact.from_dict(payload)
 
 
