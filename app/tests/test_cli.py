@@ -19,7 +19,7 @@ def test_main_prints_help_without_command(capsys: CaptureFixture[str]) -> None:
 
 
 def test_main_exposes_architecture_command_surface(capsys: CaptureFixture[str]) -> None:
-    for command in COMMANDS[1:]:
+    for command in [command for command in COMMANDS[1:] if command != "correct"]:
         exit_code = main([command])
         captured = capsys.readouterr()
 

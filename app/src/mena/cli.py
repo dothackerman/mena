@@ -8,6 +8,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
+from mena.correction_workflow import CorrectionWorkflowError, run_correction_workflow
 from mena.discovery import AudioDiscovery, DiscoveryStatus, discover_audio_routes, format_discovery
 from mena.profiles import capture_profile_choices, parse_capture_profile
 from mena.protocol import ProtocolError, WorkerExitedError, WorkerProcess
@@ -56,6 +57,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     for command in COMMANDS[1:]:
         subparser = subparsers.add_parser(command)
+        if command == "correct":
+            subparser.add_argument(
+                "session_path",
+                help="Path to the session directory or session.json.",
+            )
         subparser.set_defaults(command=command)
 
     return parser
@@ -114,6 +120,18 @@ def main(
                 return 1
         update_session_capture_metadata(created_session.record_path, finalized.payload)
         print("Capture finalized")
+        return 0
+
+    if args.command == "correct":
+        try:
+            run_correction_workflow(
+                session_path=Path(args.session_path),
+                now=None,
+                input_fn=input,
+            )
+        except CorrectionWorkflowError as exc:
+            print(f"Cannot run correction workflow: {exc}")
+            return 1
         return 0
 
     print(f"Command '{args.command}' is not implemented yet.")
