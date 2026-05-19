@@ -1,0 +1,290 @@
+{
+  "$id": "https://dothackerman.github.io/mena/schemas/correction-overlay.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "artifact_ref": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_type": {
+          "pattern": "^[a-z][a-z0-9_:-]*$",
+          "type": "string"
+        },
+        "id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "version": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": ["id", "artifact_type", "version", "sha256"],
+      "type": "object"
+    },
+    "base_entry": {
+      "additionalProperties": false,
+      "properties": {
+        "correction_type": {
+          "enum": [
+            "speaker_reassignment",
+            "text_edit",
+            "skip_mark",
+            "overlap_mark"
+          ],
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^[a-z][a-z0-9_:-]*$",
+          "type": "string"
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "original_flag_id": {
+          "anyOf": [
+            {
+              "pattern": "^[a-z][a-z0-9_:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "overlap_detected": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "segment_id": {
+          "pattern": "^[a-z][a-z0-9_:-]*$",
+          "type": "string"
+        },
+        "speaker_id": {
+          "anyOf": [
+            {
+              "pattern": "^[a-z][a-z0-9_:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "speaker_label": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "user_action_at": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "segment_id",
+        "correction_type",
+        "original_flag_id",
+        "user_action_at",
+        "speaker_id",
+        "speaker_label",
+        "text",
+        "overlap_detected",
+        "metadata"
+      ],
+      "type": "object"
+    },
+    "speaker_reassignment": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/base_entry"
+        },
+        {
+          "properties": {
+            "correction_type": {
+              "const": "speaker_reassignment"
+            },
+            "overlap_detected": {
+              "type": "null"
+            },
+            "speaker_id": {
+              "pattern": "^[a-z][a-z0-9_:-]*$",
+              "type": "string"
+            },
+            "speaker_label": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "text": {
+              "type": "null"
+            }
+          }
+        }
+      ]
+    },
+    "text_edit": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/base_entry"
+        },
+        {
+          "properties": {
+            "correction_type": {
+              "const": "text_edit"
+            },
+            "overlap_detected": {
+              "type": "null"
+            },
+            "speaker_id": {
+              "type": "null"
+            },
+            "speaker_label": {
+              "type": "null"
+            },
+            "text": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    "skip_mark": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/base_entry"
+        },
+        {
+          "properties": {
+            "correction_type": {
+              "const": "skip_mark"
+            },
+            "overlap_detected": {
+              "type": "null"
+            },
+            "speaker_id": {
+              "type": "null"
+            },
+            "speaker_label": {
+              "type": "null"
+            },
+            "text": {
+              "type": "null"
+            }
+          }
+        }
+      ]
+    },
+    "overlap_mark": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/base_entry"
+        },
+        {
+          "properties": {
+            "correction_type": {
+              "const": "overlap_mark"
+            },
+            "overlap_detected": {
+              "type": "boolean"
+            },
+            "speaker_id": {
+              "type": "null"
+            },
+            "speaker_label": {
+              "type": "null"
+            },
+            "text": {
+              "type": "null"
+            }
+          }
+        }
+      ]
+    },
+    "entry": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/speaker_reassignment"
+        },
+        {
+          "$ref": "#/$defs/text_edit"
+        },
+        {
+          "$ref": "#/$defs/skip_mark"
+        },
+        {
+          "$ref": "#/$defs/overlap_mark"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "description": "Versioned correction overlay artifact storing user corrections separately from the source transcript.",
+  "properties": {
+    "created_at": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "entries": {
+      "items": {
+        "$ref": "#/$defs/entry"
+      },
+      "type": "array"
+    },
+    "review_queue_artifact": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/artifact_ref"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "session_id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "source_transcript_artifact": {
+      "$ref": "#/$defs/artifact_ref"
+    },
+    "version": {
+      "const": 1,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version",
+    "session_id",
+    "source_transcript_artifact",
+    "review_queue_artifact",
+    "entries",
+    "created_at"
+  ],
+  "type": "object"
+}

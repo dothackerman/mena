@@ -189,7 +189,7 @@
           "$ref": "#/$defs/confidence"
         },
         "kind": {
-          "enum": ["local_user", "diarized_remote", "fallback_remote"],
+          "enum": ["local_user", "diarized_remote", "fallback_remote", "human_corrected"],
           "type": "string"
         },
         "label": {
