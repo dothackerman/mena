@@ -29,7 +29,7 @@ MERGE_POLICY_VERSION = 1
 CHANNELS = frozenset({"local", "remote"})
 DIARIZATION_STATUSES = frozenset({"used", "skipped", "unavailable", "not_applicable"})
 CONFIDENCE_STATUSES = frozenset({"available", "unavailable"})
-SPEAKER_KINDS = frozenset({"local_user", "diarized_remote", "fallback_remote"})
+SPEAKER_KINDS = frozenset({"local_user", "diarized_remote", "fallback_remote", "human_corrected"})
 _STABLE_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_:-]*$")
 
 

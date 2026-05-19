@@ -129,6 +129,8 @@ Use `docs/ideas/` for:
 - Commit iteratively while working. Do not save a whole feature run as one large final commit.
 - Group changes semantically: schema/contract changes, implementation behavior, tests, documentation, tooling, and review fixes should be separate commits unless they are tightly coupled.
 - Keep commits small enough to review. There is no arbitrary file-count limit, but a commit with thousands of changed lines across multiple concerns is not acceptable.
+- A useful implementation issue usually has at least these possible commit slices when they are independently reviewable: contract/schema, runtime behavior, tests, and docs. Combine slices only when separating them would make the intermediate commits misleading or broken.
+- If you realize after committing that the branch shape violates this guidance, do not pretend it is fine. Preserve the visible history unless the user asks for a rewrite, then add a follow-up note or commit that calls out the process miss.
 - Preserve learning history. If another agent produced a poor commit shape, do not rewrite that history unless the user explicitly asks for a history rewrite. Add follow-up commits and document the issue so the team can learn from the failure.
 
 ## Definition of Done for Issue Work
@@ -140,5 +142,5 @@ Issue work is not done when the code compiles. It is done when the branch is rea
 - Before marking the pull request ready for review, perform a local self-review of the diff against the issue scope, linked architecture guidance, non-goals, and likely edge cases.
 - Add self-review fixes as follow-up commits. Do not silently rewrite another agent's history to hide review findings unless the user explicitly asks for that.
 - Run the relevant local gates, including `make check` from `app/` when application code changes.
-- Update the pull request body with scope, validation results, known limitations or non-goals, and useful agent-run notes.
+- Update the pull request body with scope, validation results, known limitations or non-goals, useful agent-run notes, and a short local self-review section that states what was checked and what was fixed or left for reviewers.
 - Only after the self-review is complete, fixes are pushed, gates pass, and the PR body is current, mark the pull request ready for review.
