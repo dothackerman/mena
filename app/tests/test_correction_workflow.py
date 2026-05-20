@@ -12,6 +12,7 @@ from mena.correction_overlay import (
 )
 from mena.correction_workflow import (
     CorrectionWorkflowError,
+    _load_review_queue,
     _new_speaker_id,
     _ordered_review_flags,
     _ordered_speaker_catalog,
@@ -287,7 +288,7 @@ def test_run_correction_workflow_displays_context_and_candidates(
     assert "1) you (You)" in captured.out
 
 
-def test_run_correction_workflow_skips_and_persists_empty_entries(tmp_path: Path) -> None:
+def test_run_correction_workflow_persists_skip_mark_entries(tmp_path: Path) -> None:
     session_dir, store, _ = _build_session_bundle(
         tmp_path,
         flags=(
@@ -314,7 +315,52 @@ def test_run_correction_workflow_skips_and_persists_empty_entries(tmp_path: Path
     assert result.reviewed == 1
     assert result.skipped == 1
     assert result.corrected == 0
-    assert payload["entries"] == []
+    assert payload["entries"] == [
+        {
+            "correction_type": "skip_mark",
+            "id": "entry_0001",
+            "metadata": {"reason": "user_action"},
+            "original_flag_id": "flag_low_speaker",
+            "overlap_detected": None,
+            "segment_id": "segment_2",
+            "speaker_id": None,
+            "speaker_label": None,
+            "text": None,
+            "user_action_at": "2026-05-19T15:20:01Z",
+        }
+    ]
+
+
+def test_run_correction_workflow_can_persist_two_runs_in_same_second(tmp_path: Path) -> None:
+    session_dir, store, _ = _build_session_bundle(
+        tmp_path,
+        flags=(
+            ReviewFlag(
+                id="flag_repeat",
+                segment_id="segment_2",
+                reason_code="low_speaker_confidence",
+                start_seconds=1.0,
+                end_seconds=1.8,
+                source_id="system_audio",
+                speaker_id="remote",
+                metadata={},
+            ),
+        ),
+    )
+
+    first = run_correction_workflow(
+        session_path=session_dir,
+        now=NOW,
+        input_fn=lambda _: "s",
+    )
+    second = run_correction_workflow(
+        session_path=session_dir,
+        now=NOW,
+        input_fn=lambda _: "s",
+    )
+
+    assert first.overlay_artifact_record.id != second.overlay_artifact_record.id
+    assert len(store.list(artifact_type=CORRECTION_OVERLAY_ARTIFACT_TYPE)) == 2
 
 
 def test_run_correction_workflow_rejects_missing_review_queue(tmp_path: Path) -> None:
@@ -371,6 +417,86 @@ def test_run_correction_workflow_rejects_stale_review_queue_reference(tmp_path: 
 
     with pytest.raises(CorrectionWorkflowError, match="missing merged transcript"):
         run_correction_workflow(session_path=session_dir, now=NOW, input_fn=lambda _: "s")
+
+
+def test_load_review_queue_rejects_failed_integrity_verification(tmp_path: Path) -> None:
+    session_dir, store, review_record = _build_session_bundle(
+        tmp_path,
+        flags=(
+            ReviewFlag(
+                id="flag_integrity",
+                segment_id="segment_1",
+                reason_code="low_transcription_confidence",
+                start_seconds=0.0,
+                end_seconds=0.8,
+                source_id="local_mic",
+                speaker_id="you",
+                metadata={},
+            ),
+        ),
+    )
+    review_path = session_dir / review_record.path
+    payload = json.loads(review_path.read_text(encoding="utf-8"))
+    payload["flags"][0]["segment_id"] = "segment_2"
+    review_path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+
+    with pytest.raises(CorrectionWorkflowError, match="Review queue artifact .* is invalid"):
+        _load_review_queue(store=store, session_id=SESSION_ID)
+
+
+def test_load_review_queue_uses_path_tie_breaker_for_same_created_at(tmp_path: Path) -> None:
+    session_dir = _create_session_record(tmp_path)
+    store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=session_dir)
+    merged_record = persist_merged_transcript_artifact(
+        store=store,
+        artifact=_merged_transcript_fixture(),
+        name="merged/merged.json",
+    )
+    merged_ref = ArtifactRef.from_record(merged_record)
+    first = persist_review_queue_artifact(
+        store=store,
+        artifact=_review_queue_fixture(
+            merged_record=merged_ref,
+            flags=(
+                ReviewFlag(
+                    id="first_queue_flag",
+                    segment_id="segment_1",
+                    reason_code="low_transcription_confidence",
+                    start_seconds=0.0,
+                    end_seconds=0.8,
+                    source_id="local_mic",
+                    speaker_id="you",
+                    metadata={},
+                ),
+            ),
+        ),
+        name="review/001-queue.json",
+    )
+    second = persist_review_queue_artifact(
+        store=store,
+        artifact=_review_queue_fixture(
+            merged_record=merged_ref,
+            flags=(
+                ReviewFlag(
+                    id="second_queue_flag",
+                    segment_id="segment_2",
+                    reason_code="low_speaker_confidence",
+                    start_seconds=1.0,
+                    end_seconds=1.8,
+                    source_id="system_audio",
+                    speaker_id="remote",
+                    metadata={},
+                ),
+            ),
+        ),
+        name="review/002-queue.json",
+    )
+
+    record, queue = _load_review_queue(store=store, session_id=SESSION_ID)
+
+    assert first.path < second.path
+    assert record.id == second.id
+    assert [flag.id for flag in queue.flags] == ["second_queue_flag"]
 
 
 def test_resolve_session_supports_session_directory_and_session_record_file(tmp_path: Path) -> None:
@@ -628,6 +754,41 @@ def test_main_correct_runs_interactive_workflow(
 
     assert exit_code == 0
     assert "Correction completed." in captured.out
+
+
+@pytest.mark.parametrize("error", [EOFError, KeyboardInterrupt])
+def test_main_correct_handles_interactive_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    error: type[BaseException],
+) -> None:
+    session_dir, _, _ = _build_session_bundle(
+        tmp_path,
+        flags=(
+            ReviewFlag(
+                id="flag_cancel",
+                segment_id="segment_1",
+                reason_code="low_transcription_confidence",
+                start_seconds=0.0,
+                end_seconds=0.8,
+                source_id="local_mic",
+                speaker_id="you",
+                metadata={},
+            ),
+        ),
+    )
+
+    def _cancel(_: str) -> str:
+        raise error
+
+    monkeypatch.setattr("builtins.input", _cancel)
+
+    exit_code = main(["correct", str(session_dir)])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "Correction workflow cancelled." in captured.out
 
 
 def _build_session_bundle(

@@ -132,6 +132,9 @@ def main(
         except CorrectionWorkflowError as exc:
             print(f"Cannot run correction workflow: {exc}")
             return 1
+        except (EOFError, KeyboardInterrupt):
+            print("Correction workflow cancelled.")
+            return 1
         return 0
 
     print(f"Command '{args.command}' is not implemented yet.")

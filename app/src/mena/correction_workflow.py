@@ -8,6 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from uuid import uuid4
 
 from mena.artifacts import ArtifactRecord, FileSystemArtifactStore
 from mena.correction_overlay import (
@@ -97,6 +98,14 @@ def run_correction_workflow(
         reviewed += 1
 
         if action == "skip":
+            entries.append(
+                _make_skip_entry(
+                    entry_id=f"entry_{index:04d}",
+                    segment_id=segment.id,
+                    flag_id=flag.id,
+                    now=_timestamp(now, index=index),
+                )
+            )
             skipped += 1
             continue
 
@@ -197,6 +206,12 @@ def _load_review_queue(
 
     latest: tuple[ArtifactRecord, ReviewQueueArtifact] | None = None
     for record in records:
+        verification = store.verify(record.id)
+        if not verification.ok:
+            raise CorrectionWorkflowError(
+                f"Review queue artifact {record.id} is invalid: {verification.error}"
+            )
+
         try:
             queue = ReviewQueueArtifact.from_dict(json.loads(store.retrieve(record.id)))
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
@@ -213,7 +228,9 @@ def _load_review_queue(
                 "Review queue session_id does not match the session record."
             )
 
-        if latest is None or queue.created_at > latest[1].created_at:
+        latest_key = None if latest is None else (latest[1].created_at, latest[0].path)
+        candidate_key = (queue.created_at, record.path)
+        if latest_key is None or candidate_key > latest_key:
             latest = (record, queue)
 
     if latest is None:
@@ -423,6 +440,23 @@ def _make_overlap_entry(
     )
 
 
+def _make_skip_entry(
+    *,
+    entry_id: str,
+    segment_id: str,
+    flag_id: str,
+    now: str,
+) -> CorrectionEntry:
+    return CorrectionEntry(
+        id=entry_id,
+        segment_id=segment_id,
+        correction_type="skip_mark",
+        original_flag_id=flag_id,
+        user_action_at=now,
+        metadata={"reason": "user_action"},
+    )
+
+
 def _print_review_item(
     *,
     index: int,
@@ -498,5 +532,5 @@ def _timestamp(now: datetime | None, *, index: int = 0) -> str:
 
 
 def _overlay_name(*, session_id: str) -> Path:
-    timestamp = datetime.now(UTC).isoformat(timespec="seconds").replace(":", "")
-    return Path("correction_overlay") / f"{session_id}-{timestamp}.json"
+    timestamp = datetime.now(UTC).isoformat(timespec="microseconds").replace(":", "")
+    return Path("correction_overlay") / f"{session_id}-{timestamp}-{uuid4().hex}.json"
