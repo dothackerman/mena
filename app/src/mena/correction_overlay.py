@@ -209,25 +209,29 @@ def persist_correction_overlay_artifact(
     store: ArtifactStore,
     artifact: CorrectionOverlayArtifact,
     name: str | Path,
+    status: str = "sealed",
+    metadata: Mapping[str, object] | None = None,
 ) -> ArtifactRecord:
     """Persist one correction overlay payload through the artifact store contract."""
 
     CorrectionOverlayArtifact.from_dict(artifact.to_dict())
+    artifact_metadata: dict[str, object] = {
+        "category": "review",
+        "contract": "correction-overlay.v1",
+        "source_transcript_artifact_id": artifact.source_transcript_artifact.id,
+        "review_queue_artifact_id": (
+            None if artifact.review_queue_artifact is None else artifact.review_queue_artifact.id
+        ),
+    }
+    if metadata is not None:
+        artifact_metadata.update(metadata)
     return store.store(
         artifact_type=CORRECTION_OVERLAY_ARTIFACT_TYPE,
         name=name,
         data=artifact.to_json_bytes(),
         version=CORRECTION_OVERLAY_ARTIFACT_VERSION,
-        metadata={
-            "category": "review",
-            "contract": "correction-overlay.v1",
-            "source_transcript_artifact_id": artifact.source_transcript_artifact.id,
-            "review_queue_artifact_id": (
-                None
-                if artifact.review_queue_artifact is None
-                else artifact.review_queue_artifact.id
-            ),
-        },
+        status=status,
+        metadata=artifact_metadata,
     )
 
 
