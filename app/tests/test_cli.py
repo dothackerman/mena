@@ -22,7 +22,7 @@ from mena.cli import (
 )
 from mena.diarization import FakeDiarizationProvider
 from mena.discovery import AudioDiscovery, AudioRoute, DiscoveryStatus, PlaybackStream
-from mena.processing import ProcessingErrorInfo, ProcessingStageLedger
+from mena.processing import ArtifactRef, ProcessingErrorInfo, ProcessingStageLedger
 from mena.profiles import CaptureProfileId, get_capture_profile, parse_capture_profile
 from mena.protocol import ProtocolError, ProtocolMessage
 from mena.semantic_coherence import FakeSemanticCoherenceProvider, SemanticCoherenceProvider
@@ -542,6 +542,41 @@ def test_main_resume_blocks_non_retryable_failure_after_running_checkpoint(
         "run-blocked', stage 'transcription', attempt 1: "
         "Bad input (code=input)" in captured.out
     )
+
+
+def test_main_resume_after_completed_checkpoint_reports_no_retry(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    session = create_session(profile=parse_capture_profile("online"), data_root=tmp_path)
+    store = FileSystemArtifactStore(session_id=session.record.id, session_dir=session.bundle_path)
+    ledger = ProcessingStageLedger(session_id=session.record.id, run_id="run-complete", store=store)
+    output_record = store.store(
+        artifact_type="transcript",
+        name="completed-transcript.json",
+        data=b"{}",
+        metadata={},
+    )
+    now = datetime(2026, 5, 8, 8, 30, tzinfo=UTC)
+    running_state = ledger.mark_running(
+        stage="transcription",
+        input_artifacts=(),
+        attempt=1,
+        now=now,
+    )
+    ledger.mark_completed(
+        stage="transcription",
+        input_artifacts=(),
+        output_artifacts=(ArtifactRef.from_record(output_record),),
+        attempt=running_state.attempt,
+        started_at=running_state.started_at,
+        now=now,
+    )
+
+    exit_code = main(["resume", str(session.record_path)])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "No retryable processing failure found to resume." in captured.out
 
 
 def test_main_resume_uses_durable_checkpoint_order_when_timestamps_tie(
@@ -1182,6 +1217,34 @@ def test_main_process_reuses_source_audio_with_relative_then_absolute_session_pa
 
     first_exit_code = main(["process", str(session.bundle_path.relative_to(tmp_path))])
     second_exit_code = main(["process", str(session.bundle_path)])
+
+    captured = capsys.readouterr()
+    assert first_exit_code == 0
+    assert second_exit_code == 0
+    assert captured.out.count("Processing completed for run '") == 2
+
+
+def test_main_process_reuses_source_audio_after_session_bundle_relocation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    session = _build_processing_session(tmp_path)
+    record = json.loads(session.record_path.read_text(encoding="utf-8"))
+    for segment in record["capture_metadata"]["segments"]:
+        segment["path"] = Path(segment["path"]).name
+    session.record_path.write_text(json.dumps(record), encoding="utf-8")
+    monkeypatch.setattr(
+        "mena.cli._run_processing_stages",
+        lambda **_kwargs: None,
+    )
+
+    first_exit_code = main(["process", str(session.record_path)])
+    relocated_root = tmp_path / "relocated"
+    relocated_root.mkdir()
+    relocated_bundle = relocated_root / session.bundle_path.name
+    session.bundle_path.rename(relocated_bundle)
+    second_exit_code = main(["process", str(relocated_bundle / "session.json")])
 
     captured = capsys.readouterr()
     assert first_exit_code == 0

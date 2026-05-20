@@ -541,7 +541,6 @@ def _ensure_source_audio_artifact(
         if (
             metadata.get(metadata_source_key) == source_id
             and metadata.get(metadata_index_key) == index
-            and metadata.get(metadata_path_key) == normalized_path
         ):
             if metadata.get(metadata_sha_key) != artifact_sha:
                 raise ValueError(
@@ -631,7 +630,7 @@ def _latest_resumable_processing_state(
     latest = _latest_processing_state(
         store=store,
         session_id=session_id,
-        allowed_statuses=frozenset({"failed", "running"}),
+        allowed_statuses=frozenset({"running", "completed", "failed", "skipped"}),
     )
     if latest is None or latest.status == "running":
         return latest
@@ -644,12 +643,16 @@ def _latest_non_retryable_processing_failure(
     store: FileSystemArtifactStore,
     session_id: str,
 ) -> ProcessingStageState | None:
-    return _latest_processing_state(
+    latest = _latest_processing_state(
         store=store,
         session_id=session_id,
-        allowed_statuses=frozenset({"failed"}),
-        require_retryable_error=False,
+        allowed_statuses=frozenset({"running", "completed", "failed", "skipped"}),
     )
+    if latest is None or latest.status != "failed":
+        return None
+    if latest.error is not None and not latest.error.retryable:
+        return latest
+    return None
 
 
 def _resolve_session(session_path: Path) -> tuple[Path, dict[str, object]]:
