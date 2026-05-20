@@ -99,7 +99,7 @@ Status: Confirmed
 - Audio recording, transcription, and diarization are local-only stages. `mena` must not send audio to a remote service.
 - Summarization is local-preferred and may fall back to ZDR-bearing direct Mistral API for the PoC when local execution is unavailable or insufficient.
 - The direct Mistral API fallback is architecture-allowed only through a Zero Data Retention access path that satisfies `CON-01`; default-retention API access is not an architecture-compliant fallback.
-- Zero Data Retention is treated as an **operator-attested contractual predicate**, not as a runtime-verifiable signal. The application cannot programmatically verify ZDR scope, plan tier, training opt-out, or subprocessor posture, and must not pretend that it can. Per `AD-026`, the fallback is disabled by default and requires explicit operator configuration plus per-session user consent. See [R-06 synthesis](../research/synthesis-research-phase-1.md#35-r-06--fallback-provider-policy) for the full allow-conditions and the residual risk list.
+- Zero Data Retention is treated as an **operator-attested contractual predicate**, not as a runtime-verifiable signal. The application cannot programmatically verify ZDR scope, plan tier, training opt-out, or subprocessor posture, and must not pretend that it can. Per `ADR-026`, the fallback is disabled by default and requires explicit operator configuration plus per-session user consent. See [R-06 synthesis](../research/synthesis-research-phase-1.md#35-r-06--fallback-provider-policy) for the full allow-conditions and the residual risk list.
 - Semantic coherence checks are local-preferred; fallback behavior remains deferred unless needed by the PoC pipeline.
 - Model and provider choices must be behind ports and a policy/capability resolver. Workflow code must not call concrete providers directly.
 - User-created session data remains local and survives uninstall by default.
@@ -124,7 +124,7 @@ These questions should not block the architecture overview.
 They should be answered through research, first implementation experience, and user testing.
 
 - The incremental complexity of `in_person_single_mic` needs validation during implementation, but it is now part of PoC v0 scope rather than a post-PoC idea.
-- Legal and policy validation of the direct Mistral summarization fallback was advanced by R-06 ([synthesis §3.5](../research/synthesis-research-phase-1.md#35-r-06--fallback-provider-policy)) and is now expressed as the operator-attested allow-conditions in `AD-026`. Residual contractual risk remains and must be reviewed if Mistral's terms change.
+- Legal and policy validation of the direct Mistral summarization fallback was advanced by R-06 ([synthesis §3.5](../research/synthesis-research-phase-1.md#35-r-06--fallback-provider-policy)) and is now expressed as the operator-attested allow-conditions in `ADR-026`. Residual contractual risk remains and must be reviewed if Mistral's terms change.
 - "Good enough" output quality is an empirical PoC learning outcome. The architecture must provide a fast feedback loop and traceable artifacts rather than pretending a threshold is known upfront.
 - CLI device/profile confirmation friction is an empirical UX learning outcome. The architecture must expose profile and device choices cleanly so the CLI can evolve without changing core logic.
 
@@ -392,7 +392,7 @@ Architectural mitigation:
 
 Status: Confirmed for the Linux PoC adapter; informative for the architectural Capture Port
 
-`AD-024` records the concrete Linux topology that satisfies the Capture Port for `online_dual_stream`. The pattern is PipeWire-first:
+`ADR-024` records the concrete Linux topology that satisfies the Capture Port for `online_dual_stream`. The pattern is PipeWire-first:
 
 - enumerate active playback streams, sinks, and sources in the user session
 - require explicit user confirmation of which playback stream is the meeting audio (the CLI surfaces application binary, stream name, and media name)
@@ -777,7 +777,7 @@ The protocol currently assumes:
 
 #### PoC Transport and Encoding
 
-Status: Confirmed for the PoC (per `AD-025`)
+Status: Confirmed for the PoC (per `ADR-025`)
 
 The PoC transport is **dedicated `stdio`** between the orchestrator and a child capture worker:
 
@@ -1309,7 +1309,7 @@ Current fallback decision:
 - OpenRouter or similar brokers are not part of the PoC fallback path
 - choosing a model family does not by itself decide sovereignty; the access path, jurisdiction, routing, retention, and contractual guarantees matter
 
-Per `AD-026`, ZDR is treated as an **operator-attested contractual predicate**, not as a runtime-verifiable signal. The fallback is **disabled by default**. The application verifies only the narrow technical perimeter (host, path, model allow-list, plain-text payload). The full allow-conditions are:
+Per `ADR-026`, ZDR is treated as an **operator-attested contractual predicate**, not as a runtime-verifiable signal. The fallback is **disabled by default**. The application verifies only the narrow technical perimeter (host, path, model allow-list, plain-text payload). The full allow-conditions are:
 
 - organisation-controlled commercial Mistral AI Studio account (business/processor posture)
 - Scale-tier or stronger commercial subscription (Experiment is excluded)
@@ -1325,13 +1325,13 @@ When operator evidence is missing, the product behaviour is **"remote summarisat
 
 #### PoC Provider Adapter Decisions
 
-Status: Confirmed (per `AD-021`, `AD-022`, `AD-023`)
+Status: Confirmed (per `ADR-021`, `ADR-022`, `ADR-023`)
 
 The architecture preserves provider-port replaceability, but the PoC pins concrete first adapters so coding agents can ship without re-litigating the choice:
 
-- **Local LLM (summarisation, semantic flagging) — `AD-021`.** PoC default adapter is **Ollama**. A second adapter for owned `llama.cpp` (`llama-server`) should be added as an early hardening slice once the first model-dependent workflow exists, so the Inference Port boundary is validated before model work becomes product-critical. Default model profile: 3B–4B-parameter quantised instruct model; 1B–3B fallback profile on ≤8 GB RAM machines; 7B is opt-in for stronger machines; 12B-class models are not the baseline. vLLM is out of scope for the PoC. Workflow code asks for stage-level capabilities ("structured summary", "semantic coherence check"), not for `/v1/chat/completions`.
-- **ASR — `AD-022`.** PoC primary ASR adapter is **`faster-whisper`** with hardware-selected Whisper-family profiles. `large-v3-turbo` is the quality ceiling for machines with sufficient VRAM/RAM headroom, not a universal default; `large-v3` is retained only as an explicit quality-reference rerun on stronger machines. Installation/preflight should choose a suitable model-size configuration from available VRAM/RAM and adapter capability. **`whisper.cpp`** is the first fallback adapter for weaker or more brittle environments (CPU-only, ≤8 GB RAM, no AVX2). Provider metadata (provider name, checkpoint, quantisation, device type, decode parameters including `condition_on_previous_text` and `hallucination_silence_threshold`, detected language, timestamp mode) is persisted with every transcript so reruns are deterministic. Vocabulary support uses `initial_prompt` and hotword hints (soft biasing); deterministic vocabulary control remains out of scope.
-- **Diarisation — `AD-023`.** PoC adapter is **`pyannote/speaker-diarization-community-1`**, invoked **scenario-aware**: not run on the local mic in `online_dual_stream` (structural attribution from the local mic is sufficient), run on the remote/system stream only when there are multiple remote speakers worth distinguishing, and run on the room mic for `in_person_single_mic`. The combined dual-stream is **not** fed to `community-1` because the model card requires mono input and downmixes stereo by averaging. Three diarisation artifacts are persisted: regular timeline (preserves overlap), exclusive projection, and correction overlay. Confidence is a **product-level heuristic layer** (overlap presence, very short speaker turns, speaker-flipping rate, regular-vs-exclusive disagreement, speaker-count instability) rather than a model signal — `community-1` does not expose calibrated confidence. Graceful degradation uses coarse labels (`You`, `Remote speaker 1`, `Speaker unknown`, `Room`) rather than confident-but-wrong identities.
+- **Local LLM (summarisation, semantic flagging) — `ADR-021`.** PoC default adapter is **Ollama**. A second adapter for owned `llama.cpp` (`llama-server`) should be added as an early hardening slice once the first model-dependent workflow exists, so the Inference Port boundary is validated before model work becomes product-critical. Default model profile: 3B–4B-parameter quantised instruct model; 1B–3B fallback profile on ≤8 GB RAM machines; 7B is opt-in for stronger machines; 12B-class models are not the baseline. vLLM is out of scope for the PoC. Workflow code asks for stage-level capabilities ("structured summary", "semantic coherence check"), not for `/v1/chat/completions`.
+- **ASR — `ADR-022`.** PoC primary ASR adapter is **`faster-whisper`** with hardware-selected Whisper-family profiles. `large-v3-turbo` is the quality ceiling for machines with sufficient VRAM/RAM headroom, not a universal default; `large-v3` is retained only as an explicit quality-reference rerun on stronger machines. Installation/preflight should choose a suitable model-size configuration from available VRAM/RAM and adapter capability. **`whisper.cpp`** is the first fallback adapter for weaker or more brittle environments (CPU-only, ≤8 GB RAM, no AVX2). Provider metadata (provider name, checkpoint, quantisation, device type, decode parameters including `condition_on_previous_text` and `hallucination_silence_threshold`, detected language, timestamp mode) is persisted with every transcript so reruns are deterministic. Vocabulary support uses `initial_prompt` and hotword hints (soft biasing); deterministic vocabulary control remains out of scope.
+- **Diarisation — `ADR-023`.** PoC adapter is **`pyannote/speaker-diarization-community-1`**, invoked **scenario-aware**: not run on the local mic in `online_dual_stream` (structural attribution from the local mic is sufficient), run on the remote/system stream only when there are multiple remote speakers worth distinguishing, and run on the room mic for `in_person_single_mic`. The combined dual-stream is **not** fed to `community-1` because the model card requires mono input and downmixes stereo by averaging. Three diarisation artifacts are persisted: regular timeline (preserves overlap), exclusive projection, and correction overlay. Confidence is a **product-level heuristic layer** (overlap presence, very short speaker turns, speaker-flipping rate, regular-vs-exclusive disagreement, speaker-count instability) rather than a model signal — `community-1` does not expose calibrated confidence. Graceful degradation uses coarse labels (`You`, `Remote speaker 1`, `Speaker unknown`, `Room`) rather than confident-but-wrong identities.
 
 Full per-adapter rationale and divergence resolution lives in the [research synthesis §3.1, §3.3, §3.4](../research/synthesis-research-phase-1.md#3-per-task-synthesis).
 
@@ -2212,7 +2212,7 @@ Telemetry is not part of the PoC implementation scope.
 
 ##### UX Telemetry Red Lines
 
-Status: Confirmed (per `AD-027`, even though telemetry remains deferred per `AD-014`)
+Status: Confirmed (per `ADR-027`, even though telemetry remains deferred per `ADR-014`)
 
 Even though telemetry is not implemented in the PoC, the architectural red lines below are documented now so future work cannot drift around them:
 
@@ -2224,7 +2224,7 @@ Even though telemetry is not implemented in the PoC, the architectural red lines
 - never rely on hashed or pseudonymous stable IDs as a workaround — pseudonymisation is not anonymisation under EDPB and GDPR
 - never silently submit telemetry over the network in PoC v0; if telemetry is introduced later, the only architecturally compatible model is local-only short-retention storage with manual user export, no persistent identifiers, closed-vocabulary metrics, and a schema registry/privacy-review gate per metric
 
-Allowed categories (only after `AD-014` is unparked, with explicit user opt-in):
+Allowed categories (only after `ADR-014` is unparked, with explicit user opt-in):
 
 - operational health and reliability — categorical/bucketed only — app version, enabled local models/backends, startup success/failure class, stage success/failure classes, storage pressure, crash class counts
 - performance buckets — coarse ranges only (e.g. "under 1 minute / 1–5 minutes / over 5 minutes"); never exact durations
@@ -2273,48 +2273,21 @@ This separation is intentional:
 
 Status: Provisional
 
-This is a compact decision log, not a full ADR set yet.
-If a decision becomes contentious, expensive, or implementation-critical, it should be promoted to a separate ADR.
+Decision records have been migrated to individual files in [`docs/decisions/`](../decisions/README.md).
 
-| ID | Decision | Status | Consequence |
-| --- | --- | --- | --- |
-| AD-001 | Build a standalone local PoC. | Confirmed | OpenClaw remains a future adapter/integration path, not a PoC dependency. |
-| AD-002 | Treat the CLI as an adapter. | Confirmed | Core workflow logic must not depend on command-line control flow, prompts, or terminal behavior. |
-| AD-003 | Use one generic `Capture Port` with capture profiles. | Confirmed | `online_dual_stream` and `in_person_single_mic` can share core capture concepts while differing in adapter behavior. |
-| AD-004 | Use a `Session Orchestrator Process` and a `Capture Worker Process`. | Confirmed | Capture has failure isolation and real-time ownership without turning every workflow step into a separate service. |
-| AD-005 | Use explicit criteria before adding more processes. | Confirmed | New processes must justify themselves through failure isolation, real-time ownership, resource isolation, lifecycle independence, privilege boundary, or runtime incompatibility. |
-| AD-006 | Make the per-invocation orchestrator the canonical `Session Record` writer while it holds session authority. | Confirmed | Capture workers and future workers emit facts/events/artifact references instead of independently mutating session truth; cross-invocation continuity is reconstructed from files. |
-| AD-007 | Use files for durable artifacts and protocol for live coordination. | Confirmed | The protocol stays small and avoids transporting raw audio or large generated artifacts. |
-| AD-008 | Keep raw audio sealed and separate corrections from generated transcript output. | Confirmed | Review transparency is preserved and transcripts can be regenerated from source audio when needed. |
-| AD-009 | Make recording, transcription, and diarization local-only. | Confirmed | No audio leaves the user's machine due to `mena`; quality/runtime tradeoffs must be solved locally for these stages. |
-| AD-010 | Use provider ports plus policy/capability resolution. | Confirmed | Model/runtime implementations can vary without changing workflow logic; ZDR-bearing direct Mistral API is the PoC summarization fallback when local execution is insufficient. |
-| AD-011 | Version durable schemas and internal protocol from day one, treating the PoC as the initial `v1` contract epoch without adding a formal migration framework yet. | Confirmed | Persisted contracts start with real schemas or version markers and evolve independently by contract; protocol initialization includes version agreement and minimal capabilities; migrations remain explicit future work, not accidental hidden behavior. |
-| AD-012 | Keep runtime data outside the repository and preserve user session data on uninstall. | Confirmed | Development checkout, installed application, and user-owned data remain separate. |
-| AD-013 | Design for replayability and contract testing. | Confirmed | Coding agents can test core behavior with fixtures and fake providers instead of relying on live meetings. |
-| AD-014 | Defer privacy-preserving UX telemetry until research provides a concrete model. | Deferred | Telemetry must not be implemented ad hoc or mixed into session content artifacts. |
-| AD-015 | Treat output quality and CLI friction thresholds as PoC learning outcomes. | Confirmed | Architecture must enable fast test loops and traceable artifacts instead of requiring invented acceptance thresholds upfront. |
-| AD-016 | Include both `online_dual_stream` and `in_person_single_mic` in CLI PoC scope. | Confirmed | Build order is online first, in-person second; both use capture profiles rather than separate pipelines. Supersedes `[SCOPE-OUT 6]` and the in-person clause of `[POST-POC B]` in `docs/requirements/poc-requirements.md` v1.0. |
-| AD-017 | Use versioned manual-notes input artifacts for summarization. | Confirmed | Edited notes produce new notes artifact versions and new summary candidates instead of silently mutating prior summaries. |
-| AD-018 | Use a narrow rebuildable global index. | Confirmed | The index supports session discovery only and does not become canonical meeting-content storage. |
-| AD-019 | Centralize error recovery authority in the active orchestrator. | Confirmed | Adapters report typed failures; the orchestrator chooses bounded recovery according to stage policy, artifact state, and user intent. |
-| AD-020 | Persist per-session speaker anchor artifacts for `REQ-F18`. | Confirmed | Corrected speaker labels and associated embeddings are stored inside session bundles for forward compatibility, while cross-session matching remains deferred. |
-| AD-021 (2026-05-01) | PoC default local-LLM runtime adapter is **Ollama**, with owned `llama.cpp` (`llama-server`) as the first quality-validated alternative once model-dependent workflow code exists; vLLM is out of PoC scope. Default model profile: 3B–4B-parameter quantised instruct; 1B–3B fallback on ≤8 GB RAM machines; 7B opt-in for stronger machines; no 12B-class baseline. | Confirmed | Workflow code asks for stage-level capabilities, not for `/v1/chat/completions`. Replaceability is preserved by validating the Inference Port with an owned `llama.cpp` adapter before model work becomes product-critical, without blocking the earlier capture/CLI foundation. Resolves R-01. |
-| AD-022 (2026-05-01) | PoC primary ASR adapter is **`faster-whisper`** with hardware-selected Whisper-family profiles; `large-v3-turbo` is the quality ceiling for strong machines, `large-v3` is an explicit quality rerun, and **`whisper.cpp`** is the first fallback adapter for weaker/brittle hardware. Provider metadata (checkpoint, decode parameters) is persisted with every transcript. | Confirmed | ASR output is treated as provisional and replayable. Installation/preflight chooses a suitable model-size configuration from available VRAM/RAM and adapter capability. Vocabulary support uses `initial_prompt` and hotwords (soft biasing); deterministic vocabulary control is out of scope. Resolves R-04. |
-| AD-023 (2026-05-01) | PoC diarisation adapter is **`pyannote/speaker-diarization-community-1`**, invoked **scenario-aware**: not on the local mic in `online_dual_stream`, on the remote/system stream when value-adding, on the room mic for `in_person_single_mic`. Confidence is a product-level heuristic layer, not a model signal. | Confirmed | Combined dual-stream is never fed to the diarizer because `community-1` is mono-only. Three artifacts persisted per session (regular timeline, exclusive projection, correction overlay). Resolves R-05. |
-| AD-024 (2026-05-01) | Linux PoC capture realisation for `online_dual_stream` is **PipeWire-first with a session-scoped dedicated null sink**: explicit user confirmation of the meeting playback stream, move only that stream into the null sink, capture the null-sink monitor as the remote stream, separate loopback to the user's actual playback device, direct microphone capture as the local stream. Tiered fallback: `mic + default_sink_monitor` → `mic_only`, with degradation events written to session metadata. | Confirmed | AD-003 (one generic Capture Port with profiles) stands; this AD pins the concrete Linux topology behind that port. Resolves R-02. |
-| AD-025 (2026-05-01) | PoC internal-protocol transport is **stdio with newline-delimited compact UTF-8 JSON**, one object per frame, with an explicit `hello` version-agreement message. `stderr` is diagnostics-only. Files carry durable/bulky data; the protocol carries references. No JSON-RPC, gRPC, or Protocol Buffers in v0. | Confirmed | Concrete realisation of §6.10 and §8.5 versioning rules. Liveness uses OS-level signals; heartbeats deferred until evidence of live-but-stuck workers. Resolves R-08. |
-| AD-026 (2026-05-01) | ZDR-bearing direct Mistral API summarisation fallback is gated by **operator-attested contractual predicates** (commercial Scale-or-stronger account, written ZDR approval, dedicated workspace, EU-served default endpoint, plain-text chat-completions only, non-Labs allow-listed models, direct API only) **plus per-session user consent**. The application verifies only the narrow technical perimeter; ZDR is not programmatically verifiable. Fallback is **disabled by default**; missing operator evidence yields "fallback unavailable", not best-effort remote calls. | Confirmed | Refines AD-010 and §2.3. Closes the open follow-up on legal/policy validation; residual contractual risk remains time-bounded and must be reviewed if Mistral's terms change. Resolves R-06. |
-| AD-027 (2026-05-01) | UX telemetry remains **absent in PoC v0** (confirms AD-014 for the PoC horizon). When introduced later, the only architecturally compatible model is local-only short-retention storage with manual user export, no persistent identifiers, closed-vocabulary metrics, and the documented red-line list (no meeting substance, no participant identity, no free-form strings, no crash dumps by default, no session replay, no pseudonymous stable IDs). | Deferred (red lines documented now in §8.10) | Resolves R-09. Heavy machinery (LDP/OHTTP/DAP) is not adopted for the PoC; if true remote telemetry is ever introduced it becomes a separate architecture decision. |
+Each decision has its own file (ADR-NNN for architecture, PDR-NNN for product) with full context, decision, and consequences. The index in `docs/decisions/README.md` lists all records with status and date.
+
+Cross-references throughout this document use the `ADR-NNN` / `PDR-NNN` numbering scheme.
 
 ### 9.2 Decisions Needing Follow-Up
 
 Status: Open
 
 - Validate actual incremental implementation cost of `in_person_single_mic`; current architecture assumes it is a capture-profile extension implemented after `online_dual_stream`.
-- Compare local summarisation output against ZDR-bearing direct Mistral API fallback output during PoC testing where the operator-attested allow-conditions in `AD-026` are met.
-- Validate `AD-024` device/route discovery and tiered fallback behaviour against representative meeting tools (Zoom desktop, kMeet, Google Meet in-browser) and identify per-client quirks.
-- Validate `AD-021` model profile thresholds against representative tester hardware (modern dev laptop, 16 GB no-dGPU, 8 GB no-dGPU) and confirm the chunked map-reduce summarisation strategy.
-- Validate `AD-026` user-facing disclosure copy with at least one tester before enabling remote fallback by default in any environment.
+- Compare local summarisation output against ZDR-bearing direct Mistral API fallback output during PoC testing where the operator-attested allow-conditions in `ADR-026` are met.
+- Validate `ADR-024` device/route discovery and tiered fallback behaviour against representative meeting tools (Zoom desktop, kMeet, Google Meet in-browser) and identify per-client quirks.
+- Validate `ADR-021` model profile thresholds against representative tester hardware (modern dev laptop, 16 GB no-dGPU, 8 GB no-dGPU) and confirm the chunked map-reduce summarisation strategy.
+- Validate `ADR-026` user-facing disclosure copy with at least one tester before enabling remote fallback by default in any environment.
 - R-03 (future OS compatibility) and R-07 (install/update/uninstall) are now Ready and remain to be executed.
 
 ## 10. Quality Requirements
@@ -2574,13 +2547,13 @@ It is not a full project risk register.
 
 | Risk | Current Assessment | Mitigation / Follow-Up |
 | --- | --- | --- |
-| Linux audio routing may be fragile across devices and meeting tools. | High likelihood, high impact. | R-02 Done; AD-024 pins PipeWire-first with dedicated null sink and tiered fallback; capture stays behind adapters and profiles. Per-client quirks (Zoom/kMeet/Google Meet) remain to be validated. |
-| Local model runtime choice may create installation or hardware lock-in. | High likelihood, high impact. | R-01 Done; AD-021 adopts Ollama default with owned `llama.cpp` as the first hardening adapter once model-dependent workflow code exists; vLLM out of scope; Inference Port replaceability is validated before model work becomes product-critical. |
-| ASR quality may be insufficient for target meetings, accents, or mixed languages. | Medium likelihood, high impact. | R-04 Done; AD-022 adopts `faster-whisper` with hardware-selected Whisper-family profiles (`large-v3-turbo` as ceiling; `large-v3` quality rerun) and `whisper.cpp` fallback; raw audio is preserved so transcripts can be regenerated. |
-| Diarization may fail for overlap, poor microphones, or in-person single-mic meetings. | High likelihood, medium impact. | R-05 Done; AD-023 adopts scenario-aware `pyannote/community-1` (not run on local mic in dual-stream); confidence is a product heuristic; correction overlay is the load-bearing layer. |
-| Fallback providers may violate sovereignty expectations if policy is vague. | Medium likelihood, high impact. | R-06 Done; AD-026 pins operator-attested allow-conditions, fallback disabled by default, residual contractual risk documented; Mistral's terms must be reviewed if they change. |
-| Internal protocol may be under-specified for parallel agent implementation. | Medium likelihood, medium impact. | R-08 Done; AD-025 pins stdio + newline-delimited JSON with explicit version-agreement; protocol and schemas versioned from day one. |
-| Local install/update/uninstall may be harder than expected. | Medium likelihood, medium impact. | R-07 promoted to Ready by this synthesis; AD-021/AD-022/AD-023/AD-024 give R-07 the concrete dependency surfaces it needs (Ollama, `faster-whisper`/`whisper.cpp`, `pyannote.audio`, PipeWire user-session adapter). Repo / install / config / session / cache / logs separation rules from §8.6 stand. |
+| Linux audio routing may be fragile across devices and meeting tools. | High likelihood, high impact. | R-02 Done; ADR-024 pins PipeWire-first with dedicated null sink and tiered fallback; capture stays behind adapters and profiles. Per-client quirks (Zoom/kMeet/Google Meet) remain to be validated. |
+| Local model runtime choice may create installation or hardware lock-in. | High likelihood, high impact. | R-01 Done; ADR-021 adopts Ollama default with owned `llama.cpp` as the first hardening adapter once model-dependent workflow code exists; vLLM out of scope; Inference Port replaceability is validated before model work becomes product-critical. |
+| ASR quality may be insufficient for target meetings, accents, or mixed languages. | Medium likelihood, high impact. | R-04 Done; ADR-022 adopts `faster-whisper` with hardware-selected Whisper-family profiles (`large-v3-turbo` as ceiling; `large-v3` quality rerun) and `whisper.cpp` fallback; raw audio is preserved so transcripts can be regenerated. |
+| Diarization may fail for overlap, poor microphones, or in-person single-mic meetings. | High likelihood, medium impact. | R-05 Done; ADR-023 adopts scenario-aware `pyannote/community-1` (not run on local mic in dual-stream); confidence is a product heuristic; correction overlay is the load-bearing layer. |
+| Fallback providers may violate sovereignty expectations if policy is vague. | Medium likelihood, high impact. | R-06 Done; ADR-026 pins operator-attested allow-conditions, fallback disabled by default, residual contractual risk documented; Mistral's terms must be reviewed if they change. |
+| Internal protocol may be under-specified for parallel agent implementation. | Medium likelihood, medium impact. | R-08 Done; ADR-025 pins stdio + newline-delimited JSON with explicit version-agreement; protocol and schemas versioned from day one. |
+| Local install/update/uninstall may be harder than expected. | Medium likelihood, medium impact. | R-07 promoted to Ready by this synthesis; ADR-021/ADR-022/ADR-023/ADR-024 give R-07 the concrete dependency surfaces it needs (Ollama, `faster-whisper`/`whisper.cpp`, `pyannote.audio`, PipeWire user-session adapter). Repo / install / config / session / cache / logs separation rules from §8.6 stand. |
 
 ### 11.3 Architecture Debt
 
@@ -2588,7 +2561,7 @@ It is not a full project risk register.
 | --- | --- | --- |
 | Decisions are captured in one architecture overview rather than separate ADRs. | Acceptable for current phase. | Promote contentious or expensive decisions to ADRs when implementation starts. |
 | Research backlog items are broad. | Acceptable if each has verifiable start and finish criteria. | Refine individual tasks before assigning deep research agents. |
-| Telemetry is intentionally not designed yet. | Acceptable because privacy failure would be worse than delayed telemetry. | R-09 Done; AD-027 confirms AD-014 for the PoC horizon and documents the red lines (§8.10). Future remote telemetry would be a separate architecture decision. |
+| Telemetry is intentionally not designed yet. | Acceptable because privacy failure would be worse than delayed telemetry. | R-09 Done; ADR-027 confirms ADR-014 for the PoC horizon and documents the red lines (§8.10). Future remote telemetry would be a separate architecture decision. |
 | Coding agents may drift from intended boundaries. | Material risk for implementation phase. | Use folder-level `AGENTS.md`, contract tests, architecture tests where useful, and issue templates that reference relevant decisions. |
 
 ### 11.4 Items Requiring Product Validation or Research
@@ -2596,7 +2569,7 @@ It is not a full project risk register.
 Status: Open
 
 - Use first-user testing to determine what "good enough" means for notes, corrections, speaker labels, and summaries.
-- Use first-user testing to compare local summarization output against ZDR-bearing direct Mistral API fallback output where the operator-attested allow-conditions in `AD-026` are met.
+- Use first-user testing to compare local summarization output against ZDR-bearing direct Mistral API fallback output where the operator-attested allow-conditions in `ADR-026` are met.
 - Use first CLI testing to determine how much device/profile confirmation is helpful before it becomes friction.
 - Execute R-03 (future OS compatibility) and R-07 (install/update/uninstall) — both promoted to Ready by the [research phase 1 synthesis](../research/synthesis-research-phase-1.md).
 

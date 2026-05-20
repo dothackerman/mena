@@ -4,7 +4,7 @@
 - **Status:** Accepted
 - **Date:** 2026-05-20
 - **Superseded by:** —
-- **Related:** #14, #13, PR #52, ADR-010 (provider ports), AD-023 (diarisation scenario-aware)
+- **Related:** #14, #13, PR #52, ADR-010 (provider ports), ADR-023 (diarisation scenario-aware)
 
 ## Context
 
