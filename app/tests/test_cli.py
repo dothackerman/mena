@@ -25,7 +25,7 @@ from mena.discovery import AudioDiscovery, AudioRoute, DiscoveryStatus, Playback
 from mena.processing import ProcessingErrorInfo, ProcessingStageLedger
 from mena.profiles import CaptureProfileId, get_capture_profile, parse_capture_profile
 from mena.protocol import ProtocolError, ProtocolMessage
-from mena.semantic_coherence import FakeSemanticCoherenceProvider
+from mena.semantic_coherence import FakeSemanticCoherenceProvider, SemanticCoherenceProvider
 from mena.sessions import CreatedSession, create_session, update_session_capture_metadata
 from mena.transcription import FakeTranscriptionProvider, TranscriptionProvider
 
@@ -506,6 +506,79 @@ def test_main_resume_without_retryable_failure_reports_no_retry(
         "run-blocked', stage 'transcription', attempt 1: "
         "Non-retryable setup (code=input)" in captured.out
     )
+
+
+def test_main_resume_blocks_non_retryable_failure_after_running_checkpoint(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    session = create_session(profile=parse_capture_profile("online"), data_root=tmp_path)
+    store = FileSystemArtifactStore(session_id=session.record.id, session_dir=session.bundle_path)
+    ledger = ProcessingStageLedger(session_id=session.record.id, run_id="run-blocked", store=store)
+    now = datetime(2026, 5, 8, 8, 30, tzinfo=UTC)
+    ledger.mark_running(
+        stage="transcription",
+        input_artifacts=(),
+        attempt=1,
+        now=now,
+    )
+    ledger.mark_failed(
+        stage="transcription",
+        input_artifacts=(),
+        error=ProcessingErrorInfo(
+            message="Bad input",
+            retryable=False,
+            code="input",
+        ),
+        attempt=1,
+        now=now,
+    )
+
+    exit_code = main(["resume", str(session.record_path)])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert (
+        "Latest processing failure is non-retryable at run '"
+        "run-blocked', stage 'transcription', attempt 1: "
+        "Bad input (code=input)" in captured.out
+    )
+
+
+def test_main_resume_uses_durable_checkpoint_order_when_timestamps_tie(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _build_processing_session(tmp_path)
+    store = FileSystemArtifactStore(session_id=session.record.id, session_dir=session.bundle_path)
+    now = datetime(2026, 5, 8, 8, 30, tzinfo=UTC)
+    older = ProcessingStageLedger(session_id=session.record.id, run_id="a-older", store=store)
+    older.mark_failed(
+        stage="transcription",
+        input_artifacts=(),
+        error=ProcessingErrorInfo(message="first", retryable=True, code="model"),
+        attempt=1,
+        now=now,
+    )
+    newer = ProcessingStageLedger(session_id=session.record.id, run_id="z-newer", store=store)
+    newer_state = newer.mark_failed(
+        stage="transcription",
+        input_artifacts=(),
+        error=ProcessingErrorInfo(message="second", retryable=True, code="model"),
+        attempt=3,
+        now=now,
+    )
+    processing_calls = _patch_processing_stages(monkeypatch)
+
+    exit_code = main(
+        ["resume", str(session.record_path)],
+        transcription_provider_factory=FakeTranscriptionProvider,
+        diarization_provider_factory=FakeDiarizationProvider,
+        semantic_coherence_provider_factory=lambda: FakeSemanticCoherenceProvider(results={}),
+    )
+
+    assert exit_code == 0
+    assert processing_calls["run_id"] == newer_state.run_id
+    assert processing_calls["attempt"] == newer_state.attempt + 1
 
 
 def test_main_resume_without_checkpoint_reports_no_retry(
@@ -1091,6 +1164,56 @@ def test_main_process_reuses_existing_source_audio_artifacts_on_second_run(
     assert captured.out.count("Processing completed for run '") == 2
 
 
+def test_main_process_reuses_source_audio_with_relative_then_absolute_session_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    session = _build_processing_session(tmp_path)
+    record = json.loads(session.record_path.read_text(encoding="utf-8"))
+    for segment in record["capture_metadata"]["segments"]:
+        segment["path"] = Path(segment["path"]).name
+    session.record_path.write_text(json.dumps(record), encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "mena.cli._run_processing_stages",
+        lambda **_kwargs: None,
+    )
+
+    first_exit_code = main(["process", str(session.bundle_path.relative_to(tmp_path))])
+    second_exit_code = main(["process", str(session.bundle_path)])
+
+    captured = capsys.readouterr()
+    assert first_exit_code == 0
+    assert second_exit_code == 0
+    assert captured.out.count("Processing completed for run '") == 2
+
+
+def test_main_process_rematerializes_corrupt_reused_source_audio(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    session = _build_processing_session(tmp_path)
+    monkeypatch.setattr(
+        "mena.cli._run_processing_stages",
+        lambda **_kwargs: None,
+    )
+
+    first_exit_code = main(["process", str(session.record_path)])
+    source_artifact_path = (
+        session.bundle_path / "artifacts/source_audio/source_audio/local_mic_000001.wav"
+    )
+    source_artifact_path.write_bytes(b"truncated")
+    second_exit_code = main(["process", str(session.record_path)])
+
+    captured = capsys.readouterr()
+    assert first_exit_code == 0
+    assert second_exit_code == 0
+    assert source_artifact_path.read_bytes() == b"local audio placeholder"
+    assert captured.out.count("Processing completed for run '") == 2
+
+
 def test_main_process_rejects_source_audio_hash_change_when_sha_not_recorded(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1134,4 +1257,13 @@ def test_require_provider_type_requirements() -> None:
             provider_factory=lambda: "nope",
             provider_type=int,
             provider_name="bogus",
+        )
+
+    with pytest.raises(
+        TypeError, match="semantic_coherence provider must expose semantic metadata config_id"
+    ):
+        _require_provider(
+            provider_factory=lambda: SimpleNamespace(metadata={}, check=lambda *_args: None),
+            provider_type=SemanticCoherenceProvider,
+            provider_name="semantic_coherence",
         )

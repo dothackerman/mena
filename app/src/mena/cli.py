@@ -530,7 +530,7 @@ def _ensure_source_audio_artifact(
     artifact_sha: str,
     payload: bytes,
 ) -> ArtifactRecord:
-    normalized_path = str(path)
+    normalized_path = str(path.resolve(strict=True))
     metadata_path_key = "source_path"
     metadata_index_key = "segment_index"
     metadata_source_key = "source_id"
@@ -548,6 +548,15 @@ def _ensure_source_audio_artifact(
                     f"Source artifact collision for {source_id} segment {index}: "
                     "checksum has changed since prior processing attempt."
                 )
+            verification = store.verify(existing.id)
+            if not verification.ok or verification.expected_sha256 != artifact_sha:
+                artifact_path = store.session_dir / existing.path
+                artifact_path.write_bytes(payload)
+                verification = store.verify(existing.id)
+                if not verification.ok or verification.expected_sha256 != artifact_sha:
+                    raise ValueError(
+                        f"Source artifact verification failed for {source_id} segment {index}."
+                    )
             return existing
 
     return store.store(
@@ -571,7 +580,7 @@ def _latest_processing_state(
     allowed_statuses: frozenset[str],
     require_retryable_error: bool | None = None,
 ) -> ProcessingStageState | None:
-    matches: list[ProcessingStageState] = []
+    matches: list[tuple[int, ProcessingStageState]] = []
     for state_record in store.list(artifact_type=PROCESSING_STATE_ARTIFACT_TYPE):
         payload = json.loads(store.retrieve(state_record.id))
         state = ProcessingStageState.from_dict(payload)
@@ -586,11 +595,21 @@ def _latest_processing_state(
             if require_retryable_error is False and state.error.retryable:
                 continue
 
-        matches.append(state)
+        matches.append((_processing_state_order(state_record), state))
 
     if not matches:
         return None
-    return max(matches, key=lambda item: item.completed_at or item.started_at or "")
+    return max(matches, key=lambda item: item[0])[1]
+
+
+def _processing_state_order(record: ArtifactRecord) -> int:
+    prefix = Path(record.path).stem.split("-", 1)[0]
+    try:
+        return int(prefix)
+    except ValueError as exc:
+        raise ProcessingStateError(
+            "Processing state artifact name must start with sequence."
+        ) from exc
 
 
 def _latest_retryable_processing_state(
@@ -609,12 +628,16 @@ def _latest_resumable_processing_state(
     store: FileSystemArtifactStore,
     session_id: str,
 ) -> ProcessingStageState | None:
-    return _latest_processing_state(
+    latest = _latest_processing_state(
         store=store,
         session_id=session_id,
         allowed_statuses=frozenset({"failed", "running"}),
-        require_retryable_error=True,
     )
+    if latest is None or latest.status == "running":
+        return latest
+    if latest.error is not None and latest.error.retryable:
+        return latest
+    return None
 
 
 def _latest_non_retryable_processing_failure(
@@ -688,6 +711,13 @@ def _require_provider(
     if required:
         if not _provider_implements(provider, *required):
             raise TypeError(f"{provider_name} provider must implement {provider_type.__name__}.")
+        if provider_type is SemanticCoherenceProvider:
+            metadata = provider.metadata
+            config_id = getattr(metadata, "config_id", None)
+            if not isinstance(config_id, str) or not config_id:
+                raise TypeError(
+                    f"{provider_name} provider must expose semantic metadata config_id."
+                )
         return provider
 
     try:
