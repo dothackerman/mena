@@ -1,4 +1,5 @@
 import json
+import os
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -444,7 +445,7 @@ def test_load_review_queue_rejects_failed_integrity_verification(tmp_path: Path)
         _load_review_queue(store=store, session_id=SESSION_ID)
 
 
-def test_load_review_queue_uses_path_tie_breaker_for_same_created_at(tmp_path: Path) -> None:
+def test_load_review_queue_uses_file_mtime_when_created_at_ties(tmp_path: Path) -> None:
     session_dir = _create_session_record(tmp_path)
     store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=session_dir)
     merged_record = persist_merged_transcript_artifact(
@@ -470,7 +471,7 @@ def test_load_review_queue_uses_path_tie_breaker_for_same_created_at(tmp_path: P
                 ),
             ),
         ),
-        name="review/001-queue.json",
+        name="review/z-older-queue.json",
     )
     second = persist_review_queue_artifact(
         store=store,
@@ -489,12 +490,14 @@ def test_load_review_queue_uses_path_tie_breaker_for_same_created_at(tmp_path: P
                 ),
             ),
         ),
-        name="review/002-queue.json",
+        name="review/a-newer-queue.json",
     )
+    os.utime(session_dir / first.path, ns=(1_000_000_000, 1_000_000_000))
+    os.utime(session_dir / second.path, ns=(2_000_000_000, 2_000_000_000))
 
     record, queue = _load_review_queue(store=store, session_id=SESSION_ID)
 
-    assert first.path < second.path
+    assert second.path < first.path
     assert record.id == second.id
     assert [flag.id for flag in queue.flags] == ["second_queue_flag"]
 

@@ -228,14 +228,32 @@ def _load_review_queue(
                 "Review queue session_id does not match the session record."
             )
 
-        latest_key = None if latest is None else (latest[1].created_at, latest[0].path)
-        candidate_key = (queue.created_at, record.path)
+        latest_key = (
+            None
+            if latest is None
+            else _review_queue_recency_key(
+                store=store,
+                record=latest[0],
+                queue=latest[1],
+            )
+        )
+        candidate_key = _review_queue_recency_key(store=store, record=record, queue=queue)
         if latest_key is None or candidate_key > latest_key:
             latest = (record, queue)
 
     if latest is None:
         raise CorrectionWorkflowError("No valid review queue artifact was found for this session.")
     return latest
+
+
+def _review_queue_recency_key(
+    *,
+    store: FileSystemArtifactStore,
+    record: ArtifactRecord,
+    queue: ReviewQueueArtifact,
+) -> tuple[str, int, str]:
+    path = store.session_dir / record.path
+    return (queue.created_at, path.stat().st_mtime_ns, record.id)
 
 
 def _load_source_transcript(
