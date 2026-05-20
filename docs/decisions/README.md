@@ -19,6 +19,7 @@ Proposed → Accepted → [Superseded | Deprecated | Rejected]
 
 - **Proposed** — drafted, not yet agreed
 - **Accepted** — agreed and active
+- **Deferred** — accepted but implementation delayed; may include conditions for reactivation
 - **Superseded** — replaced by a new decision. Must reference the successor.
 - **Deprecated** — no longer relevant. Must include reason.
 - **Rejected** — never accepted. Kept for the record.
@@ -31,7 +32,7 @@ Proposed → Accepted → [Superseded | Deprecated | Rejected]
 # [ADR|PDR]-NNN: [title]
 
 - **Type:** Architecture | Product
-- **Status:** Proposed | Accepted | Superseded | Deprecated | Rejected
+- **Status:** Proposed | Accepted | Deferred | Superseded | Deprecated | Rejected
 - **Date:** YYYY-MM-DD
 - **Superseded by:** [ADR-NNN | PDR-NNN | —]
 - **Related:** #issue, PR #nn, ADR-NNN, PDR-NNN
