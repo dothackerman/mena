@@ -539,6 +539,87 @@ def test_resolve_active_correction_overlay_returns_none_without_completed_overla
     assert resolved is None
 
 
+def test_resolve_active_correction_overlay_falls_back_to_created_at_when_completed_at_invalid() -> (
+    None
+):
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    source_record = _persist_source_transcript(store)
+    source_ref = ArtifactRef.from_record(source_record)
+
+    fallback_overlay = create_correction_overlay(
+        session_id=SESSION_ID,
+        source_transcript_artifact=source_ref,
+        entries=(),
+        created_at="2026-05-19T15:20:00Z",
+    )
+    fallback_record = persist_correction_overlay_artifact(
+        store=store,
+        artifact=fallback_overlay,
+        name="overlays/fallback.json",
+        status="sealed",
+        metadata={"workflow_status": "completed", "completed_at": "not-a-timestamp"},
+    )
+
+    older_overlay = create_correction_overlay(
+        session_id=SESSION_ID,
+        source_transcript_artifact=source_ref,
+        entries=(),
+        created_at="2026-05-19T15:00:00Z",
+    )
+    _ = persist_correction_overlay_artifact(
+        store=store,
+        artifact=older_overlay,
+        name="overlays/older.json",
+        status="sealed",
+        metadata={"workflow_status": "completed", "completed_at": "2026-05-19T15:10:00Z"},
+    )
+
+    resolved = resolve_active_correction_overlay(
+        store=store,
+        source_transcript_record=source_record,
+    )
+
+    assert resolved is not None
+    resolved_record, _ = resolved
+    assert resolved_record.id == fallback_record.id
+
+
+def test_resolve_active_correction_overlay_ignores_invalid_payload_records() -> None:
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    source_record = _persist_source_transcript(store)
+    store.store(
+        artifact_type=CORRECTION_OVERLAY_ARTIFACT_TYPE,
+        name="overlays/invalid.json",
+        data=b"not-json",
+        version=1,
+        status="sealed",
+        metadata={"workflow_status": "completed", "completed_at": "2026-05-19T15:22:00Z"},
+    )
+
+    valid_overlay = create_correction_overlay(
+        session_id=SESSION_ID,
+        source_transcript_artifact=ArtifactRef.from_record(source_record),
+        entries=(),
+        created_at="2026-05-19T15:20:00Z",
+    )
+    valid_record = persist_correction_overlay_artifact(
+        store=store,
+        artifact=valid_overlay,
+        name="overlays/valid.json",
+        status="sealed",
+        metadata={"workflow_status": "completed", "completed_at": "2026-05-19T15:20:00Z"},
+    )
+
+    resolved = resolve_active_correction_overlay(
+        store=store,
+        source_transcript_record=source_record,
+    )
+
+    assert resolved is not None
+    resolved_record, _ = resolved
+    assert resolved_record.id == valid_record.id
+
+
 def test_resolve_active_correction_overlay_prefers_newest_completed_at() -> None:
     store = InMemoryArtifactStore(session_id=SESSION_ID)
     source_record = _persist_source_transcript(store)

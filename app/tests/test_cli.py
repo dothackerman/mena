@@ -12,7 +12,12 @@ from mena.artifacts import (
     ArtifactStoreError,
     FileSystemArtifactStore,
 )
-from mena.cli import COMMANDS, WORKER_EXIT_TIMEOUT_SECONDS, main
+from mena.cli import (
+    COMMANDS,
+    WORKER_EXIT_TIMEOUT_SECONDS,
+    _resolve_latest_merged_transcript_record,
+    main,
+)
 from mena.correction_overlay import (
     CorrectionEntry,
     create_correction_overlay,
@@ -20,6 +25,7 @@ from mena.correction_overlay import (
 )
 from mena.discovery import AudioDiscovery, AudioRoute, DiscoveryStatus, PlaybackStream
 from mena.merge_timing import (
+    MERGED_TRANSCRIPT_ARTIFACT_TYPE,
     MERGED_TRANSCRIPT_SCHEMA_VERSION,
     MergedTranscriptArtifact,
     MergedTranscriptSegment,
@@ -275,6 +281,48 @@ def test_main_summarize_applies_active_overlay_and_manual_notes(
     assert "Summary written to:" in captured_output.out
 
 
+def test_main_summarize_accepts_session_json_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_dir, _, _, _ = _build_summarize_session_bundle(tmp_path)
+    session_json_path = session_dir / SESSION_RECORD_FILENAME
+    captured: dict[str, object] = {}
+
+    def _fake_run_summarization_stage(
+        *,
+        store: ArtifactStore,
+        ledger: ProcessingStageLedger,
+        merged_transcript_record: ArtifactRecord,
+        provider: object,
+        correction_overlay_record: ArtifactRecord | None = None,
+        policy: SummarizationPolicy | None = None,
+        manual_notes_record: ArtifactRecord | None = None,
+        stage: str = "summarization",
+        attempt: int = 1,
+        skip_completed: bool = True,
+        now: datetime | None = None,
+    ) -> SimpleNamespace:
+        captured["merged"] = merged_transcript_record
+        captured["overlay"] = correction_overlay_record
+        captured["manual"] = manual_notes_record
+        captured["language"] = policy.language if policy is not None else None
+        return SimpleNamespace(
+            summary_record=store.store(
+                artifact_type="summary",
+                name="summary/final.json",
+                data=b"{}",
+                version=1,
+            ),
+        )
+
+    monkeypatch.setattr("mena.cli.run_summarization_stage", _fake_run_summarization_stage)
+
+    exit_code = main(["summarize", str(session_json_path)])
+
+    assert exit_code == 0
+
+
 def test_main_summarize_reports_missing_merged_transcript(
     tmp_path: Path,
     capsys: CaptureFixture[str],
@@ -286,6 +334,20 @@ def test_main_summarize_reports_missing_merged_transcript(
 
     assert exit_code == 1
     assert "No merged transcript artifact found for this session." in captured.out
+
+
+def test_main_summarize_rejects_invalid_session_path(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    exit_code = main(["summarize", str(tmp_path / "missing-session.json")])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert (
+        "Cannot summarize session: Session path must be a session directory or"
+        " an existing session.json path."
+    ) in captured.out
 
 
 def test_main_summarize_rejects_when_no_completed_correction_overlay_is_available(
@@ -323,6 +385,27 @@ def test_main_summarize_reports_stage_failure(
 
     assert exit_code == 1
     assert "Cannot summarize session: Local summary provider is unavailable." in captured.out
+
+
+def test_resolve_latest_merged_transcript_record_ignores_corrupt_payload(
+    tmp_path: Path,
+) -> None:
+    session_dir = _create_session_record(tmp_path)
+    store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=session_dir)
+    valid_record = _persist_merged_transcript(store=store)
+    corrupt_record = store.store(
+        artifact_type=MERGED_TRANSCRIPT_ARTIFACT_TYPE,
+        name="merged/invalid.json",
+        data=b"not-json",
+        version=1,
+        status="sealed",
+        metadata={"contract": "merged-transcript.v1"},
+    )
+    resolved = _resolve_latest_merged_transcript_record(store=store)
+
+    assert resolved is not None
+    assert resolved.id == valid_record.id
+    assert resolved.id != corrupt_record.id
 
 
 def test_main_correct_handles_artifact_store_errors(

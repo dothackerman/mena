@@ -438,6 +438,30 @@ def test_summarization_stage_rejects_non_notes_artifact_when_notes_are_included(
         )
 
 
+def test_summarization_stage_rejects_non_overlay_artifact_for_correction_overlay() -> None:
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    merged_record = _persist_merged_transcript(store=store)
+    wrong_record = store.store(
+        artifact_type="transcript",
+        name="not-overlay.txt",
+        data=b"{}",
+        version=1,
+        metadata={"contract": "transcript.v1"},
+    )
+    provider = FakeSummarizationProvider(result=_summary_result())
+    ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+
+    with pytest.raises(SummarizationError, match="correction_overlay type"):
+        run_summarization_stage(
+            store=store,
+            ledger=ledger,
+            merged_transcript_record=merged_record,
+            correction_overlay_record=wrong_record,
+            provider=provider,
+            now=NOW,
+        )
+
+
 def test_summarization_stage_marks_failed_checkpoint_for_missing_input_artifact() -> None:
     store = InMemoryArtifactStore(session_id=SESSION_ID)
     merged_record = _persist_merged_transcript(store=store)
