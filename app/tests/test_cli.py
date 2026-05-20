@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 from pytest import CaptureFixture
 
+from mena.artifacts import ArtifactStoreError
 from mena.cli import COMMANDS, WORKER_EXIT_TIMEOUT_SECONDS, main
 from mena.discovery import AudioDiscovery, AudioRoute, DiscoveryStatus, PlaybackStream
 from mena.profiles import CaptureProfileId
@@ -186,6 +187,23 @@ def test_record_uses_configurable_worker_exit_timeout(tmp_path: Path) -> None:
 
 def test_record_worker_exit_timeout_default_is_generous() -> None:
     assert WORKER_EXIT_TIMEOUT_SECONDS == 30.0
+
+
+def test_main_correct_handles_artifact_store_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    def _raise_artifact_error(**_kwargs: object) -> None:
+        raise ArtifactStoreError("Unsupported artifact manifest version.")
+
+    monkeypatch.setattr("mena.cli.run_correction_workflow", _raise_artifact_error)
+
+    exit_code = main(["correct", str(tmp_path)])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "Cannot run correction workflow: Unsupported artifact manifest version." in captured.out
 
 
 class FakeWorkerProcess:

@@ -82,79 +82,101 @@ def run_correction_workflow(
     skipped = 0
     corrected = 0
 
-    for index, (flag, segment) in enumerate(review_items, start=1):
-        segment_position = segment_positions[segment.id]
-        _print_review_item(
-            index=index,
-            total=len(review_items),
-            flag=flag,
-            segment=segment,
-            ordered_segments=ordered_segments,
-            segment_position=segment_position,
-            candidates=speaker_catalog,
-        )
+    try:
+        for index, (flag, segment) in enumerate(review_items, start=1):
+            segment_position = segment_positions[segment.id]
+            _print_review_item(
+                index=index,
+                total=len(review_items),
+                flag=flag,
+                segment=segment,
+                ordered_segments=ordered_segments,
+                segment_position=segment_position,
+                candidates=speaker_catalog,
+            )
 
-        action = _prompt_action(input_fn=input_fn)
-        reviewed += 1
+            action = _prompt_action(input_fn=input_fn)
+            reviewed += 1
 
-        if action == "skip":
-            entries.append(
-                _make_skip_entry(
+            if action == "skip":
+                entries.append(
+                    _make_skip_entry(
+                        entry_id=f"entry_{index:04d}",
+                        segment_id=segment.id,
+                        flag_id=flag.id,
+                        now=_timestamp(now, index=index),
+                    )
+                )
+                skipped += 1
+                continue
+
+            if action == "speaker_reassignment":
+                speaker_id, speaker_label = _prompt_speaker_assignment(
+                    input_fn=input_fn,
+                    candidates=speaker_catalog,
+                )
+                entry = _make_speaker_entry(
                     entry_id=f"entry_{index:04d}",
                     segment_id=segment.id,
                     flag_id=flag.id,
+                    speaker_id=speaker_id,
+                    speaker_label=speaker_label,
                     now=_timestamp(now, index=index),
                 )
-            )
-            skipped += 1
-            continue
+            elif action == "text_edit":
+                corrected_text = _prompt_text_edit(input_fn=input_fn)
+                entry = _make_text_entry(
+                    entry_id=f"entry_{index:04d}",
+                    segment_id=segment.id,
+                    flag_id=flag.id,
+                    text=corrected_text,
+                    now=_timestamp(now, index=index),
+                )
+            else:
+                overlap_marked = _prompt_overlap_mark(input_fn=input_fn)
+                entry = _make_overlap_entry(
+                    entry_id=f"entry_{index:04d}",
+                    segment_id=segment.id,
+                    flag_id=flag.id,
+                    overlap_detected=overlap_marked,
+                    now=_timestamp(now, index=index),
+                )
 
-        if action == "speaker_reassignment":
-            speaker_id, speaker_label = _prompt_speaker_assignment(
-                input_fn=input_fn,
-                candidates=speaker_catalog,
+            entries.append(entry)
+            corrected += 1
+    except (EOFError, KeyboardInterrupt):
+        if entries:
+            _persist_overlay(
+                store=store,
+                session_id=session_id,
+                source_record=source_record,
+                review_queue_record=review_queue_record,
+                entries=entries,
+                created_at=_timestamp(now),
+                status="staged",
+                metadata={
+                    "workflow_status": "cancelled",
+                    "reviewed": reviewed,
+                    "skipped": skipped,
+                    "corrected": corrected,
+                },
             )
-            entry = _make_speaker_entry(
-                entry_id=f"entry_{index:04d}",
-                segment_id=segment.id,
-                flag_id=flag.id,
-                speaker_id=speaker_id,
-                speaker_label=speaker_label,
-                now=_timestamp(now, index=index),
-            )
-        elif action == "text_edit":
-            corrected_text = _prompt_text_edit(input_fn=input_fn)
-            entry = _make_text_entry(
-                entry_id=f"entry_{index:04d}",
-                segment_id=segment.id,
-                flag_id=flag.id,
-                text=corrected_text,
-                now=_timestamp(now, index=index),
-            )
-        else:
-            overlap_marked = _prompt_overlap_mark(input_fn=input_fn)
-            entry = _make_overlap_entry(
-                entry_id=f"entry_{index:04d}",
-                segment_id=segment.id,
-                flag_id=flag.id,
-                overlap_detected=overlap_marked,
-                now=_timestamp(now, index=index),
-            )
+        raise
 
-        entries.append(entry)
-        corrected += 1
-
-    overlay = create_correction_overlay(
-        session_id=session_id,
-        source_transcript_artifact=ArtifactRef.from_record(source_record),
-        review_queue_artifact=ArtifactRef.from_record(review_queue_record),
-        entries=tuple(entries),
-        created_at=_timestamp(now),
-    )
-    overlay_record = persist_correction_overlay_artifact(
+    overlay_record = _persist_overlay(
         store=store,
-        artifact=overlay,
-        name=_overlay_name(session_id=session_id),
+        session_id=session_id,
+        source_record=source_record,
+        review_queue_record=review_queue_record,
+        entries=entries,
+        created_at=_timestamp(now),
+        status="sealed",
+        metadata={
+            "workflow_status": "completed",
+            "reviewed": reviewed,
+            "skipped": skipped,
+            "corrected": corrected,
+        },
     )
 
     print(f"Correction completed. reviewed={reviewed}, skipped={skipped}, corrected={corrected}.")
@@ -163,6 +185,33 @@ def run_correction_workflow(
         skipped=skipped,
         corrected=corrected,
         overlay_artifact_record=overlay_record,
+    )
+
+
+def _persist_overlay(
+    *,
+    store: FileSystemArtifactStore,
+    session_id: str,
+    source_record: ArtifactRecord,
+    review_queue_record: ArtifactRecord,
+    entries: list[CorrectionEntry],
+    created_at: str,
+    status: str,
+    metadata: dict[str, object],
+) -> ArtifactRecord:
+    overlay = create_correction_overlay(
+        session_id=session_id,
+        source_transcript_artifact=ArtifactRef.from_record(source_record),
+        review_queue_artifact=ArtifactRef.from_record(review_queue_record),
+        entries=tuple(entries),
+        created_at=created_at,
+    )
+    return persist_correction_overlay_artifact(
+        store=store,
+        artifact=overlay,
+        name=_overlay_name(session_id=session_id),
+        status=status,
+        metadata=metadata,
     )
 
 

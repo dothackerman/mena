@@ -332,6 +332,55 @@ def test_run_correction_workflow_persists_skip_mark_entries(tmp_path: Path) -> N
     ]
 
 
+def test_run_correction_workflow_persists_partial_overlay_on_cancellation(
+    tmp_path: Path,
+) -> None:
+    session_dir, store, _ = _build_session_bundle(
+        tmp_path,
+        flags=(
+            ReviewFlag(
+                id="flag_kept",
+                segment_id="segment_1",
+                reason_code="low_transcription_confidence",
+                start_seconds=0.0,
+                end_seconds=0.8,
+                source_id="local_mic",
+                speaker_id="you",
+                metadata={},
+            ),
+            ReviewFlag(
+                id="flag_cancelled",
+                segment_id="segment_2",
+                reason_code="low_speaker_confidence",
+                start_seconds=1.0,
+                end_seconds=1.8,
+                source_id="system_audio",
+                speaker_id="remote",
+                metadata={},
+            ),
+        ),
+    )
+    inputs = iter(("s",))
+
+    def _input(_: str) -> str:
+        try:
+            return next(inputs)
+        except StopIteration as exc:
+            raise EOFError from exc
+
+    with pytest.raises(EOFError):
+        run_correction_workflow(session_path=session_dir, now=NOW, input_fn=_input)
+
+    overlays = store.list(artifact_type=CORRECTION_OVERLAY_ARTIFACT_TYPE)
+    assert len(overlays) == 1
+    assert overlays[0].status == "staged"
+    assert overlays[0].metadata["workflow_status"] == "cancelled"
+    assert overlays[0].metadata["reviewed"] == 1
+    payload = json.loads(store.retrieve(overlays[0].id))
+    assert [entry["correction_type"] for entry in payload["entries"]] == ["skip_mark"]
+    assert payload["entries"][0]["original_flag_id"] == "flag_kept"
+
+
 def test_run_correction_workflow_can_persist_two_runs_in_same_second(tmp_path: Path) -> None:
     session_dir, store, _ = _build_session_bundle(
         tmp_path,

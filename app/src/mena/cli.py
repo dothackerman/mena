@@ -8,6 +8,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
+from mena.artifacts import ArtifactStoreError
 from mena.correction_workflow import CorrectionWorkflowError, run_correction_workflow
 from mena.discovery import AudioDiscovery, DiscoveryStatus, discover_audio_routes, format_discovery
 from mena.profiles import capture_profile_choices, parse_capture_profile
@@ -129,7 +130,7 @@ def main(
                 now=None,
                 input_fn=input,
             )
-        except CorrectionWorkflowError as exc:
+        except (ArtifactStoreError, CorrectionWorkflowError) as exc:
             print(f"Cannot run correction workflow: {exc}")
             return 1
         except (EOFError, KeyboardInterrupt):
