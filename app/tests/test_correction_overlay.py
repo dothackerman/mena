@@ -25,6 +25,7 @@ from mena.correction_overlay import (
     apply_correction_overlay,
     create_correction_overlay,
     persist_correction_overlay_artifact,
+    resolve_active_correction_overlay,
 )
 from mena.merge_timing import (
     MERGED_TRANSCRIPT_SCHEMA_VERSION,
@@ -468,6 +469,180 @@ def test_correction_overlay_schema_rejects_non_transcript_source_ref() -> None:
 
 def test_correction_overlay_schema_is_valid() -> None:
     Draft202012Validator.check_schema(_load_correction_overlay_schema())
+
+
+def test_resolve_active_correction_overlay_prefers_completed_overlays_and_ignores_staged() -> None:
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    source_record = _persist_source_transcript(store)
+
+    staged_overlay = create_correction_overlay(
+        session_id=SESSION_ID,
+        source_transcript_artifact=ArtifactRef.from_record(source_record),
+        entries=(),
+        created_at="2026-05-19T15:20:00Z",
+    )
+    first_staged_record = persist_correction_overlay_artifact(
+        store=store,
+        artifact=staged_overlay,
+        name="overlays/staged.json",
+        status="staged",
+        metadata={"workflow_status": "cancelled"},
+    )
+
+    completed_overlay = create_correction_overlay(
+        session_id=SESSION_ID,
+        source_transcript_artifact=ArtifactRef.from_record(source_record),
+        entries=(),
+        created_at="2026-05-19T15:21:00Z",
+    )
+    completed_record = persist_correction_overlay_artifact(
+        store=store,
+        artifact=completed_overlay,
+        name="overlays/completed.json",
+        status="sealed",
+        metadata={"workflow_status": "completed", "completed_at": "2026-05-19T15:21:00Z"},
+    )
+
+    resolved = resolve_active_correction_overlay(
+        store=store,
+        source_transcript_record=source_record,
+    )
+
+    assert resolved is not None
+    resolved_record, _ = resolved
+    assert resolved_record.id == completed_record.id
+    assert resolved_record.id != first_staged_record.id
+
+
+def test_resolve_active_correction_overlay_returns_none_without_completed_overlay() -> None:
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    source_record = _persist_source_transcript(store)
+
+    persist_correction_overlay_artifact(
+        store=store,
+        artifact=create_correction_overlay(
+            session_id=SESSION_ID,
+            source_transcript_artifact=ArtifactRef.from_record(source_record),
+            entries=(),
+            created_at="2026-05-19T15:20:00Z",
+        ),
+        name="overlays/ignore.json",
+        status="staged",
+        metadata={"workflow_status": "cancelled"},
+    )
+
+    resolved = resolve_active_correction_overlay(
+        store=store,
+        source_transcript_record=source_record,
+    )
+
+    assert resolved is None
+
+
+def test_resolve_active_correction_overlay_prefers_newest_completed_at() -> None:
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    source_record = _persist_source_transcript(store)
+
+    older_overlay = create_correction_overlay(
+        session_id=SESSION_ID,
+        source_transcript_artifact=ArtifactRef.from_record(source_record),
+        entries=(),
+        created_at="2026-05-19T15:20:00Z",
+    )
+    persist_correction_overlay_artifact(
+        store=store,
+        artifact=older_overlay,
+        name="overlays/older.json",
+        status="sealed",
+        metadata={"workflow_status": "completed", "completed_at": "2026-05-19T15:20:01Z"},
+    )
+
+    newer_overlay = create_correction_overlay(
+        session_id=SESSION_ID,
+        source_transcript_artifact=ArtifactRef.from_record(source_record),
+        entries=(),
+        created_at="2026-05-19T15:19:00Z",
+    )
+    newer_record = persist_correction_overlay_artifact(
+        store=store,
+        artifact=newer_overlay,
+        name="overlays/newer.json",
+        status="sealed",
+        metadata={"workflow_status": "completed", "completed_at": "2026-05-19T15:21:01Z"},
+    )
+
+    resolved = resolve_active_correction_overlay(
+        store=store,
+        source_transcript_record=source_record,
+    )
+
+    assert resolved is not None
+    resolved_record, _ = resolved
+    assert resolved_record.id == newer_record.id
+
+
+def test_resolve_active_correction_overlay_tiebreaks_by_sha_and_id() -> None:
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    source_record = _persist_source_transcript(store)
+    source_ref = ArtifactRef.from_record(source_record)
+
+    first_overlay = create_correction_overlay(
+        session_id=SESSION_ID,
+        source_transcript_artifact=source_ref,
+        entries=(
+            CorrectionEntry(
+                id="entry_alpha",
+                segment_id="segment_1",
+                correction_type="text_edit",
+                original_flag_id="flag_alpha",
+                user_action_at="2026-05-19T15:20:00Z",
+                text="alpha",
+                metadata={},
+            ),
+        ),
+        created_at="2026-05-19T15:20:00Z",
+    )
+    first_record = persist_correction_overlay_artifact(
+        store=store,
+        artifact=first_overlay,
+        name="overlays/alpha.json",
+        status="sealed",
+        metadata={"workflow_status": "completed", "completed_at": "2026-05-19T15:20:00Z"},
+    )
+
+    second_overlay = create_correction_overlay(
+        session_id=SESSION_ID,
+        source_transcript_artifact=source_ref,
+        entries=(
+            CorrectionEntry(
+                id="entry_bravo",
+                segment_id="segment_2",
+                correction_type="text_edit",
+                original_flag_id="flag_bravo",
+                user_action_at="2026-05-19T15:20:00Z",
+                text="bravo",
+                metadata={},
+            ),
+        ),
+        created_at="2026-05-19T15:20:00Z",
+    )
+    second_record = persist_correction_overlay_artifact(
+        store=store,
+        artifact=second_overlay,
+        name="overlays/bravo.json",
+        status="sealed",
+        metadata={"workflow_status": "completed", "completed_at": "2026-05-19T15:20:00Z"},
+    )
+
+    resolved = resolve_active_correction_overlay(
+        store=store,
+        source_transcript_record=source_record,
+    )
+
+    assert resolved is not None
+    resolved_record, _ = resolved
+    expected = max((first_record, second_record), key=lambda record: (record.sha256, record.id))
+    assert resolved_record.id == expected.id
 
 
 def _persist_source_transcript(

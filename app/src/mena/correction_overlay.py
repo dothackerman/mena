@@ -235,6 +235,55 @@ def persist_correction_overlay_artifact(
     )
 
 
+def resolve_active_correction_overlay(
+    *,
+    store: ArtifactStore,
+    source_transcript_record: ArtifactRecord | None = None,
+) -> tuple[ArtifactRecord, CorrectionOverlayArtifact] | None:
+    """Return the active completed correction overlay for a session or source transcript.
+
+    Selection is deterministic:
+    - prefers highest completed_at timestamp if present,
+    - falls back to created_at,
+    - then stable tie-breakers (source transcript source_at, record sha256, id).
+    """
+
+    source_ref = (
+        ArtifactRef.from_record(source_transcript_record)
+        if source_transcript_record is not None
+        else None
+    )
+    best: (
+        tuple[tuple[datetime, datetime, str, str, str], ArtifactRecord, CorrectionOverlayArtifact]
+        | None
+    ) = None
+    for record in store.list(artifact_type=CORRECTION_OVERLAY_ARTIFACT_TYPE):
+        if record.status != "sealed":
+            continue
+        if record.metadata.get("workflow_status") != "completed":
+            continue
+        verification = store.verify(record.id)
+        if not verification.ok:
+            continue
+
+        try:
+            overlay_data = json.loads(store.retrieve(record.id))
+            overlay = CorrectionOverlayArtifact.from_dict(overlay_data)
+        except (json.JSONDecodeError, UnicodeDecodeError, CorrectionOverlayContractError):
+            continue
+
+        if source_ref is not None and overlay.source_transcript_artifact != source_ref:
+            continue
+
+        key = _overlay_recency_key(record=record, overlay=overlay)
+        if best is None or key > best[0]:
+            best = (key, record, overlay)
+
+    if best is None:
+        return None
+    return best[1], best[2]
+
+
 def apply_correction_overlay(
     *,
     source_transcript: MergedTranscriptArtifact,
@@ -485,6 +534,45 @@ def _required_key(data: Mapping[str, object], key: str, label: str) -> object:
     if key not in data:
         raise CorrectionOverlayContractError(f"{label} {key} is required.")
     return data[key]
+
+
+def _overlay_timestamp(value: object, label: str) -> datetime:
+    if not isinstance(value, str) or not value:
+        raise CorrectionOverlayContractError(f"{label} must be a timestamp string.")
+    normalized = value.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise CorrectionOverlayContractError(f"{label} must be a RFC 3339 date-time.") from exc
+    if parsed.tzinfo is None:
+        raise CorrectionOverlayContractError(f"{label} must include a timezone.")
+    return parsed.astimezone(UTC).replace(microsecond=0)
+
+
+def _overlay_record_timestamp(
+    *, record: ArtifactRecord, overlay: CorrectionOverlayArtifact
+) -> datetime:
+    completed_at = record.metadata.get("completed_at")
+    if isinstance(completed_at, str):
+        try:
+            return _overlay_timestamp(completed_at, "Correction overlay completed_at metadata")
+        except CorrectionOverlayContractError:
+            pass
+    return _overlay_timestamp(overlay.created_at, "Correction overlay created_at")
+
+
+def _overlay_recency_key(
+    *, record: ArtifactRecord, overlay: CorrectionOverlayArtifact
+) -> tuple[datetime, datetime, str, str, str]:
+    completed_at = _overlay_record_timestamp(record=record, overlay=overlay)
+    created_at = _overlay_timestamp(overlay.created_at, "Correction overlay created_at")
+    return (
+        completed_at,
+        created_at,
+        overlay.source_transcript_artifact.id,
+        record.sha256,
+        record.id,
+    )
 
 
 def _validate_stable_id(value: str, label: str) -> None:
