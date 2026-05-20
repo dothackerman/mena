@@ -414,6 +414,57 @@ def test_summarization_stage_reuses_completed_output_when_overlay_is_stable() ->
     assert len(provider.requests) == 1
 
 
+def test_summarization_stage_uses_distinct_paths_for_same_content_overlay_ids() -> None:
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    merged_record = _persist_merged_transcript(store=store)
+    entries = (
+        CorrectionEntry(
+            id="overlay_same_content",
+            segment_id="merged_segment_000002",
+            correction_type="text_edit",
+            original_flag_id="flag_2",
+            user_action_at="2026-05-18T17:00:01Z",
+            text="Release is blocked unless dependencies ship.",
+            metadata={},
+        ),
+    )
+    first_overlay = _persist_correction_overlay(
+        store=store,
+        source_record=merged_record,
+        entries=entries,
+        name="overlays/same-content-a.json",
+    )
+    second_overlay = _persist_correction_overlay(
+        store=store,
+        source_record=merged_record,
+        entries=entries,
+        name="overlays/same-content-b.json",
+    )
+    provider = FakeSummarizationProvider(result=_summary_result())
+    ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+
+    first = run_summarization_stage(
+        store=store,
+        ledger=ledger,
+        merged_transcript_record=merged_record,
+        correction_overlay_record=first_overlay,
+        provider=provider,
+        now=NOW,
+    )
+    second = run_summarization_stage(
+        store=store,
+        ledger=ledger,
+        merged_transcript_record=merged_record,
+        correction_overlay_record=second_overlay,
+        provider=provider,
+        now=NOW,
+    )
+
+    assert first.summary_record.sha256 == second.summary_record.sha256
+    assert first.summary_record.id != second.summary_record.id
+    assert len(provider.requests) == 2
+
+
 def test_summarization_stage_rejects_non_notes_artifact_when_notes_are_included() -> None:
     store = InMemoryArtifactStore(session_id=SESSION_ID)
     merged_record = _persist_merged_transcript(store=store)

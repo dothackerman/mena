@@ -513,6 +513,11 @@ def run_summarization_stage(
                     if correction_overlay_used_record is None
                     else correction_overlay_used_record.sha256
                 ),
+                correction_overlay_artifact_id=(
+                    None
+                    if correction_overlay_used_record is None
+                    else correction_overlay_used_record.id
+                ),
                 attempt=attempt,
             ),
         )
@@ -658,10 +663,15 @@ def _summary_artifact_name(
     stage_config_id: str,
     manual_notes_sha256: str | None,
     correction_overlay_sha256: str | None,
+    correction_overlay_artifact_id: str | None,
     attempt: int,
 ) -> Path:
     notes_scope = manual_notes_sha256 or "no-manual-notes"
-    overlay_scope = correction_overlay_sha256 or "no-correction-overlay"
+    overlay_scope = (
+        f"{correction_overlay_artifact_id}:{correction_overlay_sha256}"
+        if correction_overlay_artifact_id is not None
+        else "no-correction-overlay"
+    )
     scope = sha256(f"{stage_config_id}:{notes_scope}:{overlay_scope}".encode()).hexdigest()[:12]
     return Path(run_id) / merged_transcript_sha256[:12] / scope / f"summary-{attempt:03d}.json"
 

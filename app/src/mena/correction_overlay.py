@@ -243,7 +243,8 @@ def resolve_active_correction_overlay(
     """Return the active completed correction overlay for a session or source transcript.
 
     Selection is deterministic:
-    - requires explicit completed_at metadata,
+    - uses completed_at metadata when present,
+    - falls back to created_at for legacy completed overlays,
     - prefers highest completed_at timestamp,
     - then stable tie-breakers (created_at, source transcript id, record sha256, id).
     """
@@ -556,7 +557,7 @@ def _overlay_timestamp(value: object, label: str) -> datetime:
         raise CorrectionOverlayContractError(f"{label} must be a RFC 3339 date-time.") from exc
     if parsed.tzinfo is None:
         raise CorrectionOverlayContractError(f"{label} must include a timezone.")
-    return parsed.astimezone(UTC).replace(microsecond=0)
+    return parsed.astimezone(UTC)
 
 
 def _overlay_record_timestamp(
@@ -565,9 +566,11 @@ def _overlay_record_timestamp(
     completed_at = record.metadata.get("completed_at")
     if isinstance(completed_at, str):
         return _overlay_timestamp(completed_at, "Correction overlay completed_at metadata")
-    raise CorrectionOverlayContractError(
-        "Completed correction overlay artifact must include completed_at metadata."
-    )
+    if completed_at is not None:
+        raise CorrectionOverlayContractError(
+            "Correction overlay completed_at metadata must be a timestamp string."
+        )
+    return _overlay_timestamp(overlay.created_at, "Correction overlay created_at")
 
 
 def _overlay_recency_key(
