@@ -243,9 +243,9 @@ def resolve_active_correction_overlay(
     """Return the active completed correction overlay for a session or source transcript.
 
     Selection is deterministic:
-    - prefers highest completed_at timestamp if present,
-    - falls back to created_at,
-    - then stable tie-breakers (source transcript source_at, record sha256, id).
+    - requires explicit completed_at metadata,
+    - prefers highest completed_at timestamp,
+    - then stable tie-breakers (created_at, source transcript id, record sha256, id).
     """
 
     source_ref = (
@@ -262,15 +262,25 @@ def resolve_active_correction_overlay(
             continue
         if record.metadata.get("workflow_status") != "completed":
             continue
+        if (
+            source_ref is not None
+            and isinstance(record.metadata.get("source_transcript_artifact_id"), str)
+            and record.metadata["source_transcript_artifact_id"] != source_ref.id
+        ):
+            continue
         verification = store.verify(record.id)
         if not verification.ok:
-            continue
+            raise CorrectionOverlayContractError(
+                "Completed correction overlay artifact failed verification."
+            )
 
         try:
             overlay_data = json.loads(store.retrieve(record.id))
             overlay = CorrectionOverlayArtifact.from_dict(overlay_data)
-        except (json.JSONDecodeError, UnicodeDecodeError, CorrectionOverlayContractError):
-            continue
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise CorrectionOverlayContractError(
+                "Completed correction overlay artifact could not be decoded."
+            ) from exc
 
         if source_ref is not None and overlay.source_transcript_artifact != source_ref:
             continue
@@ -554,11 +564,10 @@ def _overlay_record_timestamp(
 ) -> datetime:
     completed_at = record.metadata.get("completed_at")
     if isinstance(completed_at, str):
-        try:
-            return _overlay_timestamp(completed_at, "Correction overlay completed_at metadata")
-        except CorrectionOverlayContractError:
-            pass
-    return _overlay_timestamp(overlay.created_at, "Correction overlay created_at")
+        return _overlay_timestamp(completed_at, "Correction overlay completed_at metadata")
+    raise CorrectionOverlayContractError(
+        "Completed correction overlay artifact must include completed_at metadata."
+    )
 
 
 def _overlay_recency_key(

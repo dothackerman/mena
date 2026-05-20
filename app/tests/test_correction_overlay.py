@@ -539,23 +539,21 @@ def test_resolve_active_correction_overlay_returns_none_without_completed_overla
     assert resolved is None
 
 
-def test_resolve_active_correction_overlay_falls_back_to_created_at_when_completed_at_invalid() -> (
-    None
-):
+def test_resolve_active_correction_overlay_rejects_invalid_completed_at() -> None:
     store = InMemoryArtifactStore(session_id=SESSION_ID)
     source_record = _persist_source_transcript(store)
     source_ref = ArtifactRef.from_record(source_record)
 
-    fallback_overlay = create_correction_overlay(
+    invalid_overlay = create_correction_overlay(
         session_id=SESSION_ID,
         source_transcript_artifact=source_ref,
         entries=(),
         created_at="2026-05-19T15:20:00Z",
     )
-    fallback_record = persist_correction_overlay_artifact(
+    persist_correction_overlay_artifact(
         store=store,
-        artifact=fallback_overlay,
-        name="overlays/fallback.json",
+        artifact=invalid_overlay,
+        name="overlays/invalid-completed-at.json",
         status="sealed",
         metadata={"workflow_status": "completed", "completed_at": "not-a-timestamp"},
     )
@@ -574,17 +572,14 @@ def test_resolve_active_correction_overlay_falls_back_to_created_at_when_complet
         metadata={"workflow_status": "completed", "completed_at": "2026-05-19T15:10:00Z"},
     )
 
-    resolved = resolve_active_correction_overlay(
-        store=store,
-        source_transcript_record=source_record,
-    )
-
-    assert resolved is not None
-    resolved_record, _ = resolved
-    assert resolved_record.id == fallback_record.id
+    with pytest.raises(CorrectionOverlayContractError, match="completed_at metadata"):
+        resolve_active_correction_overlay(
+            store=store,
+            source_transcript_record=source_record,
+        )
 
 
-def test_resolve_active_correction_overlay_ignores_invalid_payload_records() -> None:
+def test_resolve_active_correction_overlay_rejects_invalid_completed_payload() -> None:
     store = InMemoryArtifactStore(session_id=SESSION_ID)
     source_record = _persist_source_transcript(store)
     store.store(
@@ -593,7 +588,11 @@ def test_resolve_active_correction_overlay_ignores_invalid_payload_records() -> 
         data=b"not-json",
         version=1,
         status="sealed",
-        metadata={"workflow_status": "completed", "completed_at": "2026-05-19T15:22:00Z"},
+        metadata={
+            "workflow_status": "completed",
+            "completed_at": "2026-05-19T15:22:00Z",
+            "source_transcript_artifact_id": source_record.id,
+        },
     )
 
     valid_overlay = create_correction_overlay(
@@ -602,7 +601,7 @@ def test_resolve_active_correction_overlay_ignores_invalid_payload_records() -> 
         entries=(),
         created_at="2026-05-19T15:20:00Z",
     )
-    valid_record = persist_correction_overlay_artifact(
+    persist_correction_overlay_artifact(
         store=store,
         artifact=valid_overlay,
         name="overlays/valid.json",
@@ -610,14 +609,11 @@ def test_resolve_active_correction_overlay_ignores_invalid_payload_records() -> 
         metadata={"workflow_status": "completed", "completed_at": "2026-05-19T15:20:00Z"},
     )
 
-    resolved = resolve_active_correction_overlay(
-        store=store,
-        source_transcript_record=source_record,
-    )
-
-    assert resolved is not None
-    resolved_record, _ = resolved
-    assert resolved_record.id == valid_record.id
+    with pytest.raises(CorrectionOverlayContractError, match="could not be decoded"):
+        resolve_active_correction_overlay(
+            store=store,
+            source_transcript_record=source_record,
+        )
 
 
 def test_resolve_active_correction_overlay_prefers_newest_completed_at() -> None:

@@ -16,7 +16,10 @@ from mena.artifacts import (
     ArtifactStoreError,
     FileSystemArtifactStore,
 )
-from mena.correction_overlay import resolve_active_correction_overlay
+from mena.correction_overlay import (
+    CorrectionOverlayContractError,
+    resolve_active_correction_overlay,
+)
 from mena.correction_workflow import CorrectionWorkflowError, run_correction_workflow
 from mena.discovery import AudioDiscovery, DiscoveryStatus, discover_audio_routes, format_discovery
 from mena.manual_notes import ManualNotesIngestionError, ingest_manual_notes_file
@@ -191,6 +194,7 @@ def main(
             )
         except (
             ArtifactStoreError,
+            CorrectionOverlayContractError,
             ManualNotesIngestionError,
             SummarizationError,
             ValueError,

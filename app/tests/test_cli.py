@@ -524,7 +524,10 @@ def _build_summarize_session_bundle(
         store=store,
         artifact=overlay_artifact,
         name="overlay/active.json",
-        metadata={"workflow_status": "completed"},
+        metadata={
+            "workflow_status": "completed",
+            "completed_at": "2026-05-19T15:20:00Z",
+        },
     )
     return session_dir, store, merged_record, overlay_record
 
