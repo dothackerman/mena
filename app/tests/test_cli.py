@@ -9,19 +9,41 @@ from typing import cast
 import pytest
 from pytest import CaptureFixture
 
-from mena.artifacts import ArtifactStoreError, FileSystemArtifactStore
+from mena.artifacts import (
+    ArtifactRecord,
+    ArtifactStore,
+    ArtifactStoreError,
+    FileSystemArtifactStore,
+)
 from mena.cli import (
     COMMANDS,
     WORKER_EXIT_TIMEOUT_SECONDS,
     SourceAudioInput,
     _collect_capture_segments,
     _require_provider,
+    _resolve_latest_merged_transcript_record,
     _run_processing_command,
     _run_processing_stages,
     main,
 )
+from mena.correction_overlay import (
+    CorrectionEntry,
+    create_correction_overlay,
+    persist_correction_overlay_artifact,
+)
 from mena.diarization import DiarizationProvider, FakeDiarizationProvider
 from mena.discovery import AudioDiscovery, AudioRoute, DiscoveryStatus, PlaybackStream
+from mena.merge_timing import (
+    MERGED_TRANSCRIPT_ARTIFACT_TYPE,
+    MERGED_TRANSCRIPT_SCHEMA_VERSION,
+    MergedTranscriptArtifact,
+    MergedTranscriptSegment,
+    MergedTranscriptSource,
+    MergePolicy,
+    SegmentConfidence,
+    SpeakerIdentity,
+    persist_merged_transcript_artifact,
+)
 from mena.processing import (
     ArtifactRef,
     ProcessingErrorInfo,
@@ -31,8 +53,17 @@ from mena.processing import (
 from mena.profiles import CaptureProfileId, get_capture_profile, parse_capture_profile
 from mena.protocol import ProtocolError, ProtocolMessage
 from mena.semantic_coherence import FakeSemanticCoherenceProvider, SemanticCoherenceProvider
-from mena.sessions import CreatedSession, create_session, update_session_capture_metadata
+from mena.sessions import (
+    SESSION_RECORD_FILENAME,
+    SESSION_RECORD_VERSION,
+    CreatedSession,
+    create_session,
+    update_session_capture_metadata,
+)
+from mena.summarization import SummarizationError, SummarizationPolicy
 from mena.transcription import FakeTranscriptionProvider, TranscriptionProvider
+
+SESSION_ID = "00000000-0000-0000-0000-000000000001"
 
 
 def test_main_prints_help_without_command(capsys: CaptureFixture[str]) -> None:
@@ -45,7 +76,9 @@ def test_main_prints_help_without_command(capsys: CaptureFixture[str]) -> None:
 
 def test_main_exposes_architecture_command_surface(capsys: CaptureFixture[str]) -> None:
     for command in [
-        command for command in COMMANDS[1:] if command not in {"correct", "process", "resume"}
+        command
+        for command in COMMANDS[1:]
+        if command not in {"correct", "process", "resume", "summarize"}
     ]:
         exit_code = main([command])
         captured = capsys.readouterr()
@@ -213,6 +246,192 @@ def test_record_uses_configurable_worker_exit_timeout(tmp_path: Path) -> None:
 
 def test_record_worker_exit_timeout_default_is_generous() -> None:
     assert WORKER_EXIT_TIMEOUT_SECONDS == 30.0
+
+
+def test_main_summarize_applies_active_overlay_and_manual_notes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    session_dir, store, merged_record, overlay_record = _build_summarize_session_bundle(tmp_path)
+    notes_path = tmp_path / "notes.md"
+    notes_path.write_text("- manual note from CLI", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    def _fake_run_summarization_stage(
+        *,
+        store: ArtifactStore,
+        ledger: ProcessingStageLedger,
+        merged_transcript_record: ArtifactRecord,
+        provider: object,
+        correction_overlay_record: ArtifactRecord | None = None,
+        policy: SummarizationPolicy | None = None,
+        manual_notes_record: ArtifactRecord | None = None,
+        stage: str = "summarization",
+        attempt: int = 1,
+        skip_completed: bool = True,
+        now: datetime | None = None,
+    ) -> SimpleNamespace:
+        captured["merged"] = merged_transcript_record
+        captured["overlay"] = correction_overlay_record
+        captured["manual"] = manual_notes_record
+        captured["language"] = policy.language if policy is not None else None
+        return SimpleNamespace(
+            summary_record=store.store(
+                artifact_type="summary",
+                name="summary/final.json",
+                data=b"{}",
+                version=1,
+            ),
+        )
+
+    monkeypatch.setattr("mena.cli.run_summarization_stage", _fake_run_summarization_stage)
+
+    exit_code = main(
+        [
+            "summarize",
+            str(session_dir),
+            "--manual-notes",
+            str(notes_path),
+            "--language",
+            "de-CH",
+        ]
+    )
+    captured_output = capsys.readouterr()
+
+    assert exit_code == 0
+    assert captured.get("merged") == merged_record
+    assert captured.get("overlay") == overlay_record
+    assert captured.get("manual") is not None
+    assert captured.get("language") == "de-CH"
+    assert "Summary written to:" in captured_output.out
+
+
+def test_main_summarize_accepts_session_json_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_dir, _, _, _ = _build_summarize_session_bundle(tmp_path)
+    session_json_path = session_dir / SESSION_RECORD_FILENAME
+    captured: dict[str, object] = {}
+
+    def _fake_run_summarization_stage(
+        *,
+        store: ArtifactStore,
+        ledger: ProcessingStageLedger,
+        merged_transcript_record: ArtifactRecord,
+        provider: object,
+        correction_overlay_record: ArtifactRecord | None = None,
+        policy: SummarizationPolicy | None = None,
+        manual_notes_record: ArtifactRecord | None = None,
+        stage: str = "summarization",
+        attempt: int = 1,
+        skip_completed: bool = True,
+        now: datetime | None = None,
+    ) -> SimpleNamespace:
+        captured["merged"] = merged_transcript_record
+        captured["overlay"] = correction_overlay_record
+        captured["manual"] = manual_notes_record
+        captured["language"] = policy.language if policy is not None else None
+        return SimpleNamespace(
+            summary_record=store.store(
+                artifact_type="summary",
+                name="summary/final.json",
+                data=b"{}",
+                version=1,
+            ),
+        )
+
+    monkeypatch.setattr("mena.cli.run_summarization_stage", _fake_run_summarization_stage)
+
+    exit_code = main(["summarize", str(session_json_path)])
+
+    assert exit_code == 0
+
+
+def test_main_summarize_reports_missing_merged_transcript(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    session_dir = _create_session_record(tmp_path)
+
+    exit_code = main(["summarize", str(session_dir)])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "No merged transcript artifact found for this session." in captured.out
+
+
+def test_main_summarize_rejects_invalid_session_path(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    exit_code = main(["summarize", str(tmp_path / "missing-session.json")])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert (
+        "Cannot summarize session: Session path must be a session directory or"
+        " an existing session.json path."
+    ) in captured.out
+
+
+def test_main_summarize_rejects_when_no_completed_correction_overlay_is_available(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    session_dir = _create_session_record(tmp_path)
+    _persist_merged_transcript(
+        store=FileSystemArtifactStore(session_id=SESSION_ID, session_dir=session_dir)
+    )
+
+    exit_code = main(["summarize", str(session_dir)])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert (
+        "No completed correction overlay found."
+        " Run correction and complete it before summarization." in captured.out
+    )
+
+
+def test_main_summarize_reports_stage_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    def _run_stage_fails(*_: object, **__: object) -> None:
+        raise SummarizationError("Local summary provider is unavailable.")
+
+    monkeypatch.setattr("mena.cli.run_summarization_stage", _run_stage_fails)
+
+    session_dir, _, _, _ = _build_summarize_session_bundle(tmp_path)
+    exit_code = main(["summarize", str(session_dir)])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "Cannot summarize session: Local summary provider is unavailable." in captured.out
+
+
+def test_resolve_latest_merged_transcript_record_ignores_corrupt_payload(
+    tmp_path: Path,
+) -> None:
+    session_dir = _create_session_record(tmp_path)
+    store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=session_dir)
+    valid_record = _persist_merged_transcript(store=store)
+    corrupt_record = store.store(
+        artifact_type=MERGED_TRANSCRIPT_ARTIFACT_TYPE,
+        name="merged/invalid.json",
+        data=b"not-json",
+        version=1,
+        status="sealed",
+        metadata={"contract": "merged-transcript.v1"},
+    )
+    resolved = _resolve_latest_merged_transcript_record(store=store)
+
+    assert resolved is not None
+    assert resolved.id == valid_record.id
+    assert resolved.id != corrupt_record.id
 
 
 def test_main_correct_handles_artifact_store_errors(
@@ -801,6 +1020,158 @@ class TimeoutCapturingWorkerProcess(FakeWorkerProcess):
     def wait(self, timeout: float | None = None) -> int:
         self.__class__.last_timeout = timeout
         return 0
+
+
+def _build_summarize_session_bundle(
+    tmp_path: Path,
+) -> tuple[Path, FileSystemArtifactStore, ArtifactRecord, ArtifactRecord]:
+    session_dir = _create_session_record(tmp_path)
+    store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=session_dir)
+    merged_record = _persist_merged_transcript(store=store)
+    source_ref = ArtifactRef.from_record(merged_record)
+    overlay_artifact = create_correction_overlay(
+        session_id=SESSION_ID,
+        source_transcript_artifact=source_ref,
+        entries=(
+            CorrectionEntry(
+                id="entry_1",
+                segment_id="segment_2",
+                correction_type="text_edit",
+                original_flag_id="flag_1",
+                user_action_at="2026-05-19T15:20:01Z",
+                text="Corrected segment.",
+                metadata={},
+            ),
+        ),
+        now=datetime(2026, 5, 19, 15, 20, 0, tzinfo=UTC),
+    )
+    overlay_record = persist_correction_overlay_artifact(
+        store=store,
+        artifact=overlay_artifact,
+        name="overlay/active.json",
+        metadata={
+            "workflow_status": "completed",
+            "completed_at": "2026-05-19T15:20:00Z",
+        },
+    )
+    return session_dir, store, merged_record, overlay_record
+
+
+def _create_session_record(tmp_path: Path) -> Path:
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    (session_dir / SESSION_RECORD_FILENAME).write_text(
+        json.dumps(
+            {
+                "version": SESSION_RECORD_VERSION,
+                "id": SESSION_ID,
+                "created_at": "2026-05-19T15:00:00Z",
+                "name": None,
+                "status": "created",
+                "profile": "online_dual_stream",
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return session_dir
+
+
+def _persist_merged_transcript(*, store: FileSystemArtifactStore) -> ArtifactRecord:
+    return persist_merged_transcript_artifact(
+        store=store,
+        artifact=_merged_transcript_fixture(),
+        name="merged/merged.json",
+    )
+
+
+def _merged_transcript_fixture() -> MergedTranscriptArtifact:
+    source_ref = ArtifactRef(
+        id=f"{SESSION_ID}:artifacts/transcript/source.json",
+        artifact_type="transcript",
+        version=1,
+        sha256="1" * 64,
+    )
+    return MergedTranscriptArtifact(
+        version=MERGED_TRANSCRIPT_SCHEMA_VERSION,
+        session_id=SESSION_ID,
+        policy=MergePolicy(),
+        sources=(
+            MergedTranscriptSource(
+                source_id="local_mic",
+                channel="local",
+                transcript_artifact=source_ref,
+                diarization_status="not_applicable",
+                diarization_reason="local_user_structural_attribution",
+            ),
+            MergedTranscriptSource(
+                source_id="system_audio",
+                channel="remote",
+                transcript_artifact=source_ref,
+                diarization_status="skipped",
+                diarization_reason="diarization_disabled",
+            ),
+        ),
+        text="Hello everyone",
+        segments=(
+            MergedTranscriptSegment(
+                id="segment_1",
+                text="Hello",
+                start_seconds=0.0,
+                end_seconds=0.8,
+                source_id="local_mic",
+                channel="local",
+                speaker=SpeakerIdentity(
+                    speaker_id="you",
+                    label="You",
+                    kind="local_user",
+                    confidence=SegmentConfidence(
+                        status="available",
+                        metric="structural",
+                        value=1.0,
+                        reason="fixture",
+                    ),
+                ),
+                transcription_confidence=SegmentConfidence(
+                    status="available",
+                    metric="word_probability",
+                    value=0.99,
+                    reason="fixture",
+                ),
+                overlap_detected=False,
+                transcript_segment_id="local_segment_1",
+                metadata={},
+            ),
+            MergedTranscriptSegment(
+                id="segment_2",
+                text="We need to decide priorities.",
+                start_seconds=1.0,
+                end_seconds=2.0,
+                source_id="system_audio",
+                channel="remote",
+                speaker=SpeakerIdentity(
+                    speaker_id="remote",
+                    label="Remote",
+                    kind="fallback_remote",
+                    confidence=SegmentConfidence(
+                        status="unavailable",
+                        reason="diarization_disabled",
+                    ),
+                ),
+                transcription_confidence=SegmentConfidence(
+                    status="available",
+                    metric="word_probability",
+                    value=0.88,
+                    reason="fixture",
+                ),
+                overlap_detected=False,
+                transcript_segment_id="remote_segment_1",
+                metadata={},
+            ),
+        ),
+        created_at="2026-05-19T15:00:00Z",
+    )
 
 
 def _build_processing_session(tmp_path: Path) -> CreatedSession:

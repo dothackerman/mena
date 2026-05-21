@@ -163,16 +163,18 @@ def run_correction_workflow(
             )
         raise
 
+    completed_at = _timestamp(now)
     overlay_record = _persist_overlay(
         store=store,
         session_id=session_id,
         source_record=source_record,
         review_queue_record=review_queue_record,
         entries=entries,
-        created_at=_timestamp(now),
+        created_at=completed_at,
         status="sealed",
         metadata={
             "workflow_status": "completed",
+            "completed_at": completed_at,
             "reviewed": reviewed,
             "skipped": skipped,
             "corrected": corrected,

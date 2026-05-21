@@ -10,6 +10,11 @@ from jsonschema import Draft202012Validator, FormatChecker
 from jsonschema.exceptions import ValidationError
 
 from mena.artifacts import ArtifactRecord, FileSystemArtifactStore, InMemoryArtifactStore
+from mena.correction_overlay import (
+    CorrectionEntry,
+    create_correction_overlay,
+    persist_correction_overlay_artifact,
+)
 from mena.manual_notes import ManualNotesIngestionError, ingest_manual_notes_file
 from mena.merge_timing import (
     MERGED_TRANSCRIPT_SCHEMA_VERSION,
@@ -294,6 +299,172 @@ def test_summarization_stage_uses_distinct_output_paths_for_different_manual_not
     assert len(provider.requests) == 2
 
 
+def test_summarization_stage_applies_correction_overlay_to_summary_request() -> None:
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    merged_record = _persist_merged_transcript(store=store)
+    overlay_record = _persist_correction_overlay(
+        store=store,
+        source_record=merged_record,
+        entries=(
+            CorrectionEntry(
+                id="overlay_text",
+                segment_id="merged_segment_000002",
+                correction_type="text_edit",
+                original_flag_id="flag_2",
+                user_action_at="2026-05-18T17:00:01Z",
+                text="Release is blocked unless dependencies ship.",
+                metadata={},
+            ),
+        ),
+        name="overlays/active.json",
+    )
+    provider = FakeSummarizationProvider(result=_summary_result())
+    ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+
+    result = run_summarization_stage(
+        store=store,
+        ledger=ledger,
+        merged_transcript_record=merged_record,
+        correction_overlay_record=overlay_record,
+        provider=provider,
+        now=NOW,
+    )
+
+    assert result.summary_record is not None
+    assert result.summary_record.metadata["correction_overlay_artifact_id"] == overlay_record.id
+    corrected_segments = provider.requests[0].merged_transcript.segments
+    assert corrected_segments[1].text == "Release is blocked unless dependencies ship."
+    assert (
+        "Release is blocked unless dependencies ship."
+        in provider.requests[0].merged_transcript.text
+    )
+
+
+def test_summarization_stage_rejects_correction_overlay_with_source_mismatch() -> None:
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    merged_record = _persist_merged_transcript(store=store)
+    other_record = persist_merged_transcript_artifact(
+        store=store,
+        artifact=_merged_transcript_fixture(),
+        name="merged/other.json",
+    )
+    overlay_record = _persist_correction_overlay(
+        store=store,
+        source_record=other_record,
+        entries=(),
+        name="overlays/mismatch.json",
+    )
+    provider = FakeSummarizationProvider(result=_summary_result())
+    ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+
+    with pytest.raises(SummarizationError, match="source record"):
+        run_summarization_stage(
+            store=store,
+            ledger=ledger,
+            merged_transcript_record=merged_record,
+            correction_overlay_record=overlay_record,
+            provider=provider,
+            now=NOW,
+        )
+
+
+def test_summarization_stage_reuses_completed_output_when_overlay_is_stable() -> None:
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    merged_record = _persist_merged_transcript(store=store)
+    overlay_record = _persist_correction_overlay(
+        store=store,
+        source_record=merged_record,
+        entries=(
+            CorrectionEntry(
+                id="overlay_reuse",
+                segment_id="merged_segment_000002",
+                correction_type="text_edit",
+                original_flag_id="flag_2",
+                user_action_at="2026-05-18T17:00:01Z",
+                text="Release is blocked unless dependencies ship.",
+                metadata={},
+            ),
+        ),
+        name="overlays/reuse.json",
+    )
+    provider = FakeSummarizationProvider(result=_summary_result())
+    ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+
+    first = run_summarization_stage(
+        store=store,
+        ledger=ledger,
+        merged_transcript_record=merged_record,
+        correction_overlay_record=overlay_record,
+        provider=provider,
+        now=NOW,
+    )
+    second = run_summarization_stage(
+        store=store,
+        ledger=ledger,
+        merged_transcript_record=merged_record,
+        correction_overlay_record=overlay_record,
+        provider=provider,
+        now=NOW,
+    )
+
+    assert first.summary_record.metadata["correction_overlay_artifact_id"] == overlay_record.id
+    assert second.summary_record.metadata["correction_overlay_artifact_id"] == overlay_record.id
+    assert second.skipped is True
+    assert second.summary_record == first.summary_record
+    assert len(provider.requests) == 1
+
+
+def test_summarization_stage_uses_distinct_paths_for_same_content_overlay_ids() -> None:
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    merged_record = _persist_merged_transcript(store=store)
+    entries = (
+        CorrectionEntry(
+            id="overlay_same_content",
+            segment_id="merged_segment_000002",
+            correction_type="text_edit",
+            original_flag_id="flag_2",
+            user_action_at="2026-05-18T17:00:01Z",
+            text="Release is blocked unless dependencies ship.",
+            metadata={},
+        ),
+    )
+    first_overlay = _persist_correction_overlay(
+        store=store,
+        source_record=merged_record,
+        entries=entries,
+        name="overlays/same-content-a.json",
+    )
+    second_overlay = _persist_correction_overlay(
+        store=store,
+        source_record=merged_record,
+        entries=entries,
+        name="overlays/same-content-b.json",
+    )
+    provider = FakeSummarizationProvider(result=_summary_result())
+    ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+
+    first = run_summarization_stage(
+        store=store,
+        ledger=ledger,
+        merged_transcript_record=merged_record,
+        correction_overlay_record=first_overlay,
+        provider=provider,
+        now=NOW,
+    )
+    second = run_summarization_stage(
+        store=store,
+        ledger=ledger,
+        merged_transcript_record=merged_record,
+        correction_overlay_record=second_overlay,
+        provider=provider,
+        now=NOW,
+    )
+
+    assert first.summary_record.sha256 == second.summary_record.sha256
+    assert first.summary_record.id != second.summary_record.id
+    assert len(provider.requests) == 2
+
+
 def test_summarization_stage_rejects_non_notes_artifact_when_notes_are_included() -> None:
     store = InMemoryArtifactStore(session_id=SESSION_ID)
     merged_record = _persist_merged_transcript(store=store)
@@ -313,6 +484,30 @@ def test_summarization_stage_rejects_non_notes_artifact_when_notes_are_included(
             ledger=ledger,
             merged_transcript_record=merged_record,
             manual_notes_record=wrong_record,
+            provider=provider,
+            now=NOW,
+        )
+
+
+def test_summarization_stage_rejects_non_overlay_artifact_for_correction_overlay() -> None:
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    merged_record = _persist_merged_transcript(store=store)
+    wrong_record = store.store(
+        artifact_type="transcript",
+        name="not-overlay.txt",
+        data=b"{}",
+        version=1,
+        metadata={"contract": "transcript.v1"},
+    )
+    provider = FakeSummarizationProvider(result=_summary_result())
+    ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+
+    with pytest.raises(SummarizationError, match="correction_overlay type"):
+        run_summarization_stage(
+            store=store,
+            ledger=ledger,
+            merged_transcript_record=merged_record,
+            correction_overlay_record=wrong_record,
             provider=provider,
             now=NOW,
         )
@@ -546,6 +741,27 @@ def _persist_notes(*, store: FileSystemArtifactStore | InMemoryArtifactStore) ->
         data=b"- Manual note: release is blocked.",
         version=1,
         metadata={"contract": "manual-notes.raw"},
+    )
+
+
+def _persist_correction_overlay(
+    *,
+    store: FileSystemArtifactStore | InMemoryArtifactStore,
+    source_record: ArtifactRecord,
+    entries: tuple[CorrectionEntry, ...],
+    name: str,
+) -> ArtifactRecord:
+    overlay = create_correction_overlay(
+        session_id=SESSION_ID,
+        source_transcript_artifact=ArtifactRef.from_record(source_record),
+        entries=entries,
+        now=NOW,
+    )
+    return persist_correction_overlay_artifact(
+        store=store,
+        artifact=overlay,
+        name=name,
+        metadata={"workflow_status": "completed", "completed_at": "2026-05-18T17:00:00Z"},
     )
 
 

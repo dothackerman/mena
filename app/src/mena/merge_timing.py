@@ -411,25 +411,29 @@ def persist_merged_transcript_artifact(
     store: ArtifactStore,
     artifact: MergedTranscriptArtifact,
     name: str | Path,
+    metadata: Mapping[str, object] | None = None,
 ) -> ArtifactRecord:
     """Persist one merged transcript payload through the artifact store contract."""
 
     MergedTranscriptArtifact.from_dict(artifact.to_dict())
     remote_source = next(source for source in artifact.sources if source.channel == "remote")
+    artifact_metadata: dict[str, object] = {
+        "category": "derived",
+        "contract": "merged-transcript.v1",
+        "policy_config_id": artifact.policy.config_id,
+        "local_source_id": artifact.policy.local_source_id,
+        "remote_source_id": artifact.policy.remote_source_id,
+        "remote_diarization_status": remote_source.diarization_status,
+        "remote_diarization_reason": remote_source.diarization_reason,
+    }
+    if metadata is not None:
+        artifact_metadata.update(metadata)
     return store.store(
         artifact_type=MERGED_TRANSCRIPT_ARTIFACT_TYPE,
         name=name,
         data=artifact.to_json_bytes(),
         version=MERGED_TRANSCRIPT_ARTIFACT_VERSION,
-        metadata={
-            "category": "derived",
-            "contract": "merged-transcript.v1",
-            "policy_config_id": artifact.policy.config_id,
-            "local_source_id": artifact.policy.local_source_id,
-            "remote_source_id": artifact.policy.remote_source_id,
-            "remote_diarization_status": remote_source.diarization_status,
-            "remote_diarization_reason": remote_source.diarization_reason,
-        },
+        metadata=artifact_metadata,
     )
 
 

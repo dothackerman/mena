@@ -104,6 +104,8 @@ def test_run_correction_workflow_persists_overlay_and_keeps_source_transcript_im
         "overlap_mark",
     }
     assert len(store.list(artifact_type=CORRECTION_OVERLAY_ARTIFACT_TYPE)) == 1
+    assert result.overlay_artifact_record.metadata["workflow_status"] == "completed"
+    assert result.overlay_artifact_record.metadata["completed_at"] == "2026-05-19T15:20:00Z"
     assert source_path.read_bytes() == source_bytes_before
 
 
@@ -375,6 +377,7 @@ def test_run_correction_workflow_persists_partial_overlay_on_cancellation(
     assert len(overlays) == 1
     assert overlays[0].status == "staged"
     assert overlays[0].metadata["workflow_status"] == "cancelled"
+    assert "completed_at" not in overlays[0].metadata
     assert overlays[0].metadata["reviewed"] == 1
     payload = json.loads(store.retrieve(overlays[0].id))
     assert [entry["correction_type"] for entry in payload["entries"]] == ["skip_mark"]
