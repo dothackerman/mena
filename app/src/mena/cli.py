@@ -77,6 +77,10 @@ WORKER_EXIT_TIMEOUT_SECONDS = 30.0
 ProviderFactory = Callable[[], Any]
 
 
+class ProviderValidationError(TypeError):
+    """Raised when a configured processing provider does not satisfy its protocol."""
+
+
 @dataclass(frozen=True)
 class SourceAudioInput:
     source_id: str
@@ -255,6 +259,7 @@ def main(
             MergeTimingError,
             ReviewFlaggingError,
             SemanticCoherenceError,
+            ProviderValidationError,
             OSError,
         ) as exc:
             print(f"Cannot run processing workflow: {exc}")
@@ -280,6 +285,7 @@ def _run_processing_command(
     session_dir, session_record = _resolve_session(session_path)
     session_id = _extract_session_id(session_record)
     profile = get_capture_profile(_required_str(session_record, "profile"))
+    _validate_processing_profile_support(profile)
     store = FileSystemArtifactStore(session_id=session_id, session_dir=session_dir)
     source_inputs = _prepare_source_audio_inputs(
         session_dir=session_dir,
@@ -335,8 +341,7 @@ def _run_processing_stages(
     diarization_provider: DiarizationProvider,
     semantic_coherence_provider: SemanticCoherenceProvider,
 ) -> None:
-    if len(profile.sources) != 2:
-        raise ValueError("Processing currently supports profiles with exactly two sources.")
+    _validate_processing_profile_support(profile)
 
     transcript_records: dict[str, ArtifactRecord] = {}
     for source in profile.sources:
@@ -422,6 +427,11 @@ def _run_processing_stages(
         attempt=attempt,
         now=now,
     )
+
+
+def _validate_processing_profile_support(profile: CaptureProfile) -> None:
+    if len(profile.sources) != 2:
+        raise ValueError("Processing currently supports profiles with exactly two sources.")
 
 
 def _prepare_source_audio_inputs(
@@ -694,7 +704,7 @@ def _required_str(payload: dict[str, object] | object, key: str) -> str:
 
 def _required_int(payload: dict[str, object], key: str) -> int:
     value = payload.get(key)
-    if not isinstance(value, int) or value <= 0:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"Session field '{key}' must be a positive integer.")
     return value
 
@@ -724,12 +734,14 @@ def _require_provider(
 
     if required:
         if not _provider_implements(provider, *required):
-            raise TypeError(f"{provider_name} provider must implement {provider_type.__name__}.")
+            raise ProviderValidationError(
+                f"{provider_name} provider must implement {provider_type.__name__}."
+            )
         if provider_type is SemanticCoherenceProvider:
             metadata = provider.metadata
             config_id = getattr(metadata, "config_id", None)
             if not isinstance(config_id, str) or not config_id:
-                raise TypeError(
+                raise ProviderValidationError(
                     f"{provider_name} provider must expose semantic metadata config_id."
                 )
         return provider
@@ -739,5 +751,7 @@ def _require_provider(
     except TypeError:
         valid = False
     if not valid:
-        raise TypeError(f"{provider_name} provider must implement {provider_type.__name__}.")
+        raise ProviderValidationError(
+            f"{provider_name} provider must implement {provider_type.__name__}."
+        )
     return provider

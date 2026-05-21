@@ -412,6 +412,30 @@ def test_main_process_executes_full_pipeline_with_stubbed_stages(
     assert "Processing completed for run 'manual-run-001' (attempt 1)." in captured.out
 
 
+def test_main_process_reports_provider_validation_errors(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    session = _build_processing_session(tmp_path)
+
+    exit_code = main(
+        ["process", str(session.record_path)],
+        transcription_provider_factory=lambda: SimpleNamespace(
+            name="bad",
+            transcribe="not-callable",
+        ),
+        diarization_provider_factory=FakeDiarizationProvider,
+        semantic_coherence_provider_factory=lambda: FakeSemanticCoherenceProvider(results={}),
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert (
+        "Cannot run processing workflow: transcription provider must implement "
+        "TranscriptionProvider."
+    ) in captured.out
+
+
 def test_main_resume_retries_latest_retryable_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -822,6 +846,44 @@ def _build_processing_session(tmp_path: Path) -> CreatedSession:
                     "sample_rate": 48000,
                     "channels": 1,
                     "byte_count": len(remote_bytes),
+                    "status": "sealed",
+                    "format": "wav",
+                },
+            ],
+        },
+    )
+
+    return created_session
+
+
+def _build_single_source_processing_session(tmp_path: Path) -> CreatedSession:
+    created_session = create_session(
+        profile=parse_capture_profile("in-person"),
+        data_root=tmp_path,
+        now=datetime(2026, 5, 8, 5, 30, 0, tzinfo=UTC),
+    )
+
+    room_path = created_session.bundle_path / "room_mic_segment.wav"
+    room_bytes = b"room audio placeholder"
+    room_path.write_bytes(room_bytes)
+
+    update_session_capture_metadata(
+        created_session.record_path,
+        {
+            "version": 1,
+            "sample_rate": 48000,
+            "channels": 1,
+            "segment_seconds": 30,
+            "segment_count": 1,
+            "segments": [
+                {
+                    "source_id": "room_mic",
+                    "index": 1,
+                    "path": str(room_path),
+                    "sha256": hashlib.sha256(room_bytes).hexdigest(),
+                    "sample_rate": 48000,
+                    "channels": 1,
+                    "byte_count": len(room_bytes),
                     "status": "sealed",
                     "format": "wav",
                 },
@@ -1258,6 +1320,40 @@ def test_main_process_rejects_non_positive_capture_index(
     captured = capsys.readouterr()
     assert exit_code == 1
     assert "Session field 'index' must be a positive integer." in captured.out
+
+
+def test_main_process_rejects_boolean_capture_index(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    session = _build_processing_session(tmp_path)
+    record = json.loads(session.record_path.read_text(encoding="utf-8"))
+    record["capture_metadata"]["segments"][0]["index"] = True
+    session.record_path.write_text(json.dumps(record), encoding="utf-8")
+
+    exit_code = main(["process", str(session.record_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "Session field 'index' must be a positive integer." in captured.out
+
+
+def test_main_process_rejects_unsupported_profile_before_source_artifacts(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    session = _build_single_source_processing_session(tmp_path)
+
+    exit_code = main(["process", str(session.record_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "Processing currently supports profiles with exactly two sources." in captured.out
+    store = FileSystemArtifactStore(
+        session_id=session.record.id,
+        session_dir=session.bundle_path,
+    )
+    assert store.list(artifact_type="source_audio") == ()
 
 
 def test_main_process_reuses_existing_source_audio_artifacts_on_second_run(
