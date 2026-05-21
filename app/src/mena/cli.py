@@ -634,9 +634,15 @@ def _latest_resumable_processing_state(
     )
     if latest is None or latest.status == "running":
         return latest
+    if latest.status in {"completed", "skipped"}:
+        return None if _is_final_processing_stage(latest) else latest
     if latest.error is not None and latest.error.retryable:
         return latest
     return None
+
+
+def _is_final_processing_stage(state: ProcessingStageState) -> bool:
+    return state.stage == "semantic_coherence"
 
 
 def _latest_non_retryable_processing_failure(
@@ -694,7 +700,12 @@ def _required_int(payload: dict[str, object], key: str) -> int:
 
 
 def _provider_implements(provider: Any, *required_attrs: str) -> bool:
-    return all(hasattr(provider, attr) for attr in required_attrs)
+    for attr in required_attrs:
+        if not hasattr(provider, attr):
+            return False
+        if attr in {"transcribe", "diarize", "check"} and not callable(getattr(provider, attr)):
+            return False
+    return True
 
 
 def _require_provider(

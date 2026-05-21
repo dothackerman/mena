@@ -20,9 +20,14 @@ from mena.cli import (
     _run_processing_stages,
     main,
 )
-from mena.diarization import FakeDiarizationProvider
+from mena.diarization import DiarizationProvider, FakeDiarizationProvider
 from mena.discovery import AudioDiscovery, AudioRoute, DiscoveryStatus, PlaybackStream
-from mena.processing import ArtifactRef, ProcessingErrorInfo, ProcessingStageLedger
+from mena.processing import (
+    ArtifactRef,
+    ProcessingErrorInfo,
+    ProcessingStageLedger,
+    ProcessingStageState,
+)
 from mena.profiles import CaptureProfileId, get_capture_profile, parse_capture_profile
 from mena.protocol import ProtocolError, ProtocolMessage
 from mena.semantic_coherence import FakeSemanticCoherenceProvider, SemanticCoherenceProvider
@@ -544,12 +549,15 @@ def test_main_resume_blocks_non_retryable_failure_after_running_checkpoint(
     )
 
 
-def test_main_resume_after_completed_checkpoint_reports_no_retry(
-    tmp_path: Path, capsys: CaptureFixture[str]
+def test_main_resume_after_mid_run_completed_checkpoint_continues(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    session = create_session(profile=parse_capture_profile("online"), data_root=tmp_path)
+    session = _build_processing_session(tmp_path)
     store = FileSystemArtifactStore(session_id=session.record.id, session_dir=session.bundle_path)
-    ledger = ProcessingStageLedger(session_id=session.record.id, run_id="run-complete", store=store)
+    ledger = ProcessingStageLedger(
+        session_id=session.record.id, run_id="run-mid-complete", store=store
+    )
     output_record = store.store(
         artifact_type="transcript",
         name="completed-transcript.json",
@@ -563,8 +571,91 @@ def test_main_resume_after_completed_checkpoint_reports_no_retry(
         attempt=1,
         now=now,
     )
-    ledger.mark_completed(
+    completed_state = ledger.mark_completed(
         stage="transcription",
+        input_artifacts=(),
+        output_artifacts=(ArtifactRef.from_record(output_record),),
+        attempt=running_state.attempt,
+        started_at=running_state.started_at,
+        now=now,
+    )
+    processing_calls = _patch_processing_stages(monkeypatch)
+
+    exit_code = main(
+        ["resume", str(session.record_path)],
+        transcription_provider_factory=FakeTranscriptionProvider,
+        diarization_provider_factory=FakeDiarizationProvider,
+        semantic_coherence_provider_factory=lambda: FakeSemanticCoherenceProvider(results={}),
+    )
+
+    assert exit_code == 0
+    assert processing_calls["run_id"] == completed_state.run_id
+    assert processing_calls["attempt"] == completed_state.attempt + 1
+
+
+def test_main_resume_after_mid_run_skipped_checkpoint_continues(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _build_processing_session(tmp_path)
+    store = FileSystemArtifactStore(session_id=session.record.id, session_dir=session.bundle_path)
+    ledger = ProcessingStageLedger(session_id=session.record.id, run_id="run-mid-skip", store=store)
+    output_record = store.store(
+        artifact_type="transcript",
+        name="skipped-transcript.json",
+        data=b"{}",
+        metadata={},
+    )
+    skipped_state = ledger.record(
+        ProcessingStageState(
+            version=1,
+            session_id=session.record.id,
+            run_id="run-mid-skip",
+            stage="transcription",
+            status="skipped",
+            attempt=2,
+            input_artifacts=(),
+            output_artifacts=(ArtifactRef.from_record(output_record),),
+            error=None,
+            started_at="2026-05-08T08:30:00Z",
+            completed_at="2026-05-08T08:30:00Z",
+        )
+    )
+    processing_calls = _patch_processing_stages(monkeypatch)
+
+    exit_code = main(
+        ["resume", str(session.record_path)],
+        transcription_provider_factory=FakeTranscriptionProvider,
+        diarization_provider_factory=FakeDiarizationProvider,
+        semantic_coherence_provider_factory=lambda: FakeSemanticCoherenceProvider(results={}),
+    )
+
+    assert exit_code == 0
+    assert processing_calls["run_id"] == skipped_state.run_id
+    assert processing_calls["attempt"] == skipped_state.attempt + 1
+
+
+def test_main_resume_after_final_completed_checkpoint_reports_no_retry(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    session = create_session(profile=parse_capture_profile("online"), data_root=tmp_path)
+    store = FileSystemArtifactStore(session_id=session.record.id, session_dir=session.bundle_path)
+    ledger = ProcessingStageLedger(session_id=session.record.id, run_id="run-complete", store=store)
+    output_record = store.store(
+        artifact_type="transcript",
+        name="completed-transcript.json",
+        data=b"{}",
+        metadata={},
+    )
+    now = datetime(2026, 5, 8, 8, 30, tzinfo=UTC)
+    running_state = ledger.mark_running(
+        stage="semantic_coherence",
+        input_artifacts=(),
+        attempt=1,
+        now=now,
+    )
+    ledger.mark_completed(
+        stage="semantic_coherence",
         input_artifacts=(),
         output_artifacts=(ArtifactRef.from_record(output_record),),
         attempt=running_state.attempt,
@@ -1329,4 +1420,24 @@ def test_require_provider_type_requirements() -> None:
             provider_factory=lambda: SimpleNamespace(metadata={}, check=lambda *_args: None),
             provider_type=SemanticCoherenceProvider,
             provider_name="semantic_coherence",
+        )
+
+    with pytest.raises(
+        TypeError, match="transcription provider must implement TranscriptionProvider"
+    ):
+        _require_provider(
+            provider_factory=lambda: SimpleNamespace(name="bad", transcribe="not-callable"),
+            provider_type=TranscriptionProvider,
+            provider_name="transcription",
+        )
+
+    with pytest.raises(TypeError, match="diarization provider must implement DiarizationProvider"):
+        _require_provider(
+            provider_factory=lambda: SimpleNamespace(
+                name="bad",
+                config_id="cfg",
+                diarize=None,
+            ),
+            provider_type=DiarizationProvider,
+            provider_name="diarization",
         )
