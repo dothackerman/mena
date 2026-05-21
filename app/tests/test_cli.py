@@ -1,6 +1,5 @@
 import hashlib
 import json
-from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -913,6 +912,68 @@ def test_main_resume_after_final_completed_checkpoint_reports_no_retry(
     assert "No retryable processing failure found to resume." in captured.out
 
 
+def test_main_resume_ignores_later_summarization_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    session = create_session(profile=parse_capture_profile("online"), data_root=tmp_path)
+    store = FileSystemArtifactStore(session_id=session.record.id, session_dir=session.bundle_path)
+    output_record = store.store(
+        artifact_type="transcript",
+        name="completed-transcript.json",
+        data=b"{}",
+        metadata={},
+    )
+    processing_ledger = ProcessingStageLedger(
+        session_id=session.record.id,
+        run_id="run-complete",
+        store=store,
+    )
+    now = datetime(2026, 5, 8, 8, 30, tzinfo=UTC)
+    running_state = processing_ledger.mark_running(
+        stage="semantic_coherence",
+        input_artifacts=(),
+        attempt=1,
+        now=now,
+    )
+    processing_ledger.mark_completed(
+        stage="semantic_coherence",
+        input_artifacts=(),
+        output_artifacts=(ArtifactRef.from_record(output_record),),
+        attempt=running_state.attempt,
+        started_at=running_state.started_at,
+        now=now,
+    )
+    summarization_ledger = ProcessingStageLedger(
+        session_id=session.record.id,
+        run_id=f"summarize-{session.record.id}",
+        store=store,
+    )
+    summary_state = summarization_ledger.mark_running(
+        stage="summarization",
+        input_artifacts=(ArtifactRef.from_record(output_record),),
+        attempt=1,
+        now=datetime(2026, 5, 8, 8, 45, tzinfo=UTC),
+    )
+    summarization_ledger.mark_completed(
+        stage="summarization",
+        input_artifacts=(ArtifactRef.from_record(output_record),),
+        output_artifacts=(ArtifactRef.from_record(output_record),),
+        attempt=summary_state.attempt,
+        started_at=summary_state.started_at,
+        now=datetime(2026, 5, 8, 8, 45, tzinfo=UTC),
+    )
+    processing_calls = _patch_processing_stages(monkeypatch)
+
+    exit_code = main(["resume", str(session.record_path)])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert processing_calls == {}
+    assert "No retryable processing failure found to resume." in captured.out
+
+
 def test_main_resume_uses_durable_checkpoint_order_when_timestamps_tie(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1430,41 +1491,115 @@ def test_collect_capture_segments_rejects_multiple_segments_per_source() -> None
         )
 
 
-def test_run_processing_stages_rejects_non_bi_source_profile(tmp_path: Path) -> None:
-    base_profile = get_capture_profile(parse_capture_profile("online").id)
-    one_source_profile = replace(base_profile, sources=(base_profile.sources[0],))
-    store = FileSystemArtifactStore(session_id="session-no2", session_dir=tmp_path)
-    ledger = ProcessingStageLedger(session_id="session-no2", run_id="run-no2", store=store)
+def test_run_processing_stages_routes_in_person_room_mic_profile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = get_capture_profile(parse_capture_profile("in-person").id)
+    store = FileSystemArtifactStore(session_id="session-room", session_dir=tmp_path)
+    ledger = ProcessingStageLedger(session_id="session-room", run_id="run-room", store=store)
+    calls: list[str] = []
 
-    with pytest.raises(
-        ValueError, match=r"Processing currently supports profiles with exactly two sources."
-    ):
-        _run_processing_stages(
-            session_id="session-no2",
-            profile=one_source_profile,
-            source_inputs=cast(
-                dict[str, SourceAudioInput],
-                {
-                    "local_mic": SimpleNamespace(
-                        artifact=SimpleNamespace(id="a", artifact_type="source_audio"),
-                        path=tmp_path / "local_mic_segment.wav",
-                    )
-                },
+    def _fake_run_transcription_stage(*, source_id: str | None = None, **_: object) -> object:
+        calls.append(f"transcription:{source_id}")
+        return SimpleNamespace(transcript_record=SimpleNamespace(id=f"{source_id}-transcript"))
+
+    def _fake_run_diarization_stage(*, context: object, **_: object) -> object:
+        source_id = getattr(context, "source_id", None)
+        calls.append(f"diarization:{source_id}")
+        return SimpleNamespace(
+            skipped=False,
+            artifacts=(
+                SimpleNamespace(kind="regular_timeline"),
+                SimpleNamespace(kind="exclusive_projection"),
             ),
-            store=store,
-            ledger=ledger,
-            attempt=1,
-            now=datetime(2026, 5, 8, 8, 0, tzinfo=UTC),
-            transcription_provider=SimpleNamespace(
-                name="fake", transcribe=lambda *_args, **_kwargs: None
-            ),
-            diarization_provider=SimpleNamespace(
-                name="fake", config_id="cfg", diarize=lambda *_args, **_kwargs: None
-            ),
-            semantic_coherence_provider=SimpleNamespace(
-                metadata=SimpleNamespace(config_id="cfg"), check=lambda *_args, **_kwargs: True
+            artifact_records=(
+                SimpleNamespace(id=f"{source_id}-regular"),
+                SimpleNamespace(id=f"{source_id}-exclusive"),
             ),
         )
+
+    def _fake_run_room_mic_merge_timing_stage(
+        *,
+        room_transcript_record: SimpleNamespace,
+        room_regular_diarization_record: SimpleNamespace | None,
+        room_exclusive_diarization_record: SimpleNamespace | None,
+        **_: object,
+    ) -> object:
+        calls.append(
+            "room_merge:"
+            f"{room_transcript_record.id}:"
+            f"{room_regular_diarization_record.id if room_regular_diarization_record else None}:"
+            f"{room_exclusive_diarization_record.id if room_exclusive_diarization_record else None}"
+        )
+        return SimpleNamespace(merged_transcript_record=SimpleNamespace(id="merged-room"))
+
+    def _fake_run_confidence_flagging_stage(
+        *, merged_transcript_record: SimpleNamespace, **_: object
+    ) -> object:
+        calls.append(f"confidence:{merged_transcript_record.id}")
+        return SimpleNamespace(review_queue_record=None, skipped=False)
+
+    def _fake_run_semantic_coherence_stage(
+        *, merged_transcript_record: SimpleNamespace, **_: object
+    ) -> object:
+        calls.append(f"semantic:{merged_transcript_record.id}")
+        return SimpleNamespace(review_queue_record=None, skipped=False)
+
+    monkeypatch.setattr("mena.cli.run_transcription_stage", _fake_run_transcription_stage)
+    monkeypatch.setattr("mena.cli.run_diarization_stage", _fake_run_diarization_stage)
+    monkeypatch.setattr(
+        "mena.cli.run_room_mic_merge_timing_stage",
+        _fake_run_room_mic_merge_timing_stage,
+    )
+    monkeypatch.setattr(
+        "mena.cli.run_merge_timing_stage",
+        lambda **_kwargs: pytest.fail("online merge path should not run for room mic"),
+    )
+    monkeypatch.setattr(
+        "mena.cli.run_confidence_flagging_stage",
+        _fake_run_confidence_flagging_stage,
+    )
+    monkeypatch.setattr(
+        "mena.cli.run_semantic_coherence_stage",
+        _fake_run_semantic_coherence_stage,
+    )
+
+    _run_processing_stages(
+        session_id="session-room",
+        profile=profile,
+        source_inputs=cast(
+            dict[str, SourceAudioInput],
+            {
+                "room_mic": SimpleNamespace(
+                    artifact=SimpleNamespace(id="room"),
+                    path=tmp_path / "room_mic_segment.wav",
+                )
+            },
+        ),
+        store=store,
+        ledger=ledger,
+        attempt=1,
+        now=datetime(2026, 5, 8, 8, 0, tzinfo=UTC),
+        transcription_provider=SimpleNamespace(name="x", transcribe=lambda *_args, **_kwargs: None),
+        diarization_provider=SimpleNamespace(
+            name="y",
+            config_id="cfg",
+            diarize=lambda *_args, **_kwargs: None,
+        ),
+        semantic_coherence_provider=SimpleNamespace(
+            metadata=SimpleNamespace(config_id="cfg"),
+            check=lambda *_args, **_kwargs: True,
+        ),
+    )
+
+    assert calls == [
+        "transcription:room_mic",
+        "diarization:room_mic",
+        "room_merge:room_mic-transcript:room_mic-regular:room_mic-exclusive",
+        "confidence:merged-room",
+        "semantic:merged-room",
+    ]
 
 
 def test_run_processing_stages_skips_diarization_for_system_audio_and_honors_unknown_artifact_kinds(
@@ -1709,22 +1844,37 @@ def test_main_process_rejects_boolean_capture_index(
     assert "Session field 'index' must be a positive integer." in captured.out
 
 
-def test_main_process_rejects_unsupported_profile_before_source_artifacts(
+def test_main_process_executes_in_person_profile_with_room_mic_pipeline(
     tmp_path: Path,
     capsys: CaptureFixture[str],
 ) -> None:
     session = _build_single_source_processing_session(tmp_path)
 
-    exit_code = main(["process", str(session.record_path)])
+    exit_code = main(
+        ["process", str(session.record_path)],
+        run_id="manual-room-run",
+        transcription_provider_factory=FakeTranscriptionProvider,
+        diarization_provider_factory=FakeDiarizationProvider,
+        semantic_coherence_provider_factory=lambda: FakeSemanticCoherenceProvider(results={}),
+    )
 
     captured = capsys.readouterr()
-    assert exit_code == 1
-    assert "Processing currently supports profiles with exactly two sources." in captured.out
+    assert exit_code == 0
+    assert "Processing completed for run 'manual-room-run' (attempt 1)." in captured.out
     store = FileSystemArtifactStore(
         session_id=session.record.id,
         session_dir=session.bundle_path,
     )
-    assert store.list(artifact_type="source_audio") == ()
+    assert len(store.list(artifact_type="source_audio")) == 1
+    merged_records = store.list(artifact_type=MERGED_TRANSCRIPT_ARTIFACT_TYPE)
+    assert len(merged_records) == 1
+    merged = MergedTranscriptArtifact.from_dict(json.loads(store.retrieve(merged_records[0].id)))
+    assert merged.policy.capture_profile == "in_person_single_mic"
+    assert [(source.source_id, source.channel) for source in merged.sources] == [
+        ("room_mic", "room")
+    ]
+    assert merged.segments[0].source_id == "room_mic"
+    assert merged.segments[0].speaker.kind == "diarized_room"
 
 
 def test_main_process_reuses_existing_source_audio_artifacts_on_second_run(
