@@ -590,7 +590,7 @@ def test_run_processing_command_executes_stage_pipeline(
         ),
         semantic_coherence_provider_factory=lambda: SimpleNamespace(
             name="fake",
-            metadata=SimpleNamespace(config_id="cfg"),
+            metadata=SimpleNamespace(config_id="cfg", to_dict=lambda: {"config_id": "cfg"}),
             check=lambda *_args, **_kwargs: True,
         ),
     )
@@ -642,6 +642,30 @@ def test_main_process_reports_provider_validation_errors(
             name="bad",
             transcribe="not-callable",
         ),
+        diarization_provider_factory=FakeDiarizationProvider,
+        semantic_coherence_provider_factory=lambda: FakeSemanticCoherenceProvider(results={}),
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert (
+        "Cannot run processing workflow: transcription provider must implement "
+        "TranscriptionProvider."
+    ) in captured.out
+
+
+def test_main_process_reports_provider_factory_type_errors(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    session = _build_processing_session(tmp_path)
+
+    def broken_factory() -> object:
+        raise TypeError("missing constructor argument")
+
+    exit_code = main(
+        ["process", str(session.record_path)],
+        transcription_provider_factory=broken_factory,
         diarization_provider_factory=FakeDiarizationProvider,
         semantic_coherence_provider_factory=lambda: FakeSemanticCoherenceProvider(results={}),
     )
@@ -2063,6 +2087,18 @@ def test_require_provider_type_requirements() -> None:
     ):
         _require_provider(
             provider_factory=lambda: SimpleNamespace(metadata={}, check=lambda *_args: None),
+            provider_type=SemanticCoherenceProvider,
+            provider_name="semantic_coherence",
+        )
+
+    with pytest.raises(
+        TypeError, match="semantic_coherence provider must expose semantic metadata to_dict"
+    ):
+        _require_provider(
+            provider_factory=lambda: SimpleNamespace(
+                metadata=SimpleNamespace(config_id="cfg"),
+                check=lambda *_args: None,
+            ),
             provider_type=SemanticCoherenceProvider,
             provider_name="semantic_coherence",
         )

@@ -911,7 +911,12 @@ def _require_provider(
     provider_type: type[Any],
     provider_name: str,
 ) -> Any:
-    provider = provider_factory()
+    try:
+        provider = provider_factory()
+    except TypeError as exc:
+        raise ProviderValidationError(
+            f"{provider_name} provider must implement {provider_type.__name__}."
+        ) from exc
     required: tuple[str, ...] = ()
     if provider_type is TranscriptionProvider:
         required = ("name", "transcribe")
@@ -931,6 +936,10 @@ def _require_provider(
             if not isinstance(config_id, str) or not config_id:
                 raise ProviderValidationError(
                     f"{provider_name} provider must expose semantic metadata config_id."
+                )
+            if not callable(getattr(metadata, "to_dict", None)):
+                raise ProviderValidationError(
+                    f"{provider_name} provider must expose semantic metadata to_dict."
                 )
         return provider
 

@@ -1025,11 +1025,13 @@ def _validate_diarization_pair_matches_policy(
         raise MergeTimingInputError(
             f"{source_label} exclusive diarization session_id must match the processing ledger."
         )
-    if policy.capture_profile == "in_person_single_mic" and regular.context.capture_profile != (
-        "in_person_single_mic"
-    ):
+    if regular.context.capture_profile != policy.capture_profile:
         raise MergeTimingInputError(
-            "Room diarization capture_profile must match the merge policy capture profile."
+            f"{source_label} regular diarization capture_profile must match the merge policy."
+        )
+    if exclusive.context.capture_profile != policy.capture_profile:
+        raise MergeTimingInputError(
+            f"{source_label} exclusive diarization capture_profile must match the merge policy."
         )
 
 

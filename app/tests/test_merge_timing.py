@@ -205,6 +205,48 @@ def test_room_mic_merge_timing_stage_persists_single_source_room_artifact(
     assert artifact.segments[0].speaker.label == "Room speaker 1"
 
 
+def test_room_mic_merge_timing_rejects_exclusive_capture_profile_mismatch(
+    tmp_path: Path,
+) -> None:
+    store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=tmp_path)
+    room_source = store.store(artifact_type="source_audio", name="room.wav", data=b"room")
+    room_transcript_record = _persist_transcript(
+        store=store,
+        source_record=room_source,
+        source_id="room_mic",
+    )
+    regular_record, exclusive_record = _persist_remote_diarization_pair(
+        store=store,
+        source_record=room_source,
+        source_id="room_mic",
+        capture_profile="in_person_single_mic",
+        speaker_label_prefix="Room speaker",
+        name_prefix="room-",
+    )
+    exclusive_payload = json.loads(store.retrieve(exclusive_record.id))
+    exclusive_payload["context"]["capture_profile"] = "online_dual_stream"
+    mismatched_exclusive_record = store.store(
+        artifact_type="diarization",
+        name="room-exclusive-profile-mismatch.json",
+        data=json.dumps(exclusive_payload).encode("utf-8"),
+        metadata=exclusive_record.metadata,
+    )
+    ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+
+    with pytest.raises(
+        MergeTimingError,
+        match="Room exclusive diarization capture_profile must match the merge policy",
+    ):
+        run_room_mic_merge_timing_stage(
+            store=store,
+            ledger=ledger,
+            room_transcript_record=room_transcript_record,
+            room_regular_diarization_record=regular_record,
+            room_exclusive_diarization_record=mismatched_exclusive_record,
+            now=NOW,
+        )
+
+
 def test_room_mic_merge_timing_stage_reuses_verified_completed_output() -> None:
     store = InMemoryArtifactStore(session_id=SESSION_ID)
     room_source = store.store(artifact_type="source_audio", name="room.wav", data=b"room")
