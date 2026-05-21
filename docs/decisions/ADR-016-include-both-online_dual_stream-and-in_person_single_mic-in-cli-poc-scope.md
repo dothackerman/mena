@@ -1,9 +1,9 @@
 # ADR-016: Include both online_dual_stream and in_person_single_mic in CLI PoC scope
 
 - **Type:** Architecture
-- **Status:** Accepted
+- **Status:** Superseded
 - **Date:** 2026-04-20
-- **Superseded by:** —
+- **Superseded by:** PDR-002
 - **Related:** ADR-003, ADR-024
 
 ## Context
