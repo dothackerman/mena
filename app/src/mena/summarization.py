@@ -11,6 +11,12 @@ from pathlib import Path
 from typing import Protocol, Self
 
 from mena.artifacts import ArtifactRecord, ArtifactStore
+from mena.correction_overlay import (
+    CORRECTION_OVERLAY_ARTIFACT_TYPE,
+    CorrectionOverlayArtifact,
+    CorrectionOverlayContractError,
+    apply_correction_overlay,
+)
 from mena.local_llm import (
     OLLAMA_DEFAULT_ENDPOINT,
     OLLAMA_DEFAULT_MODEL,
@@ -333,31 +339,33 @@ def persist_summary_artifact(
     store: ArtifactStore,
     artifact: SummaryArtifact,
     name: str | Path,
+    correction_overlay_record: ArtifactRecord | None = None,
 ) -> ArtifactRecord:
     """Persist one summary payload through the artifact store contract."""
 
     SummaryArtifact.from_dict(artifact.to_dict())
+    metadata: dict[str, object] = {
+        "category": "summary",
+        "contract": "summary.v1",
+        "policy_config_id": _policy_config_id(artifact.policy),
+        "provider_config_id": artifact.provider.config_id,
+        "stage_config_id": _stage_config_id(
+            policy_config_id=_policy_config_id(artifact.policy),
+            provider_config_id=artifact.provider.config_id,
+        ),
+        "merged_transcript_artifact_id": artifact.merged_transcript_artifact.id,
+        "manual_notes_artifact_id": (
+            None if artifact.manual_notes_artifact is None else artifact.manual_notes_artifact.id
+        ),
+    }
+    if correction_overlay_record is not None:
+        metadata["correction_overlay_artifact_id"] = correction_overlay_record.id
     return store.store(
         artifact_type=SUMMARY_ARTIFACT_TYPE,
         name=name,
         data=artifact.to_json_bytes(),
         version=SUMMARY_ARTIFACT_VERSION,
-        metadata={
-            "category": "summary",
-            "contract": "summary.v1",
-            "policy_config_id": _policy_config_id(artifact.policy),
-            "provider_config_id": artifact.provider.config_id,
-            "stage_config_id": _stage_config_id(
-                policy_config_id=_policy_config_id(artifact.policy),
-                provider_config_id=artifact.provider.config_id,
-            ),
-            "merged_transcript_artifact_id": artifact.merged_transcript_artifact.id,
-            "manual_notes_artifact_id": (
-                None
-                if artifact.manual_notes_artifact is None
-                else artifact.manual_notes_artifact.id
-            ),
-        },
+        metadata=metadata,
     )
 
 
@@ -367,6 +375,7 @@ def run_summarization_stage(
     ledger: ProcessingStageLedger,
     merged_transcript_record: ArtifactRecord,
     provider: SummarizationProvider,
+    correction_overlay_record: ArtifactRecord | None = None,
     policy: SummarizationPolicy | None = None,
     manual_notes_record: ArtifactRecord | None = None,
     stage: str = SUMMARIZATION_STAGE,
@@ -377,10 +386,13 @@ def run_summarization_stage(
     """Generate a structured meeting summary from a merged transcript artifact."""
 
     effective_policy = policy or SummarizationPolicy()
+    correction_overlay_used_record = correction_overlay_record
     manual_notes_used_record = (
         manual_notes_record if effective_policy.include_manual_notes else None
     )
     input_refs = [ArtifactRef.from_record(merged_transcript_record)]
+    if correction_overlay_used_record is not None:
+        input_refs.append(ArtifactRef.from_record(correction_overlay_used_record))
     if manual_notes_used_record is not None:
         input_refs.append(ArtifactRef.from_record(manual_notes_used_record))
     input_artifacts = tuple(input_refs)
@@ -443,6 +455,18 @@ def run_summarization_stage(
             raise SummarizationContractError(
                 "Merged transcript session_id must match the processing ledger."
             )
+
+        transcript_for_summary = merged_transcript
+        if correction_overlay_used_record is not None:
+            overlay = _verify_and_load_correction_overlay(
+                store=store, record=correction_overlay_used_record
+            )
+            transcript_for_summary = apply_correction_overlay(
+                source_transcript=merged_transcript,
+                source_transcript_record=merged_transcript_record,
+                overlay=overlay,
+            )
+
         manual_notes = None
         if manual_notes_used_record is not None:
             manual_notes = _verify_and_load_manual_notes(
@@ -451,7 +475,7 @@ def run_summarization_stage(
         result = provider.summarize(
             SummarizationRequest(
                 session_id=merged_transcript.session_id,
-                merged_transcript=merged_transcript,
+                merged_transcript=transcript_for_summary,
                 manual_notes=manual_notes,
                 policy=effective_policy,
             )
@@ -476,6 +500,7 @@ def run_summarization_stage(
         output_record = persist_summary_artifact(
             store=store,
             artifact=artifact,
+            correction_overlay_record=correction_overlay_used_record,
             name=_summary_artifact_name(
                 run_id=ledger.run_id,
                 merged_transcript_sha256=merged_transcript_record.sha256,
@@ -483,12 +508,23 @@ def run_summarization_stage(
                 manual_notes_sha256=(
                     None if manual_notes_used_record is None else manual_notes_used_record.sha256
                 ),
+                correction_overlay_sha256=(
+                    None
+                    if correction_overlay_used_record is None
+                    else correction_overlay_used_record.sha256
+                ),
+                correction_overlay_artifact_id=(
+                    None
+                    if correction_overlay_used_record is None
+                    else correction_overlay_used_record.id
+                ),
                 attempt=attempt,
             ),
         )
     except (
         SummarizationError,
         MergeTimingContractError,
+        CorrectionOverlayContractError,
         json.JSONDecodeError,
         KeyError,
         FileExistsError,
@@ -524,6 +560,18 @@ def run_summarization_stage(
         summary=artifact,
         summary_record=output_record,
     )
+
+
+def _verify_and_load_correction_overlay(
+    *, store: ArtifactStore, record: ArtifactRecord
+) -> CorrectionOverlayArtifact:
+    if record.artifact_type != CORRECTION_OVERLAY_ARTIFACT_TYPE:
+        raise SummarizationContractError(
+            "Correction overlay artifact must have correction_overlay type."
+        )
+    if not store.verify(record.id).ok:
+        raise SummarizationContractError("Correction overlay artifact failed verification.")
+    return CorrectionOverlayArtifact.from_dict(json.loads(store.retrieve(record.id)))
 
 
 def _verify_and_load_merged_transcript(
@@ -614,10 +662,17 @@ def _summary_artifact_name(
     merged_transcript_sha256: str,
     stage_config_id: str,
     manual_notes_sha256: str | None,
+    correction_overlay_sha256: str | None,
+    correction_overlay_artifact_id: str | None,
     attempt: int,
 ) -> Path:
     notes_scope = manual_notes_sha256 or "no-manual-notes"
-    scope = sha256(f"{stage_config_id}:{notes_scope}".encode()).hexdigest()[:12]
+    overlay_scope = (
+        f"{correction_overlay_artifact_id}:{correction_overlay_sha256}"
+        if correction_overlay_artifact_id is not None
+        else "no-correction-overlay"
+    )
+    scope = sha256(f"{stage_config_id}:{notes_scope}:{overlay_scope}".encode()).hexdigest()[:12]
     return Path(run_id) / merged_transcript_sha256[:12] / scope / f"summary-{attempt:03d}.json"
 
 
