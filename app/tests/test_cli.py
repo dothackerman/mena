@@ -1464,6 +1464,34 @@ def test_main_process_rematerializes_corrupt_reused_source_audio(
     assert captured.out.count("Processing completed for run '") == 2
 
 
+def test_main_process_rematerializes_source_audio_when_artifact_parent_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    session = _build_processing_session(tmp_path)
+    monkeypatch.setattr(
+        "mena.cli._run_processing_stages",
+        lambda **_kwargs: None,
+    )
+
+    first_exit_code = main(["process", str(session.record_path)])
+    source_artifact_dir = session.bundle_path / "artifacts/source_audio/source_audio"
+    for artifact_file in source_artifact_dir.iterdir():
+        artifact_file.unlink()
+    source_artifact_dir.rmdir()
+    second_exit_code = main(["process", str(session.record_path)])
+
+    captured = capsys.readouterr()
+    assert first_exit_code == 0
+    assert second_exit_code == 0
+    assert (source_artifact_dir / "local_mic_000001.wav").read_bytes() == b"local audio placeholder"
+    assert (
+        source_artifact_dir / "system_audio_000001.wav"
+    ).read_bytes() == b"system audio placeholder"
+    assert captured.out.count("Processing completed for run '") == 2
+
+
 def test_main_process_rejects_source_audio_hash_change_when_sha_not_recorded(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

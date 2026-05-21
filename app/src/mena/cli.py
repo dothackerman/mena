@@ -560,6 +560,7 @@ def _ensure_source_audio_artifact(
             verification = store.verify(existing.id)
             if not verification.ok or verification.expected_sha256 != artifact_sha:
                 artifact_path = store.session_dir / existing.path
+                artifact_path.parent.mkdir(parents=True, exist_ok=True)
                 artifact_path.write_bytes(payload)
                 verification = store.verify(existing.id)
                 if not verification.ok or verification.expected_sha256 != artifact_sha:
