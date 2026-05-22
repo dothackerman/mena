@@ -16,6 +16,7 @@ class RuntimePaths:
 
     data_home: Path
     sessions_dir: Path
+    exports_dir: Path
     config_home: Path
     cache_home: Path
     model_cache_dir: Path
@@ -59,8 +60,9 @@ def resolve_runtime_paths(
         env_key="XDG_DATA_HOME",
         default_base=current_home / ".local" / "share",
     )
+    sessions_root = data_home
     if configured_data_root := current_env.get(DATA_ROOT_ENV_VAR):
-        data_home = Path(configured_data_root).expanduser()
+        sessions_root = Path(configured_data_root).expanduser()
 
     config_home = _mena_root(
         current_env,
@@ -80,7 +82,8 @@ def resolve_runtime_paths(
 
     return RuntimePaths(
         data_home=data_home,
-        sessions_dir=data_home / "sessions",
+        sessions_dir=sessions_root / "sessions",
+        exports_dir=data_home / "exports",
         config_home=config_home,
         cache_home=cache_home,
         model_cache_dir=cache_home / "models",

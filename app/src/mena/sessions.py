@@ -42,7 +42,7 @@ class CreatedSession:
 def default_data_root() -> Path:
     """Return the local data root for runtime session bundles."""
 
-    return AppSettings.from_env().paths.data_home
+    return AppSettings.from_env().paths.sessions_dir.parent
 
 
 def create_session(
