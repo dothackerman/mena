@@ -67,6 +67,7 @@ from mena.sessions import (
     create_session,
     update_session_capture_metadata,
 )
+from mena.settings import DATA_ROOT_ENV_VAR
 from mena.summarization import (
     FakeSummarizationProvider,
     SummarizationError,
@@ -163,6 +164,48 @@ def test_record_creates_session_bundle_and_record(
     assert record["profile"] == "online_dual_stream"
     assert record["discovery"]["status"] == "available"
     assert record["capture_metadata"]["segment_count"] == 0
+
+
+def test_record_defaults_to_runtime_sessions_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    monkeypatch.delenv(DATA_ROOT_ENV_VAR, raising=False)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
+
+    exit_code = main(
+        ["record", "--profile", "online", "--dry-run"],
+        discoverer=_available_discoverer,
+    )
+    captured = capsys.readouterr()
+
+    sessions_dir = tmp_path / "xdg-data" / "mena" / "sessions"
+    sessions = list(sessions_dir.iterdir())
+    assert exit_code == 0
+    assert len(sessions) == 1
+    assert f"Session record: {sessions[0] / 'session.json'}" in captured.out
+
+
+def test_record_data_root_override_remains_session_scoped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+
+    exit_code = main(
+        ["record", "--profile", "online", "--dry-run"],
+        data_root=tmp_path / "smoke-data",
+        discoverer=_available_discoverer,
+    )
+
+    assert exit_code == 0
+    assert len(list((tmp_path / "smoke-data" / "sessions").iterdir())) == 1
+    assert not (tmp_path / "config").exists()
+    assert not (tmp_path / "cache").exists()
+    assert not (tmp_path / "state").exists()
 
 
 def test_record_requires_profile(capsys: CaptureFixture[str]) -> None:

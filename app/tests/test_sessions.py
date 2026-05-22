@@ -32,6 +32,23 @@ def test_session_record_version_matches_v1_schema_const() -> None:
     assert version["const"] == SESSION_RECORD_VERSION
 
 
+def test_create_session_defaults_to_runtime_sessions_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(DATA_ROOT_ENV_VAR, raising=False)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
+    now = datetime(2026, 5, 8, 5, 30, 0, tzinfo=UTC)
+
+    created_session = create_session(
+        profile=parse_capture_profile("online"),
+        name=None,
+        now=now,
+    )
+
+    assert created_session.bundle_path.parent == tmp_path / "xdg-data" / "mena" / "sessions"
+    assert created_session.record_path == created_session.bundle_path / "session.json"
+
+
 def test_create_session_uses_uuid_and_timestamp_directory(tmp_path: Path) -> None:
     now = datetime(2026, 5, 8, 5, 30, 0, tzinfo=UTC)
 
