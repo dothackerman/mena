@@ -1,5 +1,7 @@
 import json
 import os
+import subprocess
+import wave
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,10 +15,14 @@ from mena.correction_overlay import (
 )
 from mena.correction_workflow import (
     CorrectionWorkflowError,
+    LocalPlaybackPlayer,
+    PlaybackError,
+    PlaybackRequest,
     _load_review_queue,
     _new_speaker_id,
     _ordered_review_flags,
     _ordered_speaker_catalog,
+    _playback_window,
     _print_review_item,
     _prompt_overlap_mark,
     _prompt_speaker_assignment,
@@ -46,6 +52,14 @@ from mena.review_flagging import (
     persist_review_queue_artifact,
 )
 from mena.sessions import SESSION_RECORD_FILENAME, SESSION_RECORD_VERSION
+from mena.transcription import (
+    TRANSCRIPT_SCHEMA_VERSION,
+    TranscriptArtifact,
+    TranscriptLanguage,
+    TranscriptProviderMetadata,
+    TranscriptSegment,
+    persist_transcript_artifact,
+)
 
 SESSION_ID = "00000000-0000-0000-0000-000000000001"
 NOW = datetime(2026, 5, 19, 15, 20, 0, tzinfo=UTC)
@@ -289,6 +303,443 @@ def test_run_correction_workflow_displays_context_and_candidates(
     assert "Context (previous):" in captured.out
     assert "Candidate speakers:" in captured.out
     assert "1) you (You)" in captured.out
+
+
+def test_playback_window_includes_context_and_clamps_start() -> None:
+    first_segment, second_segment = _merged_transcript_fixture().segments
+
+    first_start, first_end = _playback_window(first_segment)
+    second_start, second_end = _playback_window(second_segment)
+
+    assert first_start == pytest.approx(0.0)
+    assert first_end == pytest.approx(2.3)
+    assert second_start == pytest.approx(0.0)
+    assert second_end == pytest.approx(3.3)
+
+
+def test_local_playback_player_uses_ffplay_argument_list(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    audio_path = tmp_path / "source.wav"
+    audio_path.write_bytes(b"not decoded by ffplay test")
+    calls: list[tuple[list[str], bool]] = []
+
+    def _which(command: str) -> str | None:
+        return "/usr/bin/ffplay" if command == "ffplay" else None
+
+    def _run(args: list[str], *, check: bool) -> None:
+        calls.append((args, check))
+
+    monkeypatch.setattr("mena.correction_workflow.shutil.which", _which)
+    monkeypatch.setattr("mena.correction_workflow.subprocess.run", _run)
+
+    LocalPlaybackPlayer()(
+        PlaybackRequest(
+            audio_path=audio_path,
+            start_seconds=1.25,
+            end_seconds=3.5,
+            source_id="local_mic",
+            segment_id="segment_1",
+        )
+    )
+
+    assert calls == [
+        (
+            [
+                "/usr/bin/ffplay",
+                "-nodisp",
+                "-autoexit",
+                "-loglevel",
+                "error",
+                "-ss",
+                "1.250",
+                "-t",
+                "2.250",
+                str(audio_path),
+            ],
+            True,
+        )
+    ]
+
+
+def test_local_playback_player_clips_wav_for_simple_players_and_cleans_up(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    audio_path = tmp_path / "source.wav"
+    _write_wav_fixture(audio_path)
+    clip_paths: list[Path] = []
+
+    def _which(command: str) -> str | None:
+        if command == "pw-play":
+            return "/usr/bin/pw-play"
+        return None
+
+    def _run(args: list[str], *, check: bool) -> None:
+        assert args[0] == "/usr/bin/pw-play"
+        assert check is True
+        clip_path = Path(args[1])
+        assert clip_path.exists()
+        clip_paths.append(clip_path)
+
+    monkeypatch.setattr("mena.correction_workflow.shutil.which", _which)
+    monkeypatch.setattr("mena.correction_workflow.subprocess.run", _run)
+
+    LocalPlaybackPlayer()(
+        PlaybackRequest(
+            audio_path=audio_path,
+            start_seconds=0.05,
+            end_seconds=0.2,
+            source_id="local_mic",
+            segment_id="segment_1",
+        )
+    )
+
+    assert len(clip_paths) == 1
+    assert not clip_paths[0].exists()
+
+
+def test_local_playback_player_reports_missing_commands(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("mena.correction_workflow.shutil.which", lambda _: None)
+
+    with pytest.raises(PlaybackError, match="No supported local audio playback command"):
+        LocalPlaybackPlayer()(
+            PlaybackRequest(
+                audio_path=Path("missing.wav"),
+                start_seconds=0.0,
+                end_seconds=1.0,
+                source_id="local_mic",
+                segment_id="segment_1",
+            )
+        )
+
+
+def test_local_playback_player_maps_missing_detected_executable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    audio_path = tmp_path / "source.wav"
+    audio_path.write_bytes(b"not decoded by ffplay test")
+    monkeypatch.setattr(
+        "mena.correction_workflow.shutil.which",
+        lambda command: "/usr/bin/ffplay" if command == "ffplay" else None,
+    )
+
+    def _missing(_args: list[str], *, check: bool) -> None:
+        raise FileNotFoundError
+
+    monkeypatch.setattr("mena.correction_workflow.subprocess.run", _missing)
+
+    with pytest.raises(PlaybackError, match="Playback command not found"):
+        LocalPlaybackPlayer()(
+            PlaybackRequest(
+                audio_path=audio_path,
+                start_seconds=0.0,
+                end_seconds=1.0,
+                source_id="local_mic",
+                segment_id="segment_1",
+            )
+        )
+
+
+def test_local_playback_player_maps_subprocess_os_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    audio_path = tmp_path / "source.wav"
+    audio_path.write_bytes(b"not decoded by ffplay test")
+    monkeypatch.setattr(
+        "mena.correction_workflow.shutil.which",
+        lambda command: "/usr/bin/ffplay" if command == "ffplay" else None,
+    )
+
+    def _permission_error(_args: list[str], *, check: bool) -> None:
+        raise PermissionError("not executable")
+
+    monkeypatch.setattr("mena.correction_workflow.subprocess.run", _permission_error)
+
+    with pytest.raises(PlaybackError, match="could not be started"):
+        LocalPlaybackPlayer()(
+            PlaybackRequest(
+                audio_path=audio_path,
+                start_seconds=0.0,
+                end_seconds=1.0,
+                source_id="local_mic",
+                segment_id="segment_1",
+            )
+        )
+
+
+def test_local_playback_player_rejects_unclippable_source_for_simple_players(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    audio_path = tmp_path / "source.wav"
+    audio_path.write_bytes(b"not a wav")
+
+    def _which(command: str) -> str | None:
+        if command == "pw-play":
+            return "/usr/bin/pw-play"
+        return None
+
+    monkeypatch.setattr("mena.correction_workflow.shutil.which", _which)
+
+    with pytest.raises(PlaybackError, match="Only readable PCM WAV"):
+        LocalPlaybackPlayer()(
+            PlaybackRequest(
+                audio_path=audio_path,
+                start_seconds=0.0,
+                end_seconds=1.0,
+                source_id="local_mic",
+                segment_id="segment_1",
+            )
+        )
+
+
+def test_local_playback_player_maps_temp_clip_write_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    audio_path = tmp_path / "source.wav"
+    _write_wav_fixture(audio_path)
+
+    def _which(command: str) -> str | None:
+        if command == "pw-play":
+            return "/usr/bin/pw-play"
+        return None
+
+    class FailingWaveWriter:
+        def __enter__(self) -> "FailingWaveWriter":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def setparams(self, _params: object) -> None:
+            return None
+
+        def writeframes(self, _frames: bytes) -> None:
+            raise OSError("disk full")
+
+    original_wave_open = wave.open
+
+    def _wave_open(path: str, mode: str = "rb") -> object:
+        if mode == "wb":
+            return FailingWaveWriter()
+        return original_wave_open(path, mode)
+
+    monkeypatch.setattr("mena.correction_workflow.shutil.which", _which)
+    monkeypatch.setattr("mena.correction_workflow.wave.open", _wave_open)
+
+    with pytest.raises(PlaybackError, match="Temporary playback clip"):
+        LocalPlaybackPlayer()(
+            PlaybackRequest(
+                audio_path=audio_path,
+                start_seconds=0.0,
+                end_seconds=0.2,
+                source_id="local_mic",
+                segment_id="segment_1",
+            )
+        )
+
+
+def test_local_playback_player_maps_subprocess_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    audio_path = tmp_path / "source.wav"
+    audio_path.write_bytes(b"not decoded by ffplay test")
+    monkeypatch.setattr(
+        "mena.correction_workflow.shutil.which",
+        lambda command: "/usr/bin/ffplay" if command == "ffplay" else None,
+    )
+
+    def _fail(args: list[str], *, check: bool) -> None:
+        raise subprocess.CalledProcessError(returncode=9, cmd=args)
+
+    monkeypatch.setattr("mena.correction_workflow.subprocess.run", _fail)
+
+    with pytest.raises(PlaybackError, match="exited with status 9"):
+        LocalPlaybackPlayer()(
+            PlaybackRequest(
+                audio_path=audio_path,
+                start_seconds=0.0,
+                end_seconds=1.0,
+                source_id="local_mic",
+                segment_id="segment_1",
+            )
+        )
+
+
+def test_run_correction_workflow_playback_invokes_fake_player_and_returns_to_same_item(
+    tmp_path: Path,
+) -> None:
+    session_dir, store, _, source_records = _build_playback_session_bundle(
+        tmp_path,
+        flags=(
+            ReviewFlag(
+                id="flag_play_remote",
+                segment_id="segment_2",
+                reason_code="low_speaker_confidence",
+                start_seconds=1.0,
+                end_seconds=1.8,
+                source_id="system_audio",
+                speaker_id="remote",
+                metadata={},
+            ),
+        ),
+    )
+    requests: list[PlaybackRequest] = []
+    inputs = iter(["p", "s"])
+
+    result = run_correction_workflow(
+        session_path=session_dir,
+        now=NOW,
+        input_fn=lambda _: next(inputs),
+        playback_player=requests.append,
+    )
+
+    assert result.reviewed == 1
+    assert result.skipped == 1
+    assert result.corrected == 0
+    assert len(requests) == 1
+    assert requests[0].source_id == "system_audio"
+    assert requests[0].segment_id == "segment_2"
+    assert requests[0].audio_path == session_dir / source_records["system_audio"].path
+    assert requests[0].start_seconds == pytest.approx(0.0)
+    assert requests[0].end_seconds == pytest.approx(3.3)
+    payload = json.loads(store.retrieve(result.overlay_artifact_record.id))
+    assert [entry["original_flag_id"] for entry in payload["entries"]] == ["flag_play_remote"]
+
+
+def test_run_correction_workflow_playback_failure_does_not_consume_review_item(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    session_dir, _, _, _ = _build_playback_session_bundle(
+        tmp_path,
+        flags=(
+            ReviewFlag(
+                id="flag_play_failure",
+                segment_id="segment_1",
+                reason_code="low_transcription_confidence",
+                start_seconds=0.0,
+                end_seconds=0.8,
+                source_id="local_mic",
+                speaker_id="you",
+                metadata={},
+            ),
+        ),
+    )
+    requests: list[PlaybackRequest] = []
+    inputs = iter(["p", "s"])
+
+    def _fail_playback(request: PlaybackRequest) -> None:
+        requests.append(request)
+        raise PlaybackError("audio device unavailable")
+
+    result = run_correction_workflow(
+        session_path=session_dir,
+        now=NOW,
+        input_fn=lambda _: next(inputs),
+        playback_player=_fail_playback,
+    )
+    captured = capsys.readouterr()
+
+    assert result.reviewed == 1
+    assert result.skipped == 1
+    assert len(requests) == 1
+    assert "Playback failed: audio device unavailable" in captured.out
+
+
+def test_run_correction_workflow_playback_rejects_missing_transcript_reference(
+    tmp_path: Path,
+) -> None:
+    session_dir, _, _ = _build_session_bundle(
+        tmp_path,
+        flags=(
+            ReviewFlag(
+                id="flag_missing_transcript",
+                segment_id="segment_1",
+                reason_code="low_transcription_confidence",
+                start_seconds=0.0,
+                end_seconds=0.8,
+                source_id="local_mic",
+                speaker_id="you",
+                metadata={},
+            ),
+        ),
+    )
+    requests: list[PlaybackRequest] = []
+
+    with pytest.raises(CorrectionWorkflowError, match="missing transcript artifact"):
+        run_correction_workflow(
+            session_path=session_dir,
+            now=NOW,
+            input_fn=lambda _: "p",
+            playback_player=requests.append,
+        )
+
+    assert requests == []
+
+
+def test_run_correction_workflow_playback_rejects_stale_source_audio_reference(
+    tmp_path: Path,
+) -> None:
+    session_dir, _, _, _ = _build_playback_session_bundle(
+        tmp_path,
+        flags=(
+            ReviewFlag(
+                id="flag_stale_source",
+                segment_id="segment_2",
+                reason_code="low_speaker_confidence",
+                start_seconds=1.0,
+                end_seconds=1.8,
+                source_id="system_audio",
+                speaker_id="remote",
+                metadata={},
+            ),
+        ),
+        source_audio_ref_sha_by_id={"system_audio": "0" * 64},
+    )
+
+    with pytest.raises(CorrectionWorkflowError, match="Source audio artifact .* sha256 is stale"):
+        run_correction_workflow(
+            session_path=session_dir,
+            now=NOW,
+            input_fn=lambda _: "p",
+            playback_player=lambda _: None,
+        )
+
+
+def test_run_correction_workflow_playback_rejects_corrupt_source_audio_artifact(
+    tmp_path: Path,
+) -> None:
+    session_dir, _, _, source_records = _build_playback_session_bundle(
+        tmp_path,
+        flags=(
+            ReviewFlag(
+                id="flag_corrupt_source",
+                segment_id="segment_2",
+                reason_code="low_speaker_confidence",
+                start_seconds=1.0,
+                end_seconds=1.8,
+                source_id="system_audio",
+                speaker_id="remote",
+                metadata={},
+            ),
+        ),
+    )
+    (session_dir / source_records["system_audio"].path).write_bytes(b"changed audio")
+
+    with pytest.raises(CorrectionWorkflowError, match="Source audio artifact .* is invalid"):
+        run_correction_workflow(
+            session_path=session_dir,
+            now=NOW,
+            input_fn=lambda _: "p",
+            playback_player=lambda _: None,
+        )
 
 
 def test_run_correction_workflow_persists_skip_mark_entries(tmp_path: Path) -> None:
@@ -867,6 +1318,138 @@ def _build_session_bundle(
         name="review/queue.json",
     )
     return session_dir, store, review_record
+
+
+def _write_wav_fixture(path: Path) -> None:
+    with wave.open(str(path), "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(100)
+        audio.writeframes(b"\x00\x00" * 50)
+
+
+def _build_playback_session_bundle(
+    tmp_path: Path,
+    *,
+    flags: tuple[ReviewFlag, ...],
+    source_audio_ref_sha_by_id: dict[str, str] | None = None,
+) -> tuple[Path, FileSystemArtifactStore, ArtifactRecord, dict[str, ArtifactRecord]]:
+    session_dir = _create_session_record(tmp_path)
+    store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=session_dir)
+    source_records = {
+        source_id: store.store(
+            artifact_type="source_audio",
+            name=f"source_audio/{source_id}.wav",
+            data=f"{source_id} audio".encode(),
+            status="sealed",
+            metadata={"source_id": source_id},
+        )
+        for source_id in ("local_mic", "system_audio")
+    }
+    stale_sha = source_audio_ref_sha_by_id or {}
+    transcript_records = {
+        source_id: persist_transcript_artifact(
+            store=store,
+            transcript=_transcript_fixture(
+                source_id=source_id,
+                source_record=source_record,
+                source_ref_sha=stale_sha.get(source_id),
+            ),
+            name=f"transcript/{source_id}.json",
+        )
+        for source_id, source_record in source_records.items()
+    }
+    merged_record = persist_merged_transcript_artifact(
+        store=store,
+        artifact=_merged_transcript_fixture_with_refs(
+            local_ref=ArtifactRef.from_record(transcript_records["local_mic"]),
+            remote_ref=ArtifactRef.from_record(transcript_records["system_audio"]),
+        ),
+        name="merged/merged.json",
+    )
+    review_record = persist_review_queue_artifact(
+        store=store,
+        artifact=_review_queue_fixture(
+            merged_record=ArtifactRef.from_record(merged_record),
+            flags=flags,
+        ),
+        name="review/queue.json",
+    )
+    return session_dir, store, review_record, source_records
+
+
+def _transcript_fixture(
+    *,
+    source_id: str,
+    source_record: ArtifactRecord,
+    source_ref_sha: str | None = None,
+) -> TranscriptArtifact:
+    source_ref = ArtifactRef.from_record(source_record)
+    if source_ref_sha is not None:
+        source_ref = ArtifactRef(
+            id=source_ref.id,
+            artifact_type=source_ref.artifact_type,
+            version=source_ref.version,
+            sha256=source_ref_sha,
+        )
+    return TranscriptArtifact(
+        version=TRANSCRIPT_SCHEMA_VERSION,
+        session_id=SESSION_ID,
+        source_artifact=source_ref,
+        source_id=source_id,
+        provider=TranscriptProviderMetadata(
+            name="fake",
+            checkpoint="fixture",
+            quantization="none",
+            device="test",
+            timestamp_mode="segment",
+        ),
+        language=TranscriptLanguage(requested="en", detected="en", detection_probability=1.0),
+        text=f"{source_id} transcript",
+        segments=(
+            TranscriptSegment(
+                id=f"{source_id}_segment",
+                text=f"{source_id} transcript",
+                start_seconds=0.0,
+                end_seconds=2.0,
+            ),
+        ),
+        created_at="2026-05-19T15:10:00Z",
+    )
+
+
+def _merged_transcript_fixture_with_refs(
+    *,
+    local_ref: ArtifactRef,
+    remote_ref: ArtifactRef,
+) -> MergedTranscriptArtifact:
+    base = _merged_transcript_fixture()
+    base_sources = {source.source_id: source for source in base.sources}
+
+    def _source(source_id: str, transcript_ref: ArtifactRef) -> MergedTranscriptSource:
+        existing = base_sources[source_id]
+        return MergedTranscriptSource(
+            source_id=existing.source_id,
+            channel=existing.channel,
+            transcript_artifact=transcript_ref,
+            diarization_status=existing.diarization_status,
+            diarization_reason=existing.diarization_reason,
+            regular_diarization_artifact=existing.regular_diarization_artifact,
+            exclusive_diarization_artifact=existing.exclusive_diarization_artifact,
+        )
+
+    return MergedTranscriptArtifact(
+        version=base.version,
+        session_id=base.session_id,
+        policy=base.policy,
+        sources=(
+            _source("local_mic", local_ref),
+            _source("system_audio", remote_ref),
+        ),
+        text=base.text,
+        segments=base.segments,
+        created_at=base.created_at,
+    )
 
 
 def _read_with_values(values: Iterator[str]) -> Callable[[str], str]:

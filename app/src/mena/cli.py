@@ -23,7 +23,11 @@ from mena.correction_overlay import (
     CorrectionOverlayContractError,
     resolve_active_correction_overlay,
 )
-from mena.correction_workflow import CorrectionWorkflowError, run_correction_workflow
+from mena.correction_workflow import (
+    CorrectionWorkflowError,
+    PlaybackPlayer,
+    run_correction_workflow,
+)
 from mena.diarization import (
     DIARIZATION_STAGE,
     DiarizationContext,
@@ -215,6 +219,8 @@ def main(
     semantic_coherence_provider_factory: ProviderFactory = OllamaSemanticCoherenceProvider,
     settings: AppSettings | None = None,
     config_path: Path | None = None,
+    input_fn: Callable[[str], str] | None = None,
+    playback_player: PlaybackPlayer | None = None,
 ) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -276,7 +282,8 @@ def main(
             run_correction_workflow(
                 session_path=Path(args.session_path),
                 now=now,
-                input_fn=input,
+                input_fn=input if input_fn is None else input_fn,
+                playback_player=playback_player,
             )
         except (ArtifactStoreError, CorrectionWorkflowError) as exc:
             print(f"Cannot run correction workflow: {exc}")

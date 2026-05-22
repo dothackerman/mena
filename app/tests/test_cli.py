@@ -30,6 +30,7 @@ from mena.correction_overlay import (
     create_correction_overlay,
     persist_correction_overlay_artifact,
 )
+from mena.correction_workflow import PlaybackRequest
 from mena.diarization import DiarizationProvider, FakeDiarizationProvider
 from mena.discovery import AudioDiscovery, AudioRoute, DiscoveryStatus, PlaybackStream
 from mena.merge_timing import (
@@ -51,6 +52,13 @@ from mena.processing import (
 )
 from mena.profiles import CaptureProfileId, get_capture_profile, parse_capture_profile
 from mena.protocol import ProtocolError, ProtocolMessage
+from mena.review_flagging import (
+    REVIEW_QUEUE_SCHEMA_VERSION,
+    ConfidenceFlaggingPolicy,
+    ReviewFlag,
+    ReviewQueueArtifact,
+    persist_review_queue_artifact,
+)
 from mena.semantic_coherence import FakeSemanticCoherenceProvider, SemanticCoherenceProvider
 from mena.sessions import (
     SESSION_RECORD_FILENAME,
@@ -59,6 +67,7 @@ from mena.sessions import (
     create_session,
     update_session_capture_metadata,
 )
+from mena.settings import DATA_ROOT_ENV_VAR
 from mena.summarization import (
     FakeSummarizationProvider,
     SummarizationError,
@@ -67,7 +76,16 @@ from mena.summarization import (
     SummaryResult,
     persist_summary_artifact,
 )
-from mena.transcription import FakeTranscriptionProvider, TranscriptionProvider
+from mena.transcription import (
+    TRANSCRIPT_SCHEMA_VERSION,
+    FakeTranscriptionProvider,
+    TranscriptArtifact,
+    TranscriptionProvider,
+    TranscriptLanguage,
+    TranscriptProviderMetadata,
+    TranscriptSegment,
+    persist_transcript_artifact,
+)
 
 SESSION_ID = "00000000-0000-0000-0000-000000000001"
 
@@ -146,6 +164,48 @@ def test_record_creates_session_bundle_and_record(
     assert record["profile"] == "online_dual_stream"
     assert record["discovery"]["status"] == "available"
     assert record["capture_metadata"]["segment_count"] == 0
+
+
+def test_record_defaults_to_runtime_sessions_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    monkeypatch.delenv(DATA_ROOT_ENV_VAR, raising=False)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
+
+    exit_code = main(
+        ["record", "--profile", "online", "--dry-run"],
+        discoverer=_available_discoverer,
+    )
+    captured = capsys.readouterr()
+
+    sessions_dir = tmp_path / "xdg-data" / "mena" / "sessions"
+    sessions = list(sessions_dir.iterdir())
+    assert exit_code == 0
+    assert len(sessions) == 1
+    assert f"Session record: {sessions[0] / 'session.json'}" in captured.out
+
+
+def test_record_data_root_override_remains_session_scoped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+
+    exit_code = main(
+        ["record", "--profile", "online", "--dry-run"],
+        data_root=tmp_path / "smoke-data",
+        discoverer=_available_discoverer,
+    )
+
+    assert exit_code == 0
+    assert len(list((tmp_path / "smoke-data" / "sessions").iterdir())) == 1
+    assert not (tmp_path / "config").exists()
+    assert not (tmp_path / "cache").exists()
+    assert not (tmp_path / "state").exists()
 
 
 def test_record_requires_profile(capsys: CaptureFixture[str]) -> None:
@@ -735,6 +795,46 @@ def test_main_correct_handles_artifact_store_errors(
 
     assert exit_code == 1
     assert "Cannot run correction workflow: Unsupported artifact manifest version." in captured.out
+
+
+def test_main_correct_playback_prompt_uses_injected_player(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    session_dir, source_records = _build_cli_playback_session(tmp_path, valid_source_refs=True)
+    requests: list[PlaybackRequest] = []
+    inputs = iter(["p", "s"])
+
+    exit_code = main(
+        ["correct", str(session_dir)],
+        input_fn=lambda _: next(inputs),
+        playback_player=requests.append,
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert len(requests) == 1
+    assert requests[0].source_id == "system_audio"
+    assert requests[0].audio_path == session_dir / source_records["system_audio"].path
+    assert "Correction completed. reviewed=1, skipped=1, corrected=0." in captured.out
+
+
+def test_main_correct_reports_playback_source_reference_errors(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    session_dir, _ = _build_cli_playback_session(tmp_path, valid_source_refs=False)
+
+    exit_code = main(
+        ["correct", str(session_dir)],
+        input_fn=lambda _: "p",
+        playback_player=lambda _: None,
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "Cannot run correction workflow:" in captured.out
+    assert "missing transcript artifact" in captured.out
 
 
 def test_run_processing_command_executes_stage_pipeline(
@@ -1443,6 +1543,139 @@ def _build_verified_export_session_bundle(
         metadata={"contract": "merged-transcript.v1"},
     )
     return session_dir, store, merged_record
+
+
+def _build_cli_playback_session(
+    tmp_path: Path,
+    *,
+    valid_source_refs: bool,
+) -> tuple[Path, dict[str, ArtifactRecord]]:
+    session_dir = _create_session_record(tmp_path)
+    store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=session_dir)
+    source_records: dict[str, ArtifactRecord] = {}
+    if valid_source_refs:
+        source_records = {
+            source_id: store.store(
+                artifact_type="source_audio",
+                name=f"source_audio/{source_id}.wav",
+                data=f"{source_id} audio".encode(),
+                status="sealed",
+                metadata={"source_id": source_id},
+            )
+            for source_id in ("local_mic", "system_audio")
+        }
+        transcript_records = {
+            source_id: persist_transcript_artifact(
+                store=store,
+                transcript=_cli_transcript_fixture(
+                    source_id=source_id,
+                    source_record=source_record,
+                ),
+                name=f"transcript/{source_id}.json",
+            )
+            for source_id, source_record in source_records.items()
+        }
+        merged_transcript = _cli_merged_transcript_with_refs(
+            local_ref=ArtifactRef.from_record(transcript_records["local_mic"]),
+            remote_ref=ArtifactRef.from_record(transcript_records["system_audio"]),
+        )
+    else:
+        merged_transcript = _merged_transcript_fixture()
+
+    merged_record = persist_merged_transcript_artifact(
+        store=store,
+        artifact=merged_transcript,
+        name="merged/merged.json",
+    )
+    persist_review_queue_artifact(
+        store=store,
+        artifact=ReviewQueueArtifact(
+            version=REVIEW_QUEUE_SCHEMA_VERSION,
+            session_id=SESSION_ID,
+            merged_transcript_artifact=ArtifactRef.from_record(merged_record),
+            policy=ConfidenceFlaggingPolicy(),
+            flags=(
+                ReviewFlag(
+                    id="flag_cli_playback",
+                    segment_id="segment_2",
+                    reason_code="low_speaker_confidence",
+                    start_seconds=1.0,
+                    end_seconds=1.8,
+                    source_id="system_audio",
+                    speaker_id="remote",
+                    metadata={},
+                ),
+            ),
+            created_at="2026-05-19T15:20:00Z",
+        ),
+        name="review/queue.json",
+    )
+    return session_dir, source_records
+
+
+def _cli_transcript_fixture(
+    *,
+    source_id: str,
+    source_record: ArtifactRecord,
+) -> TranscriptArtifact:
+    return TranscriptArtifact(
+        version=TRANSCRIPT_SCHEMA_VERSION,
+        session_id=SESSION_ID,
+        source_artifact=ArtifactRef.from_record(source_record),
+        source_id=source_id,
+        provider=TranscriptProviderMetadata(
+            name="fake",
+            checkpoint="fixture",
+            quantization="none",
+            device="test",
+            timestamp_mode="segment",
+        ),
+        language=TranscriptLanguage(requested="en", detected="en", detection_probability=1.0),
+        text=f"{source_id} transcript",
+        segments=(
+            TranscriptSegment(
+                id=f"{source_id}_segment",
+                text=f"{source_id} transcript",
+                start_seconds=0.0,
+                end_seconds=2.0,
+            ),
+        ),
+        created_at="2026-05-19T15:10:00Z",
+    )
+
+
+def _cli_merged_transcript_with_refs(
+    *,
+    local_ref: ArtifactRef,
+    remote_ref: ArtifactRef,
+) -> MergedTranscriptArtifact:
+    base = _merged_transcript_fixture()
+    base_sources = {source.source_id: source for source in base.sources}
+
+    def _source(source_id: str, transcript_ref: ArtifactRef) -> MergedTranscriptSource:
+        existing = base_sources[source_id]
+        return MergedTranscriptSource(
+            source_id=existing.source_id,
+            channel=existing.channel,
+            transcript_artifact=transcript_ref,
+            diarization_status=existing.diarization_status,
+            diarization_reason=existing.diarization_reason,
+            regular_diarization_artifact=existing.regular_diarization_artifact,
+            exclusive_diarization_artifact=existing.exclusive_diarization_artifact,
+        )
+
+    return MergedTranscriptArtifact(
+        version=base.version,
+        session_id=base.session_id,
+        policy=base.policy,
+        sources=(
+            _source("local_mic", local_ref),
+            _source("system_audio", remote_ref),
+        ),
+        text=base.text,
+        segments=base.segments,
+        created_at=base.created_at,
+    )
 
 
 def _create_session_record(tmp_path: Path) -> Path:
