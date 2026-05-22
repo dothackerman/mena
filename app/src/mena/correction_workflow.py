@@ -123,6 +123,8 @@ def _run_playback_command(args: list[str]) -> None:
         subprocess.run(args, check=True)
     except FileNotFoundError as exc:
         raise PlaybackError(f"Playback command not found: {args[0]}.") from exc
+    except OSError as exc:
+        raise PlaybackError(f"Playback command could not be started: {args[0]}: {exc}.") from exc
     except subprocess.CalledProcessError as exc:
         raise PlaybackError(
             f"Playback command exited with status {exc.returncode}: {args[0]}."
@@ -161,9 +163,9 @@ def _write_wav_clip(request: PlaybackRequest) -> Path:
         with wave.open(str(clip_path), "wb") as target:
             target.setparams(params)
             target.writeframes(frames)
-    except Exception:
+    except (OSError, wave.Error) as exc:
         clip_path.unlink(missing_ok=True)
-        raise
+        raise PlaybackError("Temporary playback clip could not be written.") from exc
     return clip_path
 
 

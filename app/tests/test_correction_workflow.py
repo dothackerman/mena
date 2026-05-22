@@ -443,6 +443,34 @@ def test_local_playback_player_maps_missing_detected_executable(
         )
 
 
+def test_local_playback_player_maps_subprocess_os_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    audio_path = tmp_path / "source.wav"
+    audio_path.write_bytes(b"not decoded by ffplay test")
+    monkeypatch.setattr(
+        "mena.correction_workflow.shutil.which",
+        lambda command: "/usr/bin/ffplay" if command == "ffplay" else None,
+    )
+
+    def _permission_error(_args: list[str], *, check: bool) -> None:
+        raise PermissionError("not executable")
+
+    monkeypatch.setattr("mena.correction_workflow.subprocess.run", _permission_error)
+
+    with pytest.raises(PlaybackError, match="could not be started"):
+        LocalPlaybackPlayer()(
+            PlaybackRequest(
+                audio_path=audio_path,
+                start_seconds=0.0,
+                end_seconds=1.0,
+                source_id="local_mic",
+                segment_id="segment_1",
+            )
+        )
+
+
 def test_local_playback_player_rejects_unclippable_source_for_simple_players(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -463,6 +491,53 @@ def test_local_playback_player_rejects_unclippable_source_for_simple_players(
                 audio_path=audio_path,
                 start_seconds=0.0,
                 end_seconds=1.0,
+                source_id="local_mic",
+                segment_id="segment_1",
+            )
+        )
+
+
+def test_local_playback_player_maps_temp_clip_write_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    audio_path = tmp_path / "source.wav"
+    _write_wav_fixture(audio_path)
+
+    def _which(command: str) -> str | None:
+        if command == "pw-play":
+            return "/usr/bin/pw-play"
+        return None
+
+    class FailingWaveWriter:
+        def __enter__(self) -> "FailingWaveWriter":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def setparams(self, _params: object) -> None:
+            return None
+
+        def writeframes(self, _frames: bytes) -> None:
+            raise OSError("disk full")
+
+    original_wave_open = wave.open
+
+    def _wave_open(path: str, mode: str = "rb") -> object:
+        if mode == "wb":
+            return FailingWaveWriter()
+        return original_wave_open(path, mode)
+
+    monkeypatch.setattr("mena.correction_workflow.shutil.which", _which)
+    monkeypatch.setattr("mena.correction_workflow.wave.open", _wave_open)
+
+    with pytest.raises(PlaybackError, match="Temporary playback clip"):
+        LocalPlaybackPlayer()(
+            PlaybackRequest(
+                audio_path=audio_path,
+                start_seconds=0.0,
+                end_seconds=0.2,
                 source_id="local_mic",
                 segment_id="segment_1",
             )
