@@ -1,6 +1,16 @@
 from pathlib import Path
 
-from mena.settings import DATA_ROOT_ENV_VAR, AppSettings, resolve_runtime_paths
+import pytest
+
+from mena.settings import (
+    DATA_ROOT_ENV_VAR,
+    OLLAMA_ENDPOINT_ENV_VAR,
+    OLLAMA_MODEL_ENV_VAR,
+    SUMMARY_LANGUAGE_ENV_VAR,
+    AppSettings,
+    SettingsError,
+    resolve_runtime_paths,
+)
 
 
 def test_resolve_runtime_paths_uses_xdg_defaults_under_home(tmp_path: Path) -> None:
@@ -69,3 +79,90 @@ def test_app_settings_wraps_resolved_paths(tmp_path: Path) -> None:
     settings = AppSettings.from_env(env={}, home=tmp_path)
 
     assert settings.paths.sessions_dir == tmp_path / ".local" / "share" / "mena" / "sessions"
+
+
+def test_app_settings_uses_defaults_when_config_file_is_missing(tmp_path: Path) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path, config_path=tmp_path / "missing.toml")
+
+    assert settings.summary.language == "en"
+    assert settings.local_llm.ollama_endpoint == "http://localhost:11434"
+    assert settings.local_llm.ollama_model == "llama3.2:3b"
+
+
+def test_app_settings_loads_toml_config_values(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+[summary]
+language = "de-CH"
+
+[ollama]
+endpoint = "http://127.0.0.1:11435/"
+model = "mistral:7b"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    settings = AppSettings.from_env(env={}, home=tmp_path, config_path=config_path)
+
+    assert settings.summary.language == "de-CH"
+    assert settings.local_llm.ollama_endpoint == "http://127.0.0.1:11435"
+    assert settings.local_llm.ollama_model == "mistral:7b"
+
+
+def test_app_settings_environment_overrides_config_file(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+[summary]
+language = "de-CH"
+
+[ollama]
+endpoint = "http://localhost:11434"
+model = "mistral:7b"
+""".strip(),
+        encoding="utf-8",
+    )
+    env = {
+        SUMMARY_LANGUAGE_ENV_VAR: "fr-CH",
+        OLLAMA_ENDPOINT_ENV_VAR: "http://127.0.0.1:11436",
+        OLLAMA_MODEL_ENV_VAR: "llama3.1:8b",
+    }
+
+    settings = AppSettings.from_env(env=env, home=tmp_path, config_path=config_path)
+
+    assert settings.summary.language == "fr-CH"
+    assert settings.local_llm.ollama_endpoint == "http://127.0.0.1:11436"
+    assert settings.local_llm.ollama_model == "llama3.1:8b"
+
+
+def test_app_settings_rejects_unknown_config_keys(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text("[summary]\nstyle = 'brief'\n", encoding="utf-8")
+
+    with pytest.raises(SettingsError, match="unknown key"):
+        AppSettings.from_env(env={}, home=tmp_path, config_path=config_path)
+
+
+def test_app_settings_rejects_wrong_config_types(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text("[summary]\nlanguage = 123\n", encoding="utf-8")
+
+    with pytest.raises(SettingsError, match="must be a string"):
+        AppSettings.from_env(env={}, home=tmp_path, config_path=config_path)
+
+
+def test_app_settings_rejects_invalid_values(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text("[ollama]\nendpoint = 'https://api.example.com'\n", encoding="utf-8")
+
+    with pytest.raises(SettingsError, match="must be local"):
+        AppSettings.from_env(env={}, home=tmp_path, config_path=config_path)
+
+
+def test_app_settings_rejects_invalid_toml(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text("[summary\n", encoding="utf-8")
+
+    with pytest.raises(SettingsError, match="invalid TOML"):
+        AppSettings.from_env(env={}, home=tmp_path, config_path=config_path)

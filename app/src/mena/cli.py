@@ -89,8 +89,8 @@ from mena.sessions import (
     update_session_capture_metadata,
     update_session_discovery,
 )
+from mena.settings import AppSettings, SettingsError
 from mena.summarization import (
-    DEFAULT_LANGUAGE,
     OllamaSummarizationProvider,
     SummarizationError,
     SummarizationPolicy,
@@ -194,7 +194,7 @@ def build_parser() -> argparse.ArgumentParser:
             )
             subparser.add_argument(
                 "--language",
-                default=DEFAULT_LANGUAGE,
+                default=None,
                 help="Language code for the summary model prompt.",
             )
         subparser.set_defaults(command=command)
@@ -217,6 +217,8 @@ def main(
     transcription_provider_factory: ProviderFactory = FasterWhisperTranscriptionProvider,
     diarization_provider_factory: ProviderFactory = PyannoteCommunityDiarizationProvider,
     semantic_coherence_provider_factory: ProviderFactory = OllamaSemanticCoherenceProvider,
+    settings: AppSettings | None = None,
+    config_path: Path | None = None,
     input_fn: Callable[[str], str] | None = None,
     playback_player: PlaybackPlayer | None = None,
 ) -> int:
@@ -232,6 +234,17 @@ def main(
     if args.command is None:
         parser.print_help()
         return 0
+
+    try:
+        app_settings = settings or AppSettings.from_env(config_path=config_path)
+    except SettingsError as exc:
+        print(f"Cannot load configuration: {exc}")
+        return 1
+
+    effective_semantic_coherence_provider_factory = _configured_semantic_factory(
+        semantic_coherence_provider_factory,
+        app_settings,
+    )
 
     if args.command == "record":
         profile = parse_capture_profile(args.profile)
@@ -285,7 +298,8 @@ def main(
             return _run_summarize_command(
                 session_path=Path(args.session_path),
                 manual_notes=args.manual_notes,
-                language=args.language,
+                language=args.language or app_settings.summary.language,
+                settings=app_settings,
             )
         except (
             ArtifactStoreError,
@@ -369,7 +383,7 @@ def main(
                 now=now,
                 transcription_provider_factory=transcription_provider_factory,
                 diarization_provider_factory=diarization_provider_factory,
-                semantic_coherence_provider_factory=semantic_coherence_provider_factory,
+                semantic_coherence_provider_factory=effective_semantic_coherence_provider_factory,
             )
         except (
             ArtifactStoreError,
@@ -393,11 +407,28 @@ def main(
     return 0
 
 
+def _configured_semantic_factory(
+    factory: ProviderFactory,
+    settings: AppSettings,
+) -> ProviderFactory:
+    if factory is not OllamaSemanticCoherenceProvider:
+        return factory
+
+    def _factory() -> OllamaSemanticCoherenceProvider:
+        return OllamaSemanticCoherenceProvider(
+            model=settings.local_llm.ollama_model,
+            endpoint=settings.local_llm.ollama_endpoint,
+        )
+
+    return _factory
+
+
 def _run_summarize_command(
     *,
     session_path: Path,
     manual_notes: str | None,
     language: str,
+    settings: AppSettings,
 ) -> int:
     session_dir, session_record = _resolve_session(session_path)
     session_id = _extract_session_id(session_record)
@@ -431,7 +462,10 @@ def _run_summarize_command(
         merged_transcript_record=merged_transcript_record,
         correction_overlay_record=resolved_overlay[0],
         manual_notes_record=manual_notes_record,
-        provider=OllamaSummarizationProvider(),
+        provider=OllamaSummarizationProvider(
+            model=settings.local_llm.ollama_model,
+            endpoint=settings.local_llm.ollama_endpoint,
+        ),
         policy=SummarizationPolicy(language=language),
     )
 

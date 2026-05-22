@@ -3,7 +3,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from pytest import CaptureFixture
@@ -379,6 +379,158 @@ def test_main_summarize_applies_active_overlay_and_manual_notes(
     assert captured.get("manual") is not None
     assert captured.get("language") == "de-CH"
     assert "Summary written to:" in captured_output.out
+
+
+def test_main_summarize_uses_configured_defaults(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_dir, _, _, _ = _build_summarize_session_bundle(tmp_path)
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+[summary]
+language = "fr-CH"
+
+[ollama]
+endpoint = "http://127.0.0.1:11436"
+model = "mistral:7b"
+""".strip(),
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    def _fake_run_summarization_stage(
+        *,
+        store: ArtifactStore,
+        ledger: ProcessingStageLedger,
+        merged_transcript_record: ArtifactRecord,
+        provider: object,
+        correction_overlay_record: ArtifactRecord | None = None,
+        policy: SummarizationPolicy | None = None,
+        manual_notes_record: ArtifactRecord | None = None,
+        stage: str = "summarization",
+        attempt: int = 1,
+        skip_completed: bool = True,
+        now: datetime | None = None,
+    ) -> SimpleNamespace:
+        provider_metadata = cast(Any, provider).metadata
+        captured["language"] = policy.language if policy is not None else None
+        captured["provider_model"] = provider_metadata.model
+        captured["provider_endpoint"] = provider_metadata.endpoint
+        return SimpleNamespace(
+            summary_record=store.store(
+                artifact_type="summary",
+                name="summary/final.json",
+                data=b"{}",
+                version=1,
+            ),
+        )
+
+    monkeypatch.setattr("mena.cli.run_summarization_stage", _fake_run_summarization_stage)
+
+    exit_code = main(["summarize", str(session_dir)], config_path=config_path)
+
+    assert exit_code == 0
+    assert captured["language"] == "fr-CH"
+    assert captured["provider_model"] == "mistral:7b"
+    assert captured["provider_endpoint"] == "http://127.0.0.1:11436"
+
+
+def test_main_summarize_cli_language_overrides_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_dir, _, _, _ = _build_summarize_session_bundle(tmp_path)
+    config_path = tmp_path / "config.toml"
+    config_path.write_text("[summary]\nlanguage = 'fr-CH'\n", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    def _fake_run_summarization_stage(
+        *,
+        store: ArtifactStore,
+        ledger: ProcessingStageLedger,
+        merged_transcript_record: ArtifactRecord,
+        provider: object,
+        correction_overlay_record: ArtifactRecord | None = None,
+        policy: SummarizationPolicy | None = None,
+        manual_notes_record: ArtifactRecord | None = None,
+        stage: str = "summarization",
+        attempt: int = 1,
+        skip_completed: bool = True,
+        now: datetime | None = None,
+    ) -> SimpleNamespace:
+        captured["language"] = policy.language if policy is not None else None
+        return SimpleNamespace(
+            summary_record=store.store(
+                artifact_type="summary",
+                name="summary/final.json",
+                data=b"{}",
+                version=1,
+            ),
+        )
+
+    monkeypatch.setattr("mena.cli.run_summarization_stage", _fake_run_summarization_stage)
+
+    exit_code = main(
+        ["summarize", str(session_dir), "--language", "it-CH"],
+        config_path=config_path,
+    )
+
+    assert exit_code == 0
+    assert captured["language"] == "it-CH"
+
+
+def test_main_reports_config_errors_before_command_execution(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text("[summary]\nlanguage = 123\n", encoding="utf-8")
+
+    exit_code = main(
+        ["record", "--profile", "online", "--dry-run"],
+        data_root=tmp_path,
+        discoverer=_available_discoverer,
+        config_path=config_path,
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "Cannot load configuration:" in captured.out
+    assert not (tmp_path / "sessions").exists()
+
+
+def test_main_process_uses_configured_ollama_defaults_for_semantic_provider(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_dir = _create_session_record(tmp_path)
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+[ollama]
+endpoint = "http://127.0.0.1:11436"
+model = "semantic-model:latest"
+""".strip(),
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    def _fake_run_processing_command(**kwargs: object) -> int:
+        provider_factory = cast(Any, kwargs["semantic_coherence_provider_factory"])
+        provider = provider_factory()
+        captured["model"] = provider.metadata.model
+        captured["endpoint"] = provider.metadata.endpoint
+        return 0
+
+    monkeypatch.setattr("mena.cli._run_processing_command", _fake_run_processing_command)
+
+    exit_code = main(["process", str(session_dir)], config_path=config_path)
+
+    assert exit_code == 0
+    assert captured["model"] == "semantic-model:latest"
+    assert captured["endpoint"] == "http://127.0.0.1:11436"
 
 
 def test_main_summarize_accepts_session_json_file(
