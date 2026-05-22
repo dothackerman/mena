@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
+import subprocess
+import tempfile
+import wave
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -20,6 +25,7 @@ from mena.merge_timing import (
     MERGED_TRANSCRIPT_ARTIFACT_TYPE,
     MergedTranscriptArtifact,
     MergedTranscriptSegment,
+    MergedTranscriptSource,
 )
 from mena.processing import ArtifactRef
 from mena.review_flagging import (
@@ -29,10 +35,24 @@ from mena.review_flagging import (
     ReviewQueueArtifact,
 )
 from mena.sessions import SESSION_RECORD_FILENAME, read_session_record
+from mena.transcription import (
+    TRANSCRIPT_ARTIFACT_TYPE,
+    TranscriptArtifact,
+    TranscriptionContractError,
+)
+
+SOURCE_AUDIO_ARTIFACT_TYPE = "source_audio"
+PLAYBACK_PREROLL_SECONDS = 1.5
+PLAYBACK_POSTROLL_SECONDS = 1.5
+SUPPORTED_PLAYBACK_COMMANDS = ("ffplay", "pw-play", "paplay", "aplay")
 
 
 class CorrectionWorkflowError(RuntimeError):
     """Base class for correction workflow failures."""
+
+
+class PlaybackError(RuntimeError):
+    """Raised when local playback cannot be completed."""
 
 
 @dataclass(frozen=True)
@@ -45,11 +65,118 @@ class CorrectionWorkflowResult:
     overlay_artifact_record: ArtifactRecord
 
 
+@dataclass(frozen=True)
+class PlaybackRequest:
+    """Bounded playback request for a source-audio artifact."""
+
+    audio_path: Path
+    start_seconds: float
+    end_seconds: float
+    source_id: str
+    segment_id: str
+
+
+PlaybackPlayer = Callable[[PlaybackRequest], None]
+
+
+class LocalPlaybackPlayer:
+    """Small local playback adapter using safe argument-list subprocess calls."""
+
+    def __call__(self, request: PlaybackRequest) -> None:
+        command = _detect_playback_command()
+        command_name = Path(command).name
+        if command_name == "ffplay":
+            _run_playback_command(
+                [
+                    command,
+                    "-nodisp",
+                    "-autoexit",
+                    "-loglevel",
+                    "error",
+                    "-ss",
+                    _format_seconds(request.start_seconds),
+                    "-t",
+                    _format_seconds(request.end_seconds - request.start_seconds),
+                    str(request.audio_path),
+                ]
+            )
+            return
+
+        clip_path = _write_wav_clip(request)
+        try:
+            _run_playback_command([command, str(clip_path)])
+        finally:
+            clip_path.unlink(missing_ok=True)
+
+
+def _detect_playback_command() -> str:
+    for command in SUPPORTED_PLAYBACK_COMMANDS:
+        resolved = shutil.which(command)
+        if resolved is not None:
+            return resolved
+    tried = ", ".join(SUPPORTED_PLAYBACK_COMMANDS)
+    raise PlaybackError(f"No supported local audio playback command found. Tried: {tried}.")
+
+
+def _run_playback_command(args: list[str]) -> None:
+    try:
+        subprocess.run(args, check=True)
+    except FileNotFoundError as exc:
+        raise PlaybackError(f"Playback command not found: {args[0]}.") from exc
+    except subprocess.CalledProcessError as exc:
+        raise PlaybackError(
+            f"Playback command exited with status {exc.returncode}: {args[0]}."
+        ) from exc
+
+
+def _write_wav_clip(request: PlaybackRequest) -> Path:
+    try:
+        with wave.open(str(request.audio_path), "rb") as source:
+            frame_rate = source.getframerate()
+            if frame_rate <= 0:
+                raise PlaybackError("Source audio frame rate must be positive.")
+            start_frame = min(
+                source.getnframes(),
+                max(0, int(request.start_seconds * frame_rate)),
+            )
+            end_frame = min(
+                source.getnframes(),
+                max(start_frame, int(request.end_seconds * frame_rate)),
+            )
+            frame_count = end_frame - start_frame
+            if frame_count <= 0:
+                raise PlaybackError("Playback window contains no audio frames.")
+            source.setpos(start_frame)
+            frames = source.readframes(frame_count)
+            params = source.getparams()
+    except (OSError, wave.Error) as exc:
+        raise PlaybackError(
+            "Only readable PCM WAV source audio can be clipped for this playback command."
+        ) from exc
+
+    fd, raw_clip_path = tempfile.mkstemp(prefix="mena-playback-", suffix=".wav")
+    os.close(fd)
+    clip_path = Path(raw_clip_path)
+    try:
+        with wave.open(str(clip_path), "wb") as target:
+            target.setparams(params)
+            target.writeframes(frames)
+    except Exception:
+        clip_path.unlink(missing_ok=True)
+        raise
+    return clip_path
+
+
+def _format_seconds(value: float) -> str:
+    return f"{value:.3f}"
+
+
 def run_correction_workflow(
     session_path: str | Path,
     *,
     now: datetime | None = None,
     input_fn: Callable[[str], str] = input,
+    playback_player: PlaybackPlayer | None = None,
 ) -> CorrectionWorkflowResult:
     """Run an interactive correction session and persist a correction overlay."""
 
@@ -76,6 +203,7 @@ def run_correction_workflow(
         sorted(source_transcript.segments, key=lambda segment: segment.start_seconds)
     )
     segment_positions = {segment.id: index for index, segment in enumerate(ordered_segments)}
+    player = playback_player or LocalPlaybackPlayer()
 
     entries: list[CorrectionEntry] = []
     reviewed = 0
@@ -95,7 +223,28 @@ def run_correction_workflow(
                 candidates=speaker_catalog,
             )
 
-            action = _prompt_action(input_fn=input_fn)
+            while True:
+                action = _prompt_action(input_fn=input_fn)
+                if action != "playback":
+                    break
+
+                request = _resolve_playback_request(
+                    store=store,
+                    source_transcript=source_transcript,
+                    segment=segment,
+                    session_id=session_id,
+                )
+                try:
+                    player(request)
+                except PlaybackError as exc:
+                    print(f"Playback failed: {exc}")
+                else:
+                    print(
+                        "Playback completed for "
+                        f"{request.source_id} "
+                        f"{request.start_seconds:.2f}-{request.end_seconds:.2f}s."
+                    )
+
             reviewed += 1
 
             if action == "skip":
@@ -354,6 +503,124 @@ def _load_source_transcript(
     return source_record, source_transcript
 
 
+def _resolve_playback_request(
+    *,
+    store: FileSystemArtifactStore,
+    source_transcript: MergedTranscriptArtifact,
+    segment: MergedTranscriptSegment,
+    session_id: str,
+) -> PlaybackRequest:
+    source = _source_for_segment(source_transcript=source_transcript, segment=segment)
+    transcript_record = _record_for_ref(
+        store=store,
+        artifact_ref=source.transcript_artifact,
+        expected_type=TRANSCRIPT_ARTIFACT_TYPE,
+        label=f"Transcript source for source '{segment.source_id}'",
+    )
+    transcript = _load_transcript_for_playback(
+        store=store,
+        record=transcript_record,
+        source_id=segment.source_id,
+        session_id=session_id,
+    )
+    source_audio_record = _record_for_ref(
+        store=store,
+        artifact_ref=transcript.source_artifact,
+        expected_type=SOURCE_AUDIO_ARTIFACT_TYPE,
+        label=f"Source audio artifact for source '{segment.source_id}'",
+    )
+    start_seconds, end_seconds = _playback_window(segment)
+    return PlaybackRequest(
+        audio_path=store.session_dir / source_audio_record.path,
+        start_seconds=start_seconds,
+        end_seconds=end_seconds,
+        source_id=segment.source_id,
+        segment_id=segment.id,
+    )
+
+
+def _source_for_segment(
+    *,
+    source_transcript: MergedTranscriptArtifact,
+    segment: MergedTranscriptSegment,
+) -> MergedTranscriptSource:
+    for source in source_transcript.sources:
+        if source.source_id == segment.source_id:
+            return source
+    raise CorrectionWorkflowError(
+        f"Merged transcript has no source reference for segment source_id {segment.source_id}."
+    )
+
+
+def _record_for_ref(
+    *,
+    store: FileSystemArtifactStore,
+    artifact_ref: ArtifactRef,
+    expected_type: str,
+    label: str,
+) -> ArtifactRecord:
+    if artifact_ref.artifact_type != expected_type:
+        raise CorrectionWorkflowError(f"{label} must reference {expected_type}.")
+
+    records = {record.id: record for record in store.list(artifact_type=expected_type)}
+    try:
+        record = records[artifact_ref.id]
+    except KeyError as exc:
+        raise CorrectionWorkflowError(
+            f"{label} references a missing {expected_type} artifact."
+        ) from exc
+
+    if record.sha256 != artifact_ref.sha256:
+        raise CorrectionWorkflowError(f"{label} sha256 is stale.")
+    if record.status != "sealed":
+        raise CorrectionWorkflowError(f"{label} must reference a sealed artifact.")
+
+    verification = store.verify(record.id)
+    if not verification.ok:
+        raise CorrectionWorkflowError(f"{label} is invalid: {verification.error}")
+    return record
+
+
+def _load_transcript_for_playback(
+    *,
+    store: FileSystemArtifactStore,
+    record: ArtifactRecord,
+    source_id: str,
+    session_id: str,
+) -> TranscriptArtifact:
+    try:
+        transcript = TranscriptArtifact.from_dict(json.loads(store.retrieve(record.id)))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise CorrectionWorkflowError(
+            f"Transcript artifact for source '{source_id}' payload is not valid JSON."
+        ) from exc
+    except TranscriptionContractError as exc:
+        raise CorrectionWorkflowError(
+            f"Transcript artifact for source '{source_id}' payload is invalid: {exc}"
+        ) from exc
+
+    if transcript.session_id != session_id:
+        raise CorrectionWorkflowError(
+            f"Transcript artifact for source '{source_id}' session_id does not match."
+        )
+    if transcript.source_id != source_id:
+        raise CorrectionWorkflowError(
+            f"Transcript artifact for source '{source_id}' has mismatched source_id."
+        )
+    if transcript.source_artifact.artifact_type != SOURCE_AUDIO_ARTIFACT_TYPE:
+        raise CorrectionWorkflowError(
+            f"Transcript artifact for source '{source_id}' must reference source_audio."
+        )
+    return transcript
+
+
+def _playback_window(segment: MergedTranscriptSegment) -> tuple[float, float]:
+    return (
+        max(0.0, segment.start_seconds - PLAYBACK_PREROLL_SECONDS),
+        segment.end_seconds + PLAYBACK_POSTROLL_SECONDS,
+    )
+
+
 def _ordered_review_flags(
     *,
     review_queue: ReviewQueueArtifact,
@@ -392,10 +659,12 @@ def _ordered_speaker_catalog(source_transcript: MergedTranscriptArtifact) -> lis
 def _prompt_action(input_fn: Callable[[str], str]) -> str:
     while True:
         raw = (
-            input_fn("Action [s]kip, [r]eassign speaker, [t]ext edit, or [o]verlap: ")
+            input_fn("Action [p]lay, [s]kip, [r]eassign speaker, [t]ext edit, or [o]verlap: ")
             .strip()
             .lower()
         )
+        if raw in {"p", "play", "playback"}:
+            return "playback"
         if raw in {"s", "skip"}:
             return "skip"
         if raw in {"r", "speaker", "reassign", "speaker_reassignment"}:
@@ -404,7 +673,7 @@ def _prompt_action(input_fn: Callable[[str], str]) -> str:
             return "text_edit"
         if raw in {"o", "overlap", "overlap_mark"}:
             return "overlap_mark"
-        print("Invalid action. Use [s]kip, [r]eassign, [t]ext, or [o]verlap.")
+        print("Invalid action. Use [p]lay, [s]kip, [r]eassign, [t]ext, or [o]verlap.")
 
 
 def _prompt_speaker_assignment(
