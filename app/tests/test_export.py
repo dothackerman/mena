@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -75,6 +76,27 @@ def test_resolve_summary_markdown_input_prefers_latest_timestamp(tmp_path: Path)
     assert selected_record.id != old_record.id
 
 
+def test_resolve_summary_markdown_input_fails_closed_on_invalid_summary(
+    tmp_path: Path,
+) -> None:
+    store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=tmp_path)
+    _persist_summary_artifact(
+        store=store,
+        created_at="2026-05-18T17:00:00Z",
+        name="summary/old.json",
+    )
+    store.store(
+        artifact_type="summary",
+        name="summary/new-invalid.json",
+        data=b"not-json",
+        version=1,
+        status="sealed",
+    )
+
+    with pytest.raises(SummaryMarkdownExportError, match="is not valid JSON"):
+        resolve_summary_markdown_input(store=store)
+
+
 def test_resolve_summary_markdown_input_respects_explicit_summary_record_id(
     tmp_path: Path,
 ) -> None:
@@ -109,9 +131,43 @@ def test_export_summary_markdown_rejects_no_valid_summary_artifact(tmp_path: Pat
         status="sealed",
     )
 
-    with pytest.raises(
-        SummaryMarkdownExportError, match="No valid summary.v1 artifact was found for export."
-    ):
+    with pytest.raises(SummaryMarkdownExportError, match="is not valid JSON"):
+        export_summary_markdown(store=store)
+
+
+def test_export_summary_markdown_reuses_existing_matching_export(tmp_path: Path) -> None:
+    store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=tmp_path)
+    _persist_summary_artifact(
+        store=store,
+        created_at="2026-05-18T17:00:00Z",
+        name="summary/final.json",
+    )
+
+    first = export_summary_markdown(store=store)
+    second = export_summary_markdown(store=store)
+
+    assert second.export_record == first.export_record
+    assert store.list(artifact_type=SUMMARY_MARKDOWN_EXPORT_ARTIFACT_TYPE) == (first.export_record,)
+
+
+def test_export_summary_markdown_rejects_existing_export_metadata_drift(
+    tmp_path: Path,
+) -> None:
+    store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=tmp_path)
+    _persist_summary_artifact(
+        store=store,
+        created_at="2026-05-18T17:00:00Z",
+        name="summary/final.json",
+    )
+    first = export_summary_markdown(store=store)
+    manifest_path = tmp_path / "artifacts" / "artifact-manifest.v1.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for item in manifest["artifacts"]:
+        if item["id"] == first.export_record.id:
+            item["metadata"]["summary_artifact_id"] = "different"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(SummaryMarkdownExportError, match="metadata does not match"):
         export_summary_markdown(store=store)
 
 

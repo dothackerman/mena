@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -45,14 +46,29 @@ def export_summary_markdown(
         summary_record_id=summary_record_id,
     )
     markdown = format_summary_markdown(summary)
+    export_name = _export_artifact_name(summary_record=summary_record, summary=summary)
+    metadata = _export_metadata(summary_record=summary_record, summary=summary)
+
+    existing_export = _matching_existing_export(
+        store=store,
+        export_name=export_name,
+        markdown=markdown,
+        metadata=metadata,
+    )
+    if existing_export is not None:
+        return SummaryMarkdownExportResult(
+            summary_record=summary_record,
+            summary=summary,
+            export_record=existing_export,
+        )
 
     export_record = store.store(
         artifact_type=SUMMARY_MARKDOWN_EXPORT_ARTIFACT_TYPE,
-        name=_export_artifact_name(summary_record=summary_record, summary=summary),
+        name=export_name,
         data=markdown.encode("utf-8"),
         version=SUMMARY_MARKDOWN_EXPORT_ARTIFACT_VERSION,
         status="sealed",
-        metadata=_export_metadata(summary_record=summary_record, summary=summary),
+        metadata=metadata,
     )
 
     return SummaryMarkdownExportResult(
@@ -79,10 +95,7 @@ def resolve_summary_markdown_input(
 
     candidates: list[tuple[datetime, str, str, ArtifactRecord, SummaryArtifact]] = []
     for record in records:
-        try:
-            _, summary = _load_summary_artifact(record=record, store=store)
-        except SummaryMarkdownExportError:
-            continue
+        _, summary = _load_summary_artifact(record=record, store=store)
         candidates.append(
             (
                 _summary_created_at(summary),
@@ -138,6 +151,39 @@ def _load_summary_artifact(
         )
 
     return record, summary
+
+
+def _matching_existing_export(
+    *,
+    store: ArtifactStore,
+    export_name: Path,
+    markdown: str,
+    metadata: dict[str, object],
+) -> ArtifactRecord | None:
+    expected_path = Path("artifacts") / SUMMARY_MARKDOWN_EXPORT_ARTIFACT_TYPE / export_name
+    expected_payload = markdown.encode("utf-8")
+    expected_sha = _sha256(expected_payload)
+    for record in store.list(artifact_type=SUMMARY_MARKDOWN_EXPORT_ARTIFACT_TYPE):
+        if record.path != expected_path.as_posix():
+            continue
+        verification = store.verify(record.id)
+        if not verification.ok or record.sha256 != expected_sha:
+            raise SummaryMarkdownExportError(
+                f"Existing markdown export artifact {record.id} failed integrity verification."
+            )
+        if store.retrieve(record.id) != expected_payload:
+            raise SummaryMarkdownExportError(
+                f"Existing markdown export artifact {record.id} content does not match."
+            )
+        for key, value in metadata.items():
+            if key == "exported_at":
+                continue
+            if record.metadata.get(key) != value:
+                raise SummaryMarkdownExportError(
+                    f"Existing markdown export artifact {record.id} metadata does not match."
+                )
+        return record
+    return None
 
 
 def _export_metadata(
@@ -205,3 +251,7 @@ def _format_timestamp(value: str) -> str:
 
 def _now_utc_iso8601() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
