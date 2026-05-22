@@ -59,7 +59,14 @@ from mena.sessions import (
     create_session,
     update_session_capture_metadata,
 )
-from mena.summarization import SummarizationError, SummarizationPolicy
+from mena.summarization import (
+    FakeSummarizationProvider,
+    SummarizationError,
+    SummarizationPolicy,
+    SummaryArtifact,
+    SummaryResult,
+    persist_summary_artifact,
+)
 from mena.transcription import FakeTranscriptionProvider, TranscriptionProvider
 
 SESSION_ID = "00000000-0000-0000-0000-000000000001"
@@ -77,7 +84,15 @@ def test_main_exposes_architecture_command_surface(capsys: CaptureFixture[str]) 
     for command in [
         command
         for command in COMMANDS[1:]
-        if command not in {"correct", "process", "resume", "summarize"}
+        if command
+        not in {
+            "correct",
+            "process",
+            "resume",
+            "summarize",
+            "export",
+            "inspect",
+        }
     ]:
         exit_code = main([command])
         captured = capsys.readouterr()
@@ -410,6 +425,126 @@ def test_main_summarize_reports_stage_failure(
 
     assert exit_code == 1
     assert "Cannot summarize session: Local summary provider is unavailable." in captured.out
+
+
+def test_main_export_command_exports_latest_summary_markdown(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    session_dir, store, merged_record = _build_verified_export_session_bundle(tmp_path)
+    _persist_summary_artifact_for_cli(store=store, merged_transcript_record=merged_record)
+
+    exit_code = main(["export", str(session_dir)])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Export written to:" in captured.out
+    assert "Export contract: summary-markdown.v1" in captured.out
+    assert '"summary_artifact_id"' in captured.out
+    assert '"merged_transcript_artifact_id"' in captured.out
+    assert '"manual_notes_artifact_id"' in captured.out
+    assert '"correction_overlay_artifact_id"' in captured.out
+
+    export_line = next(
+        line for line in captured.out.splitlines() if line.startswith("Export written to:")
+    )
+    export_path = Path(export_line.removeprefix("Export written to: ").strip())
+    assert export_path.as_posix().startswith("artifacts/")
+    assert (session_dir / export_path).exists()
+
+
+def test_main_export_command_rejects_unknown_summary_artifact(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    session_dir, store, merged_record = _build_verified_export_session_bundle(tmp_path)
+    _persist_summary_artifact_for_cli(store=store, merged_transcript_record=merged_record)
+
+    exit_code = main(
+        [
+            "export",
+            str(session_dir),
+            "--summary-artifact-id",
+            "summary-not-found-id",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert (
+        "Cannot export session summary markdown: Summary artifact not found:"
+        " summary-not-found-id." in captured.out
+    )
+
+
+def test_main_export_command_rejects_unverified_bundle(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    session_dir = _create_session_record(tmp_path)
+    store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=session_dir)
+    _persist_summary_artifact_for_cli(
+        store=store,
+        merged_transcript_record=None,
+    )
+
+    exit_code = main(["export", str(session_dir)])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert (
+        "Cannot export session summary markdown: Session bundle failed integrity verification"
+        in captured.out
+    )
+
+
+def test_main_inspect_command_reports_bundle_integrity(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    session_dir = _create_session_record(tmp_path)
+
+    exit_code = main(["inspect", str(session_dir)])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert f"Integrity report for {session_dir}: OK" in captured.out
+    assert '"ok": true' in captured.out
+    assert '"artifact_count": 0' in captured.out
+
+
+def test_main_inspect_command_rejects_invalid_session(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    missing_session_path = tmp_path / "missing-session"
+    exit_code = main(["inspect", str(missing_session_path)])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert f"Integrity report for {missing_session_path}: FAILED" in captured.out
+    assert '"ok": false' in captured.out
+
+
+def test_main_inspect_command_rejects_broken_bundle(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    session_dir = _create_session_record(tmp_path)
+    store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=session_dir)
+    artifact_record = store.store(
+        artifact_type=MERGED_TRANSCRIPT_ARTIFACT_TYPE,
+        name="merged/merged.json",
+        data=b'{"version":1}',
+        version=1,
+        status="sealed",
+        metadata={"contract": "merged-transcript.v1"},
+    )
+    (session_dir / artifact_record.path).unlink()
+
+    exit_code = main(["inspect", str(session_dir)])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert f"Integrity report for {session_dir}: FAILED" in captured.out
+    assert '"ok": false' in captured.out
+    assert '"code": "artifact_missing"' in captured.out
 
 
 def test_resolve_latest_merged_transcript_record_ignores_corrupt_payload(
@@ -1142,6 +1277,22 @@ def _build_summarize_session_bundle(
     return session_dir, store, merged_record, overlay_record
 
 
+def _build_verified_export_session_bundle(
+    tmp_path: Path,
+) -> tuple[Path, FileSystemArtifactStore, ArtifactRecord]:
+    session_dir = _create_session_record(tmp_path)
+    store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=session_dir)
+    merged_record = store.store(
+        artifact_type=MERGED_TRANSCRIPT_ARTIFACT_TYPE,
+        name="merged/merged.json",
+        data=b'{"version":1}',
+        version=1,
+        status="sealed",
+        metadata={"contract": "merged-transcript.v1"},
+    )
+    return session_dir, store, merged_record
+
+
 def _create_session_record(tmp_path: Path) -> Path:
     session_dir = tmp_path / "session"
     session_dir.mkdir()
@@ -1161,6 +1312,52 @@ def _create_session_record(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     return session_dir
+
+
+def _summary_result_for_export() -> SummaryResult:
+    return SummaryResult(
+        timeline=("Agenda covered.",),
+        important_points=("A decision was made.",),
+        action_items=(),
+        general_summary="The team aligned on the plan.",
+    )
+
+
+def _persist_summary_artifact_for_cli(
+    *,
+    store: FileSystemArtifactStore,
+    merged_transcript_record: ArtifactRecord | None,
+) -> ArtifactRecord:
+    summary_result = _summary_result_for_export()
+    merged_artifact_ref = (
+        ArtifactRef.from_record(merged_transcript_record)
+        if merged_transcript_record is not None
+        else ArtifactRef(
+            id=f"{SESSION_ID}:artifacts/merged_transcript/missing.json",
+            artifact_type="merged_transcript",
+            version=1,
+            sha256="1" * 64,
+        )
+    )
+
+    return persist_summary_artifact(
+        store=store,
+        artifact=SummaryArtifact(
+            version=1,
+            session_id=SESSION_ID,
+            merged_transcript_artifact=merged_artifact_ref,
+            manual_notes_artifact=None,
+            policy=SummarizationPolicy(language="en").to_dict(),
+            provider=FakeSummarizationProvider(result=summary_result).metadata,
+            timeline=summary_result.timeline,
+            important_points=summary_result.important_points,
+            action_items=summary_result.action_items,
+            general_summary=summary_result.general_summary,
+            created_at="2026-05-20T10:00:00Z",
+        ),
+        name="summary/final.json",
+        correction_overlay_record=None,
+    )
 
 
 def _persist_merged_transcript(*, store: FileSystemArtifactStore) -> ArtifactRecord:

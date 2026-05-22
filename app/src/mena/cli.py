@@ -33,6 +33,10 @@ from mena.diarization import (
     run_diarization_stage,
 )
 from mena.discovery import AudioDiscovery, DiscoveryStatus, discover_audio_routes, format_discovery
+from mena.export import (
+    SummaryMarkdownExportError,
+    export_summary_markdown,
+)
 from mena.manual_notes import ManualNotesIngestionError, ingest_manual_notes_file
 from mena.merge_timing import (
     MERGE_TIMING_STAGE,
@@ -69,6 +73,11 @@ from mena.semantic_coherence import (
     SemanticCoherenceProvider,
     run_semantic_coherence_stage,
 )
+from mena.session_integrity import (
+    SessionIntegrityError,
+    load_verified_session_bundle,
+    verify_session_bundle,
+)
 from mena.sessions import (
     SESSION_RECORD_FILENAME,
     create_session,
@@ -99,6 +108,7 @@ COMMANDS = (
     "correct",
     "summarize",
     "export",
+    "inspect",
     "resume",
 )
 WORKER_EXIT_TIMEOUT_SECONDS = 30.0
@@ -159,10 +169,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     for command in COMMANDS[1:]:
         subparser = subparsers.add_parser(command)
-        if command in {"correct", "process", "resume", "summarize"}:
+        if command in {"correct", "process", "resume", "summarize", "export", "inspect"}:
             subparser.add_argument(
                 "session_path",
                 help="Path to the session directory or session.json.",
+            )
+
+        if command == "export":
+            subparser.add_argument(
+                "--summary-artifact-id",
+                dest="summary_artifact_id",
+                default=None,
+                help="Optional explicit summary artifact id to export.",
             )
         if command == "summarize":
             subparser.add_argument(
@@ -273,6 +291,32 @@ def main(
             return 1
         except (EOFError, KeyboardInterrupt):
             print("Summarization cancelled.")
+            return 1
+    if args.command == "export":
+        try:
+            return _run_export_command(
+                session_path=Path(args.session_path),
+                summary_artifact_id=args.summary_artifact_id,
+            )
+        except (
+            ArtifactStoreError,
+            SummaryMarkdownExportError,
+            SessionIntegrityError,
+            OSError,
+            ValueError,
+        ) as exc:
+            print(f"Cannot export session summary markdown: {exc}")
+            return 1
+
+    if args.command == "inspect":
+        try:
+            return _run_inspect_command(session_path=Path(args.session_path))
+        except (
+            ArtifactStoreError,
+            ValueError,
+            OSError,
+        ) as exc:
+            print(f"Cannot inspect session: {exc}")
             return 1
 
     if args.command in {"process", "resume"}:
@@ -386,6 +430,54 @@ def _run_summarize_command(
 
     print(f"Summary written to: {result.summary_record.path}")
     return 0
+
+
+def _run_export_command(
+    *,
+    session_path: Path,
+    summary_artifact_id: str | None,
+) -> int:
+    verified = load_verified_session_bundle(session_path)
+    session_record = dict(verified.record)
+    session_id = _extract_session_id(session_record)
+
+    export_result = export_summary_markdown(
+        store=FileSystemArtifactStore(
+            session_id=session_id,
+            session_dir=verified.session_dir,
+        ),
+        summary_record_id=summary_artifact_id,
+    )
+
+    print(f"Export written to: {export_result.export_record.path}")
+    print(f"Export contract: {export_result.export_record.metadata.get('contract', '(unknown)')}")
+    print(
+        f"Summary artifact: {export_result.summary_record.path} ({export_result.summary_record.id})"
+    )
+    provenance = {
+        key: value
+        for key, value in export_result.export_record.metadata.items()
+        if key
+        in {
+            "summary_artifact_id",
+            "summary_created_at",
+            "merged_transcript_artifact_id",
+            "manual_notes_artifact_id",
+            "correction_overlay_artifact_id",
+        }
+    }
+    print(f"Export provenance: {json.dumps(provenance, sort_keys=True)}")
+    return 0
+
+
+def _run_inspect_command(
+    *,
+    session_path: Path,
+) -> int:
+    report = verify_session_bundle(session_path)
+    print(f"Integrity report for {session_path}: {'OK' if report.ok else 'FAILED'}")
+    print(json.dumps(report.to_dict(), sort_keys=True, indent=2))
+    return 0 if report.ok else 1
 
 
 def _run_processing_command(
