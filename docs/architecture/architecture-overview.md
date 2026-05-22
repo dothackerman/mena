@@ -1042,6 +1042,12 @@ Telemetry remains a research topic until its event model, storage rules, identif
 - downstream processing must verify required upstream artifacts before trusting them
 - if a source artifact fails integrity verification, downstream trust stops
 
+Implementation note for the CLI PoC:
+
+- `mena.session_integrity` owns reusable session-bundle verification
+- verification covers session-record capture metadata, manifest-backed artifact bytes, artifact reference consistency, processing-state references, and orphaned files under the session artifact directory
+- global-index rebuild is a projection from session bundles; it does not become the canonical store for meeting content
+
 #### Provisional Lifecycle States
 
 Initial lifecycle vocabulary:
