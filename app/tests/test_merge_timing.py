@@ -34,6 +34,7 @@ from mena.merge_timing import (
     SpeakerIdentity,
     persist_merged_transcript_artifact,
     run_merge_timing_stage,
+    run_room_mic_merge_timing_stage,
 )
 from mena.processing import ArtifactRef, ProcessingStageLedger
 from mena.transcription import (
@@ -152,6 +153,137 @@ def test_merge_timing_stage_persists_merged_artifact_and_completed_checkpoint(
         "running",
         "completed",
     ]
+
+
+def test_room_mic_merge_timing_stage_persists_single_source_room_artifact(
+    tmp_path: Path,
+) -> None:
+    store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=tmp_path)
+    room_source = store.store(artifact_type="source_audio", name="room.wav", data=b"room")
+    room_transcript_record = _persist_transcript(
+        store=store,
+        source_record=room_source,
+        source_id="room_mic",
+    )
+    regular_record, exclusive_record = _persist_remote_diarization_pair(
+        store=store,
+        source_record=room_source,
+        source_id="room_mic",
+        capture_profile="in_person_single_mic",
+        speaker_label_prefix="Room speaker",
+        name_prefix="room-",
+    )
+    ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+
+    result = run_room_mic_merge_timing_stage(
+        store=store,
+        ledger=ledger,
+        room_transcript_record=room_transcript_record,
+        room_regular_diarization_record=regular_record,
+        room_exclusive_diarization_record=exclusive_record,
+        now=NOW,
+    )
+
+    assert result.skipped is False
+    assert result.state.status == "completed"
+    assert result.merged_transcript_record.metadata["room_source_id"] == "room_mic"
+    assert result.merged_transcript_record.metadata["room_diarization_status"] == "used"
+    payload = json.loads(store.retrieve(result.merged_transcript_record.id))
+    Draft202012Validator(
+        _load_merged_transcript_schema(),
+        format_checker=FormatChecker(),
+    ).validate(payload)
+    artifact = MergedTranscriptArtifact.from_dict(payload)
+    assert artifact.policy.capture_profile == "in_person_single_mic"
+    assert [(source.source_id, source.channel) for source in artifact.sources] == [
+        ("room_mic", "room")
+    ]
+    assert artifact.sources[0].diarization_status == "used"
+    assert [segment.source_id for segment in artifact.segments] == ["room_mic"]
+    assert artifact.segments[0].channel == "room"
+    assert artifact.segments[0].speaker.kind == "diarized_room"
+    assert artifact.segments[0].speaker.label == "Room speaker 1"
+
+
+def test_room_mic_merge_timing_rejects_exclusive_capture_profile_mismatch(
+    tmp_path: Path,
+) -> None:
+    store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=tmp_path)
+    room_source = store.store(artifact_type="source_audio", name="room.wav", data=b"room")
+    room_transcript_record = _persist_transcript(
+        store=store,
+        source_record=room_source,
+        source_id="room_mic",
+    )
+    regular_record, exclusive_record = _persist_remote_diarization_pair(
+        store=store,
+        source_record=room_source,
+        source_id="room_mic",
+        capture_profile="in_person_single_mic",
+        speaker_label_prefix="Room speaker",
+        name_prefix="room-",
+    )
+    exclusive_payload = json.loads(store.retrieve(exclusive_record.id))
+    exclusive_payload["context"]["capture_profile"] = "online_dual_stream"
+    mismatched_exclusive_record = store.store(
+        artifact_type="diarization",
+        name="room-exclusive-profile-mismatch.json",
+        data=json.dumps(exclusive_payload).encode("utf-8"),
+        metadata=exclusive_record.metadata,
+    )
+    ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+
+    with pytest.raises(
+        MergeTimingError,
+        match="Room exclusive diarization capture_profile must match the merge policy",
+    ):
+        run_room_mic_merge_timing_stage(
+            store=store,
+            ledger=ledger,
+            room_transcript_record=room_transcript_record,
+            room_regular_diarization_record=regular_record,
+            room_exclusive_diarization_record=mismatched_exclusive_record,
+            now=NOW,
+        )
+
+
+def test_room_mic_merge_timing_stage_reuses_verified_completed_output() -> None:
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    room_source = store.store(artifact_type="source_audio", name="room.wav", data=b"room")
+    room_transcript_record = _persist_transcript(
+        store=store,
+        source_record=room_source,
+        source_id="room_mic",
+    )
+    ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+
+    first = run_room_mic_merge_timing_stage(
+        store=store,
+        ledger=ledger,
+        room_transcript_record=room_transcript_record,
+        room_diarization_status="skipped",
+        room_diarization_reason="diarization_disabled",
+        now=NOW,
+    )
+    second = run_room_mic_merge_timing_stage(
+        store=store,
+        ledger=ledger,
+        room_transcript_record=room_transcript_record,
+        room_diarization_status="skipped",
+        room_diarization_reason="diarization_disabled",
+        now=NOW,
+    )
+
+    assert second.skipped is True
+    assert second.skip_reason == "completed_output_reused"
+    assert second.merged_transcript_record == first.merged_transcript_record
+    room_source_info = second.merged_transcript.sources[0]
+    room_segment = second.merged_transcript.segments[0]
+    assert room_source_info.diarization_status == "skipped"
+    assert room_source_info.diarization_reason == "diarization_disabled"
+    assert room_segment.speaker.kind == "fallback_room"
+    assert room_segment.speaker.label == "Room"
+    assert room_segment.speaker.confidence.status == "unavailable"
 
 
 def test_merge_timing_stage_reuses_verified_completed_output() -> None:
@@ -956,17 +1088,21 @@ def _persist_remote_diarization_pair(
     *,
     store: FileSystemArtifactStore | InMemoryArtifactStore,
     source_record: ArtifactRecord,
+    source_id: str = "system_audio",
+    capture_profile: str = "online_dual_stream",
+    speaker_label_prefix: str = "Remote speaker",
+    name_prefix: str = "",
 ) -> tuple[ArtifactRecord, ArtifactRecord]:
     source_ref = ArtifactRef.from_record(source_record)
     speakers = (
         DiarizedSpeaker(
             id="speaker_1",
-            label="Remote speaker 1",
+            label=f"{speaker_label_prefix} 1",
             embedding=SpeakerEmbeddingRef.unavailable("fixture"),
         ),
         DiarizedSpeaker(
             id="speaker_2",
-            label="Remote speaker 2",
+            label=f"{speaker_label_prefix} 2",
             embedding=SpeakerEmbeddingRef.unavailable("fixture"),
         ),
     )
@@ -975,10 +1111,10 @@ def _persist_remote_diarization_pair(
         kind="regular_timeline",
         session_id=SESSION_ID,
         source_artifact=source_ref,
-        source_id="system_audio",
+        source_id=source_id,
         context=DiarizationContext(
-            capture_profile="online_dual_stream",
-            source_id="system_audio",
+            capture_profile=capture_profile,
+            source_id=source_id,
             remote_speaker_count=2,
         ),
         provider=DiarizationProviderMetadata(
@@ -1012,14 +1148,14 @@ def _persist_remote_diarization_pair(
     regular_record = persist_diarization_artifact(
         store=store,
         artifact=regular,
-        name="regular.json",
+        name=f"{name_prefix}regular.json",
     )
     exclusive = DiarizationArtifact(
         version=DIARIZATION_SCHEMA_VERSION,
         kind="exclusive_projection",
         session_id=SESSION_ID,
         source_artifact=source_ref,
-        source_id="system_audio",
+        source_id=source_id,
         context=regular.context,
         provider=regular.provider,
         speakers=speakers,
@@ -1046,7 +1182,7 @@ def _persist_remote_diarization_pair(
     exclusive_record = persist_diarization_artifact(
         store=store,
         artifact=exclusive,
-        name="exclusive.json",
+        name=f"{name_prefix}exclusive.json",
     )
     return regular_record, exclusive_record
 

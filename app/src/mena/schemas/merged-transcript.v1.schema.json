@@ -103,6 +103,18 @@
           "pattern": "^[a-z][a-z0-9_:-]*$",
           "type": "string"
         },
+        "room_fallback_speaker_id": {
+          "pattern": "^[a-z][a-z0-9_:-]*$",
+          "type": "string"
+        },
+        "room_fallback_speaker_label": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "room_source_id": {
+          "pattern": "^[a-z][a-z0-9_:-]*$",
+          "type": "string"
+        },
         "sort_order": {
           "minLength": 1,
           "type": "string"
@@ -125,7 +137,7 @@
       "additionalProperties": false,
       "properties": {
         "channel": {
-          "enum": ["local", "remote"],
+          "enum": ["local", "remote", "room"],
           "type": "string"
         },
         "diarization_reason": {
@@ -189,7 +201,14 @@
           "$ref": "#/$defs/confidence"
         },
         "kind": {
-          "enum": ["local_user", "diarized_remote", "fallback_remote", "human_corrected"],
+          "enum": [
+            "local_user",
+            "diarized_remote",
+            "fallback_remote",
+            "diarized_room",
+            "fallback_room",
+            "human_corrected"
+          ],
           "type": "string"
         },
         "label": {
@@ -208,7 +227,7 @@
       "additionalProperties": false,
       "properties": {
         "channel": {
-          "enum": ["local", "remote"],
+          "enum": ["local", "remote", "room"],
           "type": "string"
         },
         "diarization_segment_ids": {
@@ -297,7 +316,7 @@
       "items": {
         "$ref": "#/$defs/source"
       },
-      "minItems": 2,
+      "minItems": 1,
       "maxItems": 2,
       "type": "array"
     },
