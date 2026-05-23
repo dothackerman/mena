@@ -90,6 +90,19 @@ from mena.sessions import (
     update_session_discovery,
 )
 from mena.settings import AppSettings, SettingsError, validate_summary_language
+from mena.setup import (
+    CommandIdentity,
+    CommandRunner,
+    HardwareFacts,
+    SetupActionResult,
+    SubprocessCommandRunner,
+    detect_local_installation_state,
+    evaluate_setup,
+    execute_setup_plan,
+    final_provider_readiness,
+    format_setup_report,
+    get_alpha_local_profile,
+)
 from mena.summarization import (
     OllamaSummarizationProvider,
     SummarizationError,
@@ -106,6 +119,7 @@ from mena.transcription import (
 
 COMMANDS = (
     "record",
+    "setup",
     "list",
     "show",
     "process",
@@ -171,7 +185,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     record_parser.set_defaults(command="record")
 
+    setup_parser = subparsers.add_parser("setup", help="Run Linux alpha setup/preflight.")
+    setup_parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Only evaluate local install/provider readiness; do not mutate.",
+    )
+    setup_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Confirm planned automated setup actions without prompting.",
+    )
+    setup_parser.set_defaults(command="setup")
+
     for command in COMMANDS[1:]:
+        if command == "setup":
+            continue
         subparser = subparsers.add_parser(command)
         if command in {"correct", "process", "resume", "summarize", "export", "inspect"}:
             subparser.add_argument(
@@ -221,6 +250,9 @@ def main(
     config_path: Path | None = None,
     input_fn: Callable[[str], str] | None = None,
     playback_player: PlaybackPlayer | None = None,
+    setup_runner: CommandRunner | None = None,
+    setup_command_identity: CommandIdentity | None = None,
+    setup_hardware: HardwareFacts | None = None,
 ) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -245,6 +277,17 @@ def main(
         semantic_coherence_provider_factory,
         app_settings,
     )
+
+    if args.command == "setup":
+        return _run_setup_command(
+            check_only=args.check,
+            assume_yes=args.yes,
+            settings=app_settings,
+            input_fn=input_fn,
+            runner=setup_runner,
+            command_identity=setup_command_identity,
+            hardware=setup_hardware,
+        )
 
     if args.command == "record":
         profile = parse_capture_profile(args.profile)
@@ -410,6 +453,60 @@ def main(
 
     print(f"Command '{args.command}' is not implemented yet.")
     return 0
+
+
+def _run_setup_command(
+    *,
+    check_only: bool,
+    assume_yes: bool,
+    settings: AppSettings,
+    input_fn: Callable[[str], str] | None,
+    runner: CommandRunner | None,
+    command_identity: CommandIdentity | None,
+    hardware: HardwareFacts | None,
+) -> int:
+    command_runner = runner or SubprocessCommandRunner()
+    profile = get_alpha_local_profile(settings.local_llm.ollama_model)
+    state = detect_local_installation_state(
+        settings,
+        runner=command_runner,
+        command_identity=command_identity,
+        hardware=hardware,
+    )
+    evaluation = evaluate_setup(profile, state)
+    print(format_setup_report(evaluation), end="")
+
+    if check_only:
+        return 0 if evaluation.ready else 1
+    if evaluation.ready:
+        return 0
+    if not evaluation.plan.actions:
+        return 1
+
+    prompt_fn = input if input_fn is None else input_fn
+    if not assume_yes:
+        answer = prompt_fn("Proceed with automated setup actions? [y/N] ")
+        if answer.strip().lower() not in {"y", "yes"}:
+            print("Setup declined; local provider readiness is incomplete.")
+            return 1
+
+    results = execute_setup_plan(evaluation.plan, runner=command_runner)
+    final_ready = final_provider_readiness(evaluation, results)
+    print(_format_setup_action_results(results, final_ready), end="")
+    return 0 if final_ready else 1
+
+
+def _format_setup_action_results(
+    results: Sequence[SetupActionResult],
+    final_ready: bool,
+) -> str:
+    lines = ["Setup action results:"]
+    for result in results:
+        command = "" if not result.command else f" command: {' '.join(result.command)}"
+        lines.append(f"  [{result.status}] {result.label}: {result.detail}{command}")
+    readiness = "complete" if final_ready else "incomplete"
+    lines.append(f"Local provider readiness: {readiness}")
+    return "\n".join(lines) + "\n"
 
 
 def _configured_semantic_factory(
