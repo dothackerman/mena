@@ -1341,6 +1341,37 @@ The architecture preserves provider-port replaceability, but the PoC pins concre
 
 Full per-adapter rationale and divergence resolution lives in the [research synthesis §3.1, §3.3, §3.4](../research/synthesis-research-phase-1.md#3-per-task-synthesis).
 
+#### Installation Profile and Setup Policy
+
+Status: Confirmed (per `ADR-028`)
+
+Installation and preflight must not decide provider setup by inspecting the machine and installing whatever happens to be possible.
+
+The architecture distinguishes:
+
+- `Profile catalog`: product-supported setup definitions controlled by Mena
+- `Local installation state`: what this machine currently has installed, downloaded, configured, and reachable
+- `User or administrator choice`: the selected setup path among profiles that are policy-allowed and viable on the detected machine
+
+A profile may include stage coverage, provider adapters, runtime commands, model identifiers, dependency surfaces, storage expectations, policy constraints, and hardware requirements.
+Local installation state may satisfy, partially satisfy, or fail to satisfy a profile, but it is not itself a product recommendation.
+
+Setup flow must separate:
+
+- profile lookup
+- hardware and local-state evaluation
+- planned-change presentation
+- user confirmation
+- dependency/model/configuration mutation
+- post-setup verification
+
+The product must not offer impossible or policy-disallowed setups as selectable choices.
+Unsupported setups may be explained, but cannot be selected.
+
+For the Linux CLI PoC, issue #68 implements only the first fixed local profile.
+That profile is a structural seed for the catalog boundary, not a general multi-profile recommendation system.
+Remote fallback setup, profile updates, telemetry-informed recommendations, doctor, and re-setup UX are deferred.
+
 #### User Configuration Rule
 
 Local provider configuration may be flexible during PoC and research.
@@ -1389,11 +1420,15 @@ provider adapter
 - workflow code must not directly call concrete providers
 - remote provider/model choice is policy-constrained
 - remote summarization fallback requires per-session consent in the PoC
+- install/preflight must keep profile catalog, local installation state, and user/admin choice separate
+- impossible or policy-disallowed setups must not be offered as selectable choices
 
 #### Deferred
 
 - exact policy/config format
 - exact hardware or capability detection thresholds
+- multi-profile recommendation UX and catalog update mechanism
+- doctor and re-setup commands
 
 #### Affected Parts
 
@@ -1405,6 +1440,7 @@ provider adapter
 - semantic flagging provider port
 - CLI and future interface adapters
 - installation and configuration flow
+- setup/preflight evaluation and mutation flow
 
 #### Failure Mode Prevented
 
@@ -1598,6 +1634,22 @@ These categories may live on the same machine, but they have different ownership
 Model downloads are setup/preflight work, not surprise recording-time work.
 The user should see what model/runtime assets are needed, where they come from, the expected size where known, and where they will be stored.
 Integrity should be verified where upstream checksums, signatures, or package mechanisms support it.
+
+#### Setup State Separation Rule
+
+Status: Confirmed (per `ADR-028`)
+
+The selected setup profile, local installation state, and downloaded model/cache files are separate concepts.
+
+- The selected profile records what Mena intends to use.
+- Local installation state records what the machine currently has installed, pulled, configured, and reachable.
+- Model/cache files are assets that may satisfy part of the selected profile.
+
+Setup/preflight must not infer product support from random file presence alone.
+It should inspect local state through explicit checks, compare that state to the selected profile, present planned changes, and mutate only after confirmation.
+
+This rule prepares the architecture for future doctor and re-setup workflows without requiring those features in the PoC.
+The same evaluation logic should be reusable for initial setup, smoke verification, and later health checks.
 
 `Logs and diagnostics`:
 
