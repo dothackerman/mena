@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import subprocess
 from collections.abc import Sequence
 from pathlib import Path
+from types import SimpleNamespace
 
-from mena.settings import RuntimePaths
+import pytest
+
+from mena.settings import AppSettings, RuntimePaths
 from mena.setup import (
     ALPHA_LOCAL_PROFILE_ID,
     PYANNOTE_COMMUNITY_CHECKPOINT,
@@ -16,13 +20,21 @@ from mena.setup import (
     PythonSurfaceCheck,
     ReadinessItem,
     SetupAction,
+    SetupActionResult,
     SetupEvaluation,
     SetupPlan,
     SetupProfile,
+    SubprocessCommandRunner,
+    _detect_avx2,
+    _detect_nvidia_vram_gb,
+    _parse_ollama_model_names,
     default_profile_catalog,
+    detect_command_identity,
+    detect_local_installation_state,
     evaluate_setup,
     execute_setup_plan,
     final_provider_readiness,
+    format_setup_report,
     get_alpha_local_profile,
 )
 
@@ -164,16 +176,288 @@ def test_manual_action_keeps_provider_readiness_incomplete() -> None:
     assert not final_provider_readiness(evaluation, results)
 
 
+def test_subprocess_runner_wraps_which_and_command_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = SubprocessCommandRunner()
+
+    def _which(command: str) -> str | None:
+        return "/bin/echo" if command == "echo" else None
+
+    monkeypatch.setattr("mena.setup.shutil.which", _which)
+    assert runner.which("echo") == Path("/bin/echo")
+    assert runner.which("missing") is None
+
+    monkeypatch.setattr(
+        "mena.setup.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=3, stdout="out", stderr="err"),
+    )
+    failed = runner.run(("tool", "arg"))
+    assert failed.exit_code == 3
+    assert failed.stdout == "out"
+    assert failed.stderr == "err"
+
+    def _timeout(*_args: object, **_kwargs: object) -> object:
+        raise subprocess.TimeoutExpired(cmd=("slow",), timeout=1.0, output="partial")
+
+    monkeypatch.setattr("mena.setup.subprocess.run", _timeout)
+    timed_out = runner.run(("slow",), timeout_seconds=1.0)
+    assert timed_out.exit_code == 124
+    assert timed_out.stdout == "partial"
+    assert timed_out.stderr == "Command timed out."
+
+    def _os_error(*_args: object, **_kwargs: object) -> object:
+        raise OSError("not executable")
+
+    monkeypatch.setattr("mena.setup.subprocess.run", _os_error)
+    os_error = runner.run(("broken",))
+    assert os_error.exit_code == 127
+    assert os_error.stderr == "not executable"
+
+
+def test_detect_command_identity_distinguishes_product_dev_and_direct_invocations() -> None:
+    runner = FakeRunner(paths={"mena": Path("/opt/mena/bin/mena")})
+
+    dev = detect_command_identity(
+        runner=runner,
+        current_executable=Path("/repo/app/.venv/bin/mena"),
+        version="0.1.0",
+    )
+    product = detect_command_identity(
+        runner=runner,
+        current_executable=Path("/opt/mena/bin/mena"),
+        version="0.1.0",
+    )
+    direct = detect_command_identity(
+        runner=FakeRunner(paths={}),
+        current_executable=Path("/usr/bin/python3"),
+        version="0.1.0",
+    )
+
+    assert dev.invocation_mode == "repo/dev"
+    assert product.invocation_mode == "installed-product"
+    assert direct.invocation_mode == "direct-python/test"
+    assert product.plain_mena_path == Path("/opt/mena/bin/mena")
+
+
+def test_detect_local_installation_state_uses_runner_env_and_configured_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    profile = get_alpha_local_profile()
+    runner = FakeRunner(
+        results={
+            ("ollama", "list"): CommandRun(
+                ("ollama", "list"),
+                0,
+                stdout="NAME ID SIZE MODIFIED\nllama3.2:3b abc 2 GB now\n",
+            )
+        }
+    )
+
+    monkeypatch.setattr(
+        "mena.setup._module_installed",
+        lambda import_name: import_name == "faster_whisper",
+    )
+
+    state = detect_local_installation_state(
+        settings,
+        runner=runner,
+        command_identity=CommandIdentity(
+            current_executable=Path("/bin/mena"),
+            plain_mena_path=Path("/bin/mena"),
+            version="0.1.0",
+            invocation_mode="installed-product",
+        ),
+        hardware=HardwareFacts(
+            system="Linux",
+            ram_gb=32.0,
+            cuda_available=False,
+            vram_gb=None,
+            avx2_available=True,
+        ),
+        env={"HF_TOKEN": "token"},
+        python_executable=Path("/python"),
+    )
+
+    assert tuple(check.name for check in state.commands) == profile.required_commands
+    assert state.runtime_paths == settings.paths
+    assert state.ollama.model_present
+    assert state.pyannote_token_present
+    assert [check.installed for check in state.python_surfaces] == [True, False]
+    assert state.python_executable == Path("/python")
+    assert runner.run_calls == [("ollama", "list")]
+
+
+def test_detection_helpers_parse_cpu_gpu_and_ollama_outputs(tmp_path: Path) -> None:
+    cpuinfo = tmp_path / "cpuinfo"
+    cpuinfo.write_text("flags\t: fpu sse avx2 sse4\n", encoding="utf-8")
+    empty_cpuinfo = tmp_path / "empty-cpuinfo"
+    empty_cpuinfo.write_text("", encoding="utf-8")
+    runner = FakeRunner(
+        paths={"nvidia-smi": Path("/usr/bin/nvidia-smi")},
+        results={
+            (
+                "nvidia-smi",
+                "--query-gpu=memory.total",
+                "--format=csv,noheader,nounits",
+            ): CommandRun(
+                (
+                    "nvidia-smi",
+                    "--query-gpu=memory.total",
+                    "--format=csv,noheader,nounits",
+                ),
+                0,
+                stdout="8192\nnot-a-number\n4096\n",
+            )
+        },
+    )
+
+    assert _detect_avx2(cpuinfo) is True
+    assert _detect_avx2(empty_cpuinfo) is None
+    assert _detect_avx2(tmp_path / "missing") is None
+    assert _detect_nvidia_vram_gb(FakeRunner(paths={})) is None
+    assert _detect_nvidia_vram_gb(runner) == 8.0
+    assert _parse_ollama_model_names("NAME ID\nllama3.2:3b abc\n\nother:1b def\n") == frozenset(
+        {"llama3.2:3b", "other:1b"}
+    )
+
+
+def test_evaluation_reports_manual_actions_for_playback_and_python_surfaces() -> None:
+    profile = get_alpha_local_profile()
+    state = _state(
+        playback_present=False,
+        python_surfaces={"faster_whisper": False, "pyannote.audio": False},
+        asr_model_present=False,
+        diarization_model_present=False,
+    )
+
+    evaluation = evaluate_setup(profile, state)
+
+    assert _action(evaluation.plan, "playback-command").mode == "manual"
+    assert _action(evaluation.plan, "python:faster_whisper").mode == "manual"
+    assert _action(evaluation.plan, "python:pyannote.audio").mode == "manual"
+    assert "local provider extra" in _readiness(evaluation, "python:faster_whisper").detail
+
+
+def test_evaluation_reports_hardware_detection_failures_without_setup_actions() -> None:
+    profile = get_alpha_local_profile()
+    cases = [
+        (
+            HardwareFacts(
+                system="Darwin",
+                ram_gb=32.0,
+                cuda_available=False,
+                vram_gb=None,
+                avx2_available=True,
+            ),
+            "Linux is required",
+        ),
+        (
+            HardwareFacts(
+                system="Linux",
+                ram_gb=None,
+                cuda_available=False,
+                vram_gb=None,
+                avx2_available=True,
+            ),
+            "RAM could not be detected",
+        ),
+        (
+            HardwareFacts(
+                system="Linux",
+                ram_gb=32.0,
+                cuda_available=False,
+                vram_gb=None,
+                avx2_available=None,
+            ),
+            "Neither sufficient CUDA VRAM nor AVX2",
+        ),
+        (
+            HardwareFacts(
+                system="Linux",
+                ram_gb=32.0,
+                cuda_available=False,
+                vram_gb=None,
+                avx2_available=False,
+            ),
+            "needs CUDA with enough VRAM or an AVX2-capable CPU",
+        ),
+    ]
+
+    for hardware, message in cases:
+        evaluation = evaluate_setup(profile, _state(hardware=hardware))
+        assert not evaluation.ready
+        assert evaluation.plan.actions == ()
+        assert message in evaluation.blocking_reasons[0]
+
+
+def test_execute_plan_records_failed_and_unknown_action_modes() -> None:
+    plan = SetupPlan(
+        actions=(
+            SetupAction(
+                id="automated",
+                label="Automated action",
+                mode="automated",
+                detail="run it",
+                command=("tool",),
+            ),
+            SetupAction(
+                id="custom",
+                label="Custom action",
+                mode="custom",
+                detail="unknown",
+            ),
+        )
+    )
+    runner = FakeRunner(results={("tool",): CommandRun(("tool",), 2, stderr="failed")})
+
+    results = execute_setup_plan(plan, runner=runner)
+
+    assert results[0].status == "failed"
+    assert results[0].detail == "failed"
+    assert results[1].status == "skipped"
+    assert "Unknown setup action mode" in results[1].detail
+
+
+def test_format_setup_report_includes_action_results() -> None:
+    profile = get_alpha_local_profile()
+    evaluation = evaluate_setup(profile, _state(ollama_model_present=False))
+    report = format_setup_report(
+        evaluation,
+        action_results=(
+            SetupActionResult(
+                action_id="ollama-model",
+                label="Pull Ollama model llama3.2:3b",
+                status="failed",
+                detail="network unavailable",
+                command=("ollama", "pull", "llama3.2:3b"),
+            ),
+        ),
+        final_ready=False,
+    )
+
+    assert "Setup action results:" in report
+    assert "network unavailable" in report
+    assert "command: ollama pull llama3.2:3b" in report
+    assert report.endswith("Local provider readiness: incomplete\n")
+
+
 class FakeRunner:
     def __init__(
         self,
         *,
         results: dict[tuple[str, ...], CommandRun] | None = None,
+        paths: dict[str, Path] | None = None,
     ) -> None:
         self.results = results or {}
+        self.paths = paths
         self.run_calls: list[tuple[str, ...]] = []
 
     def which(self, command: str) -> Path | None:
+        if self.paths is not None:
+            return self.paths.get(command)
         return Path("/usr/bin") / command
 
     def run(self, args: Sequence[str], *, timeout_seconds: float = 30.0) -> CommandRun:
@@ -187,6 +471,7 @@ def _state(
     hardware: HardwareFacts | None = None,
     missing_commands: set[str] | None = None,
     python_surfaces: dict[str, bool] | None = None,
+    playback_present: bool = True,
     ollama_model_present: bool = True,
     asr_model_present: bool | None = True,
     diarization_model_present: bool | None = True,
@@ -208,7 +493,7 @@ def _state(
     playback_commands = tuple(
         CommandCheck(
             name=command,
-            path=Path("/usr/bin") / command if command == "ffplay" else None,
+            path=Path("/usr/bin") / command if playback_present and command == "ffplay" else None,
         )
         for command in profile.playback_commands
     )
