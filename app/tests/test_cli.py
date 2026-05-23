@@ -481,14 +481,14 @@ def test_main_summarize_cli_language_overrides_config(
     assert captured["language"] == "it-CH"
 
 
-def test_main_summarize_preserves_empty_explicit_cli_language(
+def test_main_summarize_rejects_empty_explicit_cli_language(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
 ) -> None:
     session_dir, _, _, _ = _build_summarize_session_bundle(tmp_path)
     config_path = tmp_path / "config.toml"
     config_path.write_text("[summary]\nlanguage = 'fr-CH'\n", encoding="utf-8")
-    captured: dict[str, object] = {}
 
     def _fake_run_summarization_stage(
         *,
@@ -504,15 +504,7 @@ def test_main_summarize_preserves_empty_explicit_cli_language(
         skip_completed: bool = True,
         now: datetime | None = None,
     ) -> SimpleNamespace:
-        captured["language"] = policy.language if policy is not None else None
-        return SimpleNamespace(
-            summary_record=store.store(
-                artifact_type="summary",
-                name="summary/final.json",
-                data=b"{}",
-                version=1,
-            ),
-        )
+        raise AssertionError("summarization should not run with an invalid CLI language")
 
     monkeypatch.setattr("mena.cli.run_summarization_stage", _fake_run_summarization_stage)
 
@@ -520,9 +512,10 @@ def test_main_summarize_preserves_empty_explicit_cli_language(
         ["summarize", str(session_dir), "--language", ""],
         config_path=config_path,
     )
+    captured = capsys.readouterr()
 
-    assert exit_code == 0
-    assert captured["language"] == ""
+    assert exit_code == 1
+    assert "Cannot summarize session: --language must be a non-empty string" in captured.out
 
 
 def test_main_reports_config_errors_before_command_execution(
