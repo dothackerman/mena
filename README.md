@@ -34,12 +34,11 @@ git clone <repo-url> mena
 cd mena/app
 uv sync --all-groups
 uv run mena --version
-uv run mena setup --check
 make hooks
 make check
 ```
 
-During development, prefer `uv run mena ...` from `app/` so the command uses the checkout environment. Use explicit scratch paths, such as `MENA_DATA_ROOT` or temporary XDG roots, for dev smoke tests. Do not treat repo/dev `uv run mena ...` as proof that the installed product command works.
+During development, prefer `uv run mena ...` from `app/` so the command uses the checkout environment. Use explicit scratch paths, such as `MENA_DATA_ROOT` or temporary XDG roots, for dev smoke tests. Run setup preflight through the installed product command, not repo/dev `uv run mena ...`, and do not treat repo/dev command output as proof that the installed product command works.
 
 ## Local provider setup and preflight
 

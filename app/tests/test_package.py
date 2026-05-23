@@ -50,7 +50,7 @@ def test_readme_documents_product_install_and_dev_commands() -> None:
     assert "mena setup --yes" in readme
     assert "uv sync --all-groups" in readme
     assert "uv run mena --version" in readme
-    assert "uv run mena setup --check" in readme
+    assert "Run setup preflight through the installed product command" in readme
     assert "make hooks" in readme
     assert "make check" in readme
 
