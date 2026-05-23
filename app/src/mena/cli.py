@@ -298,7 +298,9 @@ def main(
             return _run_summarize_command(
                 session_path=Path(args.session_path),
                 manual_notes=args.manual_notes,
-                language=args.language or app_settings.summary.language,
+                language=(
+                    app_settings.summary.language if args.language is None else args.language
+                ),
                 settings=app_settings,
             )
         except (

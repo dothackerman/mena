@@ -481,6 +481,50 @@ def test_main_summarize_cli_language_overrides_config(
     assert captured["language"] == "it-CH"
 
 
+def test_main_summarize_preserves_empty_explicit_cli_language(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_dir, _, _, _ = _build_summarize_session_bundle(tmp_path)
+    config_path = tmp_path / "config.toml"
+    config_path.write_text("[summary]\nlanguage = 'fr-CH'\n", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    def _fake_run_summarization_stage(
+        *,
+        store: ArtifactStore,
+        ledger: ProcessingStageLedger,
+        merged_transcript_record: ArtifactRecord,
+        provider: object,
+        correction_overlay_record: ArtifactRecord | None = None,
+        policy: SummarizationPolicy | None = None,
+        manual_notes_record: ArtifactRecord | None = None,
+        stage: str = "summarization",
+        attempt: int = 1,
+        skip_completed: bool = True,
+        now: datetime | None = None,
+    ) -> SimpleNamespace:
+        captured["language"] = policy.language if policy is not None else None
+        return SimpleNamespace(
+            summary_record=store.store(
+                artifact_type="summary",
+                name="summary/final.json",
+                data=b"{}",
+                version=1,
+            ),
+        )
+
+    monkeypatch.setattr("mena.cli.run_summarization_stage", _fake_run_summarization_stage)
+
+    exit_code = main(
+        ["summarize", str(session_dir), "--language", ""],
+        config_path=config_path,
+    )
+
+    assert exit_code == 0
+    assert captured["language"] == ""
+
+
 def test_main_reports_config_errors_before_command_execution(
     tmp_path: Path,
     capsys: CaptureFixture[str],

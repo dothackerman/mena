@@ -155,8 +155,13 @@ def _resolve_app_settings(
 
 
 def _load_config_file(config_path: Path) -> Mapping[str, Any]:
-    if not config_path.exists():
+    try:
+        config_path.lstat()
+    except FileNotFoundError:
         return {}
+    except OSError as exc:
+        raise SettingsError(f"Cannot inspect config file {config_path}: {exc}") from exc
+
     try:
         with config_path.open("rb") as config_file:
             data = tomllib.load(config_file)
