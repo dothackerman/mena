@@ -240,6 +240,25 @@ def test_detect_command_identity_distinguishes_product_dev_and_direct_invocation
     assert product.plain_mena_path == Path("/opt/mena/bin/mena")
 
 
+def test_repo_dev_invocation_does_not_satisfy_product_command_readiness() -> None:
+    profile = get_alpha_local_profile()
+    state = _state(
+        command_identity=CommandIdentity(
+            current_executable=Path("/repo/app/.venv/bin/mena"),
+            plain_mena_path=Path("/repo/app/.venv/bin/mena"),
+            version="0.1.0",
+            invocation_mode="repo/dev",
+        )
+    )
+
+    evaluation = evaluate_setup(profile, state)
+
+    assert not evaluation.ready
+    assert _readiness(evaluation, "command:mena").ready is False
+    assert "current invocation mode is repo/dev" in _readiness(evaluation, "command:mena").detail
+    assert _action(evaluation.plan, "command:mena").mode == "manual"
+
+
 def test_detect_local_installation_state_uses_runner_env_and_configured_paths(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -468,6 +487,7 @@ class FakeRunner:
 
 def _state(
     *,
+    command_identity: CommandIdentity | None = None,
     hardware: HardwareFacts | None = None,
     missing_commands: set[str] | None = None,
     python_surfaces: dict[str, bool] | None = None,
@@ -498,7 +518,8 @@ def _state(
         for command in profile.playback_commands
     )
     return LocalInstallationState(
-        command_identity=CommandIdentity(
+        command_identity=command_identity
+        or CommandIdentity(
             current_executable=Path("/home/user/.local/bin/mena"),
             plain_mena_path=Path("/home/user/.local/bin/mena"),
             version="0.1.0",

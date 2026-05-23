@@ -582,6 +582,9 @@ def _evaluate_required_commands(
 ) -> None:
     for command_name in profile.required_commands:
         check = _command_check(state.commands, command_name)
+        if command_name == "mena":
+            _evaluate_mena_command(state, check, readiness, actions)
+            continue
         if check.present:
             readiness.append(
                 ReadinessItem(
@@ -609,6 +612,47 @@ def _evaluate_required_commands(
                 detail=detail,
             )
         )
+
+
+def _evaluate_mena_command(
+    state: LocalInstallationState,
+    check: CommandCheck,
+    readiness: list[ReadinessItem],
+    actions: list[SetupAction],
+) -> None:
+    if check.present and state.command_identity.invocation_mode == "installed-product":
+        readiness.append(
+            ReadinessItem(
+                id="command:mena",
+                label="command mena",
+                ready=True,
+                detail=str(check.path),
+            )
+        )
+        return
+    if state.command_identity.invocation_mode == "installed-product":
+        detail = _manual_command_detail("mena")
+    else:
+        detail = (
+            "Run setup through the plain installed product `mena`; "
+            f"current invocation mode is {state.command_identity.invocation_mode}."
+        )
+    readiness.append(
+        ReadinessItem(
+            id="command:mena",
+            label="command mena",
+            ready=False,
+            detail=detail,
+        )
+    )
+    actions.append(
+        SetupAction(
+            id="command:mena",
+            label="Use installed product command mena",
+            mode="manual",
+            detail=detail,
+        )
+    )
 
 
 def _evaluate_playback_commands(
