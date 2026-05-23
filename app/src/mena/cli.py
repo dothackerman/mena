@@ -94,6 +94,7 @@ from mena.setup import (
     CommandIdentity,
     CommandRunner,
     HardwareFacts,
+    ReadinessItem,
     SetupActionResult,
     SubprocessCommandRunner,
     detect_local_installation_state,
@@ -482,10 +483,17 @@ def _run_setup_command(
         return 0
     if not evaluation.plan.actions:
         return 1
+    if _readiness_item_failed(evaluation.readiness, "command:mena"):
+        print("Setup actions were not run because this is not the installed product command.")
+        return 1
 
     prompt_fn = input if input_fn is None else input_fn
     if not assume_yes:
-        answer = prompt_fn("Proceed with automated setup actions? [y/N] ")
+        try:
+            answer = prompt_fn("Proceed with automated setup actions? [y/N] ")
+        except (EOFError, KeyboardInterrupt):
+            print("Setup interrupted; local provider readiness is incomplete.")
+            return 1
         if answer.strip().lower() not in {"y", "yes"}:
             print("Setup declined; local provider readiness is incomplete.")
             return 1
@@ -507,6 +515,13 @@ def _format_setup_action_results(
     readiness = "complete" if final_ready else "incomplete"
     lines.append(f"Local provider readiness: {readiness}")
     return "\n".join(lines) + "\n"
+
+
+def _readiness_item_failed(
+    readiness: Sequence[ReadinessItem],
+    readiness_id: str,
+) -> bool:
+    return any(item.id == readiness_id and not item.ready for item in readiness)
 
 
 def _configured_semantic_factory(

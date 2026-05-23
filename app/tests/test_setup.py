@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from mena import __version__
 from mena.settings import AppSettings, RuntimePaths
 from mena.setup import (
     ALPHA_LOCAL_PROFILE_ID,
@@ -156,6 +157,8 @@ def test_final_provider_readiness_can_complete_after_successful_automated_action
     assert {result.status for result in results} == {"installed"}
     assert final_provider_readiness(evaluation, results)
     assert ("ollama", "pull", "llama3.2:3b") in runner.run_calls
+    ollama_call_index = runner.run_calls.index(("ollama", "pull", "llama3.2:3b"))
+    assert runner.run_envs[ollama_call_index]["OLLAMA_HOST"] == "http://localhost:11434"
     assert any(call[1] == "-c" and "faster_whisper" in call[2] for call in runner.run_calls)
     assert any(call[1] == "-c" and "pyannote.audio" in call[2] for call in runner.run_calls)
 
@@ -239,6 +242,15 @@ def test_detect_command_identity_distinguishes_product_dev_and_direct_invocation
     assert direct.invocation_mode == "direct-python/test"
     assert product.plain_mena_path == Path("/opt/mena/bin/mena")
 
+    bare_dev = detect_command_identity(
+        runner=FakeRunner(paths={"mena": Path("/repo/app/.venv/bin/mena")}),
+        current_executable=Path("mena"),
+        version="0.1.0",
+    )
+
+    assert bare_dev.current_executable == Path("/repo/app/.venv/bin/mena")
+    assert bare_dev.invocation_mode == "repo/dev"
+
 
 def test_repo_dev_invocation_does_not_satisfy_product_command_readiness() -> None:
     profile = get_alpha_local_profile()
@@ -263,7 +275,10 @@ def test_detect_local_installation_state_uses_runner_env_and_configured_paths(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    settings = AppSettings.from_env(env={}, home=tmp_path)
+    settings = AppSettings.from_env(
+        env={"MENA_OLLAMA_ENDPOINT": "http://127.0.0.1:11435"},
+        home=tmp_path,
+    )
     profile = get_alpha_local_profile()
     runner = FakeRunner(
         results={
@@ -304,14 +319,20 @@ def test_detect_local_installation_state_uses_runner_env_and_configured_paths(
     assert state.runtime_paths == settings.paths
     assert state.ollama.model_present
     assert state.pyannote_token_present
+    assert state.asr_model_present is True
+    assert state.diarization_model_present is False
     assert [check.installed for check in state.python_surfaces] == [True, False]
     assert state.python_executable == Path("/python")
-    assert runner.run_calls == [("ollama", "list")]
+    assert runner.run_calls[0] == ("ollama", "list")
+    assert runner.run_envs[0]["OLLAMA_HOST"] == "http://127.0.0.1:11435"
+    assert any(call[1] == "-c" and "faster_whisper" in call[2] for call in runner.run_calls)
 
 
 def test_detection_helpers_parse_cpu_gpu_and_ollama_outputs(tmp_path: Path) -> None:
     cpuinfo = tmp_path / "cpuinfo"
     cpuinfo.write_text("flags\t: fpu sse avx2 sse4\n", encoding="utf-8")
+    tail_cpuinfo = tmp_path / "tail-cpuinfo"
+    tail_cpuinfo.write_text("flags\t: fpu sse avx2\n", encoding="utf-8")
     empty_cpuinfo = tmp_path / "empty-cpuinfo"
     empty_cpuinfo.write_text("", encoding="utf-8")
     runner = FakeRunner(
@@ -334,6 +355,7 @@ def test_detection_helpers_parse_cpu_gpu_and_ollama_outputs(tmp_path: Path) -> N
     )
 
     assert _detect_avx2(cpuinfo) is True
+    assert _detect_avx2(tail_cpuinfo) is True
     assert _detect_avx2(empty_cpuinfo) is None
     assert _detect_avx2(tmp_path / "missing") is None
     assert _detect_nvidia_vram_gb(FakeRunner(paths={})) is None
@@ -358,6 +380,19 @@ def test_evaluation_reports_manual_actions_for_playback_and_python_surfaces() ->
     assert _action(evaluation.plan, "python:faster_whisper").mode == "manual"
     assert _action(evaluation.plan, "python:pyannote.audio").mode == "manual"
     assert "local provider extra" in _readiness(evaluation, "python:faster_whisper").detail
+    assert f"mena-{__version__}" in _readiness(evaluation, "python:faster_whisper").detail
+
+
+def test_unreachable_ollama_requires_manual_start_before_pull() -> None:
+    profile = get_alpha_local_profile()
+    state = _state(ollama_model_present=False, ollama_reachable=False)
+
+    evaluation = evaluate_setup(profile, state)
+
+    action = _action(evaluation.plan, "ollama-model")
+    assert action.mode == "manual"
+    assert action.command == ()
+    assert "Start the configured local Ollama service" in action.detail
 
 
 def test_evaluation_reports_hardware_detection_failures_without_setup_actions() -> None:
@@ -473,15 +508,23 @@ class FakeRunner:
         self.results = results or {}
         self.paths = paths
         self.run_calls: list[tuple[str, ...]] = []
+        self.run_envs: list[dict[str, str]] = []
 
     def which(self, command: str) -> Path | None:
         if self.paths is not None:
             return self.paths.get(command)
         return Path("/usr/bin") / command
 
-    def run(self, args: Sequence[str], *, timeout_seconds: float = 30.0) -> CommandRun:
+    def run(
+        self,
+        args: Sequence[str],
+        *,
+        timeout_seconds: float = 30.0,
+        env: Mapping[str, str] | None = None,
+    ) -> CommandRun:
         command = tuple(args)
         self.run_calls.append(command)
+        self.run_envs.append(dict(env or {}))
         return self.results.get(command, CommandRun(command, 0, stdout="ok"))
 
 
@@ -493,6 +536,7 @@ def _state(
     python_surfaces: dict[str, bool] | None = None,
     playback_present: bool = True,
     ollama_model_present: bool = True,
+    ollama_reachable: bool = True,
     asr_model_present: bool | None = True,
     diarization_model_present: bool | None = True,
     pyannote_token_present: bool = False,
@@ -549,7 +593,7 @@ def _state(
             command=CommandCheck(
                 "ollama", None if "ollama" in missing else Path("/usr/bin/ollama")
             ),
-            reachable="ollama" not in missing,
+            reachable="ollama" not in missing and ollama_reachable,
             model_present=ollama_model_present,
             detail=(
                 "model present"

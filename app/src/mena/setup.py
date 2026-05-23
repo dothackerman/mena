@@ -51,7 +51,13 @@ class CommandRunner(Protocol):
     def which(self, command: str) -> Path | None:
         """Return a command path if it is available on PATH."""
 
-    def run(self, args: Sequence[str], *, timeout_seconds: float = 30.0) -> CommandRun:
+    def run(
+        self,
+        args: Sequence[str],
+        *,
+        timeout_seconds: float = 30.0,
+        env: Mapping[str, str] | None = None,
+    ) -> CommandRun:
         """Run a command and capture its result."""
 
 
@@ -62,8 +68,15 @@ class SubprocessCommandRunner:
         path = shutil.which(command)
         return None if path is None else Path(path)
 
-    def run(self, args: Sequence[str], *, timeout_seconds: float = 30.0) -> CommandRun:
+    def run(
+        self,
+        args: Sequence[str],
+        *,
+        timeout_seconds: float = 30.0,
+        env: Mapping[str, str] | None = None,
+    ) -> CommandRun:
         command = tuple(str(arg) for arg in args)
+        command_env = None if env is None else {**os.environ, **env}
         try:
             completed = subprocess.run(
                 command,
@@ -71,6 +84,7 @@ class SubprocessCommandRunner:
                 capture_output=True,
                 text=True,
                 timeout=timeout_seconds,
+                env=command_env,
             )
         except subprocess.TimeoutExpired as exc:
             stdout = exc.stdout if isinstance(exc.stdout, str) else ""
@@ -210,6 +224,7 @@ class SetupAction:
     mode: str
     detail: str
     command: tuple[str, ...] = ()
+    env: tuple[tuple[str, str], ...] = ()
     required: bool = True
 
 
@@ -323,8 +338,13 @@ def detect_command_identity(
     """Detect the current command path and the plain installed `mena` path."""
 
     command_runner = runner or SubprocessCommandRunner()
-    current = (current_executable or Path(sys.argv[0])).expanduser()
+    current_arg = current_executable or Path(sys.argv[0])
+    current = current_arg.expanduser()
     plain_mena_path = command_runner.which("mena")
+    if not current.is_absolute():
+        current_command = command_runner.which(str(current))
+        if current_command is not None:
+            current = current_command
     resolved_current = _resolve_path(current)
     resolved_plain = None if plain_mena_path is None else _resolve_path(plain_mena_path)
     return CommandIdentity(
@@ -364,6 +384,9 @@ def detect_local_installation_state(
     current_env = os.environ if env is None else env
     identity = command_identity or detect_command_identity(runner=command_runner)
     profile = get_alpha_local_profile(settings.local_llm.ollama_model)
+    detected_hardware = hardware or detect_hardware(command_runner)
+    selected_asr_profile = _select_asr_profile(detected_hardware)
+    resolved_python = python_executable or Path(sys.executable)
     commands = tuple(
         CommandCheck(name=command, path=command_runner.which(command))
         for command in profile.required_commands
@@ -384,20 +407,32 @@ def detect_local_installation_state(
         command=_command_check(commands, "ollama"),
         runner=command_runner,
     )
+    asr_model_present = _detect_asr_model_present(
+        runner=command_runner,
+        python_executable=resolved_python,
+        profile=selected_asr_profile,
+        python_surfaces=surfaces,
+    )
+    diarization_model_present = _detect_diarization_model_present(
+        runner=command_runner,
+        python_executable=resolved_python,
+        python_surfaces=surfaces,
+        env=current_env,
+    )
     return LocalInstallationState(
         command_identity=identity,
         runtime_paths=settings.paths,
-        hardware=hardware or detect_hardware(command_runner),
+        hardware=detected_hardware,
         commands=commands,
         playback_commands=playback_commands,
         python_surfaces=surfaces,
         ollama=ollama,
-        asr_model_present=None,
-        diarization_model_present=None,
+        asr_model_present=asr_model_present,
+        diarization_model_present=diarization_model_present,
         pyannote_token_present=bool(
             current_env.get("HF_TOKEN") or current_env.get("HUGGING_FACE_HUB_TOKEN")
         ),
-        python_executable=python_executable or Path(sys.executable),
+        python_executable=resolved_python,
     )
 
 
@@ -407,13 +442,7 @@ def evaluate_setup(
 ) -> SetupEvaluation:
     """Compare one profile with local state and produce a non-mutating setup plan."""
 
-    hardware_snapshot = HardwareSnapshot(
-        cuda_available=state.hardware.cuda_available,
-        vram_gb=state.hardware.vram_gb,
-        ram_gb=state.hardware.ram_gb,
-        avx2_available=state.hardware.avx2_available,
-    )
-    selected_asr_profile = select_faster_whisper_profile(hardware_snapshot)
+    selected_asr_profile = _select_asr_profile(state.hardware)
     readiness: list[ReadinessItem] = []
     actions: list[SetupAction] = []
 
@@ -476,7 +505,12 @@ def execute_setup_plan(
                 )
             )
             continue
-        run = command_runner.run(action.command, timeout_seconds=900.0)
+        action_env = dict(action.env) if action.env else None
+        run = command_runner.run(
+            action.command,
+            timeout_seconds=900.0,
+            env=action_env,
+        )
         detail = run.stderr.strip() or run.stdout.strip() or action.detail
         results.append(
             SetupActionResult(
@@ -560,7 +594,7 @@ def format_setup_report(
     if not evaluation.plan.actions:
         lines.append("  none")
     for action in evaluation.plan.actions:
-        command = "" if not action.command else f" command: {' '.join(action.command)}"
+        command = _format_action_command(action.command, action.env)
         lines.append(f"  [{action.mode}] {action.label}: {action.detail}{command}")
 
     if action_results:
@@ -707,11 +741,7 @@ def _evaluate_python_surfaces(
                 )
             )
             continue
-        detail = (
-            "Reinstall the versioned alpha wheel with the local provider extra, "
-            "for example: uv tool install --reinstall "
-            "'dist/mena-0.1.0-py3-none-any.whl[local-providers]'."
-        )
+        detail = _provider_surface_repair_detail(requirement)
         readiness.append(
             ReadinessItem(
                 id=f"python:{requirement.import_name}",
@@ -753,7 +783,7 @@ def _evaluate_ollama_model(
             detail=state.ollama.detail,
         )
     )
-    if state.ollama.command.present:
+    if state.ollama.command.present and state.ollama.reachable:
         actions.append(
             SetupAction(
                 id="ollama-model",
@@ -761,6 +791,19 @@ def _evaluate_ollama_model(
                 mode="automated",
                 detail="Download the configured local LLM model with Ollama.",
                 command=("ollama", "pull", state.ollama.model),
+                env=_action_env({"OLLAMA_HOST": state.ollama.endpoint}),
+            )
+        )
+    elif state.ollama.command.present:
+        actions.append(
+            SetupAction(
+                id="ollama-model",
+                label="Start Ollama before pulling local model",
+                mode="manual",
+                detail=(
+                    "Start the configured local Ollama service before setup can pull "
+                    f"{state.ollama.model} from {state.ollama.endpoint}."
+                ),
             )
         )
 
@@ -922,7 +965,12 @@ def _detect_ollama_state(
             model_present=False,
             detail="Ollama command is not installed.",
         )
-    result = runner.run(("ollama", "list"), timeout_seconds=15.0)
+    endpoint_env = _action_env({"OLLAMA_HOST": settings.local_llm.ollama_endpoint})
+    result = runner.run(
+        ("ollama", "list"),
+        timeout_seconds=15.0,
+        env=dict(endpoint_env),
+    )
     if not result.ok:
         detail = result.stderr.strip() or result.stdout.strip() or "ollama list failed."
         return OllamaState(
@@ -970,7 +1018,8 @@ def _detect_avx2(cpuinfo_path: Path = Path("/proc/cpuinfo")) -> bool | None:
         return None
     if not cpuinfo.strip():
         return None
-    return " avx2 " in f" {cpuinfo.lower()} "
+    flags = cpuinfo.lower().split()
+    return "avx2" in flags
 
 
 def _detect_nvidia_vram_gb(runner: CommandRunner) -> float | None:
@@ -1002,6 +1051,59 @@ def _module_installed(import_name: str) -> bool:
         return False
 
 
+def _select_asr_profile(hardware: HardwareFacts) -> FasterWhisperModelProfile:
+    return select_faster_whisper_profile(
+        HardwareSnapshot(
+            cuda_available=hardware.cuda_available,
+            vram_gb=hardware.vram_gb,
+            ram_gb=hardware.ram_gb,
+            avx2_available=hardware.avx2_available,
+        )
+    )
+
+
+def _detect_asr_model_present(
+    *,
+    runner: CommandRunner,
+    python_executable: Path,
+    profile: FasterWhisperModelProfile,
+    python_surfaces: Sequence[PythonSurfaceCheck],
+) -> bool | None:
+    if not _python_surface_installed_checks(python_surfaces, "faster_whisper"):
+        return False
+    result = runner.run(
+        _faster_whisper_cache_check_command(python_executable, profile),
+        timeout_seconds=120.0,
+    )
+    return result.ok
+
+
+def _detect_diarization_model_present(
+    *,
+    runner: CommandRunner,
+    python_executable: Path,
+    python_surfaces: Sequence[PythonSurfaceCheck],
+    env: Mapping[str, str],
+) -> bool | None:
+    if not _python_surface_installed_checks(python_surfaces, "pyannote.audio"):
+        return False
+    token = env.get("HF_TOKEN") or env.get("HUGGING_FACE_HUB_TOKEN")
+    command_env = _action_env(
+        {
+            "HF_HUB_OFFLINE": "1",
+            "TRANSFORMERS_OFFLINE": "1",
+            "HF_TOKEN": token or "",
+            "HUGGING_FACE_HUB_TOKEN": token or "",
+        }
+    )
+    result = runner.run(
+        _pyannote_cache_check_command(python_executable),
+        timeout_seconds=120.0,
+        env=dict(command_env),
+    )
+    return result.ok
+
+
 def _command_check(checks: Sequence[CommandCheck], command_name: str) -> CommandCheck:
     for check in checks:
         if check.name == command_name:
@@ -1010,10 +1112,14 @@ def _command_check(checks: Sequence[CommandCheck], command_name: str) -> Command
 
 
 def _python_surface_installed(state: LocalInstallationState, import_name: str) -> bool:
-    return any(
-        check.requirement.import_name == import_name and check.installed
-        for check in state.python_surfaces
-    )
+    return _python_surface_installed_checks(state.python_surfaces, import_name)
+
+
+def _python_surface_installed_checks(
+    checks: Sequence[PythonSurfaceCheck],
+    import_name: str,
+) -> bool:
+    return any(check.requirement.import_name == import_name and check.installed for check in checks)
 
 
 def _manual_command_detail(command_name: str) -> str:
@@ -1029,6 +1135,15 @@ def _manual_command_detail(command_name: str) -> str:
     if command_name in {"pw-dump", "pw-cli", "wpctl"}:
         return "Install/enable the PipeWire and WirePlumber user-session audio tools."
     return f"Install required command {command_name}."
+
+
+def _provider_surface_repair_detail(requirement: PythonSurfaceRequirement) -> str:
+    return (
+        "Reinstall the current versioned alpha wheel with the local provider extra, "
+        "for example: uv tool install --reinstall "
+        f"'dist/mena-{__version__}-py3-none-any.whl[{requirement.install_extra}]', "
+        "or reinstall with '[local-providers]' to prepare all local provider surfaces."
+    )
 
 
 def _parse_ollama_model_names(output: str) -> frozenset[str]:
@@ -1055,10 +1170,38 @@ def _faster_whisper_warm_command(
     return (str(python_executable), "-c", code)
 
 
+def _faster_whisper_cache_check_command(
+    python_executable: Path,
+    profile: FasterWhisperModelProfile,
+) -> tuple[str, ...]:
+    code = (
+        "from faster_whisper import WhisperModel; "
+        f"WhisperModel({profile.checkpoint!r}, "
+        f"device={profile.device!r}, "
+        f"compute_type={profile.compute_type!r}, "
+        "local_files_only=True)"
+    )
+    return (str(python_executable), "-c", code)
+
+
 def _pyannote_warm_command(python_executable: Path) -> tuple[str, ...]:
     code = (
         "from pyannote.audio import Pipeline; "
         f"Pipeline.from_pretrained({PYANNOTE_COMMUNITY_CHECKPOINT!r})"
+    )
+    return (str(python_executable), "-c", code)
+
+
+def _pyannote_cache_check_command(python_executable: Path) -> tuple[str, ...]:
+    code = (
+        "import os; "
+        "os.environ.setdefault('HF_HUB_OFFLINE', '1'); "
+        "os.environ.setdefault('TRANSFORMERS_OFFLINE', '1'); "
+        "from pyannote.audio import Pipeline; "
+        "Pipeline.from_pretrained("
+        f"{PYANNOTE_COMMUNITY_CHECKPOINT!r}, "
+        "use_auth_token=os.environ.get('HF_TOKEN') "
+        "or os.environ.get('HUGGING_FACE_HUB_TOKEN'))"
     )
     return (str(python_executable), "-c", code)
 
@@ -1077,9 +1220,21 @@ def _invocation_mode(current: Path, plain_mena: Path | None) -> str:
         return "repo/dev"
     if plain_mena is not None and current == plain_mena:
         return "installed-product"
-    if current.name == "mena":
-        return "installed-product"
     return "direct-python/test"
+
+
+def _action_env(env: Mapping[str, str]) -> tuple[tuple[str, str], ...]:
+    return tuple(sorted((key, value) for key, value in env.items() if value))
+
+
+def _format_action_command(
+    command: Sequence[str],
+    env: Sequence[tuple[str, str]] = (),
+) -> str:
+    if not command:
+        return ""
+    env_prefix = "" if not env else " env: " + " ".join(f"{key}={value}" for key, value in env)
+    return f"{env_prefix} command: {' '.join(command)}"
 
 
 def _format_gb(value: float | None) -> str:

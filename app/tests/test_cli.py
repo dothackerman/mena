@@ -1,6 +1,6 @@
 import hashlib
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -190,6 +190,74 @@ def test_setup_decline_does_not_mutate_or_report_complete(
     assert runner.run_calls == []
     assert "Setup declined; local provider readiness is incomplete." in captured.out
     assert "Local provider readiness: incomplete" in captured.out
+
+
+def test_setup_interrupt_does_not_mutate_or_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    state = _setup_state(settings=settings, ollama_model_present=False)
+    runner = SetupFakeRunner()
+
+    def _detect_state(_settings: AppSettings, **_kwargs: object) -> LocalInstallationState:
+        return state
+
+    def _interrupt(_prompt: str) -> str:
+        raise EOFError
+
+    monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
+
+    exit_code = main(
+        ["setup"],
+        settings=settings,
+        input_fn=_interrupt,
+        setup_runner=runner,
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert runner.run_calls == []
+    assert "Setup interrupted; local provider readiness is incomplete." in captured.out
+
+
+def test_setup_does_not_mutate_from_repo_dev_invocation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    state = _setup_state(
+        settings=settings,
+        command_identity=CommandIdentity(
+            current_executable=Path("/repo/app/.venv/bin/mena"),
+            plain_mena_path=Path("/repo/app/.venv/bin/mena"),
+            version="0.1.0",
+            invocation_mode="repo/dev",
+        ),
+        ollama_model_present=False,
+        asr_model_present=False,
+        diarization_model_present=False,
+        pyannote_token_present=True,
+    )
+    runner = SetupFakeRunner()
+
+    def _detect_state(_settings: AppSettings, **_kwargs: object) -> LocalInstallationState:
+        return state
+
+    monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
+
+    exit_code = main(["setup", "--yes"], settings=settings, setup_runner=runner)
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert runner.run_calls == []
+    assert "current invocation mode is repo/dev" in captured.out
+    assert (
+        "Setup actions were not run because this is not the installed product command."
+        in captured.out
+    )
 
 
 def test_setup_yes_executes_planned_actions_through_runner(
@@ -2842,19 +2910,28 @@ def test_require_provider_type_requirements() -> None:
 class SetupFakeRunner:
     def __init__(self) -> None:
         self.run_calls: list[tuple[str, ...]] = []
+        self.run_envs: list[dict[str, str]] = []
 
     def which(self, command: str) -> Path | None:
         return Path("/usr/bin") / command
 
-    def run(self, args: Sequence[str], *, timeout_seconds: float = 30.0) -> CommandRun:
+    def run(
+        self,
+        args: Sequence[str],
+        *,
+        timeout_seconds: float = 30.0,
+        env: Mapping[str, str] | None = None,
+    ) -> CommandRun:
         command = tuple(args)
         self.run_calls.append(command)
+        self.run_envs.append(dict(env or {}))
         return CommandRun(command, 0, stdout="ok")
 
 
 def _setup_state(
     *,
     settings: AppSettings,
+    command_identity: CommandIdentity | None = None,
     ollama_model_present: bool = True,
     asr_model_present: bool | None = True,
     diarization_model_present: bool | None = True,
@@ -2862,7 +2939,8 @@ def _setup_state(
 ) -> LocalInstallationState:
     profile = get_alpha_local_profile(settings.local_llm.ollama_model)
     return LocalInstallationState(
-        command_identity=CommandIdentity(
+        command_identity=command_identity
+        or CommandIdentity(
             current_executable=Path("/home/user/.local/bin/mena"),
             plain_mena_path=Path("/home/user/.local/bin/mena"),
             version="0.1.0",
