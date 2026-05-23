@@ -1186,22 +1186,30 @@ def _faster_whisper_cache_check_command(
 
 def _pyannote_warm_command(python_executable: Path) -> tuple[str, ...]:
     code = (
+        "import inspect, os; "
         "from pyannote.audio import Pipeline; "
-        f"Pipeline.from_pretrained({PYANNOTE_COMMUNITY_CHECKPOINT!r})"
+        "token = os.environ.get('HF_TOKEN') or os.environ.get('HUGGING_FACE_HUB_TOKEN'); "
+        "kwargs = {}; "
+        "params = inspect.signature(Pipeline.from_pretrained).parameters; "
+        "kwargs.update({'use_auth_token': token} if token and 'use_auth_token' in params else {}); "
+        "kwargs.update({'token': token} if token and 'token' in params else {}); "
+        f"Pipeline.from_pretrained({PYANNOTE_COMMUNITY_CHECKPOINT!r}, **kwargs)"
     )
     return (str(python_executable), "-c", code)
 
 
 def _pyannote_cache_check_command(python_executable: Path) -> tuple[str, ...]:
     code = (
-        "import os; "
+        "import inspect, os; "
         "os.environ.setdefault('HF_HUB_OFFLINE', '1'); "
         "os.environ.setdefault('TRANSFORMERS_OFFLINE', '1'); "
         "from pyannote.audio import Pipeline; "
-        "Pipeline.from_pretrained("
-        f"{PYANNOTE_COMMUNITY_CHECKPOINT!r}, "
-        "use_auth_token=os.environ.get('HF_TOKEN') "
-        "or os.environ.get('HUGGING_FACE_HUB_TOKEN'))"
+        "token = os.environ.get('HF_TOKEN') or os.environ.get('HUGGING_FACE_HUB_TOKEN'); "
+        "kwargs = {}; "
+        "params = inspect.signature(Pipeline.from_pretrained).parameters; "
+        "kwargs.update({'use_auth_token': token} if token and 'use_auth_token' in params else {}); "
+        "kwargs.update({'token': token} if token and 'token' in params else {}); "
+        f"Pipeline.from_pretrained({PYANNOTE_COMMUNITY_CHECKPOINT!r}, **kwargs)"
     )
     return (str(python_executable), "-c", code)
 
