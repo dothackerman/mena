@@ -124,6 +124,15 @@ Use `docs/ideas/` for:
 - Follow the repository workflow in `docs/repository-workflow.md` for branch naming and issue references.
 - Treat `develop` as the active integration branch. Do not target `main` until the first shippable version or unless the user explicitly instructs it.
 
+## Developer vs Product Usage
+
+- Keep repository/developer usage distinct from installed product or UAT usage, even on the same machine.
+- Run unreleased code from the checkout with repo-scoped commands such as `cd app && uv run mena ...`.
+- Treat plain `mena ...` as the installed product/UAT command unless the current shell environment explicitly points at the repo virtual environment.
+- Dev smoke tests, fixtures, and agent validation should use explicit scratch paths such as `MENA_DATA_ROOT`, temporary XDG roots, or test fixtures. Do not rely on default product data paths for repo validation unless the user explicitly asks to test the installed product setup.
+- Installed product/UAT usage should use normal runtime paths and must not depend on the repo checkout, editable package state, or test fixtures.
+- When changing install, runtime path, or preflight behavior, verify which `mena` executable is being exercised and state whether validation used repo/dev invocation or installed product invocation.
+
 ## Commit Hygiene
 
 - Commit iteratively while working. Do not save a whole feature run as one large final commit.
