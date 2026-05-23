@@ -27,7 +27,7 @@ from mena.merge_timing import (
     MergedTranscriptSegment,
     MergedTranscriptSource,
 )
-from mena.processing import ArtifactRef
+from mena.processing import ArtifactRef, ProcessingStateError
 from mena.review_flagging import (
     REVIEW_QUEUE_ARTIFACT_TYPE,
     ReviewFlag,
@@ -156,8 +156,11 @@ def _write_wav_clip(request: PlaybackRequest) -> Path:
             "Only readable PCM WAV source audio can be clipped for this playback command."
         ) from exc
 
-    fd, raw_clip_path = tempfile.mkstemp(prefix="mena-playback-", suffix=".wav")
-    os.close(fd)
+    try:
+        fd, raw_clip_path = tempfile.mkstemp(prefix="mena-playback-", suffix=".wav")
+        os.close(fd)
+    except OSError as exc:
+        raise PlaybackError("Temporary playback clip could not be created.") from exc
     clip_path = Path(raw_clip_path)
     try:
         with wave.open(str(clip_path), "wb") as target:
@@ -574,6 +577,8 @@ def _record_for_ref(
 
     if record.sha256 != artifact_ref.sha256:
         raise CorrectionWorkflowError(f"{label} sha256 is stale.")
+    if record.version != artifact_ref.version:
+        raise CorrectionWorkflowError(f"{label} version is stale.")
     if record.status != "sealed":
         raise CorrectionWorkflowError(f"{label} must reference a sealed artifact.")
 
@@ -596,7 +601,7 @@ def _load_transcript_for_playback(
         raise CorrectionWorkflowError(
             f"Transcript artifact for source '{source_id}' payload is not valid JSON."
         ) from exc
-    except TranscriptionContractError as exc:
+    except (ProcessingStateError, TranscriptionContractError) as exc:
         raise CorrectionWorkflowError(
             f"Transcript artifact for source '{source_id}' payload is invalid: {exc}"
         ) from exc

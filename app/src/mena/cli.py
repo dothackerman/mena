@@ -89,7 +89,7 @@ from mena.sessions import (
     update_session_capture_metadata,
     update_session_discovery,
 )
-from mena.settings import AppSettings, SettingsError
+from mena.settings import AppSettings, SettingsError, validate_summary_language
 from mena.summarization import (
     OllamaSummarizationProvider,
     SummarizationError,
@@ -298,13 +298,18 @@ def main(
             return _run_summarize_command(
                 session_path=Path(args.session_path),
                 manual_notes=args.manual_notes,
-                language=args.language or app_settings.summary.language,
+                language=(
+                    app_settings.summary.language
+                    if args.language is None
+                    else validate_summary_language(args.language, "--language")
+                ),
                 settings=app_settings,
             )
         except (
             ArtifactStoreError,
             CorrectionOverlayContractError,
             ManualNotesIngestionError,
+            SettingsError,
             SummarizationError,
             ValueError,
         ) as exc:

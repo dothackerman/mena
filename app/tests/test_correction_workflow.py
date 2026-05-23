@@ -544,6 +544,36 @@ def test_local_playback_player_maps_temp_clip_write_failures(
         )
 
 
+def test_local_playback_player_maps_temp_clip_creation_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    audio_path = tmp_path / "source.wav"
+    _write_wav_fixture(audio_path)
+
+    def _which(command: str) -> str | None:
+        if command == "pw-play":
+            return "/usr/bin/pw-play"
+        return None
+
+    monkeypatch.setattr("mena.correction_workflow.shutil.which", _which)
+    monkeypatch.setattr(
+        "mena.correction_workflow.tempfile.mkstemp",
+        lambda **_kwargs: (_ for _ in ()).throw(OSError("tmp unavailable")),
+    )
+
+    with pytest.raises(PlaybackError, match="Temporary playback clip could not be created"):
+        LocalPlaybackPlayer()(
+            PlaybackRequest(
+                audio_path=audio_path,
+                start_seconds=0.0,
+                end_seconds=0.2,
+                source_id="local_mic",
+                segment_id="segment_1",
+            )
+        )
+
+
 def test_local_playback_player_maps_subprocess_failures(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -705,6 +735,104 @@ def test_run_correction_workflow_playback_rejects_stale_source_audio_reference(
     )
 
     with pytest.raises(CorrectionWorkflowError, match="Source audio artifact .* sha256 is stale"):
+        run_correction_workflow(
+            session_path=session_dir,
+            now=NOW,
+            input_fn=lambda _: "p",
+            playback_player=lambda _: None,
+        )
+
+
+def test_run_correction_workflow_playback_rejects_version_mismatched_source_audio_reference(
+    tmp_path: Path,
+) -> None:
+    session_dir, _, _, _ = _build_playback_session_bundle(
+        tmp_path,
+        flags=(
+            ReviewFlag(
+                id="flag_stale_source_version",
+                segment_id="segment_2",
+                reason_code="low_speaker_confidence",
+                start_seconds=1.0,
+                end_seconds=1.8,
+                source_id="system_audio",
+                speaker_id="remote",
+                metadata={},
+            ),
+        ),
+        source_audio_ref_version_by_id={"system_audio": 999},
+    )
+
+    with pytest.raises(CorrectionWorkflowError, match="Source audio artifact .* version is stale"):
+        run_correction_workflow(
+            session_path=session_dir,
+            now=NOW,
+            input_fn=lambda _: "p",
+            playback_player=lambda _: None,
+        )
+
+
+def test_run_correction_workflow_playback_wraps_malformed_transcript_source_ref(
+    tmp_path: Path,
+) -> None:
+    session_dir = _create_session_record(tmp_path)
+    store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=session_dir)
+    source_record = store.store(
+        artifact_type="source_audio",
+        name="source_audio/system_audio.wav",
+        data=b"system audio",
+        status="sealed",
+        metadata={"source_id": "system_audio"},
+    )
+    transcript_payload = _transcript_fixture(
+        source_id="system_audio",
+        source_record=source_record,
+    ).to_dict()
+    transcript_payload["source_artifact"] = {
+        "id": source_record.id,
+        "version": source_record.version,
+        "sha256": source_record.sha256,
+    }
+    transcript_record = store.store(
+        artifact_type="transcript",
+        name="transcript/system_audio.json",
+        data=json.dumps(transcript_payload, sort_keys=True).encode(),
+        status="sealed",
+        metadata={},
+        version=TRANSCRIPT_SCHEMA_VERSION,
+    )
+    merged_record = persist_merged_transcript_artifact(
+        store=store,
+        artifact=_merged_transcript_fixture_with_refs(
+            local_ref=ArtifactRef.from_record(transcript_record),
+            remote_ref=ArtifactRef.from_record(transcript_record),
+        ),
+        name="merged/merged.json",
+    )
+    persist_review_queue_artifact(
+        store=store,
+        artifact=_review_queue_fixture(
+            merged_record=ArtifactRef.from_record(merged_record),
+            flags=(
+                ReviewFlag(
+                    id="flag_malformed_transcript_ref",
+                    segment_id="segment_2",
+                    reason_code="low_speaker_confidence",
+                    start_seconds=1.0,
+                    end_seconds=1.8,
+                    source_id="system_audio",
+                    speaker_id="remote",
+                    metadata={},
+                ),
+            ),
+        ),
+        name="review/queue.json",
+    )
+
+    with pytest.raises(
+        CorrectionWorkflowError,
+        match="Transcript artifact for source 'system_audio' payload is invalid",
+    ):
         run_correction_workflow(
             session_path=session_dir,
             now=NOW,
@@ -1333,6 +1461,7 @@ def _build_playback_session_bundle(
     *,
     flags: tuple[ReviewFlag, ...],
     source_audio_ref_sha_by_id: dict[str, str] | None = None,
+    source_audio_ref_version_by_id: dict[str, int] | None = None,
 ) -> tuple[Path, FileSystemArtifactStore, ArtifactRecord, dict[str, ArtifactRecord]]:
     session_dir = _create_session_record(tmp_path)
     store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=session_dir)
@@ -1347,6 +1476,7 @@ def _build_playback_session_bundle(
         for source_id in ("local_mic", "system_audio")
     }
     stale_sha = source_audio_ref_sha_by_id or {}
+    stale_version = source_audio_ref_version_by_id or {}
     transcript_records = {
         source_id: persist_transcript_artifact(
             store=store,
@@ -1354,6 +1484,7 @@ def _build_playback_session_bundle(
                 source_id=source_id,
                 source_record=source_record,
                 source_ref_sha=stale_sha.get(source_id),
+                source_ref_version=stale_version.get(source_id),
             ),
             name=f"transcript/{source_id}.json",
         )
@@ -1383,14 +1514,15 @@ def _transcript_fixture(
     source_id: str,
     source_record: ArtifactRecord,
     source_ref_sha: str | None = None,
+    source_ref_version: int | None = None,
 ) -> TranscriptArtifact:
     source_ref = ArtifactRef.from_record(source_record)
-    if source_ref_sha is not None:
+    if source_ref_sha is not None or source_ref_version is not None:
         source_ref = ArtifactRef(
             id=source_ref.id,
             artifact_type=source_ref.artifact_type,
-            version=source_ref.version,
-            sha256=source_ref_sha,
+            version=source_ref.version if source_ref_version is None else source_ref_version,
+            sha256=source_ref.sha256 if source_ref_sha is None else source_ref_sha,
         )
     return TranscriptArtifact(
         version=TRANSCRIPT_SCHEMA_VERSION,

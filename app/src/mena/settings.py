@@ -33,6 +33,12 @@ class SettingsError(ValueError):
     """Raised when configuration cannot be loaded or validated."""
 
 
+def validate_summary_language(value: object, label: str) -> str:
+    """Validate and return a configured summary language code."""
+
+    return _language(value, label)
+
+
 @dataclass(frozen=True)
 class RuntimePaths:
     """Resolved local runtime paths for mena."""
@@ -155,8 +161,13 @@ def _resolve_app_settings(
 
 
 def _load_config_file(config_path: Path) -> Mapping[str, Any]:
-    if not config_path.exists():
+    try:
+        config_path.lstat()
+    except FileNotFoundError:
         return {}
+    except OSError as exc:
+        raise SettingsError(f"Cannot inspect config file {config_path}: {exc}") from exc
+
     try:
         with config_path.open("rb") as config_file:
             data = tomllib.load(config_file)
@@ -180,7 +191,9 @@ def _apply_config(
         _reject_unknown_keys(summary_section, _ALLOWED_SUMMARY_CONFIG_KEYS, "[summary]")
         if "language" in summary_section:
             summary = SummarySettings(
-                language=_language(summary_section["language"], "[summary].language")
+                language=validate_summary_language(
+                    summary_section["language"], "[summary].language"
+                )
             )
 
     ollama_section = _optional_section(config, "ollama")
@@ -205,7 +218,9 @@ def _apply_env(
 ) -> tuple[SummarySettings, LocalLLMSettings]:
     if SUMMARY_LANGUAGE_ENV_VAR in env:
         summary = SummarySettings(
-            language=_language(env[SUMMARY_LANGUAGE_ENV_VAR], SUMMARY_LANGUAGE_ENV_VAR)
+            language=validate_summary_language(
+                env[SUMMARY_LANGUAGE_ENV_VAR], SUMMARY_LANGUAGE_ENV_VAR
+            )
         )
 
     endpoint = local_llm.ollama_endpoint

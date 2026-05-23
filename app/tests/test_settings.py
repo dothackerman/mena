@@ -89,6 +89,32 @@ def test_app_settings_uses_defaults_when_config_file_is_missing(tmp_path: Path) 
     assert settings.local_llm.ollama_model == "llama3.2:3b"
 
 
+def test_app_settings_rejects_broken_config_symlink(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.symlink_to(tmp_path / "missing-target.toml")
+
+    with pytest.raises(SettingsError, match="Cannot read config file"):
+        AppSettings.from_env(env={}, home=tmp_path, config_path=config_path)
+
+
+def test_app_settings_wraps_config_path_inspection_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.toml"
+
+    def _raise_os_error(self: Path) -> object:
+        if self == config_path:
+            raise OSError("permission denied")
+        return original_lstat(self)
+
+    original_lstat = Path.lstat
+    monkeypatch.setattr(Path, "lstat", _raise_os_error)
+
+    with pytest.raises(SettingsError, match="Cannot inspect config file"):
+        AppSettings.from_env(env={}, home=tmp_path, config_path=config_path)
+
+
 def test_app_settings_loads_toml_config_values(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
     config_path.write_text(
