@@ -41,14 +41,18 @@ def test_package_metadata_declares_optional_heavy_provider_extras() -> None:
     assert "pyannote.audio>=3.3" in optional["local-providers"]
 
 
-def test_readme_documents_clone_run_and_check_commands() -> None:
+def test_readme_documents_product_install_and_dev_commands() -> None:
     readme = README.read_text(encoding="utf-8")
 
+    assert "uv build --wheel --out-dir dist" in readme
+    assert "uv tool install 'dist/mena-0.1.0-py3-none-any.whl[local-providers]'" in readme
+    assert "mena setup --check" in readme
+    assert "mena setup --yes" in readme
     assert "uv sync --all-groups" in readme
     assert "uv run mena --version" in readme
+    assert "uv run mena setup --check" in readme
     assert "make hooks" in readme
     assert "make check" in readme
-    assert "uv tool install --editable ." in readme
 
 
 def test_readme_documents_runtime_paths_and_safe_uninstall() -> None:
@@ -59,4 +63,5 @@ def test_readme_documents_runtime_paths_and_safe_uninstall() -> None:
     assert "$XDG_CACHE_HOME/mena/models" in readme
     assert "$XDG_STATE_HOME/mena/logs" in readme
     assert "must not delete sessions or exports" in readme
+    assert "Uninstall is not cleanup" in readme
     assert "uv tool uninstall mena" in readme
