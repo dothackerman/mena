@@ -273,10 +273,12 @@ def test_setup_yes_executes_planned_actions_through_runner(
         diarization_model_present=False,
         pyannote_token_present=True,
     )
+    ready_state = _setup_state(settings=settings, pyannote_token_present=True)
+    detected_states = [state, ready_state]
     runner = SetupFakeRunner()
 
     def _detect_state(_settings: AppSettings, **_kwargs: object) -> LocalInstallationState:
-        return state
+        return detected_states.pop(0)
 
     monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
 
@@ -289,6 +291,11 @@ def test_setup_yes_executes_planned_actions_through_runner(
     assert any(call[1] == "-c" and "pyannote.audio" in call[2] for call in runner.run_calls)
     assert "Setup action results:" in captured.out
     assert captured.out.rstrip().endswith("Local provider readiness: complete")
+    assert "[missing]" in captured.out
+    assert (
+        captured.out.rsplit("Mena Linux alpha setup preflight", maxsplit=1)[-1].count("[missing]")
+        == 0
+    )
 
 
 def test_setup_with_only_manual_actions_does_not_prompt_or_execute(

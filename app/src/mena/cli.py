@@ -99,7 +99,6 @@ from mena.setup import (
     detect_local_installation_state,
     evaluate_setup,
     execute_setup_plan,
-    final_provider_readiness,
     format_setup_report,
     get_alpha_local_profile,
 )
@@ -505,8 +504,22 @@ def _run_setup_command(
     except KeyboardInterrupt:
         print("Setup interrupted; local provider readiness is incomplete.")
         return 1
-    final_ready = final_provider_readiness(evaluation, results)
-    print(format_setup_report(evaluation, action_results=results, final_ready=final_ready), end="")
+    refreshed_state = detect_local_installation_state(
+        settings,
+        runner=command_runner,
+        command_identity=command_identity,
+        hardware=hardware,
+    )
+    refreshed_evaluation = evaluate_setup(profile, refreshed_state)
+    final_ready = refreshed_evaluation.ready
+    print(
+        format_setup_report(
+            refreshed_evaluation,
+            action_results=results,
+            final_ready=final_ready,
+        ),
+        end="",
+    )
     return 0 if final_ready else 1
 
 

@@ -87,7 +87,9 @@ class SubprocessCommandRunner:
                 env=command_env,
             )
         except subprocess.TimeoutExpired as exc:
-            stdout = exc.stdout if isinstance(exc.stdout, str) else ""
+            stdout = exc.output if isinstance(exc.output, str) else ""
+            if not stdout and isinstance(exc.stdout, str):
+                stdout = exc.stdout
             stderr = exc.stderr if isinstance(exc.stderr, str) else ""
             return CommandRun(command, 124, stdout=stdout, stderr=stderr or "Command timed out.")
         except OSError as exc:
