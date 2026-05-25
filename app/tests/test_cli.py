@@ -291,6 +291,37 @@ def test_setup_yes_executes_planned_actions_through_runner(
     assert captured.out.rstrip().endswith("Local provider readiness: complete")
 
 
+def test_setup_with_only_manual_actions_does_not_prompt_or_execute(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    state = _setup_state(
+        settings=settings,
+        ollama_model_present=True,
+        asr_model_present=False,
+        diarization_model_present=False,
+        python_surfaces={"faster_whisper": False, "pyannote.audio": False},
+    )
+    runner = SetupFakeRunner()
+
+    def _detect_state(_settings: AppSettings, **_kwargs: object) -> LocalInstallationState:
+        return state
+
+    def _prompt(_prompt: str) -> str:
+        raise AssertionError("manual-only setup should not prompt")
+
+    monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
+
+    exit_code = main(["setup"], settings=settings, input_fn=_prompt, setup_runner=runner)
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert runner.run_calls == []
+    assert "only manual actions remain" in captured.out
+
+
 def test_setup_interrupt_during_actions_does_not_traceback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2978,8 +3009,13 @@ def _setup_state(
     asr_model_present: bool | None = True,
     diarization_model_present: bool | None = True,
     pyannote_token_present: bool = False,
+    python_surfaces: dict[str, bool] | None = None,
 ) -> LocalInstallationState:
     profile = get_alpha_local_profile(settings.local_llm.ollama_model)
+    surface_presence = python_surfaces or {
+        "faster_whisper": True,
+        "pyannote.audio": True,
+    }
     return LocalInstallationState(
         command_identity=command_identity
         or CommandIdentity(
@@ -3008,7 +3044,10 @@ def _setup_state(
             for command in profile.playback_commands
         ),
         python_surfaces=tuple(
-            PythonSurfaceCheck(requirement=requirement, installed=True)
+            PythonSurfaceCheck(
+                requirement=requirement,
+                installed=surface_presence[requirement.import_name],
+            )
             for requirement in profile.python_surfaces
         ),
         ollama=OllamaState(

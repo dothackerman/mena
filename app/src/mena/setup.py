@@ -1242,12 +1242,22 @@ def _resolve_path(path: Path) -> Path:
 
 
 def _invocation_mode(current: Path, plain_mena: Path | None) -> str:
-    if plain_mena is not None and current == plain_mena:
+    repo_dev_path = _looks_like_repo_dev_path(current)
+    if plain_mena is not None and current == plain_mena and not repo_dev_path:
         return "installed-product"
-    current_parts = set(current.parts)
-    if ".venv" in current_parts or "site-packages" in current_parts:
+    if repo_dev_path:
         return "repo/dev"
     return "direct-python/test"
+
+
+def _looks_like_repo_dev_path(path: Path) -> bool:
+    parts = path.parts
+    if "site-packages" in parts:
+        return True
+    for index, part in enumerate(parts):
+        if part == ".venv" and index > 0 and parts[index - 1] == "app":
+            return True
+    return False
 
 
 def _action_env(env: Mapping[str, str]) -> tuple[tuple[str, str], ...]:

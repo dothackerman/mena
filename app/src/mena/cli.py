@@ -95,7 +95,6 @@ from mena.setup import (
     CommandRunner,
     HardwareFacts,
     ReadinessItem,
-    SetupActionResult,
     SubprocessCommandRunner,
     detect_local_installation_state,
     evaluate_setup,
@@ -486,6 +485,9 @@ def _run_setup_command(
     if _readiness_item_failed(evaluation.readiness, "command:mena"):
         print("Setup actions were not run because this is not the installed product command.")
         return 1
+    if not any(action.mode == "automated" for action in evaluation.plan.actions):
+        print("Setup actions were not run because only manual actions remain.")
+        return 1
 
     prompt_fn = input if input_fn is None else input_fn
     if not assume_yes:
@@ -504,21 +506,8 @@ def _run_setup_command(
         print("Setup interrupted; local provider readiness is incomplete.")
         return 1
     final_ready = final_provider_readiness(evaluation, results)
-    print(_format_setup_action_results(results, final_ready), end="")
+    print(format_setup_report(evaluation, action_results=results, final_ready=final_ready), end="")
     return 0 if final_ready else 1
-
-
-def _format_setup_action_results(
-    results: Sequence[SetupActionResult],
-    final_ready: bool,
-) -> str:
-    lines = ["Setup action results:"]
-    for result in results:
-        command = "" if not result.command else f" command: {' '.join(result.command)}"
-        lines.append(f"  [{result.status}] {result.label}: {result.detail}{command}")
-    readiness = "complete" if final_ready else "incomplete"
-    lines.append(f"Local provider readiness: {readiness}")
-    return "\n".join(lines) + "\n"
 
 
 def _readiness_item_failed(

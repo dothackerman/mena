@@ -242,14 +242,21 @@ def test_detect_command_identity_distinguishes_product_dev_and_direct_invocation
     assert direct.invocation_mode == "direct-python/test"
     assert product.plain_mena_path == Path("/opt/mena/bin/mena")
 
-    plain_venv_product = detect_command_identity(
+    repo_venv = detect_command_identity(
         runner=FakeRunner(paths={"mena": Path("/repo/app/.venv/bin/mena")}),
         current_executable=Path("mena"),
         version="0.1.0",
     )
+    external_venv_product = detect_command_identity(
+        runner=FakeRunner(paths={"mena": Path("/home/user/.venv/bin/mena")}),
+        current_executable=Path("mena"),
+        version="0.1.0",
+    )
 
-    assert plain_venv_product.current_executable == Path("/repo/app/.venv/bin/mena")
-    assert plain_venv_product.invocation_mode == "installed-product"
+    assert repo_venv.current_executable == Path("/repo/app/.venv/bin/mena")
+    assert repo_venv.invocation_mode == "repo/dev"
+    assert external_venv_product.current_executable == Path("/home/user/.venv/bin/mena")
+    assert external_venv_product.invocation_mode == "installed-product"
 
 
 def test_repo_dev_invocation_does_not_satisfy_product_command_readiness() -> None:
