@@ -1109,18 +1109,16 @@ def _detect_diarization_model_present(
     if not _python_surface_installed_checks(python_surfaces, "pyannote.audio"):
         return False
     token = env.get("HF_TOKEN") or env.get("HUGGING_FACE_HUB_TOKEN")
-    command_env = _action_env(
-        {
-            "HF_HUB_OFFLINE": "1",
-            "TRANSFORMERS_OFFLINE": "1",
-            "HF_TOKEN": token or "",
-            "HUGGING_FACE_HUB_TOKEN": token or "",
-        }
-    )
+    command_env = {
+        "HF_HUB_OFFLINE": "1",
+        "TRANSFORMERS_OFFLINE": "1",
+        "HF_TOKEN": token or "",
+        "HUGGING_FACE_HUB_TOKEN": token or "",
+    }
     result = runner.run(
         _pyannote_cache_check_command(python_executable),
         timeout_seconds=120.0,
-        env=dict(command_env),
+        env=command_env,
     )
     return result.ok
 
@@ -1254,8 +1252,6 @@ def _invocation_mode(current: Path, plain_mena: Path | None) -> str:
 
 def _looks_like_repo_dev_path(path: Path) -> bool:
     parts = path.parts
-    if "site-packages" in parts:
-        return True
     for index, part in enumerate(parts):
         if part == ".venv" and index > 0 and parts[index - 1] == "app":
             return True

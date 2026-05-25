@@ -252,11 +252,17 @@ def test_detect_command_identity_distinguishes_product_dev_and_direct_invocation
         current_executable=Path("mena"),
         version="0.1.0",
     )
+    site_packages_module = detect_command_identity(
+        runner=FakeRunner(paths={}),
+        current_executable=Path("/home/user/.venv/lib/python3.13/site-packages/mena/__main__.py"),
+        version="0.1.0",
+    )
 
     assert repo_venv.current_executable == Path("/repo/app/.venv/bin/mena")
     assert repo_venv.invocation_mode == "repo/dev"
     assert external_venv_product.current_executable == Path("/home/user/.venv/bin/mena")
     assert external_venv_product.invocation_mode == "installed-product"
+    assert site_packages_module.invocation_mode == "direct-python/test"
 
 
 def test_repo_dev_invocation_does_not_satisfy_product_command_readiness() -> None:
@@ -372,6 +378,41 @@ def test_detect_local_installation_state_probes_surfaces_with_target_interpreter
         and "importlib.util.find_spec('pyannote.audio')" in call[2]
         for call in runner.run_calls
     )
+
+
+def test_diarization_cache_probe_clears_ambient_tokens_when_env_has_none(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    runner = FakeRunner()
+
+    detect_local_installation_state(
+        settings,
+        runner=runner,
+        command_identity=CommandIdentity(
+            current_executable=Path("/bin/mena"),
+            plain_mena_path=Path("/bin/mena"),
+            version="0.1.0",
+            invocation_mode="installed-product",
+        ),
+        hardware=HardwareFacts(
+            system="Linux",
+            ram_gb=32.0,
+            cuda_available=False,
+            vram_gb=None,
+            avx2_available=True,
+        ),
+        env={},
+        python_executable=Path("/target/python"),
+    )
+
+    pyannote_call_index = next(
+        index
+        for index, call in enumerate(runner.run_calls)
+        if len(call) > 2 and "Pipeline.from_pretrained" in call[2]
+    )
+    assert runner.run_envs[pyannote_call_index]["HF_TOKEN"] == ""
+    assert runner.run_envs[pyannote_call_index]["HUGGING_FACE_HUB_TOKEN"] == ""
 
 
 def test_detection_helpers_parse_cpu_gpu_and_ollama_outputs(tmp_path: Path) -> None:
