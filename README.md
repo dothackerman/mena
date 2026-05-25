@@ -15,7 +15,7 @@ The Linux CLI alpha product path is a versioned wheel install, not an editable c
 ```bash
 cd mena/app
 uv build --wheel --out-dir dist
-MENA_WHEEL="$(ls dist/mena-*.whl | head -n 1)"
+MENA_WHEEL="$(ls -t dist/mena-*.whl | head -n 1)"
 uv tool install "${MENA_WHEEL}[local-providers]"
 mena --version
 mena setup --check
@@ -69,7 +69,7 @@ If hardware cannot be detected confidently or cannot satisfy the fixed local pro
 The alpha product install should include the local provider extra:
 
 ```bash
-MENA_WHEEL="$(ls dist/mena-*.whl | head -n 1)"
+MENA_WHEEL="$(ls -t dist/mena-*.whl | head -n 1)"
 uv tool install "${MENA_WHEEL}[local-providers]"
 ```
 
