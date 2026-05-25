@@ -265,6 +265,37 @@ def test_detect_command_identity_distinguishes_product_dev_and_direct_invocation
     assert site_packages_module.invocation_mode == "direct-python/test"
 
 
+@pytest.mark.parametrize(
+    ("current_executable", "plain_mena_path", "expected_mode"),
+    [
+        (Path("/repo/app/.venv/bin/mena"), Path("/repo/app/.venv/bin/mena"), "repo/dev"),
+        (Path("/home/user/.venv/bin/mena"), Path("/home/user/.venv/bin/mena"), "installed-product"),
+        (
+            Path("/home/user/.venv/lib/python3.13/site-packages/mena/__main__.py"),
+            None,
+            "direct-python/test",
+        ),
+        (Path("/opt/mena/bin/python"), Path("/opt/mena/bin/mena"), "direct-python/test"),
+    ],
+)
+def test_detect_command_identity_boundary_matrix_for_setup_modes(
+    current_executable: Path,
+    plain_mena_path: Path | None,
+    expected_mode: str,
+) -> None:
+    runner = FakeRunner(paths={} if plain_mena_path is None else {"mena": plain_mena_path})
+
+    identity = detect_command_identity(
+        runner=runner,
+        current_executable=current_executable,
+        version="0.1.0",
+    )
+
+    assert identity.invocation_mode == expected_mode
+    assert identity.current_executable == current_executable
+    assert identity.plain_mena_path == plain_mena_path
+
+
 def test_repo_dev_invocation_does_not_satisfy_product_command_readiness() -> None:
     profile = get_alpha_local_profile()
     state = _state(
