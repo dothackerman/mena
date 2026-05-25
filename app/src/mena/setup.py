@@ -1158,10 +1158,9 @@ def _manual_command_detail(command_name: str) -> str:
 
 def _provider_surface_repair_detail(requirement: PythonSurfaceRequirement) -> str:
     return (
-        "Reinstall the current versioned alpha wheel with the local provider extra, "
-        "for example: uv tool install --reinstall "
-        f"'dist/mena-{__version__}-py3-none-any.whl[{requirement.install_extra}]', "
-        "or reinstall with '[local-providers]' to prepare all local provider surfaces."
+        "Reinstall the installed alpha wheel with the [local-providers] extra to prepare "
+        "all local provider surfaces. If repairing only this provider surface, reinstall "
+        f"the same wheel with [{requirement.install_extra}]."
     )
 
 

@@ -7,7 +7,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from mena import __version__
 from mena.settings import AppSettings, RuntimePaths
 from mena.setup import (
     ALPHA_LOCAL_PROFILE_ID,
@@ -497,9 +496,10 @@ def test_evaluation_reports_manual_actions_for_playback_and_python_surfaces() ->
     assert _action(evaluation.plan, "playback-command").mode == "manual"
     assert _action(evaluation.plan, "python:faster_whisper").mode == "manual"
     assert _action(evaluation.plan, "python:pyannote.audio").mode == "manual"
-    assert "local provider extra" in _readiness(evaluation, "python:faster_whisper").detail
+    assert "[local-providers]" in _readiness(evaluation, "python:faster_whisper").detail
+    assert "[asr]" in _readiness(evaluation, "python:faster_whisper").detail
+    assert "dist/mena-" not in _readiness(evaluation, "python:faster_whisper").detail
     assert "faster-whisper must be installed" in _readiness(evaluation, "asr-model").detail
-    assert f"mena-{__version__}" in _readiness(evaluation, "python:faster_whisper").detail
 
 
 def test_unreachable_ollama_requires_manual_start_before_pull() -> None:
