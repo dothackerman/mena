@@ -1,5 +1,6 @@
 import hashlib
 import json
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -67,7 +68,17 @@ from mena.sessions import (
     create_session,
     update_session_capture_metadata,
 )
-from mena.settings import DATA_ROOT_ENV_VAR
+from mena.settings import DATA_ROOT_ENV_VAR, AppSettings
+from mena.setup import (
+    CommandCheck,
+    CommandIdentity,
+    CommandRun,
+    HardwareFacts,
+    LocalInstallationState,
+    OllamaState,
+    PythonSurfaceCheck,
+    get_alpha_local_profile,
+)
 from mena.summarization import (
     FakeSummarizationProvider,
     SummarizationError,
@@ -110,6 +121,7 @@ def test_main_exposes_architecture_command_surface(capsys: CaptureFixture[str]) 
             "summarize",
             "export",
             "inspect",
+            "setup",
         }
     ]:
         exit_code = main([command])
@@ -125,6 +137,276 @@ def test_main_prints_version(capsys: CaptureFixture[str]) -> None:
     captured = capsys.readouterr()
     assert exit_code == 0
     assert captured.out.strip()
+
+
+def test_setup_check_reports_product_paths_and_ready_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    state = _setup_state(settings=settings)
+
+    def _detect_state(_settings: AppSettings, **_kwargs: object) -> LocalInstallationState:
+        return state
+
+    monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
+
+    exit_code = main(["setup", "--check"], settings=settings)
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "Profile: linux-alpha-local-v1" in captured.out
+    assert "Current executable: /home/user/.local/bin/mena" in captured.out
+    assert "Plain mena on PATH: /home/user/.local/bin/mena" in captured.out
+    assert f"sessions: {settings.paths.sessions_dir}" in captured.out
+    assert "Invocation mode: installed-product" in captured.out
+    assert "Local provider readiness: complete" in captured.out
+
+
+def test_setup_decline_does_not_mutate_or_report_complete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    state = _setup_state(settings=settings, ollama_model_present=False)
+    runner = SetupFakeRunner()
+
+    def _detect_state(_settings: AppSettings, **_kwargs: object) -> LocalInstallationState:
+        return state
+
+    monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
+
+    exit_code = main(
+        ["setup"],
+        settings=settings,
+        input_fn=lambda _: "n",
+        setup_runner=runner,
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert runner.run_calls == []
+    assert "Setup declined; local provider readiness is incomplete." in captured.out
+    assert "Local provider readiness: incomplete" in captured.out
+
+
+def test_setup_interrupt_does_not_mutate_or_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    state = _setup_state(settings=settings, ollama_model_present=False)
+    runner = SetupFakeRunner()
+
+    def _detect_state(_settings: AppSettings, **_kwargs: object) -> LocalInstallationState:
+        return state
+
+    def _interrupt(_prompt: str) -> str:
+        raise EOFError
+
+    monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
+
+    exit_code = main(
+        ["setup"],
+        settings=settings,
+        input_fn=_interrupt,
+        setup_runner=runner,
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert runner.run_calls == []
+    assert "Setup interrupted; local provider readiness is incomplete." in captured.out
+
+
+def test_setup_interrupt_during_initial_detection_does_not_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    runner = SetupFakeRunner()
+
+    def _detect_state(_settings: AppSettings, **_kwargs: object) -> LocalInstallationState:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
+
+    exit_code = main(["setup", "--check"], settings=settings, setup_runner=runner)
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert runner.run_calls == []
+    assert "Setup interrupted; local provider readiness is incomplete." in captured.out
+
+
+def test_setup_does_not_mutate_from_repo_dev_invocation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    state = _setup_state(
+        settings=settings,
+        command_identity=CommandIdentity(
+            current_executable=Path("/repo/app/.venv/bin/mena"),
+            plain_mena_path=Path("/repo/app/.venv/bin/mena"),
+            version="0.1.0",
+            invocation_mode="repo/dev",
+        ),
+        ollama_model_present=False,
+        asr_model_present=False,
+        diarization_model_present=False,
+        pyannote_token_present=True,
+    )
+    runner = SetupFakeRunner()
+
+    def _detect_state(_settings: AppSettings, **_kwargs: object) -> LocalInstallationState:
+        return state
+
+    monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
+
+    exit_code = main(["setup", "--yes"], settings=settings, setup_runner=runner)
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert runner.run_calls == []
+    assert "current invocation mode is repo/dev" in captured.out
+    assert (
+        "Setup actions were not run because this is not the installed product command."
+        in captured.out
+    )
+
+
+def test_setup_yes_executes_planned_actions_through_runner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    state = _setup_state(
+        settings=settings,
+        ollama_model_present=False,
+        asr_model_present=False,
+        diarization_model_present=False,
+        pyannote_token_present=True,
+    )
+    ready_state = _setup_state(settings=settings, pyannote_token_present=True)
+    detected_states = [state, ready_state]
+    runner = SetupFakeRunner()
+
+    def _detect_state(_settings: AppSettings, **_kwargs: object) -> LocalInstallationState:
+        return detected_states.pop(0)
+
+    monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
+
+    exit_code = main(["setup", "--yes"], settings=settings, setup_runner=runner)
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert ("ollama", "pull", "llama3.2:3b") in runner.run_calls
+    assert any(call[1] == "-c" and "faster_whisper" in call[2] for call in runner.run_calls)
+    assert any(call[1] == "-c" and "pyannote.audio" in call[2] for call in runner.run_calls)
+    assert "Setup action results:" in captured.out
+    assert captured.out.rstrip().endswith("Local provider readiness: complete")
+    assert "[missing]" in captured.out
+    assert (
+        captured.out.rsplit("Mena Linux alpha setup preflight", maxsplit=1)[-1].count("[missing]")
+        == 0
+    )
+
+
+def test_setup_with_only_manual_actions_does_not_prompt_or_execute(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    state = _setup_state(
+        settings=settings,
+        ollama_model_present=True,
+        asr_model_present=False,
+        diarization_model_present=False,
+        python_surfaces={"faster_whisper": False, "pyannote.audio": False},
+    )
+    runner = SetupFakeRunner()
+
+    def _detect_state(_settings: AppSettings, **_kwargs: object) -> LocalInstallationState:
+        return state
+
+    def _prompt(_prompt: str) -> str:
+        raise AssertionError("manual-only setup should not prompt")
+
+    monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
+
+    exit_code = main(["setup"], settings=settings, input_fn=_prompt, setup_runner=runner)
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert runner.run_calls == []
+    assert "only manual actions remain" in captured.out
+
+
+def test_setup_interrupt_during_actions_does_not_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    state = _setup_state(
+        settings=settings,
+        ollama_model_present=False,
+        asr_model_present=False,
+        diarization_model_present=False,
+        pyannote_token_present=True,
+    )
+    runner = InterruptingSetupRunner()
+
+    def _detect_state(_settings: AppSettings, **_kwargs: object) -> LocalInstallationState:
+        return state
+
+    monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
+
+    exit_code = main(["setup", "--yes"], settings=settings, setup_runner=runner)
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert runner.run_calls
+    assert "Setup interrupted; local provider readiness is incomplete." in captured.out
+
+
+def test_setup_interrupt_during_post_action_refresh_does_not_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    state = _setup_state(
+        settings=settings,
+        ollama_model_present=False,
+        asr_model_present=False,
+        diarization_model_present=False,
+        pyannote_token_present=True,
+    )
+    detected_states: list[LocalInstallationState] = [state]
+    runner = SetupFakeRunner()
+
+    def _detect_state(_settings: AppSettings, **_kwargs: object) -> LocalInstallationState:
+        if detected_states:
+            return detected_states.pop(0)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
+
+    exit_code = main(["setup", "--yes"], settings=settings, setup_runner=runner)
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert runner.run_calls
+    assert "Setup interrupted; local provider readiness is incomplete." in captured.out
 
 
 def test_record_help_lists_profile_options(capsys: CaptureFixture[str]) -> None:
@@ -2741,3 +3023,106 @@ def test_require_provider_type_requirements() -> None:
             provider_type=DiarizationProvider,
             provider_name="diarization",
         )
+
+
+class SetupFakeRunner:
+    def __init__(self) -> None:
+        self.run_calls: list[tuple[str, ...]] = []
+        self.run_envs: list[dict[str, str]] = []
+
+    def which(self, command: str) -> Path | None:
+        return Path("/usr/bin") / command
+
+    def run(
+        self,
+        args: Sequence[str],
+        *,
+        timeout_seconds: float = 30.0,
+        env: Mapping[str, str] | None = None,
+    ) -> CommandRun:
+        command = tuple(args)
+        self.run_calls.append(command)
+        self.run_envs.append(dict(env or {}))
+        return CommandRun(command, 0, stdout="ok")
+
+
+class InterruptingSetupRunner(SetupFakeRunner):
+    def run(
+        self,
+        args: Sequence[str],
+        *,
+        timeout_seconds: float = 30.0,
+        env: Mapping[str, str] | None = None,
+    ) -> CommandRun:
+        command = tuple(args)
+        self.run_calls.append(command)
+        self.run_envs.append(dict(env or {}))
+        raise KeyboardInterrupt
+
+
+def _setup_state(
+    *,
+    settings: AppSettings,
+    command_identity: CommandIdentity | None = None,
+    ollama_model_present: bool = True,
+    asr_model_present: bool | None = True,
+    diarization_model_present: bool | None = True,
+    pyannote_token_present: bool = False,
+    python_surfaces: dict[str, bool] | None = None,
+) -> LocalInstallationState:
+    profile = get_alpha_local_profile(settings.local_llm.ollama_model)
+    surface_presence = python_surfaces or {
+        "faster_whisper": True,
+        "pyannote.audio": True,
+    }
+    return LocalInstallationState(
+        command_identity=command_identity
+        or CommandIdentity(
+            current_executable=Path("/home/user/.local/bin/mena"),
+            plain_mena_path=Path("/home/user/.local/bin/mena"),
+            version="0.1.0",
+            invocation_mode="installed-product",
+        ),
+        runtime_paths=settings.paths,
+        hardware=HardwareFacts(
+            system="Linux",
+            ram_gb=32.0,
+            cuda_available=True,
+            vram_gb=12.0,
+            avx2_available=True,
+        ),
+        commands=tuple(
+            CommandCheck(name=command, path=Path("/usr/bin") / command)
+            for command in profile.required_commands
+        ),
+        playback_commands=tuple(
+            CommandCheck(
+                name=command,
+                path=Path("/usr/bin") / command if command == "ffplay" else None,
+            )
+            for command in profile.playback_commands
+        ),
+        python_surfaces=tuple(
+            PythonSurfaceCheck(
+                requirement=requirement,
+                installed=surface_presence[requirement.import_name],
+            )
+            for requirement in profile.python_surfaces
+        ),
+        ollama=OllamaState(
+            endpoint=settings.local_llm.ollama_endpoint,
+            model=settings.local_llm.ollama_model,
+            command=CommandCheck("ollama", Path("/usr/bin/ollama")),
+            reachable=True,
+            model_present=ollama_model_present,
+            detail=(
+                "model present"
+                if ollama_model_present
+                else f"model {settings.local_llm.ollama_model} is not listed by Ollama"
+            ),
+        ),
+        asr_model_present=asr_model_present,
+        diarization_model_present=diarization_model_present,
+        pyannote_token_present=pyannote_token_present,
+        python_executable=Path("/usr/bin/python3"),
+    )
