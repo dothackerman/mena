@@ -498,7 +498,11 @@ def _run_setup_command(
             print("Setup declined; local provider readiness is incomplete.")
             return 1
 
-    results = execute_setup_plan(evaluation.plan, runner=command_runner)
+    try:
+        results = execute_setup_plan(evaluation.plan, runner=command_runner)
+    except KeyboardInterrupt:
+        print("Setup interrupted; local provider readiness is incomplete.")
+        return 1
     final_ready = final_provider_readiness(evaluation, results)
     print(_format_setup_action_results(results, final_ready), end="")
     return 0 if final_ready else 1

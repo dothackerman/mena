@@ -291,6 +291,34 @@ def test_setup_yes_executes_planned_actions_through_runner(
     assert captured.out.rstrip().endswith("Local provider readiness: complete")
 
 
+def test_setup_interrupt_during_actions_does_not_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    state = _setup_state(
+        settings=settings,
+        ollama_model_present=False,
+        asr_model_present=False,
+        diarization_model_present=False,
+        pyannote_token_present=True,
+    )
+    runner = InterruptingSetupRunner()
+
+    def _detect_state(_settings: AppSettings, **_kwargs: object) -> LocalInstallationState:
+        return state
+
+    monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
+
+    exit_code = main(["setup", "--yes"], settings=settings, setup_runner=runner)
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert runner.run_calls
+    assert "Setup interrupted; local provider readiness is incomplete." in captured.out
+
+
 def test_record_help_lists_profile_options(capsys: CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as exc_info:
         main(["record", "--help"])
@@ -2926,6 +2954,20 @@ class SetupFakeRunner:
         self.run_calls.append(command)
         self.run_envs.append(dict(env or {}))
         return CommandRun(command, 0, stdout="ok")
+
+
+class InterruptingSetupRunner(SetupFakeRunner):
+    def run(
+        self,
+        args: Sequence[str],
+        *,
+        timeout_seconds: float = 30.0,
+        env: Mapping[str, str] | None = None,
+    ) -> CommandRun:
+        command = tuple(args)
+        self.run_calls.append(command)
+        self.run_envs.append(dict(env or {}))
+        raise KeyboardInterrupt
 
 
 def _setup_state(

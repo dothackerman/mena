@@ -242,14 +242,14 @@ def test_detect_command_identity_distinguishes_product_dev_and_direct_invocation
     assert direct.invocation_mode == "direct-python/test"
     assert product.plain_mena_path == Path("/opt/mena/bin/mena")
 
-    bare_dev = detect_command_identity(
+    plain_venv_product = detect_command_identity(
         runner=FakeRunner(paths={"mena": Path("/repo/app/.venv/bin/mena")}),
         current_executable=Path("mena"),
         version="0.1.0",
     )
 
-    assert bare_dev.current_executable == Path("/repo/app/.venv/bin/mena")
-    assert bare_dev.invocation_mode == "repo/dev"
+    assert plain_venv_product.current_executable == Path("/repo/app/.venv/bin/mena")
+    assert plain_venv_product.invocation_mode == "installed-product"
 
 
 def test_repo_dev_invocation_does_not_satisfy_product_command_readiness() -> None:
@@ -292,7 +292,7 @@ def test_detect_local_installation_state_uses_runner_env_and_configured_paths(
 
     monkeypatch.setattr(
         "mena.setup._module_installed",
-        lambda import_name: import_name == "faster_whisper",
+        lambda import_name, **_kwargs: import_name == "faster_whisper",
     )
 
     state = detect_local_installation_state(
@@ -326,6 +326,45 @@ def test_detect_local_installation_state_uses_runner_env_and_configured_paths(
     assert runner.run_calls[0] == ("ollama", "list")
     assert runner.run_envs[0]["OLLAMA_HOST"] == "http://127.0.0.1:11435"
     assert any(call[1] == "-c" and "faster_whisper" in call[2] for call in runner.run_calls)
+
+
+def test_detect_local_installation_state_probes_surfaces_with_target_interpreter(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    runner = FakeRunner()
+
+    detect_local_installation_state(
+        settings,
+        runner=runner,
+        command_identity=CommandIdentity(
+            current_executable=Path("/bin/mena"),
+            plain_mena_path=Path("/bin/mena"),
+            version="0.1.0",
+            invocation_mode="installed-product",
+        ),
+        hardware=HardwareFacts(
+            system="Linux",
+            ram_gb=32.0,
+            cuda_available=False,
+            vram_gb=None,
+            avx2_available=True,
+        ),
+        python_executable=Path("/target/python"),
+    )
+
+    assert any(
+        call[0] == "/target/python"
+        and call[1] == "-c"
+        and "importlib.util.find_spec('faster_whisper')" in call[2]
+        for call in runner.run_calls
+    )
+    assert any(
+        call[0] == "/target/python"
+        and call[1] == "-c"
+        and "importlib.util.find_spec('pyannote.audio')" in call[2]
+        for call in runner.run_calls
+    )
 
 
 def test_detection_helpers_parse_cpu_gpu_and_ollama_outputs(tmp_path: Path) -> None:

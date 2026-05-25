@@ -398,7 +398,11 @@ def detect_local_installation_state(
     surfaces = tuple(
         PythonSurfaceCheck(
             requirement=requirement,
-            installed=_module_installed(requirement.import_name),
+            installed=_module_installed(
+                requirement.import_name,
+                runner=command_runner,
+                python_executable=resolved_python,
+            ),
         )
         for requirement in profile.python_surfaces
     )
@@ -1048,7 +1052,18 @@ def _detect_nvidia_vram_gb(runner: CommandRunner) -> float | None:
     return max(values) if values else None
 
 
-def _module_installed(import_name: str) -> bool:
+def _module_installed(
+    import_name: str,
+    *,
+    runner: CommandRunner | None = None,
+    python_executable: Path | None = None,
+) -> bool:
+    if runner is not None and python_executable is not None:
+        code = (
+            "import importlib.util, sys; "
+            f"sys.exit(0 if importlib.util.find_spec({import_name!r}) is not None else 1)"
+        )
+        return runner.run((str(python_executable), "-c", code), timeout_seconds=30.0).ok
     try:
         return importlib.util.find_spec(import_name) is not None
     except (ImportError, AttributeError, ValueError):
@@ -1227,11 +1242,11 @@ def _resolve_path(path: Path) -> Path:
 
 
 def _invocation_mode(current: Path, plain_mena: Path | None) -> str:
+    if plain_mena is not None and current == plain_mena:
+        return "installed-product"
     current_parts = set(current.parts)
     if ".venv" in current_parts or "site-packages" in current_parts:
         return "repo/dev"
-    if plain_mena is not None and current == plain_mena:
-        return "installed-product"
     return "direct-python/test"
 
 
