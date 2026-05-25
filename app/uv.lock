@@ -1566,7 +1566,7 @@ wheels = [
 
 [[package]]
 name = "mena"
-version = "0.1.0"
+version = "0.1.0rc1"
 source = { editable = "." }
 
 [package.optional-dependencies]
