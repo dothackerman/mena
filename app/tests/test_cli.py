@@ -222,6 +222,27 @@ def test_setup_interrupt_does_not_mutate_or_traceback(
     assert "Setup interrupted; local provider readiness is incomplete." in captured.out
 
 
+def test_setup_interrupt_during_initial_detection_does_not_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    runner = SetupFakeRunner()
+
+    def _detect_state(_settings: AppSettings, **_kwargs: object) -> LocalInstallationState:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
+
+    exit_code = main(["setup", "--check"], settings=settings, setup_runner=runner)
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert runner.run_calls == []
+    assert "Setup interrupted; local provider readiness is incomplete." in captured.out
+
+
 def test_setup_does_not_mutate_from_repo_dev_invocation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -346,6 +367,37 @@ def test_setup_interrupt_during_actions_does_not_traceback(
 
     def _detect_state(_settings: AppSettings, **_kwargs: object) -> LocalInstallationState:
         return state
+
+    monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
+
+    exit_code = main(["setup", "--yes"], settings=settings, setup_runner=runner)
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert runner.run_calls
+    assert "Setup interrupted; local provider readiness is incomplete." in captured.out
+
+
+def test_setup_interrupt_during_post_action_refresh_does_not_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    state = _setup_state(
+        settings=settings,
+        ollama_model_present=False,
+        asr_model_present=False,
+        diarization_model_present=False,
+        pyannote_token_present=True,
+    )
+    detected_states: list[LocalInstallationState] = [state]
+    runner = SetupFakeRunner()
+
+    def _detect_state(_settings: AppSettings, **_kwargs: object) -> LocalInstallationState:
+        if detected_states:
+            return detected_states.pop(0)
+        raise KeyboardInterrupt
 
     monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
 

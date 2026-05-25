@@ -466,12 +466,16 @@ def _run_setup_command(
 ) -> int:
     command_runner = runner or SubprocessCommandRunner()
     profile = get_alpha_local_profile(settings.local_llm.ollama_model)
-    state = detect_local_installation_state(
-        settings,
-        runner=command_runner,
-        command_identity=command_identity,
-        hardware=hardware,
-    )
+    try:
+        state = detect_local_installation_state(
+            settings,
+            runner=command_runner,
+            command_identity=command_identity,
+            hardware=hardware,
+        )
+    except KeyboardInterrupt:
+        print("Setup interrupted; local provider readiness is incomplete.")
+        return 1
     evaluation = evaluate_setup(profile, state)
     print(format_setup_report(evaluation), end="")
 
@@ -504,12 +508,16 @@ def _run_setup_command(
     except KeyboardInterrupt:
         print("Setup interrupted; local provider readiness is incomplete.")
         return 1
-    refreshed_state = detect_local_installation_state(
-        settings,
-        runner=command_runner,
-        command_identity=command_identity,
-        hardware=hardware,
-    )
+    try:
+        refreshed_state = detect_local_installation_state(
+            settings,
+            runner=command_runner,
+            command_identity=command_identity,
+            hardware=hardware,
+        )
+    except KeyboardInterrupt:
+        print("Setup interrupted; local provider readiness is incomplete.")
+        return 1
     refreshed_evaluation = evaluate_setup(profile, refreshed_state)
     final_ready = refreshed_evaluation.ready
     print(
