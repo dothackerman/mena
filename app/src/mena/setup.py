@@ -15,7 +15,7 @@ from typing import Protocol
 
 from mena import __version__
 from mena.local_llm import OLLAMA_DEFAULT_MODEL
-from mena.settings import AppSettings, RuntimePaths
+from mena.settings import CONFIG_FILENAME, AppSettings, RuntimePaths
 from mena.transcription import (
     FasterWhisperModelProfile,
     HardwareSnapshot,
@@ -573,7 +573,7 @@ def format_setup_report(
         f"Invocation mode: {identity.invocation_mode}",
         f"Version: {identity.version}",
         "Runtime paths:",
-        f"  config: {paths.config_home / 'config.toml'}",
+        f"  config: {paths.config_home / CONFIG_FILENAME}",
         f"  sessions: {paths.sessions_dir}",
         f"  exports: {paths.exports_dir}",
         f"  models/cache: {paths.model_cache_dir}",
@@ -824,9 +824,13 @@ def _evaluate_asr_model(
             )
         )
         return
-    detail = (
-        "Verify or download the selected faster-whisper model before recording-time transcription."
-    )
+    if not _python_surface_installed(state, "faster_whisper"):
+        detail = "faster-whisper must be installed before its ASR model can be prepared."
+    else:
+        detail = (
+            "Verify or download the selected faster-whisper model before "
+            "recording-time transcription."
+        )
     readiness.append(
         ReadinessItem(
             id="asr-model",

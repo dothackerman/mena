@@ -380,6 +380,7 @@ def test_evaluation_reports_manual_actions_for_playback_and_python_surfaces() ->
     assert _action(evaluation.plan, "python:faster_whisper").mode == "manual"
     assert _action(evaluation.plan, "python:pyannote.audio").mode == "manual"
     assert "local provider extra" in _readiness(evaluation, "python:faster_whisper").detail
+    assert "faster-whisper must be installed" in _readiness(evaluation, "asr-model").detail
     assert f"mena-{__version__}" in _readiness(evaluation, "python:faster_whisper").detail
 
 

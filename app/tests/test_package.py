@@ -45,7 +45,8 @@ def test_readme_documents_product_install_and_dev_commands() -> None:
     readme = README.read_text(encoding="utf-8")
 
     assert "uv build --wheel --out-dir dist" in readme
-    assert "uv tool install 'dist/mena-0.1.0-py3-none-any.whl[local-providers]'" in readme
+    assert 'MENA_WHEEL="$(ls dist/mena-*.whl | head -n 1)"' in readme
+    assert 'uv tool install "${MENA_WHEEL}[local-providers]"' in readme
     assert "mena setup --check" in readme
     assert "mena setup --yes" in readme
     assert "uv sync --all-groups" in readme

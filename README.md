@@ -15,7 +15,8 @@ The Linux CLI alpha product path is a versioned wheel install, not an editable c
 ```bash
 cd mena/app
 uv build --wheel --out-dir dist
-uv tool install 'dist/mena-0.1.0-py3-none-any.whl[local-providers]'
+MENA_WHEEL="$(ls dist/mena-*.whl | head -n 1)"
+uv tool install "${MENA_WHEEL}[local-providers]"
 mena --version
 mena setup --check
 mena setup
@@ -68,7 +69,8 @@ If hardware cannot be detected confidently or cannot satisfy the fixed local pro
 The alpha product install should include the local provider extra:
 
 ```bash
-uv tool install 'dist/mena-0.1.0-py3-none-any.whl[local-providers]'
+MENA_WHEEL="$(ls dist/mena-*.whl | head -n 1)"
+uv tool install "${MENA_WHEEL}[local-providers]"
 ```
 
 For repo/dev environments only, optional provider surfaces can also be synced directly:
