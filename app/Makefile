@@ -3,16 +3,16 @@
 check: format-check lint typecheck test
 
 format:
-	uv run ruff format src tests
+	uv run ruff format src tests scripts
 
 format-check:
-	uv run ruff format --check src tests
+	uv run ruff format --check src tests scripts
 
 hooks:
 	cd .. && uv run --project app pre-commit install --config .pre-commit-config.yaml --hook-type pre-commit --hook-type pre-push
 
 lint:
-	uv run ruff check src tests
+	uv run ruff check src tests scripts
 
 pre-commit:
 	cd .. && uv run --project app pre-commit run --config .pre-commit-config.yaml --all-files
