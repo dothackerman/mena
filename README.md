@@ -50,6 +50,8 @@ The first Linux alpha profile is `linux-alpha-local-v1`. It is a local-only setu
 - summarization: local Ollama using the configured local model, defaulting to `llama3.2:3b`
 - semantic review: local Ollama using the configured local model, defaulting to `llama3.2:3b`
 
+Alpha tester note: the current diarization profile uses gated pyannote model weights. CLI PoC / close-alpha testers must accept the upstream model terms and configure a Hugging Face token before model preparation can complete. This is an alpha prerequisite, not a product-install promise for future Mena desktop users.
+
 `mena setup --check` reports the current executable path, plain `mena` path, version, runtime paths, selected profile, hardware gate, command/package/model readiness, and planned setup actions. It does not install tools, download models, change configuration, or configure remote fallback.
 
 After confirmation, setup may run only explicit local actions such as `ollama pull <model>` and provider model warm-up commands in the installed Python environment. It does not run `sudo`, install system packages silently, accept third-party model terms, embed credentials, or configure remote provider fallback.
