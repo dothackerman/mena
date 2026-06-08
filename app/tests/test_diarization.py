@@ -987,6 +987,103 @@ def test_pyannote_provider_rejects_unapplied_non_cpu_device(tmp_path: Path) -> N
         )
 
 
+def test_pyannote_provider_rejects_non_callable_pipeline_to(tmp_path: Path) -> None:
+    class FakePipeline:
+        to = "cuda"
+
+    source_ref = ArtifactRef(
+        id=f"{SESSION_ID}:artifacts/source_audio/system.wav",
+        artifact_type="source_audio",
+        version=1,
+        sha256="0" * 64,
+    )
+    provider = PyannoteCommunityDiarizationProvider(
+        device="cuda",
+        pipeline_factory=lambda _checkpoint: FakePipeline(),
+    )
+
+    with pytest.raises(DiarizationProviderUnavailable, match="non-callable to"):
+        provider.diarize(
+            DiarizationRequest(
+                session_id=SESSION_ID,
+                source_artifact=source_ref,
+                source_id="system_audio",
+                context=DiarizationContext(
+                    capture_profile="online_dual_stream",
+                    source_id="system_audio",
+                ),
+                audio_path=tmp_path / "system.wav",
+            )
+        )
+
+
+def test_pyannote_provider_reports_missing_torch_for_device_move(tmp_path: Path) -> None:
+    class FakePipeline:
+        def to(self, _device: object) -> "FakePipeline":
+            return self
+
+    source_ref = ArtifactRef(
+        id=f"{SESSION_ID}:artifacts/source_audio/system.wav",
+        artifact_type="source_audio",
+        version=1,
+        sha256="0" * 64,
+    )
+    provider = PyannoteCommunityDiarizationProvider(
+        device="cuda",
+        pipeline_factory=lambda _checkpoint: FakePipeline(),
+        module_loader=lambda _name: _raise_import_error(),
+    )
+
+    with pytest.raises(DiarizationProviderUnavailable, match="torch is not installed"):
+        provider.diarize(
+            DiarizationRequest(
+                session_id=SESSION_ID,
+                source_artifact=source_ref,
+                source_id="system_audio",
+                context=DiarizationContext(
+                    capture_profile="online_dual_stream",
+                    source_id="system_audio",
+                ),
+                audio_path=tmp_path / "system.wav",
+            )
+        )
+
+
+def test_pyannote_provider_reports_incompatible_torch_device(tmp_path: Path) -> None:
+    class FakeTorch:
+        device = "cuda"
+
+    class FakePipeline:
+        def to(self, _device: object) -> "FakePipeline":
+            return self
+
+    source_ref = ArtifactRef(
+        id=f"{SESSION_ID}:artifacts/source_audio/system.wav",
+        artifact_type="source_audio",
+        version=1,
+        sha256="0" * 64,
+    )
+    provider = PyannoteCommunityDiarizationProvider(
+        device="cuda",
+        pipeline_factory=lambda _checkpoint: FakePipeline(),
+        module_loader=lambda _name: FakeTorch(),
+    )
+
+    with pytest.raises(DiarizationProviderUnavailable, match="torch.device is unavailable"):
+        provider.diarize(
+            DiarizationRequest(
+                session_id=SESSION_ID,
+                source_artifact=source_ref,
+                source_id="system_audio",
+                context=DiarizationContext(
+                    capture_profile="online_dual_stream",
+                    source_id="system_audio",
+                ),
+                audio_path=tmp_path / "system.wav",
+            )
+        )
+
+
 def test_pyannote_provider_does_not_mask_factory_type_errors(tmp_path: Path) -> None:
     def pipeline_factory(_checkpoint: str, *, token: str) -> object:
         raise TypeError("internal construction error")

@@ -590,6 +590,11 @@ class PyannoteCommunityDiarizationProvider:
             raise DiarizationProviderUnavailable(
                 f"pyannote pipeline does not support moving to device '{self.device}'."
             )
+        if not callable(move):
+            raise DiarizationProviderUnavailable(
+                "pyannote pipeline exposes a non-callable to method; "
+                "installed pyannote.audio version is incompatible."
+            )
         device = self._torch_device()
         try:
             moved = move(device)
