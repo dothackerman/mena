@@ -590,13 +590,33 @@ class PyannoteCommunityDiarizationProvider:
             raise DiarizationProviderUnavailable(
                 f"pyannote pipeline does not support moving to device '{self.device}'."
             )
+        device = self._torch_device()
         try:
-            moved = move(self.device)
+            moved = move(device)
         except Exception as exc:
             raise DiarizationProviderUnavailable(
                 f"pyannote pipeline could not move to device '{self.device}': {exc}"
             ) from exc
         return pipeline if moved is None else moved
+
+    def _torch_device(self) -> Any:
+        try:
+            torch = self._module_loader("torch")
+        except ImportError as exc:
+            raise DiarizationProviderUnavailable(
+                "torch is not installed in this environment."
+            ) from exc
+        device_factory = getattr(torch, "device", None)
+        if not callable(device_factory):
+            raise DiarizationProviderUnavailable(
+                "torch.device is unavailable; installed torch version is incompatible."
+            )
+        try:
+            return device_factory(self.device)
+        except Exception as exc:
+            raise DiarizationProviderUnavailable(
+                f"torch could not construct device '{self.device}': {exc}"
+            ) from exc
 
 
 @dataclass(frozen=True)

@@ -835,7 +835,14 @@ def test_pyannote_provider_maps_turns_without_confidence_scores(tmp_path: Path) 
     assert result.speakers[0].embedding.status == "unavailable"
 
 
-def test_pyannote_provider_applies_non_cpu_device(tmp_path: Path) -> None:
+def test_pyannote_provider_converts_cpu_device_before_moving_pipeline(tmp_path: Path) -> None:
+    class FakeTorchDevice:
+        def __init__(self, device: str) -> None:
+            self.type = device
+
+    class FakeTorch:
+        device = FakeTorchDevice
+
     class FakeTurn:
         start = 0.0
         end = 1.0
@@ -847,14 +854,18 @@ def test_pyannote_provider_applies_non_cpu_device(tmp_path: Path) -> None:
 
     class FakePipeline:
         def __init__(self) -> None:
-            self.devices: list[str] = []
+            self.devices: list[FakeTorchDevice] = []
 
-        def to(self, device: str) -> "FakePipeline":
+        def to(self, device: FakeTorchDevice) -> "FakePipeline":
             self.devices.append(device)
             return self
 
         def __call__(self, audio_path: str) -> FakeAnnotation:
             return FakeAnnotation()
+
+    def module_loader(name: str) -> object:
+        assert name == "torch"
+        return FakeTorch()
 
     pipeline = FakePipeline()
     source_ref = ArtifactRef(
@@ -864,8 +875,8 @@ def test_pyannote_provider_applies_non_cpu_device(tmp_path: Path) -> None:
         sha256="0" * 64,
     )
     provider = PyannoteCommunityDiarizationProvider(
-        device="cuda",
         pipeline_factory=lambda _checkpoint: pipeline,
+        module_loader=module_loader,
     )
 
     provider.diarize(
@@ -881,7 +892,72 @@ def test_pyannote_provider_applies_non_cpu_device(tmp_path: Path) -> None:
         )
     )
 
-    assert pipeline.devices == ["cuda"]
+    assert len(pipeline.devices) == 1
+    assert isinstance(pipeline.devices[0], FakeTorchDevice)
+    assert pipeline.devices[0].type == "cpu"
+
+
+def test_pyannote_provider_applies_non_cpu_device(tmp_path: Path) -> None:
+    class FakeTorchDevice:
+        def __init__(self, device: str) -> None:
+            self.type = device
+
+    class FakeTorch:
+        device = FakeTorchDevice
+
+    class FakeTurn:
+        start = 0.0
+        end = 1.0
+
+    class FakeAnnotation:
+        def itertracks(self, *, yield_label: bool) -> list[tuple[FakeTurn, str, str]]:
+            assert yield_label is True
+            return [(FakeTurn(), "track-a", "SPEAKER_00")]
+
+    class FakePipeline:
+        def __init__(self) -> None:
+            self.devices: list[FakeTorchDevice] = []
+
+        def to(self, device: FakeTorchDevice) -> "FakePipeline":
+            self.devices.append(device)
+            return self
+
+        def __call__(self, audio_path: str) -> FakeAnnotation:
+            return FakeAnnotation()
+
+    def module_loader(name: str) -> object:
+        assert name == "torch"
+        return FakeTorch()
+
+    pipeline = FakePipeline()
+    source_ref = ArtifactRef(
+        id=f"{SESSION_ID}:artifacts/source_audio/system.wav",
+        artifact_type="source_audio",
+        version=1,
+        sha256="0" * 64,
+    )
+    provider = PyannoteCommunityDiarizationProvider(
+        device="cuda",
+        pipeline_factory=lambda _checkpoint: pipeline,
+        module_loader=module_loader,
+    )
+
+    provider.diarize(
+        DiarizationRequest(
+            session_id=SESSION_ID,
+            source_artifact=source_ref,
+            source_id="system_audio",
+            context=DiarizationContext(
+                capture_profile="online_dual_stream",
+                source_id="system_audio",
+            ),
+            audio_path=tmp_path / "system.wav",
+        )
+    )
+
+    assert len(pipeline.devices) == 1
+    assert isinstance(pipeline.devices[0], FakeTorchDevice)
+    assert pipeline.devices[0].type == "cuda"
 
 
 def test_pyannote_provider_rejects_unapplied_non_cpu_device(tmp_path: Path) -> None:
