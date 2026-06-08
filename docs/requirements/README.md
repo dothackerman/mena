@@ -22,6 +22,7 @@ BABOK v3 requirement types (vertical) cross the four requirements engineering ph
 | Concept | BABOK Type | RE Phase | Location |
 |---------|-----------|----------|----------|
 | Hardware-aware profiles | Business | Elicitation | `draft-hardware-aware-model-profiles.md` |
+| Installed product setup readiness | Stakeholder | Commitment | `poc-installed-product-setup-use-case.md` |
 | Local model config for PoC | Solution | Commitment | `poc-model-config-local.md` + Epic #16 |
 
 ## Anti-Patterns
