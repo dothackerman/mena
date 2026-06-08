@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import shutil
 import sys
 import wave
@@ -25,6 +26,7 @@ PROFILE_ID_BY_CLI = {
     PROFILE_ONLINE: "online_dual_stream",
     PROFILE_IN_PERSON: "in_person_single_mic",
 }
+COPY_CHUNK_SIZE = 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -143,8 +145,7 @@ def _copy_capture_segments(
         target_dir = bundle_path / "capture" / source.source_id
         target_dir.mkdir(parents=True, exist_ok=True)
         target_path = target_dir / f"{source.source_id}_000001.wav"
-        shutil.copyfile(wav_path, target_path)
-        payload = target_path.read_bytes()
+        copy_result = _copy_and_hash(wav_path, target_path)
         segments.append(
             {
                 "source_id": source.source_id,
@@ -152,14 +153,32 @@ def _copy_capture_segments(
                 "path": target_path.relative_to(bundle_path).as_posix(),
                 "sample_rate": info.sample_rate,
                 "channels": info.channels,
-                "byte_count": len(payload),
-                "sha256": hashlib.sha256(payload).hexdigest(),
+                "byte_count": copy_result.byte_count,
+                "sha256": copy_result.sha256,
                 "status": "sealed",
                 "format": "wav",
+                "_frame_count": info.frame_count,
                 "_duration_seconds": info.duration_seconds,
             }
         )
     return segments
+
+
+@dataclass(frozen=True)
+class CopyResult:
+    byte_count: int
+    sha256: str
+
+
+def _copy_and_hash(source_path: Path, target_path: Path) -> CopyResult:
+    digest = hashlib.sha256()
+    byte_count = 0
+    with source_path.open("rb") as source_file, target_path.open("wb") as target_file:
+        for chunk in iter(lambda: source_file.read(COPY_CHUNK_SIZE), b""):
+            byte_count += len(chunk)
+            digest.update(chunk)
+            target_file.write(chunk)
+    return CopyResult(byte_count=byte_count, sha256=digest.hexdigest())
 
 
 def _read_wav_info(path: Path) -> WavInfo:
@@ -171,7 +190,7 @@ def _read_wav_info(path: Path) -> WavInfo:
             sample_rate = wav_file.getframerate()
             sample_width = wav_file.getsampwidth()
             frame_count = wav_file.getnframes()
-    except wave.Error as exc:
+    except (EOFError, wave.Error) as exc:
         raise UatSessionError(f"Not a supported PCM WAV file: {path}") from exc
 
     if sample_width != 2:
@@ -184,10 +203,13 @@ def _read_wav_info(path: Path) -> WavInfo:
 def _validate_shared_audio_shape(segments: list[dict[str, object]]) -> None:
     sample_rates = {segment["sample_rate"] for segment in segments}
     channels = {segment["channels"] for segment in segments}
+    frame_counts = {segment["_frame_count"] for segment in segments}
     if len(sample_rates) > 1:
         raise UatSessionError("All source WAV files must use the same sample rate.")
     if len(channels) > 1:
         raise UatSessionError("All source WAV files must use the same channel count.")
+    if len(frame_counts) > 1:
+        raise UatSessionError("Online source WAV files must have the same frame count.")
 
 
 def _capture_metadata(segments: list[dict[str, object]]) -> dict[str, object]:
@@ -196,6 +218,7 @@ def _capture_metadata(segments: list[dict[str, object]]) -> dict[str, object]:
     for segment in segments:
         segment = dict(segment)
         duration = segment.pop("_duration_seconds")
+        segment.pop("_frame_count", None)
         if not isinstance(duration, float):
             raise AssertionError("Internal duration marker should be a float.")
         max_duration = max(max_duration, duration)
@@ -205,7 +228,7 @@ def _capture_metadata(segments: list[dict[str, object]]) -> dict[str, object]:
         "version": 1,
         "sample_rate": public_segments[0]["sample_rate"],
         "channels": public_segments[0]["channels"],
-        "segment_seconds": max(1, int(max_duration + 0.999999)),
+        "segment_seconds": max(1, math.ceil(max_duration)),
         "segment_count": len(public_segments),
         "segments": public_segments,
     }

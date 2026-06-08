@@ -62,8 +62,8 @@ def test_create_online_uat_session_from_audio(tmp_path: Path) -> None:
 
     for segment in record["capture_metadata"]["segments"]:
         copied = session_dir / segment["path"]
-        payload = copied.read_bytes()
         assert copied.is_file()
+        payload = copied.read_bytes()
         assert segment["byte_count"] == len(payload)
         assert segment["sha256"] == hashlib.sha256(payload).hexdigest()
 
@@ -131,6 +131,59 @@ def test_create_uat_session_rejects_mismatched_online_audio_shape(tmp_path: Path
     assert not sessions_dir.exists() or list(sessions_dir.iterdir()) == []
 
 
+def test_create_uat_session_rejects_mismatched_online_frame_counts(tmp_path: Path) -> None:
+    local_wav = tmp_path / "local.wav"
+    system_wav = tmp_path / "system.wav"
+    _write_wav(local_wav, frame_count=1_600)
+    _write_wav(system_wav, frame_count=3_200)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--profile",
+            "online",
+            "--data-root",
+            str(tmp_path / "uat-data"),
+            "--local-mic",
+            str(local_wav),
+            "--system-audio",
+            str(system_wav),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "Online source WAV files must have the same frame count." in result.stderr
+    sessions_dir = tmp_path / "uat-data" / "sessions"
+    assert not sessions_dir.exists() or list(sessions_dir.iterdir()) == []
+
+
+def test_create_uat_session_rejects_empty_wav_without_traceback(tmp_path: Path) -> None:
+    room_wav = tmp_path / "room.wav"
+    room_wav.write_bytes(b"")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--profile",
+            "in-person",
+            "--data-root",
+            str(tmp_path / "uat-data"),
+            "--room-mic",
+            str(room_wav),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert f"Not a supported PCM WAV file: {room_wav.resolve()}" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
 def test_create_uat_session_rejects_wrong_profile_inputs(tmp_path: Path) -> None:
     room_wav = tmp_path / "room.wav"
     _write_wav(room_wav)
@@ -154,8 +207,14 @@ def test_create_uat_session_rejects_wrong_profile_inputs(tmp_path: Path) -> None
     assert "--local-mic is required for --profile online." in result.stderr
 
 
-def _write_wav(path: Path, *, sample_rate: int = 16_000, channels: int = 1) -> None:
-    frame_count = sample_rate // 10
+def _write_wav(
+    path: Path,
+    *,
+    sample_rate: int = 16_000,
+    channels: int = 1,
+    frame_count: int | None = None,
+) -> None:
+    frame_count = frame_count or sample_rate // 10
     frame = b"\x00\x00" * channels
     with wave.open(str(path), "wb") as wav_file:
         wav_file.setnchannels(channels)
