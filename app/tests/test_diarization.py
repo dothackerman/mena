@@ -1049,6 +1049,38 @@ def test_pyannote_provider_reports_missing_torch_for_device_move(tmp_path: Path)
         )
 
 
+def test_pyannote_provider_reports_broken_torch_import_for_device_move(tmp_path: Path) -> None:
+    class FakePipeline:
+        def to(self, _device: object) -> "FakePipeline":
+            return self
+
+    source_ref = ArtifactRef(
+        id=f"{SESSION_ID}:artifacts/source_audio/system.wav",
+        artifact_type="source_audio",
+        version=1,
+        sha256="0" * 64,
+    )
+    provider = PyannoteCommunityDiarizationProvider(
+        device="cuda",
+        pipeline_factory=lambda _checkpoint: FakePipeline(),
+        module_loader=lambda _name: _raise_os_error(),
+    )
+
+    with pytest.raises(DiarizationProviderUnavailable, match="torch could not be imported"):
+        provider.diarize(
+            DiarizationRequest(
+                session_id=SESSION_ID,
+                source_artifact=source_ref,
+                source_id="system_audio",
+                context=DiarizationContext(
+                    capture_profile="online_dual_stream",
+                    source_id="system_audio",
+                ),
+                audio_path=tmp_path / "system.wav",
+            )
+        )
+
+
 def test_pyannote_provider_reports_incompatible_torch_device(tmp_path: Path) -> None:
     class FakeTorch:
         device = "cuda"
@@ -1240,6 +1272,10 @@ def _diarization_artifact(
 
 def _raise_import_error() -> Any:
     raise ImportError("missing")
+
+
+def _raise_os_error() -> Any:
+    raise OSError("libtorch_cuda.so")
 
 
 def _load_diarization_schema() -> dict[str, object]:

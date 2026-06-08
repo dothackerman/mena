@@ -611,6 +611,10 @@ class PyannoteCommunityDiarizationProvider:
             raise DiarizationProviderUnavailable(
                 "torch is not installed in this environment."
             ) from exc
+        except Exception as exc:
+            raise DiarizationProviderUnavailable(
+                f"torch could not be imported in this environment: {exc}"
+            ) from exc
         device_factory = getattr(torch, "device", None)
         if not callable(device_factory):
             raise DiarizationProviderUnavailable(
