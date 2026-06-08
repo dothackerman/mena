@@ -160,6 +160,81 @@ def test_create_uat_session_rejects_mismatched_online_frame_counts(tmp_path: Pat
     assert not sessions_dir.exists() or list(sessions_dir.iterdir()) == []
 
 
+def test_create_uat_session_rejects_online_stereo_sources(tmp_path: Path) -> None:
+    local_wav = tmp_path / "local.wav"
+    system_wav = tmp_path / "system.wav"
+    _write_wav(local_wav, channels=2)
+    _write_wav(system_wav, channels=2)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--profile",
+            "online",
+            "--data-root",
+            str(tmp_path / "uat-data"),
+            "--local-mic",
+            str(local_wav),
+            "--system-audio",
+            str(system_wav),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "online fixtures must use 1 channel(s) per source." in result.stderr
+
+
+def test_create_uat_session_rejects_in_person_mono_source(tmp_path: Path) -> None:
+    room_wav = tmp_path / "room.wav"
+    _write_wav(room_wav)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--profile",
+            "in-person",
+            "--data-root",
+            str(tmp_path / "uat-data"),
+            "--room-mic",
+            str(room_wav),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "in-person fixtures must use 2 channel(s) per source." in result.stderr
+
+
+def test_create_uat_session_rejects_audio_longer_than_one_capture_segment(
+    tmp_path: Path,
+) -> None:
+    room_wav = tmp_path / "room.wav"
+    _write_wav(room_wav, channels=2, frame_count=16_000 * 31)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--profile",
+            "in-person",
+            "--data-root",
+            str(tmp_path / "uat-data"),
+            "--room-mic",
+            str(room_wav),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "one-segment UAT helper limit of 30 seconds" in result.stderr
+
+
 def test_create_uat_session_rejects_empty_wav_without_traceback(tmp_path: Path) -> None:
     room_wav = tmp_path / "room.wav"
     room_wav.write_bytes(b"")

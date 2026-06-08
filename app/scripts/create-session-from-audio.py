@@ -20,11 +20,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
+from mena.capture import DEFAULT_SEGMENT_SECONDS, MAX_SEGMENT_BYTES
+
 PROFILE_ONLINE = "online"
 PROFILE_IN_PERSON = "in-person"
 PROFILE_ID_BY_CLI = {
     PROFILE_ONLINE: "online_dual_stream",
     PROFILE_IN_PERSON: "in_person_single_mic",
+}
+EXPECTED_CHANNELS_BY_PROFILE = {
+    PROFILE_ONLINE: 1,
+    PROFILE_IN_PERSON: 2,
 }
 COPY_CHUNK_SIZE = 1024 * 1024
 
@@ -74,7 +80,7 @@ def create_session_from_audio(args: argparse.Namespace) -> Path:
 
     try:
         segments = _copy_capture_segments(bundle_path=bundle_path, source_inputs=source_inputs)
-        _validate_shared_audio_shape(segments)
+        _validate_audio_shape(profile=args.profile, segments=segments)
         capture_metadata = _capture_metadata(segments)
         session_record = {
             "version": 1,
@@ -197,10 +203,25 @@ def _read_wav_info(path: Path) -> WavInfo:
         raise UatSessionError(f"WAV file must be 16-bit PCM for current UAT fixtures: {path}")
     if frame_count <= 0:
         raise UatSessionError(f"WAV file contains no audio frames: {path}")
-    return WavInfo(sample_rate=sample_rate, channels=channels, frame_count=frame_count)
+    data_byte_count = frame_count * channels * sample_width
+    if data_byte_count > MAX_SEGMENT_BYTES:
+        raise UatSessionError(
+            f"WAV file is too large for the current one-segment UAT helper: {path}"
+        )
+    duration_seconds = frame_count / sample_rate
+    if duration_seconds > DEFAULT_SEGMENT_SECONDS:
+        raise UatSessionError(
+            f"WAV file is longer than the current one-segment UAT helper limit "
+            f"of {DEFAULT_SEGMENT_SECONDS} seconds: {path}"
+        )
+    return WavInfo(
+        sample_rate=sample_rate,
+        channels=channels,
+        frame_count=frame_count,
+    )
 
 
-def _validate_shared_audio_shape(segments: list[dict[str, object]]) -> None:
+def _validate_audio_shape(*, profile: str, segments: list[dict[str, object]]) -> None:
     sample_rates = {segment["sample_rate"] for segment in segments}
     channels = {segment["channels"] for segment in segments}
     frame_counts = {segment["_frame_count"] for segment in segments}
@@ -210,6 +231,11 @@ def _validate_shared_audio_shape(segments: list[dict[str, object]]) -> None:
         raise UatSessionError("All source WAV files must use the same channel count.")
     if len(frame_counts) > 1:
         raise UatSessionError("Online source WAV files must have the same frame count.")
+    expected_channels = EXPECTED_CHANNELS_BY_PROFILE[profile]
+    if channels != {expected_channels}:
+        raise UatSessionError(
+            f"{profile} fixtures must use {expected_channels} channel(s) per source."
+        )
 
 
 def _capture_metadata(segments: list[dict[str, object]]) -> dict[str, object]:
