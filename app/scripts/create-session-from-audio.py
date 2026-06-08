@@ -20,7 +20,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from mena.capture import DEFAULT_SEGMENT_SECONDS, MAX_SEGMENT_BYTES
+APP_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = APP_ROOT / "src"
+if SRC_ROOT.is_dir():
+    sys.path.insert(0, str(SRC_ROOT))
 
 PROFILE_ONLINE = "online"
 PROFILE_IN_PERSON = "in-person"
@@ -188,6 +191,7 @@ def _copy_and_hash(source_path: Path, target_path: Path) -> CopyResult:
 
 
 def _read_wav_info(path: Path) -> WavInfo:
+    default_segment_seconds, max_segment_bytes = _capture_bounds()
     if not path.is_file():
         raise UatSessionError(f"WAV file does not exist: {path}")
     try:
@@ -196,29 +200,40 @@ def _read_wav_info(path: Path) -> WavInfo:
             sample_rate = wav_file.getframerate()
             sample_width = wav_file.getsampwidth()
             frame_count = wav_file.getnframes()
+            payload = wav_file.readframes(frame_count)
     except (EOFError, wave.Error) as exc:
         raise UatSessionError(f"Not a supported PCM WAV file: {path}") from exc
 
+    if sample_rate <= 0:
+        raise UatSessionError(f"WAV file sample rate must be positive: {path}")
     if sample_width != 2:
         raise UatSessionError(f"WAV file must be 16-bit PCM for current UAT fixtures: {path}")
     if frame_count <= 0:
         raise UatSessionError(f"WAV file contains no audio frames: {path}")
     data_byte_count = frame_count * channels * sample_width
-    if data_byte_count > MAX_SEGMENT_BYTES:
+    if len(payload) != data_byte_count:
+        raise UatSessionError(f"WAV file does not contain declared PCM frame data: {path}")
+    if data_byte_count > max_segment_bytes:
         raise UatSessionError(
             f"WAV file is too large for the current one-segment UAT helper: {path}"
         )
     duration_seconds = frame_count / sample_rate
-    if duration_seconds > DEFAULT_SEGMENT_SECONDS:
+    if duration_seconds > default_segment_seconds:
         raise UatSessionError(
             f"WAV file is longer than the current one-segment UAT helper limit "
-            f"of {DEFAULT_SEGMENT_SECONDS} seconds: {path}"
+            f"of {default_segment_seconds} seconds: {path}"
         )
     return WavInfo(
         sample_rate=sample_rate,
         channels=channels,
         frame_count=frame_count,
     )
+
+
+def _capture_bounds() -> tuple[int, int]:
+    from mena.capture import DEFAULT_SEGMENT_SECONDS, MAX_SEGMENT_BYTES
+
+    return DEFAULT_SEGMENT_SECONDS, MAX_SEGMENT_BYTES
 
 
 def _validate_audio_shape(*, profile: str, segments: list[dict[str, object]]) -> None:
@@ -229,7 +244,7 @@ def _validate_audio_shape(*, profile: str, segments: list[dict[str, object]]) ->
         raise UatSessionError("All source WAV files must use the same sample rate.")
     if len(channels) > 1:
         raise UatSessionError("All source WAV files must use the same channel count.")
-    if len(frame_counts) > 1:
+    if profile == PROFILE_ONLINE and len(frame_counts) > 1:
         raise UatSessionError("Online source WAV files must have the same frame count.")
     expected_channels = EXPECTED_CHANNELS_BY_PROFILE[profile]
     if channels != {expected_channels}:

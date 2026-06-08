@@ -5,6 +5,7 @@ import sys
 import wave
 from pathlib import Path
 
+from mena.capture import DEFAULT_SEGMENT_SECONDS
 from mena.session_integrity import verify_session_bundle
 
 APP_ROOT = Path(__file__).resolve().parents[1]
@@ -232,7 +233,32 @@ def test_create_uat_session_rejects_audio_longer_than_one_capture_segment(
     )
 
     assert result.returncode == 2
-    assert "one-segment UAT helper limit of 30 seconds" in result.stderr
+    assert "one-segment UAT helper limit" in result.stderr
+    assert str(DEFAULT_SEGMENT_SECONDS) in result.stderr
+
+
+def test_create_uat_session_rejects_truncated_wav_payload(tmp_path: Path) -> None:
+    room_wav = tmp_path / "room.wav"
+    _write_wav(room_wav, channels=2)
+    room_wav.write_bytes(room_wav.read_bytes()[:-2])
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--profile",
+            "in-person",
+            "--data-root",
+            str(tmp_path / "uat-data"),
+            "--room-mic",
+            str(room_wav),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "WAV file does not contain declared PCM frame data" in result.stderr
 
 
 def test_create_uat_session_rejects_empty_wav_without_traceback(tmp_path: Path) -> None:
