@@ -10,7 +10,9 @@ import pytest
 from mena.settings import AppSettings, RuntimePaths
 from mena.setup import (
     ALPHA_LOCAL_PROFILE_ID,
+    FALLBACK_LOCAL_PROFILE_ID,
     PYANNOTE_COMMUNITY_CHECKPOINT,
+    RUNTIME_PROFILE_CATALOG_VERSION,
     CommandCheck,
     CommandIdentity,
     CommandRun,
@@ -28,6 +30,7 @@ from mena.setup import (
     _detect_avx2,
     _detect_nvidia_vram_gb,
     _parse_ollama_model_names,
+    build_runtime_profile_state,
     default_profile_catalog,
     detect_command_identity,
     detect_local_installation_state,
@@ -36,6 +39,8 @@ from mena.setup import (
     final_provider_readiness,
     format_setup_report,
     get_alpha_local_profile,
+    load_runtime_profile_state,
+    persist_runtime_profile_state,
 )
 
 
@@ -44,6 +49,7 @@ def test_profile_catalog_exposes_fixed_linux_alpha_local_profile() -> None:
 
     assert profile.id == ALPHA_LOCAL_PROFILE_ID
     assert profile.version
+    assert profile.catalog_version == RUNTIME_PROFILE_CATALOG_VERSION
     assert profile.requires_linux
     assert profile.required_commands == ("mena", "uv", "ollama", "pw-dump", "pw-cli", "wpctl")
     assert profile.playback_commands == ("ffplay", "pw-play", "paplay", "aplay")
@@ -59,6 +65,16 @@ def test_profile_catalog_exposes_fixed_linux_alpha_local_profile() -> None:
     assert _stage_model(profile, "summarization") == "llama3.2:3b"
 
 
+def test_profile_catalog_exposes_supported_cpu_fallback_profile() -> None:
+    fallback = default_profile_catalog("llama3.2:3b")[1]
+
+    assert fallback.id == FALLBACK_LOCAL_PROFILE_ID
+    assert fallback.fallback
+    assert fallback.catalog_version == RUNTIME_PROFILE_CATALOG_VERSION
+    assert fallback.minimum_cuda_vram_gb == 0.0
+    assert _stage_model(fallback, "transcription") == "small"
+
+
 def test_evaluation_is_pure_and_reports_ready_state_without_actions() -> None:
     profile = get_alpha_local_profile()
     state = _state(asr_model_present=True, diarization_model_present=True)
@@ -68,6 +84,39 @@ def test_evaluation_is_pure_and_reports_ready_state_without_actions() -> None:
     assert evaluation.ready
     assert evaluation.plan.actions == ()
     assert evaluation.blocking_reasons == ()
+
+
+def test_runtime_profile_state_persists_under_runtime_state_home(tmp_path: Path) -> None:
+    profile = get_alpha_local_profile()
+    state = _state(runtime_paths=_runtime_paths(tmp_path), asr_model_present=True)
+    evaluation = evaluate_setup(profile, state)
+
+    accepted = build_runtime_profile_state(evaluation)
+    state_path = persist_runtime_profile_state(accepted, paths=state.runtime_paths)
+    loaded = load_runtime_profile_state(state.runtime_paths)
+
+    assert state_path == state.runtime_paths.state_home / "setup-state.json"
+    assert loaded.accepted_profile_id == profile.id
+    assert loaded.catalog_version == RUNTIME_PROFILE_CATALOG_VERSION
+    assert loaded.evidence_digest == accepted.evidence_digest
+    assert loaded.selected_asr_profile.id == evaluation.selected_asr_profile.id
+
+
+def test_runtime_profile_state_rejects_incomplete_setup() -> None:
+    profile = get_alpha_local_profile()
+    evaluation = evaluate_setup(profile, _state(missing_commands={"ollama"}))
+
+    with pytest.raises(ValueError, match="ready setup evaluation"):
+        build_runtime_profile_state(evaluation)
+
+
+def test_runtime_profile_state_load_rejects_invalid_json(tmp_path: Path) -> None:
+    paths = _runtime_paths(tmp_path)
+    paths.state_home.mkdir(parents=True)
+    (paths.state_home / "setup-state.json").write_text("{not-json", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="invalid JSON"):
+        load_runtime_profile_state(paths)
 
 
 def test_evaluation_distinguishes_missing_required_commands() -> None:
@@ -650,6 +699,7 @@ class FakeRunner:
 def _state(
     *,
     command_identity: CommandIdentity | None = None,
+    runtime_paths: RuntimePaths | None = None,
     hardware: HardwareFacts | None = None,
     missing_commands: set[str] | None = None,
     python_surfaces: dict[str, bool] | None = None,
@@ -688,7 +738,7 @@ def _state(
             version="0.1.0",
             invocation_mode="installed-product",
         ),
-        runtime_paths=_runtime_paths(Path("/home/user")),
+        runtime_paths=runtime_paths or _runtime_paths(Path("/home/user")),
         hardware=hardware
         or HardwareFacts(
             system="Linux",
