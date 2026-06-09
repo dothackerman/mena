@@ -31,6 +31,17 @@ from mena.transcription import FasterWhisperTranscriptionProvider
 
 ProviderFactory = Callable[[], Any]
 RUNTIME_PROFILE_PROVENANCE_CONTRACT = "runtime-profile-provenance.v1"
+PROCESSING_RUNTIME_STAGES = frozenset({"transcription", "diarization", "semantic-review"})
+SUMMARIZATION_RUNTIME_STAGES = frozenset({"summarization"})
+
+
+@dataclass(frozen=True)
+class RuntimeRevalidationScope:
+    stages: frozenset[str]
+    readiness_ids: frozenset[str]
+    command_names: tuple[str, ...]
+    python_surface_imports: frozenset[str]
+    requires_asr_selection_match: bool
 
 
 @dataclass(frozen=True)
@@ -55,6 +66,7 @@ def select_runtime_profile(
 ) -> RuntimeProfileSelection:
     """Select the accepted or explicit fallback runtime profile for derived artifacts."""
 
+    scope = _runtime_revalidation_scope(required_stages)
     accepted = load_runtime_profile_state(settings.paths)
     catalog = {
         (profile.id, profile.version): profile
@@ -70,7 +82,7 @@ def select_runtime_profile(
         )
 
     command_runner = runner or SubprocessCommandRunner()
-    accepted_detection_profile = _profile_for_stages(accepted_profile, required_stages)
+    accepted_detection_profile = _profile_for_scope(accepted_profile, scope)
     accepted_state = detect_local_installation_state(
         settings,
         runner=command_runner,
@@ -80,9 +92,9 @@ def select_runtime_profile(
     )
     accepted_evaluation = _scope_evaluation(
         evaluate_setup(accepted_detection_profile, accepted_state),
-        required_stages,
+        scope,
     )
-    accepted_failure = _runtime_profile_failure(accepted, accepted_evaluation)
+    accepted_failure = _runtime_profile_failure(accepted, accepted_evaluation, scope)
     if accepted_failure is None:
         return RuntimeProfileSelection(
             accepted=accepted,
@@ -102,7 +114,7 @@ def select_runtime_profile(
     if fallback_profile is None:
         raise ValueError(f"Accepted runtime profile is unavailable: {accepted_failure}")
 
-    fallback_detection_profile = _profile_for_stages(fallback_profile, required_stages)
+    fallback_detection_profile = _profile_for_scope(fallback_profile, scope)
     fallback_state = detect_local_installation_state(
         settings,
         runner=command_runner,
@@ -112,7 +124,7 @@ def select_runtime_profile(
     )
     fallback_evaluation = _scope_evaluation(
         evaluate_setup(fallback_detection_profile, fallback_state),
-        required_stages,
+        scope,
     )
     if not fallback_evaluation.ready:
         reasons = "; ".join(fallback_evaluation.blocking_reasons)
@@ -278,34 +290,63 @@ def runtime_stage_policy_payload(runtime_state: RuntimeProfileState) -> list[dic
     ]
 
 
-def _profile_for_stages(
-    profile: SetupProfile,
+def _runtime_revalidation_scope(
     required_stages: frozenset[str] | None,
-) -> SetupProfile:
+) -> RuntimeRevalidationScope | None:
     if required_stages is None:
+        return None
+    readiness_ids = {"command:mena"}
+    command_names = ["mena"]
+    python_surface_imports: set[str] = set()
+    if "summarization" in required_stages or "semantic-review" in required_stages:
+        readiness_ids.update({"command:ollama", "ollama-model"})
+        command_names.append("ollama")
+    if "transcription" in required_stages:
+        readiness_ids.update({"hardware", "python:faster_whisper", "asr-model"})
+        python_surface_imports.add("faster_whisper")
+    if "diarization" in required_stages:
+        readiness_ids.update({"hardware", "python:pyannote.audio", "diarization-model"})
+        python_surface_imports.add("pyannote.audio")
+    return RuntimeRevalidationScope(
+        stages=required_stages,
+        readiness_ids=frozenset(readiness_ids),
+        command_names=tuple(command_names),
+        python_surface_imports=frozenset(python_surface_imports),
+        requires_asr_selection_match="transcription" in required_stages,
+    )
+
+
+def _profile_for_scope(
+    profile: SetupProfile,
+    scope: RuntimeRevalidationScope | None,
+) -> SetupProfile:
+    if scope is None:
         return profile
-    stages = tuple(stage for stage in profile.stages if stage.stage in required_stages)
-    commands = (
-        ("mena", "ollama") if required_stages <= {"summarization"} else profile.required_commands
+    stages = tuple(stage for stage in profile.stages if stage.stage in scope.stages)
+    python_surfaces = tuple(
+        surface
+        for surface in profile.python_surfaces
+        if surface.import_name in scope.python_surface_imports
     )
     return replace(
         profile,
         stages=stages,
-        python_surfaces=(),
-        required_commands=commands,
+        python_surfaces=python_surfaces,
+        required_commands=scope.command_names,
         playback_commands=(),
     )
 
 
 def _scope_evaluation(
     evaluation: SetupEvaluation,
-    required_stages: frozenset[str] | None,
+    scope: RuntimeRevalidationScope | None,
 ) -> SetupEvaluation:
-    if required_stages is None:
+    if scope is None:
         return evaluation
-    readiness_ids = _readiness_ids_for_stages(required_stages)
-    readiness = tuple(item for item in evaluation.readiness if item.id in readiness_ids)
-    actions = tuple(action for action in evaluation.plan.actions if action.id in readiness_ids)
+    readiness = tuple(item for item in evaluation.readiness if item.id in scope.readiness_ids)
+    actions = tuple(
+        action for action in evaluation.plan.actions if action.id in scope.readiness_ids
+    )
     return SetupEvaluation(
         profile=evaluation.profile,
         selected_asr_profile=evaluation.selected_asr_profile,
@@ -313,17 +354,6 @@ def _scope_evaluation(
         readiness=readiness,
         plan=SetupPlan(actions=actions),
     )
-
-
-def _readiness_ids_for_stages(required_stages: frozenset[str]) -> frozenset[str]:
-    ids = {"command:mena"}
-    if "summarization" in required_stages or "semantic-review" in required_stages:
-        ids.update({"command:ollama", "ollama-model"})
-    if "transcription" in required_stages:
-        ids.update({"hardware", "python:faster_whisper", "asr-model"})
-    if "diarization" in required_stages:
-        ids.update({"hardware", "python:pyannote.audio", "diarization-model"})
-    return frozenset(ids)
 
 
 def stage_device(runtime_state: RuntimeProfileState, stage: str) -> str | None:
@@ -346,9 +376,12 @@ def _stage_model(runtime_state: RuntimeProfileState, stage: str) -> str:
 def _runtime_profile_failure(
     accepted: RuntimeProfileState,
     evaluation: SetupEvaluation,
+    scope: RuntimeRevalidationScope | None,
 ) -> str | None:
     if not evaluation.ready:
         return "; ".join(evaluation.blocking_reasons)
+    if scope is not None and not scope.requires_asr_selection_match:
+        return None
     expected = accepted.selected_asr_profile
     current = evaluation.selected_asr_profile
     if (

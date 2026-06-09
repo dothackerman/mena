@@ -71,6 +71,8 @@ from mena.review_flagging import (
     run_confidence_flagging_stage,
 )
 from mena.runtime_profile import (
+    PROCESSING_RUNTIME_STAGES,
+    SUMMARIZATION_RUNTIME_STAGES,
     RuntimeProfileSelection,
     production_runtime_required,
     runtime_diarization_factory,
@@ -621,7 +623,7 @@ def _run_summarize_command(
         command_identity=setup_command_identity,
         hardware=setup_hardware,
         allow_runtime_fallback=allow_runtime_fallback,
-        required_stages=frozenset({"summarization"}),
+        required_stages=SUMMARIZATION_RUNTIME_STAGES,
     )
     run_id = f"summarize-{uuid4()}"
     store_runtime_profile_provenance(
@@ -740,6 +742,7 @@ def _run_processing_command(
             command_identity=setup_command_identity,
             hardware=setup_hardware,
             allow_runtime_fallback=allow_runtime_fallback,
+            required_stages=PROCESSING_RUNTIME_STAGES,
         )
         store_runtime_profile_provenance(
             store=store,

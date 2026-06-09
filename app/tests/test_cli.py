@@ -66,6 +66,8 @@ from mena.review_flagging import (
     persist_review_queue_artifact,
 )
 from mena.runtime_profile import (
+    PROCESSING_RUNTIME_STAGES,
+    SUMMARIZATION_RUNTIME_STAGES,
     runtime_diarization_factory,
     runtime_semantic_factory,
     runtime_transcription_factory,
@@ -1013,6 +1015,13 @@ def test_main_summarize_revalidates_only_summarization_runtime_dependencies(
         observed_profile_stages.append(tuple(stage.stage for stage in profile.stages))
         return _setup_state(
             settings=settings,
+            hardware=HardwareFacts(
+                system="Linux",
+                ram_gb=32.0,
+                cuda_available=False,
+                vram_gb=None,
+                avx2_available=True,
+            ),
             asr_model_present=False,
             diarization_model_present=False,
             pyannote_token_present=False,
@@ -1063,6 +1072,58 @@ def test_main_summarize_revalidates_only_summarization_runtime_dependencies(
             "stage": "summarization",
         }
     ]
+
+
+def test_summarize_runtime_scope_still_checks_ollama_after_bad_hardware_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    ready_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = build_runtime_profile_state(evaluate_setup(get_alpha_local_profile(), ready_state))
+    persist_runtime_profile_state(accepted, paths=settings.paths)
+
+    def _detect_summary_state(
+        _settings: AppSettings,
+        **_kwargs: object,
+    ) -> LocalInstallationState:
+        state = _setup_state(settings=settings, pyannote_token_present=True)
+        return replace(
+            state,
+            hardware=HardwareFacts(
+                system="Darwin",
+                ram_gb=None,
+                cuda_available=False,
+                vram_gb=None,
+                avx2_available=None,
+            ),
+            commands=(
+                CommandCheck("mena", Path("/usr/bin/mena")),
+                CommandCheck("ollama", None),
+            ),
+            ollama=OllamaState(
+                endpoint=settings.local_llm.ollama_endpoint,
+                model=settings.local_llm.ollama_model,
+                command=CommandCheck("ollama", None),
+                reachable=False,
+                model_present=False,
+                detail="ollama command missing",
+            ),
+        )
+
+    monkeypatch.setattr(
+        "mena.runtime_profile.detect_local_installation_state", _detect_summary_state
+    )
+
+    with pytest.raises(ValueError, match="Install and start Ollama locally"):
+        select_runtime_profile(
+            settings=settings,
+            runner=None,
+            command_identity=None,
+            hardware=None,
+            allow_runtime_fallback=False,
+            required_stages=SUMMARIZATION_RUNTIME_STAGES,
+        )
 
 
 def test_main_summarize_reports_missing_merged_transcript(
@@ -1498,6 +1559,49 @@ def test_main_process_requires_accepted_runtime_profile_state(
     assert exit_code == 1
     assert "Accepted runtime profile state is missing" in captured.out
     assert str(settings.paths.state_home / "setup-state.json") in captured.out
+
+
+def test_main_process_revalidates_only_derived_runtime_dependencies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _build_processing_session(tmp_path)
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    ready_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = build_runtime_profile_state(evaluate_setup(get_alpha_local_profile(), ready_state))
+    persist_runtime_profile_state(accepted, paths=settings.paths)
+    observed: dict[str, object] = {}
+
+    def _detect_processing_state(
+        _settings: AppSettings,
+        **kwargs: object,
+    ) -> LocalInstallationState:
+        profile = cast(Any, kwargs["profile"])
+        observed["stages"] = tuple(stage.stage for stage in profile.stages)
+        observed["commands"] = profile.required_commands
+        observed["playback"] = profile.playback_commands
+        observed["surfaces"] = tuple(surface.import_name for surface in profile.python_surfaces)
+        return replace(
+            _setup_state(settings=settings, pyannote_token_present=True),
+            commands=(
+                CommandCheck("mena", Path("/usr/bin/mena")),
+                CommandCheck("ollama", Path("/usr/bin/ollama")),
+            ),
+            playback_commands=(),
+        )
+
+    monkeypatch.setattr(
+        "mena.runtime_profile.detect_local_installation_state", _detect_processing_state
+    )
+    processing_calls = _patch_processing_stages(monkeypatch)
+
+    assert main(["process", str(session.record_path)], settings=settings) == 0
+
+    assert set(cast(tuple[str, ...], observed["stages"])) == PROCESSING_RUNTIME_STAGES
+    assert observed["commands"] == ("mena", "ollama")
+    assert observed["playback"] == ()
+    assert observed["surfaces"] == ("faster_whisper", "pyannote.audio")
+    assert processing_calls["session_id"] == session.record.id
 
 
 def test_runtime_provider_factories_use_selected_profile_state(tmp_path: Path) -> None:
