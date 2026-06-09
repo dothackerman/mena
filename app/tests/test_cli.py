@@ -994,6 +994,77 @@ def test_main_summarize_requires_accepted_runtime_profile_state(
     assert str(settings.paths.state_home / "setup-state.json") in captured.out
 
 
+def test_main_summarize_revalidates_only_summarization_runtime_dependencies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_dir, store, _, _ = _build_summarize_session_bundle(tmp_path)
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    ready_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = build_runtime_profile_state(evaluate_setup(get_alpha_local_profile(), ready_state))
+    persist_runtime_profile_state(accepted, paths=settings.paths)
+    observed_profile_stages: list[tuple[str, ...]] = []
+
+    def _detect_summary_state(
+        _settings: AppSettings,
+        **kwargs: object,
+    ) -> LocalInstallationState:
+        profile = cast(Any, kwargs["profile"])
+        observed_profile_stages.append(tuple(stage.stage for stage in profile.stages))
+        return _setup_state(
+            settings=settings,
+            asr_model_present=False,
+            diarization_model_present=False,
+            pyannote_token_present=False,
+            python_surfaces={"faster_whisper": False, "pyannote.audio": False},
+        )
+
+    def _fake_run_summarization_stage(
+        *,
+        store: ArtifactStore,
+        ledger: ProcessingStageLedger,
+        merged_transcript_record: ArtifactRecord,
+        provider: object,
+        correction_overlay_record: ArtifactRecord | None = None,
+        policy: SummarizationPolicy | None = None,
+        manual_notes_record: ArtifactRecord | None = None,
+        stage: str = "summarization",
+        attempt: int = 1,
+        skip_completed: bool = True,
+        now: datetime | None = None,
+    ) -> SimpleNamespace:
+        return SimpleNamespace(
+            summary_record=store.store(
+                artifact_type="summary",
+                name=f"summary/{ledger.run_id}.json",
+                data=b"{}",
+                version=1,
+            ),
+        )
+
+    monkeypatch.setattr(
+        "mena.runtime_profile.detect_local_installation_state", _detect_summary_state
+    )
+    monkeypatch.setattr("mena.cli.run_summarization_stage", _fake_run_summarization_stage)
+
+    assert main(["summarize", str(session_dir)], settings=settings) == 0
+
+    assert observed_profile_stages == [("summarization",)]
+    provenance_records = store.list(artifact_type="runtime_profile_provenance")
+    assert len(provenance_records) == 1
+    provenance = json.loads(store.retrieve(provenance_records[0].id))
+    assert provenance["revalidation"]["ready"] is True
+    assert provenance["actual_profile"]["stages"] == [
+        {
+            "device": "local-service",
+            "model": settings.local_llm.ollama_model,
+            "policy": "local-preferred, no setup-time remote fallback",
+            "provider": "Ollama",
+            "stage": "summarization",
+        }
+    ]
+
+
 def test_main_summarize_reports_missing_merged_transcript(
     tmp_path: Path,
     capsys: CaptureFixture[str],
@@ -1668,10 +1739,12 @@ def test_runtime_profile_provenance_records_accepted_actual_and_fallback(
     record = store_runtime_profile_provenance(
         store=store,
         run_id="run-001",
+        attempt=3,
         selection=cast(Any, selection),
     )
     payload = json.loads(store.retrieve(record.id))
 
+    assert payload["attempt"] == 3
     assert payload["accepted_profile"]["id"] == accepted.accepted_profile_id
     assert payload["actual_profile"]["id"] == accepted.accepted_profile_id
     assert payload["actual_profile"]["stages"][0]["device"] == "cuda"
@@ -1679,6 +1752,7 @@ def test_runtime_profile_provenance_records_accepted_actual_and_fallback(
     assert payload["fallback"]["status"] == "not_needed"
     assert payload["contract"] == "runtime-profile-provenance.v1"
     assert payload["current_product"]["version"] == setup_state.command_identity.version
+    assert record.metadata["attempt"] == 3
     assert record.metadata["actual_profile_id"] == accepted.accepted_profile_id
 
 
@@ -1727,6 +1801,52 @@ def test_main_process_stores_runtime_profile_provenance_before_processing_stages
     assert len(provenance_records) == 1
     provenance = json.loads(store.retrieve(provenance_records[0].id))
     assert provenance["run_id"] == "run-before-stage"
+    assert provenance["attempt"] == 1
+
+
+def test_main_resume_stores_runtime_profile_provenance_per_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _build_processing_session(tmp_path)
+    store = FileSystemArtifactStore(session_id=session.record.id, session_dir=session.bundle_path)
+    ledger = ProcessingStageLedger(session_id=session.record.id, run_id="run-failed", store=store)
+    failed_state = ledger.mark_failed(
+        stage="transcription",
+        input_artifacts=(),
+        error=ProcessingErrorInfo(
+            message="Transient inference failure",
+            retryable=True,
+            code="model_timeout",
+        ),
+        attempt=4,
+    )
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    setup_state = _persist_ready_runtime_profile_state(settings, monkeypatch)
+    accepted = build_runtime_profile_state(evaluate_setup(get_alpha_local_profile(), setup_state))
+    selection = SimpleNamespace(
+        accepted=accepted,
+        actual=accepted,
+        current_command_identity=setup_state.command_identity,
+        fallback_used=False,
+        fallback_reason=None,
+        fallback_status="not_needed",
+        revalidation=evaluate_setup(get_alpha_local_profile(), setup_state),
+    )
+    store_runtime_profile_provenance(
+        store=store,
+        run_id=failed_state.run_id,
+        attempt=failed_state.attempt,
+        selection=cast(Any, selection),
+    )
+    processing_calls = _patch_processing_stages(monkeypatch)
+
+    assert main(["resume", str(session.record_path)], settings=settings) == 0
+
+    assert processing_calls["attempt"] == failed_state.attempt + 1
+    provenance_records = store.list(artifact_type="runtime_profile_provenance")
+    attempts = {json.loads(store.retrieve(record.id))["attempt"] for record in provenance_records}
+    assert attempts == {failed_state.attempt, failed_state.attempt + 1}
 
 
 def test_main_process_reports_provider_validation_errors(

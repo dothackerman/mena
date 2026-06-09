@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from mena.artifacts import ArtifactRecord, FileSystemArtifactStore
@@ -17,6 +17,8 @@ from mena.setup import (
     HardwareFacts,
     RuntimeProfileState,
     SetupEvaluation,
+    SetupPlan,
+    SetupProfile,
     SubprocessCommandRunner,
     build_runtime_profile_state,
     default_profile_catalog,
@@ -49,6 +51,7 @@ def select_runtime_profile(
     command_identity: CommandIdentity | None,
     hardware: HardwareFacts | None,
     allow_runtime_fallback: bool,
+    required_stages: frozenset[str] | None = None,
 ) -> RuntimeProfileSelection:
     """Select the accepted or explicit fallback runtime profile for derived artifacts."""
 
@@ -67,14 +70,18 @@ def select_runtime_profile(
         )
 
     command_runner = runner or SubprocessCommandRunner()
+    accepted_detection_profile = _profile_for_stages(accepted_profile, required_stages)
     accepted_state = detect_local_installation_state(
         settings,
         runner=command_runner,
         command_identity=command_identity,
         hardware=hardware,
-        profile=accepted_profile,
+        profile=accepted_detection_profile,
     )
-    accepted_evaluation = evaluate_setup(accepted_profile, accepted_state)
+    accepted_evaluation = _scope_evaluation(
+        evaluate_setup(accepted_detection_profile, accepted_state),
+        required_stages,
+    )
     accepted_failure = _runtime_profile_failure(accepted, accepted_evaluation)
     if accepted_failure is None:
         return RuntimeProfileSelection(
@@ -95,14 +102,18 @@ def select_runtime_profile(
     if fallback_profile is None:
         raise ValueError(f"Accepted runtime profile is unavailable: {accepted_failure}")
 
+    fallback_detection_profile = _profile_for_stages(fallback_profile, required_stages)
     fallback_state = detect_local_installation_state(
         settings,
         runner=command_runner,
         command_identity=command_identity,
         hardware=hardware,
-        profile=fallback_profile,
+        profile=fallback_detection_profile,
     )
-    fallback_evaluation = evaluate_setup(fallback_profile, fallback_state)
+    fallback_evaluation = _scope_evaluation(
+        evaluate_setup(fallback_detection_profile, fallback_state),
+        required_stages,
+    )
     if not fallback_evaluation.ready:
         reasons = "; ".join(fallback_evaluation.blocking_reasons)
         raise ValueError(
@@ -196,11 +207,13 @@ def store_runtime_profile_provenance(
     *,
     store: FileSystemArtifactStore,
     run_id: str,
+    attempt: int = 1,
     selection: RuntimeProfileSelection,
 ) -> ArtifactRecord:
     payload = {
         "contract": RUNTIME_PROFILE_PROVENANCE_CONTRACT,
         "run_id": run_id,
+        "attempt": attempt,
         "accepted_profile": {
             "id": selection.accepted.accepted_profile_id,
             "version": selection.accepted.accepted_profile_version,
@@ -238,12 +251,13 @@ def store_runtime_profile_provenance(
     }
     return store.store(
         artifact_type="runtime_profile_provenance",
-        name=f"{run_id}/runtime-profile-provenance.json",
+        name=f"{run_id}/attempt-{attempt}/runtime-profile-provenance.json",
         data=(json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8"),
         version=1,
         metadata={
             "contract": RUNTIME_PROFILE_PROVENANCE_CONTRACT,
             "run_id": run_id,
+            "attempt": attempt,
             "accepted_profile_id": selection.accepted.accepted_profile_id,
             "actual_profile_id": selection.actual.accepted_profile_id,
             "fallback_used": selection.fallback_used,
@@ -262,6 +276,54 @@ def runtime_stage_policy_payload(runtime_state: RuntimeProfileState) -> list[dic
         }
         for policy in runtime_state.stage_policies
     ]
+
+
+def _profile_for_stages(
+    profile: SetupProfile,
+    required_stages: frozenset[str] | None,
+) -> SetupProfile:
+    if required_stages is None:
+        return profile
+    stages = tuple(stage for stage in profile.stages if stage.stage in required_stages)
+    commands = (
+        ("mena", "ollama") if required_stages <= {"summarization"} else profile.required_commands
+    )
+    return replace(
+        profile,
+        stages=stages,
+        python_surfaces=(),
+        required_commands=commands,
+        playback_commands=(),
+    )
+
+
+def _scope_evaluation(
+    evaluation: SetupEvaluation,
+    required_stages: frozenset[str] | None,
+) -> SetupEvaluation:
+    if required_stages is None:
+        return evaluation
+    readiness_ids = _readiness_ids_for_stages(required_stages)
+    readiness = tuple(item for item in evaluation.readiness if item.id in readiness_ids)
+    actions = tuple(action for action in evaluation.plan.actions if action.id in readiness_ids)
+    return SetupEvaluation(
+        profile=evaluation.profile,
+        selected_asr_profile=evaluation.selected_asr_profile,
+        state=evaluation.state,
+        readiness=readiness,
+        plan=SetupPlan(actions=actions),
+    )
+
+
+def _readiness_ids_for_stages(required_stages: frozenset[str]) -> frozenset[str]:
+    ids = {"command:mena"}
+    if "summarization" in required_stages or "semantic-review" in required_stages:
+        ids.update({"command:ollama", "ollama-model"})
+    if "transcription" in required_stages:
+        ids.update({"hardware", "python:faster_whisper", "asr-model"})
+    if "diarization" in required_stages:
+        ids.update({"hardware", "python:pyannote.audio", "diarization-model"})
+    return frozenset(ids)
 
 
 def stage_device(runtime_state: RuntimeProfileState, stage: str) -> str | None:

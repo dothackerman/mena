@@ -621,11 +621,13 @@ def _run_summarize_command(
         command_identity=setup_command_identity,
         hardware=setup_hardware,
         allow_runtime_fallback=allow_runtime_fallback,
+        required_stages=frozenset({"summarization"}),
     )
     run_id = f"summarize-{uuid4()}"
     store_runtime_profile_provenance(
         store=store,
         run_id=run_id,
+        attempt=1,
         selection=runtime_selection,
     )
 
@@ -742,6 +744,7 @@ def _run_processing_command(
         store_runtime_profile_provenance(
             store=store,
             run_id=run_id,
+            attempt=attempt,
             selection=runtime_selection,
         )
         transcription_provider_factory = runtime_transcription_factory(
