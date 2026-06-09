@@ -533,7 +533,7 @@ def detect_local_installation_state(
     )
     ollama = _detect_ollama_state(
         settings=settings,
-        model=_stage_model(evaluated_profile, "summarization"),
+        model=_local_llm_model(evaluated_profile),
         command=_command_check(commands, "ollama"),
         runner=command_runner,
     )
@@ -548,6 +548,7 @@ def detect_local_installation_state(
         python_executable=resolved_python,
         python_surfaces=surfaces,
         env=current_env,
+        device=_stage_device(evaluated_profile, "diarization", selected_asr_profile),
     )
     return LocalInstallationState(
         command_identity=identity,
@@ -576,23 +577,27 @@ def evaluate_setup(
     readiness: list[ReadinessItem] = []
     actions: list[SetupAction] = []
 
-    hardware_ready = _hardware_ready(profile, state.hardware)
-    readiness.append(hardware_ready)
-    if not hardware_ready.ready:
-        return SetupEvaluation(
-            profile=profile,
-            selected_asr_profile=selected_asr_profile,
-            state=state,
-            readiness=tuple(readiness),
-            plan=SetupPlan(actions=()),
-        )
+    if _profile_requires_hardware_gate(profile):
+        hardware_ready = _hardware_ready(profile, state.hardware)
+        readiness.append(hardware_ready)
+        if not hardware_ready.ready:
+            return SetupEvaluation(
+                profile=profile,
+                selected_asr_profile=selected_asr_profile,
+                state=state,
+                readiness=tuple(readiness),
+                plan=SetupPlan(actions=()),
+            )
 
     _evaluate_required_commands(profile, state, readiness, actions)
     _evaluate_playback_commands(state, readiness, actions)
     _evaluate_python_surfaces(state, readiness, actions)
-    _evaluate_ollama_model(state, readiness, actions)
-    _evaluate_asr_model(state, selected_asr_profile, readiness, actions)
-    _evaluate_diarization_model(state, readiness, actions)
+    if _profile_has_any_stage(profile, {"summarization", "semantic-review"}):
+        _evaluate_ollama_model(state, readiness, actions)
+    if _profile_has_stage(profile, "transcription"):
+        _evaluate_asr_model(state, selected_asr_profile, readiness, actions)
+    if _profile_has_stage(profile, "diarization"):
+        _evaluate_diarization_model(state, readiness, actions)
 
     return SetupEvaluation(
         profile=profile,
@@ -734,6 +739,8 @@ def load_runtime_profile_state(paths: RuntimePaths) -> RuntimeProfileState:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
         raise ValueError(f"Accepted runtime profile state is missing at {path}.") from exc
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"Accepted runtime profile state at {path} is not valid UTF-8.") from exc
     except json.JSONDecodeError as exc:
         raise ValueError(f"Accepted runtime profile state at {path} is invalid JSON.") from exc
     return RuntimeProfileState.from_dict(payload)
@@ -946,6 +953,8 @@ def _evaluate_playback_commands(
     readiness: list[ReadinessItem],
     actions: list[SetupAction],
 ) -> None:
+    if not state.playback_commands:
+        return
     present = tuple(check for check in state.playback_commands if check.present)
     if present:
         readiness.append(
@@ -1355,6 +1364,42 @@ def _stage_model(profile: SetupProfile | RuntimeProfileState, stage: str) -> str
     raise ValueError(f"Profile {profile!r} does not define stage {stage!r}.")
 
 
+def _local_llm_model(profile: SetupProfile) -> str:
+    for stage in ("summarization", "semantic-review"):
+        try:
+            return _stage_model(profile, stage)
+        except ValueError:
+            continue
+    raise ValueError(f"Profile {profile!r} does not define a local LLM stage.")
+
+
+def _stage_device(
+    profile: SetupProfile,
+    stage: str,
+    selected_asr_profile: FasterWhisperModelProfile,
+) -> str:
+    for policy in profile.stages:
+        if policy.stage == stage:
+            return (
+                selected_asr_profile.device
+                if policy.device == "hardware-selected"
+                else policy.device
+            )
+    return selected_asr_profile.device
+
+
+def _profile_has_stage(profile: SetupProfile, stage: str) -> bool:
+    return any(policy.stage == stage for policy in profile.stages)
+
+
+def _profile_has_any_stage(profile: SetupProfile, stages: set[str]) -> bool:
+    return any(policy.stage in stages for policy in profile.stages)
+
+
+def _profile_requires_hardware_gate(profile: SetupProfile) -> bool:
+    return _profile_has_any_stage(profile, {"transcription", "diarization"})
+
+
 def _resolved_stage_profiles(evaluation: SetupEvaluation) -> tuple[StageProfile, ...]:
     stages: list[StageProfile] = []
     for stage in evaluation.profile.stages:
@@ -1410,6 +1455,7 @@ def _detect_diarization_model_present(
     python_executable: Path,
     python_surfaces: Sequence[PythonSurfaceCheck],
     env: Mapping[str, str],
+    device: str,
 ) -> bool | None:
     if not _python_surface_installed_checks(python_surfaces, "pyannote.audio"):
         return False
@@ -1421,7 +1467,7 @@ def _detect_diarization_model_present(
         "HUGGING_FACE_HUB_TOKEN": token or "",
     }
     result = runner.run(
-        _pyannote_cache_check_command(python_executable),
+        _pyannote_cache_check_command(python_executable, device=device),
         timeout_seconds=120.0,
         env=command_env,
     )
@@ -1521,7 +1567,7 @@ def _pyannote_warm_command(python_executable: Path) -> tuple[str, ...]:
     return (str(python_executable), "-c", code)
 
 
-def _pyannote_cache_check_command(python_executable: Path) -> tuple[str, ...]:
+def _pyannote_cache_check_command(python_executable: Path, *, device: str) -> tuple[str, ...]:
     code = (
         "import inspect, os; "
         "os.environ.setdefault('HF_HUB_OFFLINE', '1'); "
@@ -1532,7 +1578,13 @@ def _pyannote_cache_check_command(python_executable: Path) -> tuple[str, ...]:
         "params = inspect.signature(Pipeline.from_pretrained).parameters; "
         "kwargs.update({'use_auth_token': token} if token and 'use_auth_token' in params else {}); "
         "kwargs.update({'token': token} if token and 'token' in params else {}); "
-        f"Pipeline.from_pretrained({PYANNOTE_COMMUNITY_CHECKPOINT!r}, **kwargs)"
+        f"pipeline = Pipeline.from_pretrained({PYANNOTE_COMMUNITY_CHECKPOINT!r}, **kwargs); "
+        "move = getattr(pipeline, 'to', None); "
+        f"raise RuntimeError('pyannote pipeline cannot move to selected device') "
+        f"if move is None and {device!r} != 'cpu' else None; "
+        "raise RuntimeError('pyannote pipeline has non-callable to') "
+        "if move is not None and not callable(move) else None; "
+        f"move(__import__('torch').device({device!r})) if move is not None else None"
     )
     return (str(python_executable), "-c", code)
 

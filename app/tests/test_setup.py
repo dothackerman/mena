@@ -140,6 +140,15 @@ def test_runtime_profile_state_load_rejects_invalid_json(tmp_path: Path) -> None
         load_runtime_profile_state(paths)
 
 
+def test_runtime_profile_state_load_rejects_invalid_utf8(tmp_path: Path) -> None:
+    paths = _runtime_paths(tmp_path)
+    paths.state_home.mkdir(parents=True)
+    (paths.state_home / "setup-state.json").write_bytes(b"\xff\xfe")
+
+    with pytest.raises(ValueError, match="not valid UTF-8"):
+        load_runtime_profile_state(paths)
+
+
 def test_evaluation_distinguishes_missing_required_commands() -> None:
     profile = get_alpha_local_profile()
     state = _state(missing_commands={"ollama"})
@@ -513,6 +522,39 @@ def test_diarization_cache_probe_clears_ambient_tokens_when_env_has_none(
     )
     assert runner.run_envs[pyannote_call_index]["HF_TOKEN"] == ""
     assert runner.run_envs[pyannote_call_index]["HUGGING_FACE_HUB_TOKEN"] == ""
+
+
+def test_diarization_cache_probe_validates_selected_device(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    runner = FakeRunner()
+
+    detect_local_installation_state(
+        settings,
+        runner=runner,
+        command_identity=CommandIdentity(
+            current_executable=Path("/bin/mena"),
+            plain_mena_path=Path("/bin/mena"),
+            version="0.1.0",
+            invocation_mode="installed-product",
+        ),
+        hardware=HardwareFacts(
+            system="Linux",
+            ram_gb=32.0,
+            cuda_available=True,
+            vram_gb=12.0,
+            avx2_available=True,
+        ),
+        env={"HF_TOKEN": "token"},
+        python_executable=Path("/target/python"),
+    )
+
+    pyannote_call = next(
+        call for call in runner.run_calls if len(call) > 2 and "Pipeline.from_pretrained" in call[2]
+    )
+    assert "__import__('torch').device('cuda')" in pyannote_call[2]
+    assert "getattr(pipeline, 'to', None)" in pyannote_call[2]
 
 
 def test_detection_helpers_parse_cpu_gpu_and_ollama_outputs(tmp_path: Path) -> None:
