@@ -83,4 +83,5 @@ Proposed → Accepted → [Superseded | Deprecated | Rejected]
 | ADR-026 | Architecture | ZDR-bearing Mistral API fallback: operator-attested predicates | Accepted | 2026-05-01 |
 | ADR-027 | Architecture | UX telemetry absent in PoC v0 | Deferred | 2026-05-01 |
 | ADR-028 | Architecture | Installation profiles, local setup state, and preflight separation | Accepted | 2026-05-23 |
+| ADR-029 | Architecture | Accepted runtime profile state, revalidation, and provenance | Accepted | 2026-06-08 |
 | PDR-001 | Product | Automatic correction overlay selection | Accepted | 2026-05-20 |
