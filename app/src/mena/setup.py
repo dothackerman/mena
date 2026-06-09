@@ -1568,23 +1568,28 @@ def _pyannote_warm_command(python_executable: Path) -> tuple[str, ...]:
 
 
 def _pyannote_cache_check_command(python_executable: Path, *, device: str) -> tuple[str, ...]:
-    code = (
-        "import inspect, os; "
-        "os.environ.setdefault('HF_HUB_OFFLINE', '1'); "
-        "os.environ.setdefault('TRANSFORMERS_OFFLINE', '1'); "
-        "from pyannote.audio import Pipeline; "
-        "token = os.environ.get('HF_TOKEN') or os.environ.get('HUGGING_FACE_HUB_TOKEN'); "
-        "kwargs = {}; "
-        "params = inspect.signature(Pipeline.from_pretrained).parameters; "
-        "kwargs.update({'use_auth_token': token} if token and 'use_auth_token' in params else {}); "
-        "kwargs.update({'token': token} if token and 'token' in params else {}); "
-        f"pipeline = Pipeline.from_pretrained({PYANNOTE_COMMUNITY_CHECKPOINT!r}, **kwargs); "
-        "move = getattr(pipeline, 'to', None); "
-        f"raise RuntimeError('pyannote pipeline cannot move to selected device') "
-        f"if move is None and {device!r} != 'cpu' else None; "
-        "raise RuntimeError('pyannote pipeline has non-callable to') "
-        "if move is not None and not callable(move) else None; "
-        f"move(__import__('torch').device({device!r})) if move is not None else None"
+    code = "\n".join(
+        (
+            "import inspect, os",
+            "os.environ.setdefault('HF_HUB_OFFLINE', '1')",
+            "os.environ.setdefault('TRANSFORMERS_OFFLINE', '1')",
+            "from pyannote.audio import Pipeline",
+            "token = os.environ.get('HF_TOKEN') or os.environ.get('HUGGING_FACE_HUB_TOKEN')",
+            "kwargs = {}",
+            "params = inspect.signature(Pipeline.from_pretrained).parameters",
+            "kwargs.update("
+            "{'use_auth_token': token} if token and 'use_auth_token' in params else {}"
+            ")",
+            "kwargs.update({'token': token} if token and 'token' in params else {})",
+            f"pipeline = Pipeline.from_pretrained({PYANNOTE_COMMUNITY_CHECKPOINT!r}, **kwargs)",
+            "move = getattr(pipeline, 'to', None)",
+            f"if move is None and {device!r} != 'cpu':",
+            "    raise RuntimeError('pyannote pipeline cannot move to selected device')",
+            "if move is not None and not callable(move):",
+            "    raise RuntimeError('pyannote pipeline has non-callable to')",
+            "if move is not None:",
+            f"    move(__import__('torch').device({device!r}))",
+        )
     )
     return (str(python_executable), "-c", code)
 

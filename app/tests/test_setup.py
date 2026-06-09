@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import subprocess
+import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import SimpleNamespace
@@ -30,6 +32,7 @@ from mena.setup import (
     _detect_avx2,
     _detect_nvidia_vram_gb,
     _parse_ollama_model_names,
+    _pyannote_cache_check_command,
     build_runtime_profile_state,
     default_profile_catalog,
     detect_command_identity,
@@ -555,6 +558,40 @@ def test_diarization_cache_probe_validates_selected_device(
     )
     assert "__import__('torch').device('cuda')" in pyannote_call[2]
     assert "getattr(pipeline, 'to', None)" in pyannote_call[2]
+
+
+def test_pyannote_cache_probe_success_path_does_not_raise_none(tmp_path: Path) -> None:
+    pyannote_package = tmp_path / "pyannote" / "audio"
+    pyannote_package.mkdir(parents=True)
+    (tmp_path / "pyannote" / "__init__.py").write_text("", encoding="utf-8")
+    (pyannote_package / "__init__.py").write_text(
+        "\n".join(
+            (
+                "class Pipeline:",
+                "    @classmethod",
+                "    def from_pretrained(cls, *_args, **_kwargs):",
+                "        return cls()",
+                "    def to(self, device):",
+                "        self.device = device",
+                "        return self",
+            )
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "torch.py").write_text(
+        "def device(value):\n    return value\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        _pyannote_cache_check_command(Path(sys.executable), device="cuda"),
+        check=False,
+        env={**os.environ, "PYTHONPATH": str(tmp_path)},
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_detection_helpers_parse_cpu_gpu_and_ollama_outputs(tmp_path: Path) -> None:
