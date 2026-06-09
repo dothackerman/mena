@@ -75,6 +75,27 @@ def test_profile_catalog_exposes_supported_cpu_fallback_profile() -> None:
     assert _stage_model(fallback, "transcription") == "small"
 
 
+def test_cpu_fallback_profile_requires_cpu_capable_hardware() -> None:
+    fallback = default_profile_catalog("llama3.2:3b")[1]
+    evaluation = evaluate_setup(
+        fallback,
+        _state(
+            hardware=HardwareFacts(
+                system="Linux",
+                ram_gb=32.0,
+                cuda_available=True,
+                vram_gb=24.0,
+                avx2_available=False,
+            ),
+            asr_model_present=True,
+            diarization_model_present=True,
+        ),
+    )
+
+    assert not evaluation.ready
+    assert "requires an AVX2-capable CPU" in evaluation.blocking_reasons[0]
+
+
 def test_evaluation_is_pure_and_reports_ready_state_without_actions() -> None:
     profile = get_alpha_local_profile()
     state = _state(asr_model_present=True, diarization_model_present=True)

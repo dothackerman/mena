@@ -1181,14 +1181,19 @@ def _hardware_ready(profile: SetupProfile, hardware: HardwareFacts) -> Readiness
                 f"detected {_format_gb(hardware.ram_gb)}."
             ),
         )
+    cpu_ok = hardware.avx2_available is True
     gpu_ok = (
-        hardware.cuda_available
+        not profile.fallback
+        and hardware.cuda_available
         and hardware.vram_gb is not None
         and hardware.vram_gb >= profile.minimum_cuda_vram_gb
     )
-    cpu_ok = hardware.avx2_available is True
     if not gpu_ok and not cpu_ok:
-        if hardware.avx2_available is None:
+        if profile.fallback and hardware.avx2_available is None:
+            detail = "AVX2 CPU fallback capability could not be detected."
+        elif profile.fallback:
+            detail = "This fallback profile requires an AVX2-capable CPU."
+        elif hardware.avx2_available is None:
             detail = "Neither sufficient CUDA VRAM nor AVX2 CPU fallback could be detected."
         else:
             detail = "This profile needs CUDA with enough VRAM or an AVX2-capable CPU fallback."
