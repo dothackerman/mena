@@ -499,6 +499,7 @@ def detect_local_installation_state(
     runner: CommandRunner | None = None,
     command_identity: CommandIdentity | None = None,
     hardware: HardwareFacts | None = None,
+    profile: SetupProfile | None = None,
     env: Mapping[str, str] | None = None,
     python_executable: Path | None = None,
 ) -> LocalInstallationState:
@@ -507,17 +508,17 @@ def detect_local_installation_state(
     command_runner = runner or SubprocessCommandRunner()
     current_env = os.environ if env is None else env
     identity = command_identity or detect_command_identity(runner=command_runner)
-    profile = get_alpha_local_profile(settings.local_llm.ollama_model)
+    evaluated_profile = profile or get_alpha_local_profile(settings.local_llm.ollama_model)
     detected_hardware = hardware or detect_hardware(command_runner)
-    selected_asr_profile = _select_asr_profile(detected_hardware)
+    selected_asr_profile = _profile_asr_profile(evaluated_profile, detected_hardware)
     resolved_python = python_executable or Path(sys.executable)
     commands = tuple(
         CommandCheck(name=command, path=command_runner.which(command))
-        for command in profile.required_commands
+        for command in evaluated_profile.required_commands
     )
     playback_commands = tuple(
         CommandCheck(name=command, path=command_runner.which(command))
-        for command in profile.playback_commands
+        for command in evaluated_profile.playback_commands
     )
     surfaces = tuple(
         PythonSurfaceCheck(
@@ -528,10 +529,11 @@ def detect_local_installation_state(
                 python_executable=resolved_python,
             ),
         )
-        for requirement in profile.python_surfaces
+        for requirement in evaluated_profile.python_surfaces
     )
     ollama = _detect_ollama_state(
         settings=settings,
+        model=_stage_model(evaluated_profile, "summarization"),
         command=_command_check(commands, "ollama"),
         runner=command_runner,
     )
@@ -1207,13 +1209,14 @@ def _hardware_ready(profile: SetupProfile, hardware: HardwareFacts) -> Readiness
 def _detect_ollama_state(
     *,
     settings: AppSettings,
+    model: str,
     command: CommandCheck,
     runner: CommandRunner,
 ) -> OllamaState:
     if not command.present:
         return OllamaState(
             endpoint=settings.local_llm.ollama_endpoint,
-            model=settings.local_llm.ollama_model,
+            model=model,
             command=command,
             reachable=False,
             model_present=False,
@@ -1229,22 +1232,18 @@ def _detect_ollama_state(
         detail = result.stderr.strip() or result.stdout.strip() or "ollama list failed."
         return OllamaState(
             endpoint=settings.local_llm.ollama_endpoint,
-            model=settings.local_llm.ollama_model,
+            model=model,
             command=command,
             reachable=False,
             model_present=False,
             detail=detail,
         )
     models = _parse_ollama_model_names(result.stdout)
-    model_present = settings.local_llm.ollama_model in models
-    detail = (
-        "model present"
-        if model_present
-        else f"model {settings.local_llm.ollama_model} is not listed by Ollama"
-    )
+    model_present = model in models
+    detail = "model present" if model_present else f"model {model} is not listed by Ollama"
     return OllamaState(
         endpoint=settings.local_llm.ollama_endpoint,
-        model=settings.local_llm.ollama_model,
+        model=model,
         command=command,
         reachable=True,
         model_present=model_present,
@@ -1340,6 +1339,15 @@ def _profile_asr_profile(
             reason="Explicit CPU fallback profile selected by Mena setup policy.",
         )
     return _select_asr_profile(hardware)
+
+
+def _stage_model(profile: SetupProfile | RuntimeProfileState, stage: str) -> str:
+    for policy in (
+        profile.stage_policies if isinstance(profile, RuntimeProfileState) else profile.stages
+    ):
+        if policy.stage == stage:
+            return policy.model
+    raise ValueError(f"Profile {profile!r} does not define stage {stage!r}.")
 
 
 def _resolved_stage_profiles(evaluation: SetupEvaluation) -> tuple[StageProfile, ...]:
