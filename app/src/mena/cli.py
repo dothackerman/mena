@@ -70,6 +70,16 @@ from mena.review_flagging import (
     ReviewFlaggingError,
     run_confidence_flagging_stage,
 )
+from mena.runtime_profile import (
+    RuntimeProfileSelection,
+    production_runtime_required,
+    runtime_diarization_factory,
+    runtime_semantic_factory,
+    runtime_summarization_provider,
+    runtime_transcription_factory,
+    select_runtime_profile,
+    store_runtime_profile_provenance,
+)
 from mena.semantic_coherence import (
     SEMANTIC_COHERENCE_STAGE,
     OllamaSemanticCoherenceProvider,
@@ -95,20 +105,16 @@ from mena.setup import (
     CommandRunner,
     HardwareFacts,
     ReadinessItem,
-    RuntimeProfileState,
     SubprocessCommandRunner,
     build_runtime_profile_state,
-    default_profile_catalog,
     detect_local_installation_state,
     evaluate_setup,
     execute_setup_plan,
     format_setup_report,
     get_alpha_local_profile,
-    load_runtime_profile_state,
     persist_runtime_profile_state,
 )
 from mena.summarization import (
-    OllamaSummarizationProvider,
     SummarizationError,
     SummarizationPolicy,
     run_summarization_stage,
@@ -150,15 +156,6 @@ ProviderFactory = Callable[[], Any]
 
 class ProviderValidationError(TypeError):
     """Raised when a configured processing provider does not satisfy its protocol."""
-
-
-@dataclass(frozen=True)
-class RuntimeProfileSelection:
-    accepted: RuntimeProfileState
-    actual: RuntimeProfileState
-    fallback_used: bool
-    fallback_reason: str | None = None
-    fallback_status: str = "not_needed"
 
 
 @dataclass(frozen=True)
@@ -295,10 +292,7 @@ def main(
         print(f"Cannot load configuration: {exc}")
         return 1
 
-    effective_semantic_coherence_provider_factory = _configured_semantic_factory(
-        semantic_coherence_provider_factory,
-        app_settings,
-    )
+    effective_semantic_coherence_provider_factory = semantic_coherence_provider_factory
 
     if args.command == "setup":
         return _run_setup_command(
@@ -515,8 +509,8 @@ def _run_setup_command(
         return 0 if evaluation.ready else 1
     if evaluation.ready:
         accepted_state = build_runtime_profile_state(evaluation)
-        persist_runtime_profile_state(accepted_state, paths=settings.paths)
-        print(f"Accepted runtime profile state: {settings.paths.state_home / 'setup-state.json'}")
+        state_path = persist_runtime_profile_state(accepted_state, paths=settings.paths)
+        print(f"Accepted runtime profile state: {state_path}")
         return 0
     if not evaluation.plan.actions:
         return 1
@@ -577,246 +571,16 @@ def _readiness_item_failed(
     return any(item.id == readiness_id and not item.ready for item in readiness)
 
 
-def _select_runtime_profile_for_processing(
-    *,
-    settings: AppSettings,
-    runner: CommandRunner | None,
-    command_identity: CommandIdentity | None,
-    hardware: HardwareFacts | None,
-    allow_runtime_fallback: bool,
-) -> RuntimeProfileSelection:
-    accepted = load_runtime_profile_state(settings.paths)
-    catalog = {
-        (profile.id, profile.version): profile
-        for profile in default_profile_catalog(settings.local_llm.ollama_model)
-    }
-    accepted_profile = catalog.get(
-        (accepted.accepted_profile_id, accepted.accepted_profile_version)
-    )
-    if accepted_profile is None or accepted.catalog_version != accepted_profile.catalog_version:
-        raise ValueError(
-            "Accepted runtime profile state is incompatible with the bundled profile catalog; "
-            "run `mena setup` again."
-        )
-
-    command_runner = runner or SubprocessCommandRunner()
-    current_state = detect_local_installation_state(
-        settings,
-        runner=command_runner,
-        command_identity=command_identity,
-        hardware=hardware,
-    )
-    accepted_evaluation = evaluate_setup(accepted_profile, current_state)
-    accepted_failure = _runtime_profile_failure(accepted, accepted_evaluation)
-    if accepted_failure is None:
-        return RuntimeProfileSelection(accepted=accepted, actual=accepted, fallback_used=False)
-
-    fallback_profile = next((profile for profile in catalog.values() if profile.fallback), None)
-    if not allow_runtime_fallback:
-        raise ValueError(
-            "Accepted runtime profile is unavailable: "
-            f"{accepted_failure} Re-run setup or pass --allow-runtime-fallback for an explicit "
-            "one-run fallback when supported."
-        )
-    if fallback_profile is None:
-        raise ValueError(f"Accepted runtime profile is unavailable: {accepted_failure}")
-
-    fallback_evaluation = evaluate_setup(fallback_profile, current_state)
-    if not fallback_evaluation.ready:
-        reasons = "; ".join(fallback_evaluation.blocking_reasons)
-        raise ValueError(
-            "Accepted runtime profile is unavailable and fallback is not currently viable: "
-            f"{accepted_failure} Fallback blockers: {reasons}"
-        )
-    fallback_state = build_runtime_profile_state(fallback_evaluation)
-    return RuntimeProfileSelection(
-        accepted=accepted,
-        actual=fallback_state,
-        fallback_used=True,
-        fallback_reason=accepted_failure,
-        fallback_status="used",
-    )
-
-
 def _requires_runtime_profile(
     transcription_provider_factory: ProviderFactory,
     diarization_provider_factory: ProviderFactory,
     semantic_coherence_provider_factory: ProviderFactory,
 ) -> bool:
-    return (
-        transcription_provider_factory is FasterWhisperTranscriptionProvider
-        or diarization_provider_factory is PyannoteCommunityDiarizationProvider
-        or semantic_coherence_provider_factory is OllamaSemanticCoherenceProvider
+    return production_runtime_required(
+        transcription_provider_factory=transcription_provider_factory,
+        diarization_provider_factory=diarization_provider_factory,
+        semantic_coherence_provider_factory=semantic_coherence_provider_factory,
     )
-
-
-def _runtime_profile_failure(
-    accepted: RuntimeProfileState,
-    evaluation: Any,
-) -> str | None:
-    if not evaluation.ready:
-        return "; ".join(evaluation.blocking_reasons)
-    expected = accepted.selected_asr_profile
-    current = evaluation.selected_asr_profile
-    if (
-        expected.id != current.id
-        or expected.checkpoint != current.checkpoint
-        or expected.device != current.device
-        or expected.compute_type != current.compute_type
-    ):
-        return (
-            "current ASR runtime selection does not match accepted setup state "
-            f"({current.id}/{current.device}/{current.compute_type} vs "
-            f"{expected.id}/{expected.device}/{expected.compute_type})"
-        )
-    return None
-
-
-def _runtime_transcription_factory(
-    factory: ProviderFactory,
-    runtime_state: RuntimeProfileState,
-) -> ProviderFactory:
-    if factory is not FasterWhisperTranscriptionProvider:
-        return factory
-    profile = runtime_state.selected_asr_profile
-
-    def _factory() -> FasterWhisperTranscriptionProvider:
-        return FasterWhisperTranscriptionProvider(profile=profile, local_files_only=True)
-
-    return _factory
-
-
-def _runtime_diarization_factory(
-    factory: ProviderFactory,
-    runtime_state: RuntimeProfileState,
-) -> ProviderFactory:
-    if factory is not PyannoteCommunityDiarizationProvider:
-        return factory
-    device = _stage_device(runtime_state, "diarization") or "cpu"
-
-    def _factory() -> PyannoteCommunityDiarizationProvider:
-        return PyannoteCommunityDiarizationProvider(device=device)
-
-    return _factory
-
-
-def _runtime_semantic_factory(
-    factory: ProviderFactory,
-    *,
-    settings: AppSettings,
-    runtime_state: RuntimeProfileState,
-) -> ProviderFactory:
-    if factory is not OllamaSemanticCoherenceProvider:
-        return factory
-    model = _stage_model(runtime_state, "semantic-review") or settings.local_llm.ollama_model
-
-    def _factory() -> OllamaSemanticCoherenceProvider:
-        return OllamaSemanticCoherenceProvider(
-            model=model,
-            endpoint=settings.local_llm.ollama_endpoint,
-        )
-
-    return _factory
-
-
-def _stage_model(runtime_state: RuntimeProfileState, stage: str) -> str | None:
-    for policy in runtime_state.stage_policies:
-        if policy.stage == stage:
-            return policy.model
-    return None
-
-
-def _stage_device(runtime_state: RuntimeProfileState, stage: str) -> str | None:
-    for policy in runtime_state.stage_policies:
-        if policy.stage == stage:
-            return policy.device
-    return None
-
-
-def _runtime_summarization_provider(
-    *,
-    settings: AppSettings,
-    runtime_state: RuntimeProfileState,
-) -> OllamaSummarizationProvider:
-    model = _stage_model(runtime_state, "summarization") or settings.local_llm.ollama_model
-    return OllamaSummarizationProvider(
-        model=model,
-        endpoint=settings.local_llm.ollama_endpoint,
-    )
-
-
-def _runtime_stage_policy_payload(runtime_state: RuntimeProfileState) -> list[dict[str, str]]:
-    return [
-        {
-            "stage": policy.stage,
-            "provider": policy.provider,
-            "model": policy.model,
-            "device": policy.device,
-            "policy": policy.policy,
-        }
-        for policy in runtime_state.stage_policies
-    ]
-
-
-def _store_runtime_profile_provenance(
-    *,
-    store: FileSystemArtifactStore,
-    run_id: str,
-    selection: RuntimeProfileSelection,
-) -> ArtifactRecord:
-    payload = {
-        "run_id": run_id,
-        "accepted_profile": {
-            "id": selection.accepted.accepted_profile_id,
-            "version": selection.accepted.accepted_profile_version,
-            "catalog_version": selection.accepted.catalog_version,
-            "accepted_at": selection.accepted.accepted_at,
-            "product_version": selection.accepted.product_version,
-        },
-        "actual_profile": {
-            "id": selection.actual.accepted_profile_id,
-            "version": selection.actual.accepted_profile_version,
-            "catalog_version": selection.actual.catalog_version,
-            "product_version": selection.actual.product_version,
-            "selected_asr_profile": selection.actual.selected_asr_profile.id,
-            "selected_asr_device": selection.actual.selected_asr_profile.device,
-            "selected_asr_checkpoint": selection.actual.selected_asr_profile.checkpoint,
-            "stages": _runtime_stage_policy_payload(selection.actual),
-        },
-        "fallback": {
-            "used": selection.fallback_used,
-            "status": selection.fallback_status,
-            "reason": selection.fallback_reason,
-        },
-    }
-    return store.store(
-        artifact_type="runtime_profile_provenance",
-        name=f"{run_id}/runtime-profile-provenance.json",
-        data=(json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8"),
-        version=1,
-        metadata={
-            "run_id": run_id,
-            "accepted_profile_id": selection.accepted.accepted_profile_id,
-            "actual_profile_id": selection.actual.accepted_profile_id,
-            "fallback_used": selection.fallback_used,
-        },
-    )
-
-
-def _configured_semantic_factory(
-    factory: ProviderFactory,
-    settings: AppSettings,
-) -> ProviderFactory:
-    if factory is not OllamaSemanticCoherenceProvider:
-        return factory
-
-    def _factory() -> OllamaSemanticCoherenceProvider:
-        return OllamaSemanticCoherenceProvider(
-            model=settings.local_llm.ollama_model,
-            endpoint=settings.local_llm.ollama_endpoint,
-        )
-
-    return _factory
 
 
 def _run_summarize_command(
@@ -851,12 +615,18 @@ def _run_summarize_command(
         store=store,
         notes_path=manual_notes,
     )
-    runtime_selection = _select_runtime_profile_for_processing(
+    runtime_selection = select_runtime_profile(
         settings=settings,
         runner=setup_runner,
         command_identity=setup_command_identity,
         hardware=setup_hardware,
         allow_runtime_fallback=allow_runtime_fallback,
+    )
+    run_id = f"summarize-{uuid4()}"
+    store_runtime_profile_provenance(
+        store=store,
+        run_id=run_id,
+        selection=runtime_selection,
     )
 
     result = run_summarization_stage(
@@ -864,21 +634,16 @@ def _run_summarize_command(
         ledger=ProcessingStageLedger(
             store=store,
             session_id=session_id,
-            run_id=f"summarize-{session_id}",
+            run_id=run_id,
         ),
         merged_transcript_record=merged_transcript_record,
         correction_overlay_record=resolved_overlay[0],
         manual_notes_record=manual_notes_record,
-        provider=_runtime_summarization_provider(
+        provider=runtime_summarization_provider(
             settings=settings,
             runtime_state=runtime_selection.actual,
         ),
         policy=SummarizationPolicy(language=language),
-    )
-    _store_runtime_profile_provenance(
-        store=store,
-        run_id=f"summarize-{session_id}",
-        selection=runtime_selection,
     )
 
     print(f"Summary written to: {result.summary_record.path}")
@@ -967,22 +732,27 @@ def _run_processing_command(
         semantic_coherence_provider_factory,
     ):
         effective_settings = settings or AppSettings.from_env()
-        runtime_selection = _select_runtime_profile_for_processing(
+        runtime_selection = select_runtime_profile(
             settings=effective_settings,
             runner=setup_runner,
             command_identity=setup_command_identity,
             hardware=setup_hardware,
             allow_runtime_fallback=allow_runtime_fallback,
         )
-        transcription_provider_factory = _runtime_transcription_factory(
+        store_runtime_profile_provenance(
+            store=store,
+            run_id=run_id,
+            selection=runtime_selection,
+        )
+        transcription_provider_factory = runtime_transcription_factory(
             transcription_provider_factory,
             runtime_selection.actual,
         )
-        diarization_provider_factory = _runtime_diarization_factory(
+        diarization_provider_factory = runtime_diarization_factory(
             diarization_provider_factory,
             runtime_selection.actual,
         )
-        semantic_coherence_provider_factory = _runtime_semantic_factory(
+        semantic_coherence_provider_factory = runtime_semantic_factory(
             semantic_coherence_provider_factory,
             settings=effective_settings,
             runtime_state=runtime_selection.actual,
@@ -1018,12 +788,6 @@ def _run_processing_command(
         semantic_coherence_provider=semantic_coherence_provider,
     )
 
-    if runtime_selection is not None:
-        _store_runtime_profile_provenance(
-            store=store,
-            run_id=run_id,
-            selection=runtime_selection,
-        )
     fallback = (
         " with explicit runtime fallback"
         if runtime_selection is not None and runtime_selection.fallback_used
