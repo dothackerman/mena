@@ -524,9 +524,15 @@ class PyannoteCommunityDiarizationProvider:
             raise DiarizationInputError("pyannote diarization requires an audio_path.")
         pipeline = self._load_pipeline()
         output = pipeline(str(request.audio_path))
-        regular_segments = tuple(_segments_from_pyannote(output))
+        regular_output, exclusive_output = _pyannote_diarization_outputs(output)
+        regular_segments = tuple(_segments_from_pyannote(regular_output, id_prefix="turn"))
         if not regular_segments:
             raise DiarizationError("pyannote returned no speaker turns.")
+        exclusive_segments = (
+            tuple(_segments_from_pyannote(exclusive_output, id_prefix="exclusive"))
+            if exclusive_output is not None
+            else _exclusive_projection(regular_segments)
+        )
         speakers = tuple(
             DiarizedSpeaker(
                 id=speaker_id,
@@ -535,13 +541,15 @@ class PyannoteCommunityDiarizationProvider:
                     "pyannote community-1 adapter boundary does not export embeddings yet"
                 ),
             )
-            for index, speaker_id in enumerate(_speaker_ids(regular_segments), start=1)
+            for index, speaker_id in enumerate(
+                _speaker_ids((*regular_segments, *exclusive_segments)), start=1
+            )
         )
         return DiarizationResult(
             provider=self.provider,
             speakers=speakers,
             regular_segments=regular_segments,
-            exclusive_segments=_exclusive_projection(regular_segments),
+            exclusive_segments=exclusive_segments,
         )
 
     def _load_pipeline(self) -> Any:
@@ -1069,7 +1077,18 @@ def _diarization_artifact_name(
     )
 
 
-def _segments_from_pyannote(output: object) -> Iterable[DiarizationSegment]:
+def _pyannote_diarization_outputs(output: object) -> tuple[object, object | None]:
+    if getattr(output, "itertracks", None) is not None:
+        return output, None
+    regular_output = getattr(output, "speaker_diarization", None)
+    if regular_output is None:
+        raise DiarizationContractError(
+            "pyannote output must expose itertracks or speaker_diarization.itertracks."
+        )
+    return regular_output, getattr(output, "exclusive_speaker_diarization", None)
+
+
+def _segments_from_pyannote(output: object, *, id_prefix: str) -> Iterable[DiarizationSegment]:
     itertracks = getattr(output, "itertracks", None)
     if itertracks is None:
         raise DiarizationContractError("pyannote output must expose itertracks.")
@@ -1084,7 +1103,7 @@ def _segments_from_pyannote(output: object) -> Iterable[DiarizationSegment]:
         speaker_id = _stable_speaker_id(str(label))
         segments.append(
             DiarizationSegment(
-                id=f"turn_{index:06d}",
+                id=f"{id_prefix}_{index:06d}",
                 speaker_id=speaker_id,
                 start_seconds=_required_attr_number(turn, "start"),
                 end_seconds=_required_attr_number(turn, "end"),
