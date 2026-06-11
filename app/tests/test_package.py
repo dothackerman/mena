@@ -11,7 +11,7 @@ README = REPO_ROOT / "README.md"
 
 
 def test_package_has_version() -> None:
-    assert mena.__version__ == "0.1.0rc1"
+    assert mena.__version__ == "0.1.0rc2"
 
 
 def test_console_script_entry_point_is_declared() -> None:
