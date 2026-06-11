@@ -832,6 +832,14 @@ def test_pyannote_provider_maps_turns_without_confidence_scores(tmp_path: Path) 
     assert [speaker.id for speaker in result.speakers] == ["speaker_00", "speaker_01"]
     assert result.regular_segments[0].speaker_id == "speaker_00"
     assert [segment.overlapped for segment in result.regular_segments] == [True, True]
+    assert [segment.id for segment in result.exclusive_segments] == [
+        "exclusive_000001",
+        "exclusive_000002",
+    ]
+    assert [segment.metadata["projection"] for segment in result.exclusive_segments] == [
+        "regular timeline projected to one speaker per instant",
+        "regular timeline projected to one speaker per instant",
+    ]
     assert result.speakers[0].embedding.status == "unavailable"
 
 
