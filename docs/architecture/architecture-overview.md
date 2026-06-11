@@ -1343,7 +1343,7 @@ Full per-adapter rationale and divergence resolution lives in the [research synt
 
 #### Installation Profile and Setup Policy
 
-Status: Confirmed (per `ADR-028`)
+Status: Confirmed (per `ADR-028`, extended by `ADR-029`)
 
 Installation and preflight must not decide provider setup by inspecting the machine and installing whatever happens to be possible.
 
@@ -1371,6 +1371,10 @@ Unsupported setups may be explained, but cannot be selected.
 For the Linux CLI PoC, issue #68 implements only the first fixed local profile.
 That profile is a structural seed for the catalog boundary, not a general multi-profile recommendation system.
 Remote fallback setup, profile updates, telemetry-informed recommendations, doctor, and re-setup UX are deferred.
+
+Issue #72 adds accepted runtime profile state. Successful setup persists the accepted profile under `RuntimePaths.state_home` as product state, not repository state or user-authored configuration. Processing loads that accepted state, revalidates current runtime evidence before constructing providers, and uses the accepted or explicitly selected fallback profile instead of provider defaults.
+
+Processing fallback is explicit per run. If the accepted profile is stale or unavailable, non-interactive processing fails unless the command carries an explicit fallback policy. When fallback is used, run-level provenance records the accepted profile, actual profile, and fallback reason; stage artifacts continue to record provider/model/device metadata through their provider contracts.
 
 #### User Configuration Rule
 

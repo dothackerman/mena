@@ -70,6 +70,18 @@ from mena.review_flagging import (
     ReviewFlaggingError,
     run_confidence_flagging_stage,
 )
+from mena.runtime_profile import (
+    PROCESSING_RUNTIME_STAGES,
+    SUMMARIZATION_RUNTIME_STAGES,
+    RuntimeProfileSelection,
+    production_runtime_required,
+    runtime_diarization_factory,
+    runtime_semantic_factory,
+    runtime_summarization_provider,
+    runtime_transcription_factory,
+    select_runtime_profile,
+    store_runtime_profile_provenance,
+)
 from mena.semantic_coherence import (
     SEMANTIC_COHERENCE_STAGE,
     OllamaSemanticCoherenceProvider,
@@ -96,14 +108,15 @@ from mena.setup import (
     HardwareFacts,
     ReadinessItem,
     SubprocessCommandRunner,
+    build_runtime_profile_state,
     detect_local_installation_state,
     evaluate_setup,
     execute_setup_plan,
     format_setup_report,
     get_alpha_local_profile,
+    persist_runtime_profile_state,
 )
 from mena.summarization import (
-    OllamaSummarizationProvider,
     SummarizationError,
     SummarizationPolicy,
     run_summarization_stage,
@@ -206,6 +219,15 @@ def build_parser() -> argparse.ArgumentParser:
                 "session_path",
                 help="Path to the session directory or session.json.",
             )
+        if command in {"process", "resume", "summarize"}:
+            subparser.add_argument(
+                "--allow-runtime-fallback",
+                action="store_true",
+                help=(
+                    "Allow explicit one-run fallback if the accepted runtime profile is "
+                    "unavailable."
+                ),
+            )
 
         if command == "export":
             subparser.add_argument(
@@ -272,10 +294,7 @@ def main(
         print(f"Cannot load configuration: {exc}")
         return 1
 
-    effective_semantic_coherence_provider_factory = _configured_semantic_factory(
-        semantic_coherence_provider_factory,
-        app_settings,
-    )
+    effective_semantic_coherence_provider_factory = semantic_coherence_provider_factory
 
     if args.command == "setup":
         return _run_setup_command(
@@ -346,6 +365,10 @@ def main(
                     else validate_summary_language(args.language, "--language")
                 ),
                 settings=app_settings,
+                setup_runner=setup_runner,
+                setup_command_identity=setup_command_identity,
+                setup_hardware=setup_hardware,
+                allow_runtime_fallback=args.allow_runtime_fallback,
             )
         except (
             ArtifactStoreError,
@@ -431,6 +454,11 @@ def main(
                 transcription_provider_factory=transcription_provider_factory,
                 diarization_provider_factory=diarization_provider_factory,
                 semantic_coherence_provider_factory=effective_semantic_coherence_provider_factory,
+                settings=app_settings,
+                setup_runner=setup_runner,
+                setup_command_identity=setup_command_identity,
+                setup_hardware=setup_hardware,
+                allow_runtime_fallback=args.allow_runtime_fallback,
             )
         except (
             ArtifactStoreError,
@@ -482,6 +510,9 @@ def _run_setup_command(
     if check_only:
         return 0 if evaluation.ready else 1
     if evaluation.ready:
+        accepted_state = build_runtime_profile_state(evaluation)
+        state_path = persist_runtime_profile_state(accepted_state, paths=settings.paths)
+        print(f"Accepted runtime profile state: {state_path}")
         return 0
     if not evaluation.plan.actions:
         return 1
@@ -528,6 +559,10 @@ def _run_setup_command(
         ),
         end="",
     )
+    if final_ready:
+        accepted_state = build_runtime_profile_state(refreshed_evaluation)
+        state_path = persist_runtime_profile_state(accepted_state, paths=settings.paths)
+        print(f"Accepted runtime profile state: {state_path}")
     return 0 if final_ready else 1
 
 
@@ -538,20 +573,16 @@ def _readiness_item_failed(
     return any(item.id == readiness_id and not item.ready for item in readiness)
 
 
-def _configured_semantic_factory(
-    factory: ProviderFactory,
-    settings: AppSettings,
-) -> ProviderFactory:
-    if factory is not OllamaSemanticCoherenceProvider:
-        return factory
-
-    def _factory() -> OllamaSemanticCoherenceProvider:
-        return OllamaSemanticCoherenceProvider(
-            model=settings.local_llm.ollama_model,
-            endpoint=settings.local_llm.ollama_endpoint,
-        )
-
-    return _factory
+def _requires_runtime_profile(
+    transcription_provider_factory: ProviderFactory,
+    diarization_provider_factory: ProviderFactory,
+    semantic_coherence_provider_factory: ProviderFactory,
+) -> bool:
+    return production_runtime_required(
+        transcription_provider_factory=transcription_provider_factory,
+        diarization_provider_factory=diarization_provider_factory,
+        semantic_coherence_provider_factory=semantic_coherence_provider_factory,
+    )
 
 
 def _run_summarize_command(
@@ -560,6 +591,10 @@ def _run_summarize_command(
     manual_notes: str | None,
     language: str,
     settings: AppSettings,
+    setup_runner: CommandRunner | None = None,
+    setup_command_identity: CommandIdentity | None = None,
+    setup_hardware: HardwareFacts | None = None,
+    allow_runtime_fallback: bool = False,
 ) -> int:
     session_dir, session_record = _resolve_session(session_path)
     session_id = _extract_session_id(session_record)
@@ -582,20 +617,35 @@ def _run_summarize_command(
         store=store,
         notes_path=manual_notes,
     )
+    runtime_selection = select_runtime_profile(
+        settings=settings,
+        runner=setup_runner,
+        command_identity=setup_command_identity,
+        hardware=setup_hardware,
+        allow_runtime_fallback=allow_runtime_fallback,
+        required_stages=SUMMARIZATION_RUNTIME_STAGES,
+    )
+    run_id = f"summarize-{uuid4()}"
+    store_runtime_profile_provenance(
+        store=store,
+        run_id=run_id,
+        attempt=1,
+        selection=runtime_selection,
+    )
 
     result = run_summarization_stage(
         store=store,
         ledger=ProcessingStageLedger(
             store=store,
             session_id=session_id,
-            run_id=f"summarize-{session_id}",
+            run_id=run_id,
         ),
         merged_transcript_record=merged_transcript_record,
         correction_overlay_record=resolved_overlay[0],
         manual_notes_record=manual_notes_record,
-        provider=OllamaSummarizationProvider(
-            model=settings.local_llm.ollama_model,
-            endpoint=settings.local_llm.ollama_endpoint,
+        provider=runtime_summarization_provider(
+            settings=settings,
+            runtime_state=runtime_selection.actual,
         ),
         policy=SummarizationPolicy(language=language),
     )
@@ -661,7 +711,13 @@ def _run_processing_command(
     transcription_provider_factory: ProviderFactory,
     diarization_provider_factory: ProviderFactory,
     semantic_coherence_provider_factory: ProviderFactory,
+    settings: AppSettings | None = None,
+    setup_runner: CommandRunner | None = None,
+    setup_command_identity: CommandIdentity | None = None,
+    setup_hardware: HardwareFacts | None = None,
+    allow_runtime_fallback: bool = False,
 ) -> int:
+    runtime_selection: RuntimeProfileSelection | None = None
     session_dir, session_record = _resolve_session(session_path)
     session_id = _extract_session_id(session_record)
     profile = get_capture_profile(_required_str(session_record, "profile"))
@@ -673,6 +729,40 @@ def _run_processing_command(
         session_record=session_record,
         store=store,
     )
+
+    if _requires_runtime_profile(
+        transcription_provider_factory,
+        diarization_provider_factory,
+        semantic_coherence_provider_factory,
+    ):
+        effective_settings = settings or AppSettings.from_env()
+        runtime_selection = select_runtime_profile(
+            settings=effective_settings,
+            runner=setup_runner,
+            command_identity=setup_command_identity,
+            hardware=setup_hardware,
+            allow_runtime_fallback=allow_runtime_fallback,
+            required_stages=PROCESSING_RUNTIME_STAGES,
+        )
+        store_runtime_profile_provenance(
+            store=store,
+            run_id=run_id,
+            attempt=attempt,
+            selection=runtime_selection,
+        )
+        transcription_provider_factory = runtime_transcription_factory(
+            transcription_provider_factory,
+            runtime_selection.actual,
+        )
+        diarization_provider_factory = runtime_diarization_factory(
+            diarization_provider_factory,
+            runtime_selection.actual,
+        )
+        semantic_coherence_provider_factory = runtime_semantic_factory(
+            semantic_coherence_provider_factory,
+            settings=effective_settings,
+            runtime_state=runtime_selection.actual,
+        )
 
     pipeline_timestamp = now if now is not None else datetime.now(UTC)
     transcription_provider = _require_provider(
@@ -704,7 +794,12 @@ def _run_processing_command(
         semantic_coherence_provider=semantic_coherence_provider,
     )
 
-    print(f"Processing completed for run '{run_id}' (attempt {attempt}).")
+    fallback = (
+        " with explicit runtime fallback"
+        if runtime_selection is not None and runtime_selection.fallback_used
+        else ""
+    )
+    print(f"Processing completed for run '{run_id}' (attempt {attempt}){fallback}.")
     return 0
 
 

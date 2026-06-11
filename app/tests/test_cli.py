@@ -1,6 +1,7 @@
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -32,7 +33,11 @@ from mena.correction_overlay import (
     persist_correction_overlay_artifact,
 )
 from mena.correction_workflow import PlaybackRequest
-from mena.diarization import DiarizationProvider, FakeDiarizationProvider
+from mena.diarization import (
+    DiarizationProvider,
+    FakeDiarizationProvider,
+    PyannoteCommunityDiarizationProvider,
+)
 from mena.discovery import AudioDiscovery, AudioRoute, DiscoveryStatus, PlaybackStream
 from mena.merge_timing import (
     MERGED_TRANSCRIPT_ARTIFACT_TYPE,
@@ -60,7 +65,20 @@ from mena.review_flagging import (
     ReviewQueueArtifact,
     persist_review_queue_artifact,
 )
-from mena.semantic_coherence import FakeSemanticCoherenceProvider, SemanticCoherenceProvider
+from mena.runtime_profile import (
+    PROCESSING_RUNTIME_STAGES,
+    SUMMARIZATION_RUNTIME_STAGES,
+    runtime_diarization_factory,
+    runtime_semantic_factory,
+    runtime_transcription_factory,
+    select_runtime_profile,
+    store_runtime_profile_provenance,
+)
+from mena.semantic_coherence import (
+    FakeSemanticCoherenceProvider,
+    OllamaSemanticCoherenceProvider,
+    SemanticCoherenceProvider,
+)
 from mena.sessions import (
     SESSION_RECORD_FILENAME,
     SESSION_RECORD_VERSION,
@@ -77,7 +95,10 @@ from mena.setup import (
     LocalInstallationState,
     OllamaState,
     PythonSurfaceCheck,
+    build_runtime_profile_state,
+    evaluate_setup,
     get_alpha_local_profile,
+    persist_runtime_profile_state,
 )
 from mena.summarization import (
     FakeSummarizationProvider,
@@ -90,6 +111,7 @@ from mena.summarization import (
 from mena.transcription import (
     TRANSCRIPT_SCHEMA_VERSION,
     FakeTranscriptionProvider,
+    FasterWhisperTranscriptionProvider,
     TranscriptArtifact,
     TranscriptionProvider,
     TranscriptLanguage,
@@ -311,7 +333,9 @@ def test_setup_yes_executes_planned_actions_through_runner(
     assert any(call[1] == "-c" and "faster_whisper" in call[2] for call in runner.run_calls)
     assert any(call[1] == "-c" and "pyannote.audio" in call[2] for call in runner.run_calls)
     assert "Setup action results:" in captured.out
-    assert captured.out.rstrip().endswith("Local provider readiness: complete")
+    assert "Local provider readiness: complete" in captured.out
+    assert "Accepted runtime profile state:" in captured.out
+    assert (settings.paths.state_home / "setup-state.json").is_file()
     assert "[missing]" in captured.out
     assert (
         captured.out.rsplit("Mena Linux alpha setup preflight", maxsplit=1)[-1].count("[missing]")
@@ -642,6 +666,8 @@ def test_main_summarize_applies_active_overlay_and_manual_notes(
         )
 
     monkeypatch.setattr("mena.cli.run_summarization_stage", _fake_run_summarization_stage)
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    _persist_ready_runtime_profile_state(settings, monkeypatch)
 
     exit_code = main(
         [
@@ -651,7 +677,8 @@ def test_main_summarize_applies_active_overlay_and_manual_notes(
             str(notes_path),
             "--language",
             "de-CH",
-        ]
+        ],
+        settings=settings,
     )
     captured_output = capsys.readouterr()
 
@@ -660,7 +687,56 @@ def test_main_summarize_applies_active_overlay_and_manual_notes(
     assert captured.get("overlay") == overlay_record
     assert captured.get("manual") is not None
     assert captured.get("language") == "de-CH"
+    provenance_records = store.list(artifact_type="runtime_profile_provenance")
+    assert len(provenance_records) == 1
+    provenance = json.loads(store.retrieve(provenance_records[0].id))
+    assert provenance["run_id"].startswith("summarize-")
+    assert any(
+        stage["stage"] == "summarization" for stage in provenance["actual_profile"]["stages"]
+    )
     assert "Summary written to:" in captured_output.out
+
+
+def test_main_summarize_uses_unique_runtime_profile_provenance_per_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_dir, store, _, _ = _build_summarize_session_bundle(tmp_path)
+
+    def _fake_run_summarization_stage(
+        *,
+        store: ArtifactStore,
+        ledger: ProcessingStageLedger,
+        merged_transcript_record: ArtifactRecord,
+        provider: object,
+        correction_overlay_record: ArtifactRecord | None = None,
+        policy: SummarizationPolicy | None = None,
+        manual_notes_record: ArtifactRecord | None = None,
+        stage: str = "summarization",
+        attempt: int = 1,
+        skip_completed: bool = True,
+        now: datetime | None = None,
+    ) -> SimpleNamespace:
+        return SimpleNamespace(
+            summary_record=store.store(
+                artifact_type="summary",
+                name=f"summary/{ledger.run_id}.json",
+                data=b"{}",
+                version=1,
+            ),
+        )
+
+    monkeypatch.setattr("mena.cli.run_summarization_stage", _fake_run_summarization_stage)
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    _persist_ready_runtime_profile_state(settings, monkeypatch)
+
+    assert main(["summarize", str(session_dir)], settings=settings) == 0
+    assert main(["summarize", str(session_dir)], settings=settings) == 0
+
+    provenance_records = store.list(artifact_type="runtime_profile_provenance")
+    assert len(provenance_records) == 2
+    run_ids = {json.loads(store.retrieve(record.id))["run_id"] for record in provenance_records}
+    assert len(run_ids) == 2
 
 
 def test_main_summarize_uses_configured_defaults(
@@ -710,8 +786,10 @@ model = "mistral:7b"
         )
 
     monkeypatch.setattr("mena.cli.run_summarization_stage", _fake_run_summarization_stage)
+    settings = AppSettings.from_env(env={}, home=tmp_path, config_path=config_path)
+    _persist_ready_runtime_profile_state(settings, monkeypatch)
 
-    exit_code = main(["summarize", str(session_dir)], config_path=config_path)
+    exit_code = main(["summarize", str(session_dir)], settings=settings)
 
     assert exit_code == 0
     assert captured["language"] == "fr-CH"
@@ -753,10 +831,12 @@ def test_main_summarize_cli_language_overrides_config(
         )
 
     monkeypatch.setattr("mena.cli.run_summarization_stage", _fake_run_summarization_stage)
+    settings = AppSettings.from_env(env={}, home=tmp_path, config_path=config_path)
+    _persist_ready_runtime_profile_state(settings, monkeypatch)
 
     exit_code = main(
         ["summarize", str(session_dir), "--language", "it-CH"],
-        config_path=config_path,
+        settings=settings,
     )
 
     assert exit_code == 0
@@ -820,7 +900,7 @@ def test_main_reports_config_errors_before_command_execution(
     assert not (tmp_path / "sessions").exists()
 
 
-def test_main_process_uses_configured_ollama_defaults_for_semantic_provider(
+def test_main_process_does_not_preconfigure_default_semantic_provider(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -848,8 +928,8 @@ model = "semantic-model:latest"
     exit_code = main(["process", str(session_dir)], config_path=config_path)
 
     assert exit_code == 0
-    assert captured["model"] == "semantic-model:latest"
-    assert captured["endpoint"] == "http://127.0.0.1:11436"
+    assert captured["model"] == "llama3.2:3b"
+    assert captured["endpoint"] == "http://localhost:11434"
 
 
 def test_main_summarize_accepts_session_json_file(
@@ -888,10 +968,162 @@ def test_main_summarize_accepts_session_json_file(
         )
 
     monkeypatch.setattr("mena.cli.run_summarization_stage", _fake_run_summarization_stage)
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    _persist_ready_runtime_profile_state(settings, monkeypatch)
 
-    exit_code = main(["summarize", str(session_json_path)])
+    exit_code = main(["summarize", str(session_json_path)], settings=settings)
 
     assert exit_code == 0
+
+
+def test_main_summarize_requires_accepted_runtime_profile_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    session_dir, _, _, _ = _build_summarize_session_bundle(tmp_path)
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    monkeypatch.setattr(
+        "mena.runtime_profile.detect_local_installation_state",
+        lambda *_args, **_kwargs: _setup_state(settings=settings, pyannote_token_present=True),
+    )
+
+    exit_code = main(["summarize", str(session_dir)], settings=settings)
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "Accepted runtime profile state is missing" in captured.out
+    assert str(settings.paths.state_home / "setup-state.json") in captured.out
+
+
+def test_main_summarize_revalidates_only_summarization_runtime_dependencies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_dir, store, _, _ = _build_summarize_session_bundle(tmp_path)
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    ready_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = build_runtime_profile_state(evaluate_setup(get_alpha_local_profile(), ready_state))
+    persist_runtime_profile_state(accepted, paths=settings.paths)
+    observed_profile_stages: list[tuple[str, ...]] = []
+
+    def _detect_summary_state(
+        _settings: AppSettings,
+        **kwargs: object,
+    ) -> LocalInstallationState:
+        profile = cast(Any, kwargs["profile"])
+        observed_profile_stages.append(tuple(stage.stage for stage in profile.stages))
+        return _setup_state(
+            settings=settings,
+            hardware=HardwareFacts(
+                system="Linux",
+                ram_gb=32.0,
+                cuda_available=False,
+                vram_gb=None,
+                avx2_available=True,
+            ),
+            asr_model_present=False,
+            diarization_model_present=False,
+            pyannote_token_present=False,
+            python_surfaces={"faster_whisper": False, "pyannote.audio": False},
+        )
+
+    def _fake_run_summarization_stage(
+        *,
+        store: ArtifactStore,
+        ledger: ProcessingStageLedger,
+        merged_transcript_record: ArtifactRecord,
+        provider: object,
+        correction_overlay_record: ArtifactRecord | None = None,
+        policy: SummarizationPolicy | None = None,
+        manual_notes_record: ArtifactRecord | None = None,
+        stage: str = "summarization",
+        attempt: int = 1,
+        skip_completed: bool = True,
+        now: datetime | None = None,
+    ) -> SimpleNamespace:
+        return SimpleNamespace(
+            summary_record=store.store(
+                artifact_type="summary",
+                name=f"summary/{ledger.run_id}.json",
+                data=b"{}",
+                version=1,
+            ),
+        )
+
+    monkeypatch.setattr(
+        "mena.runtime_profile.detect_local_installation_state", _detect_summary_state
+    )
+    monkeypatch.setattr("mena.cli.run_summarization_stage", _fake_run_summarization_stage)
+
+    assert main(["summarize", str(session_dir)], settings=settings) == 0
+
+    assert observed_profile_stages == [("summarization",)]
+    provenance_records = store.list(artifact_type="runtime_profile_provenance")
+    assert len(provenance_records) == 1
+    provenance = json.loads(store.retrieve(provenance_records[0].id))
+    assert provenance["revalidation"]["ready"] is True
+    assert provenance["actual_profile"]["stages"] == [
+        {
+            "device": "local-service",
+            "model": settings.local_llm.ollama_model,
+            "policy": "local-preferred, no setup-time remote fallback",
+            "provider": "Ollama",
+            "stage": "summarization",
+        }
+    ]
+
+
+def test_summarize_runtime_scope_still_checks_ollama_after_bad_hardware_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    ready_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = build_runtime_profile_state(evaluate_setup(get_alpha_local_profile(), ready_state))
+    persist_runtime_profile_state(accepted, paths=settings.paths)
+
+    def _detect_summary_state(
+        _settings: AppSettings,
+        **_kwargs: object,
+    ) -> LocalInstallationState:
+        state = _setup_state(settings=settings, pyannote_token_present=True)
+        return replace(
+            state,
+            hardware=HardwareFacts(
+                system="Darwin",
+                ram_gb=None,
+                cuda_available=False,
+                vram_gb=None,
+                avx2_available=None,
+            ),
+            commands=(
+                CommandCheck("mena", Path("/usr/bin/mena")),
+                CommandCheck("ollama", None),
+            ),
+            ollama=OllamaState(
+                endpoint=settings.local_llm.ollama_endpoint,
+                model=settings.local_llm.ollama_model,
+                command=CommandCheck("ollama", None),
+                reachable=False,
+                model_present=False,
+                detail="ollama command missing",
+            ),
+        )
+
+    monkeypatch.setattr(
+        "mena.runtime_profile.detect_local_installation_state", _detect_summary_state
+    )
+
+    with pytest.raises(ValueError, match="Install and start Ollama locally"):
+        select_runtime_profile(
+            settings=settings,
+            runner=None,
+            command_identity=None,
+            hardware=None,
+            allow_runtime_fallback=False,
+            required_stages=SUMMARIZATION_RUNTIME_STAGES,
+        )
 
 
 def test_main_summarize_reports_missing_merged_transcript(
@@ -951,7 +1183,9 @@ def test_main_summarize_reports_stage_failure(
     monkeypatch.setattr("mena.cli.run_summarization_stage", _run_stage_fails)
 
     session_dir, _, _, _ = _build_summarize_session_bundle(tmp_path)
-    exit_code = main(["summarize", str(session_dir)])
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    _persist_ready_runtime_profile_state(settings, monkeypatch)
+    exit_code = main(["summarize", str(session_dir)], settings=settings)
     captured = capsys.readouterr()
 
     assert exit_code == 1
@@ -1312,6 +1546,320 @@ def test_run_processing_command_executes_stage_pipeline(
     assert "semantic" in calls
 
 
+def test_main_process_requires_accepted_runtime_profile_state(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    session = _build_processing_session(tmp_path)
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+
+    exit_code = main(["process", str(session.record_path)], settings=settings)
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "Accepted runtime profile state is missing" in captured.out
+    assert str(settings.paths.state_home / "setup-state.json") in captured.out
+
+
+def test_main_process_revalidates_only_derived_runtime_dependencies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _build_processing_session(tmp_path)
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    ready_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = build_runtime_profile_state(evaluate_setup(get_alpha_local_profile(), ready_state))
+    persist_runtime_profile_state(accepted, paths=settings.paths)
+    observed: dict[str, object] = {}
+
+    def _detect_processing_state(
+        _settings: AppSettings,
+        **kwargs: object,
+    ) -> LocalInstallationState:
+        profile = cast(Any, kwargs["profile"])
+        observed["stages"] = tuple(stage.stage for stage in profile.stages)
+        observed["commands"] = profile.required_commands
+        observed["playback"] = profile.playback_commands
+        observed["surfaces"] = tuple(surface.import_name for surface in profile.python_surfaces)
+        return replace(
+            _setup_state(settings=settings, pyannote_token_present=True),
+            commands=(
+                CommandCheck("mena", Path("/usr/bin/mena")),
+                CommandCheck("ollama", Path("/usr/bin/ollama")),
+            ),
+            playback_commands=(),
+        )
+
+    monkeypatch.setattr(
+        "mena.runtime_profile.detect_local_installation_state", _detect_processing_state
+    )
+    processing_calls = _patch_processing_stages(monkeypatch)
+
+    assert main(["process", str(session.record_path)], settings=settings) == 0
+
+    assert set(cast(tuple[str, ...], observed["stages"])) == PROCESSING_RUNTIME_STAGES
+    assert observed["commands"] == ("mena", "ollama")
+    assert observed["playback"] == ()
+    assert observed["surfaces"] == ("faster_whisper", "pyannote.audio")
+    assert processing_calls["session_id"] == session.record.id
+
+
+def test_runtime_provider_factories_use_selected_profile_state(tmp_path: Path) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    setup_state = _setup_state(settings=settings, pyannote_token_present=True)
+    evaluation = evaluate_setup(get_alpha_local_profile(), setup_state)
+    runtime_state = build_runtime_profile_state(evaluation)
+
+    transcription_provider = runtime_transcription_factory(
+        FasterWhisperTranscriptionProvider,
+        runtime_state,
+    )()
+    diarization_provider = runtime_diarization_factory(
+        PyannoteCommunityDiarizationProvider,
+        runtime_state,
+    )()
+    semantic_provider = runtime_semantic_factory(
+        OllamaSemanticCoherenceProvider,
+        settings=settings,
+        runtime_state=runtime_state,
+    )()
+
+    assert transcription_provider.profile.id == evaluation.selected_asr_profile.id
+    assert transcription_provider.profile.device == "cuda"
+    assert transcription_provider.local_files_only
+    assert diarization_provider.device == "cuda"
+    assert semantic_provider.metadata.model == settings.local_llm.ollama_model
+    assert semantic_provider.metadata.endpoint == settings.local_llm.ollama_endpoint
+
+
+def test_runtime_profile_selection_uses_accepted_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    setup_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = build_runtime_profile_state(evaluate_setup(get_alpha_local_profile(), setup_state))
+    persist_runtime_profile_state(accepted, paths=settings.paths)
+    monkeypatch.setattr(
+        "mena.runtime_profile.detect_local_installation_state",
+        lambda *_args, **_kwargs: setup_state,
+    )
+
+    selection = select_runtime_profile(
+        settings=settings,
+        runner=None,
+        command_identity=None,
+        hardware=None,
+        allow_runtime_fallback=False,
+    )
+
+    assert selection.accepted.accepted_profile_id == accepted.accepted_profile_id
+    assert selection.actual.accepted_profile_id == accepted.accepted_profile_id
+    assert not selection.fallback_used
+
+
+def test_runtime_profile_selection_revalidates_accepted_model_after_config_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    setup_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted_profile = get_alpha_local_profile(settings.local_llm.ollama_model)
+    accepted = build_runtime_profile_state(evaluate_setup(accepted_profile, setup_state))
+    persist_runtime_profile_state(accepted, paths=settings.paths)
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+[ollama]
+model = "mistral:7b"
+""".strip(),
+        encoding="utf-8",
+    )
+    drifted_settings = AppSettings.from_env(env={}, home=tmp_path, config_path=config_path)
+    observed_models: list[str] = []
+
+    def _detect_state(_settings: AppSettings, **kwargs: object) -> LocalInstallationState:
+        profile = cast(Any, kwargs["profile"])
+        model = next(stage.model for stage in profile.stages if stage.stage == "summarization")
+        observed_models.append(model)
+        return replace(
+            _setup_state(settings=drifted_settings, pyannote_token_present=True),
+            ollama=OllamaState(
+                endpoint=drifted_settings.local_llm.ollama_endpoint,
+                model=model,
+                command=CommandCheck("ollama", Path("/usr/bin/ollama")),
+                reachable=True,
+                model_present=True,
+                detail="model present",
+            ),
+        )
+
+    monkeypatch.setattr("mena.runtime_profile.detect_local_installation_state", _detect_state)
+
+    selection = select_runtime_profile(
+        settings=drifted_settings,
+        runner=None,
+        command_identity=None,
+        hardware=None,
+        allow_runtime_fallback=False,
+    )
+
+    assert observed_models == [settings.local_llm.ollama_model]
+    assert selection.actual.accepted_profile_id == accepted.accepted_profile_id
+
+
+def test_runtime_profile_selection_requires_explicit_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    accepted_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = build_runtime_profile_state(
+        evaluate_setup(get_alpha_local_profile(), accepted_state)
+    )
+    persist_runtime_profile_state(accepted, paths=settings.paths)
+    stale_state = _setup_state(
+        settings=settings,
+        hardware=HardwareFacts(
+            system="Linux",
+            ram_gb=32.0,
+            cuda_available=False,
+            vram_gb=None,
+            avx2_available=True,
+        ),
+        pyannote_token_present=True,
+    )
+    monkeypatch.setattr(
+        "mena.runtime_profile.detect_local_installation_state",
+        lambda *_args, **_kwargs: stale_state,
+    )
+
+    with pytest.raises(ValueError, match="--allow-runtime-fallback"):
+        select_runtime_profile(
+            settings=settings,
+            runner=None,
+            command_identity=None,
+            hardware=None,
+            allow_runtime_fallback=False,
+        )
+
+    fallback_selection = select_runtime_profile(
+        settings=settings,
+        runner=None,
+        command_identity=None,
+        hardware=None,
+        allow_runtime_fallback=True,
+    )
+
+    assert fallback_selection.fallback_used
+    assert fallback_selection.actual.accepted_profile_id.endswith("cpu-fallback-v1")
+    assert fallback_selection.fallback_reason is not None
+
+
+def test_runtime_profile_selection_revalidates_fallback_against_fallback_profile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    accepted_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = build_runtime_profile_state(
+        evaluate_setup(get_alpha_local_profile(), accepted_state)
+    )
+    persist_runtime_profile_state(accepted, paths=settings.paths)
+    observed_profiles: list[str] = []
+
+    def _detect_state(_settings: AppSettings, **kwargs: object) -> LocalInstallationState:
+        profile = cast(Any, kwargs["profile"])
+        observed_profiles.append(profile.id)
+        return _setup_state(
+            settings=settings,
+            hardware=HardwareFacts(
+                system="Linux",
+                ram_gb=32.0,
+                cuda_available=False,
+                vram_gb=None,
+                avx2_available=True,
+            ),
+            pyannote_token_present=True,
+        )
+
+    monkeypatch.setattr("mena.runtime_profile.detect_local_installation_state", _detect_state)
+
+    selection = select_runtime_profile(
+        settings=settings,
+        runner=None,
+        command_identity=None,
+        hardware=None,
+        allow_runtime_fallback=True,
+    )
+
+    assert observed_profiles == ["linux-alpha-local-v1", "linux-alpha-cpu-fallback-v1"]
+    assert selection.fallback_used
+    assert selection.actual.selected_asr_profile.device == "cpu"
+
+
+def test_runtime_profile_selection_rejects_stale_catalog_state(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    setup_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = build_runtime_profile_state(evaluate_setup(get_alpha_local_profile(), setup_state))
+    payload = accepted.to_dict()
+    payload["catalog_version"] = "stale-catalog"
+    settings.paths.state_home.mkdir(parents=True)
+    (settings.paths.state_home / "setup-state.json").write_text(
+        json.dumps(payload),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="incompatible"):
+        select_runtime_profile(
+            settings=settings,
+            runner=None,
+            command_identity=None,
+            hardware=None,
+            allow_runtime_fallback=False,
+        )
+
+
+def test_runtime_profile_provenance_records_accepted_actual_and_fallback(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    setup_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = build_runtime_profile_state(evaluate_setup(get_alpha_local_profile(), setup_state))
+    selection = SimpleNamespace(
+        accepted=accepted,
+        actual=accepted,
+        current_command_identity=setup_state.command_identity,
+        fallback_used=False,
+        fallback_reason=None,
+        fallback_status="not_needed",
+        revalidation=evaluate_setup(get_alpha_local_profile(), setup_state),
+    )
+    session = _build_processing_session(tmp_path)
+    store = FileSystemArtifactStore(session_id=session.record.id, session_dir=session.bundle_path)
+
+    record = store_runtime_profile_provenance(
+        store=store,
+        run_id="run-001",
+        attempt=3,
+        selection=cast(Any, selection),
+    )
+    payload = json.loads(store.retrieve(record.id))
+
+    assert payload["attempt"] == 3
+    assert payload["accepted_profile"]["id"] == accepted.accepted_profile_id
+    assert payload["actual_profile"]["id"] == accepted.accepted_profile_id
+    assert payload["actual_profile"]["stages"][0]["device"] == "cuda"
+    assert payload["fallback"]["used"] is False
+    assert payload["fallback"]["status"] == "not_needed"
+    assert payload["contract"] == "runtime-profile-provenance.v1"
+    assert payload["current_product"]["version"] == setup_state.command_identity.version
+    assert record.metadata["attempt"] == 3
+    assert record.metadata["actual_profile_id"] == accepted.accepted_profile_id
+
+
 def test_main_process_executes_full_pipeline_with_stubbed_stages(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1334,6 +1882,75 @@ def test_main_process_executes_full_pipeline_with_stubbed_stages(
     assert processing_calls["run_id"] == "manual-run-001"
     assert processing_calls["attempt"] == 1
     assert "Processing completed for run 'manual-run-001' (attempt 1)." in captured.out
+
+
+def test_main_process_stores_runtime_profile_provenance_before_processing_stages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _build_processing_session(tmp_path)
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    _persist_ready_runtime_profile_state(settings, monkeypatch)
+
+    def _fail_processing_stages(**_kwargs: object) -> None:
+        raise RuntimeError("stage should see existing runtime provenance")
+
+    monkeypatch.setattr("mena.cli._run_processing_stages", _fail_processing_stages)
+
+    with pytest.raises(RuntimeError, match="stage should see existing runtime provenance"):
+        main(["process", str(session.record_path)], settings=settings, run_id="run-before-stage")
+
+    store = FileSystemArtifactStore(session_id=session.record.id, session_dir=session.bundle_path)
+    provenance_records = store.list(artifact_type="runtime_profile_provenance")
+    assert len(provenance_records) == 1
+    provenance = json.loads(store.retrieve(provenance_records[0].id))
+    assert provenance["run_id"] == "run-before-stage"
+    assert provenance["attempt"] == 1
+
+
+def test_main_resume_stores_runtime_profile_provenance_per_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _build_processing_session(tmp_path)
+    store = FileSystemArtifactStore(session_id=session.record.id, session_dir=session.bundle_path)
+    ledger = ProcessingStageLedger(session_id=session.record.id, run_id="run-failed", store=store)
+    failed_state = ledger.mark_failed(
+        stage="transcription",
+        input_artifacts=(),
+        error=ProcessingErrorInfo(
+            message="Transient inference failure",
+            retryable=True,
+            code="model_timeout",
+        ),
+        attempt=4,
+    )
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    setup_state = _persist_ready_runtime_profile_state(settings, monkeypatch)
+    accepted = build_runtime_profile_state(evaluate_setup(get_alpha_local_profile(), setup_state))
+    selection = SimpleNamespace(
+        accepted=accepted,
+        actual=accepted,
+        current_command_identity=setup_state.command_identity,
+        fallback_used=False,
+        fallback_reason=None,
+        fallback_status="not_needed",
+        revalidation=evaluate_setup(get_alpha_local_profile(), setup_state),
+    )
+    store_runtime_profile_provenance(
+        store=store,
+        run_id=failed_state.run_id,
+        attempt=failed_state.attempt,
+        selection=cast(Any, selection),
+    )
+    processing_calls = _patch_processing_stages(monkeypatch)
+
+    assert main(["resume", str(session.record_path)], settings=settings) == 0
+
+    assert processing_calls["attempt"] == failed_state.attempt + 1
+    provenance_records = store.list(artifact_type="runtime_profile_provenance")
+    attempts = {json.loads(store.retrieve(record.id))["attempt"] for record in provenance_records}
+    assert attempts == {failed_state.attempt, failed_state.attempt + 1}
 
 
 def test_main_process_reports_provider_validation_errors(
@@ -2659,7 +3276,7 @@ def test_main_process_uses_relative_capture_segment_paths(
         lambda **_kwargs: None,
     )
 
-    exit_code = main(
+    exit_code = _main_process_with_fake_providers(
         [
             "process",
             str(session.record_path),
@@ -2813,13 +3430,13 @@ def test_main_process_reuses_existing_source_audio_artifacts_on_second_run(
         lambda **_kwargs: None,
     )
 
-    first_exit_code = main(
+    first_exit_code = _main_process_with_fake_providers(
         [
             "process",
             str(session.record_path),
         ]
     )
-    second_exit_code = main(
+    second_exit_code = _main_process_with_fake_providers(
         [
             "process",
             str(session.record_path),
@@ -2848,8 +3465,10 @@ def test_main_process_reuses_source_audio_with_relative_then_absolute_session_pa
         lambda **_kwargs: None,
     )
 
-    first_exit_code = main(["process", str(session.bundle_path.relative_to(tmp_path))])
-    second_exit_code = main(["process", str(session.bundle_path)])
+    first_exit_code = _main_process_with_fake_providers(
+        ["process", str(session.bundle_path.relative_to(tmp_path))]
+    )
+    second_exit_code = _main_process_with_fake_providers(["process", str(session.bundle_path)])
 
     captured = capsys.readouterr()
     assert first_exit_code == 0
@@ -2872,12 +3491,14 @@ def test_main_process_reuses_source_audio_after_session_bundle_relocation(
         lambda **_kwargs: None,
     )
 
-    first_exit_code = main(["process", str(session.record_path)])
+    first_exit_code = _main_process_with_fake_providers(["process", str(session.record_path)])
     relocated_root = tmp_path / "relocated"
     relocated_root.mkdir()
     relocated_bundle = relocated_root / session.bundle_path.name
     session.bundle_path.rename(relocated_bundle)
-    second_exit_code = main(["process", str(relocated_bundle / "session.json")])
+    second_exit_code = _main_process_with_fake_providers(
+        ["process", str(relocated_bundle / "session.json")]
+    )
 
     captured = capsys.readouterr()
     assert first_exit_code == 0
@@ -2896,12 +3517,12 @@ def test_main_process_rematerializes_corrupt_reused_source_audio(
         lambda **_kwargs: None,
     )
 
-    first_exit_code = main(["process", str(session.record_path)])
+    first_exit_code = _main_process_with_fake_providers(["process", str(session.record_path)])
     source_artifact_path = (
         session.bundle_path / "artifacts/source_audio/source_audio/local_mic_000001.wav"
     )
     source_artifact_path.write_bytes(b"truncated")
-    second_exit_code = main(["process", str(session.record_path)])
+    second_exit_code = _main_process_with_fake_providers(["process", str(session.record_path)])
 
     captured = capsys.readouterr()
     assert first_exit_code == 0
@@ -2921,12 +3542,12 @@ def test_main_process_rematerializes_source_audio_when_artifact_parent_is_missin
         lambda **_kwargs: None,
     )
 
-    first_exit_code = main(["process", str(session.record_path)])
+    first_exit_code = _main_process_with_fake_providers(["process", str(session.record_path)])
     source_artifact_dir = session.bundle_path / "artifacts/source_audio/source_audio"
     for artifact_file in source_artifact_dir.iterdir():
         artifact_file.unlink()
     source_artifact_dir.rmdir()
-    second_exit_code = main(["process", str(session.record_path)])
+    second_exit_code = _main_process_with_fake_providers(["process", str(session.record_path)])
 
     captured = capsys.readouterr()
     assert first_exit_code == 0
@@ -3064,6 +3685,7 @@ def _setup_state(
     *,
     settings: AppSettings,
     command_identity: CommandIdentity | None = None,
+    hardware: HardwareFacts | None = None,
     ollama_model_present: bool = True,
     asr_model_present: bool | None = True,
     diarization_model_present: bool | None = True,
@@ -3084,7 +3706,8 @@ def _setup_state(
             invocation_mode="installed-product",
         ),
         runtime_paths=settings.paths,
-        hardware=HardwareFacts(
+        hardware=hardware
+        or HardwareFacts(
             system="Linux",
             ram_gb=32.0,
             cuda_available=True,
@@ -3125,4 +3748,29 @@ def _setup_state(
         diarization_model_present=diarization_model_present,
         pyannote_token_present=pyannote_token_present,
         python_executable=Path("/usr/bin/python3"),
+    )
+
+
+def _persist_ready_runtime_profile_state(
+    settings: AppSettings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> LocalInstallationState:
+    setup_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = build_runtime_profile_state(
+        evaluate_setup(get_alpha_local_profile(settings.local_llm.ollama_model), setup_state)
+    )
+    persist_runtime_profile_state(accepted, paths=settings.paths)
+    monkeypatch.setattr(
+        "mena.runtime_profile.detect_local_installation_state",
+        lambda *_args, **_kwargs: setup_state,
+    )
+    return setup_state
+
+
+def _main_process_with_fake_providers(argv: Sequence[str]) -> int:
+    return main(
+        argv,
+        transcription_provider_factory=FakeTranscriptionProvider,
+        diarization_provider_factory=FakeDiarizationProvider,
+        semantic_coherence_provider_factory=lambda: FakeSemanticCoherenceProvider(results={}),
     )

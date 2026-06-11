@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import subprocess
+import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,7 +12,9 @@ import pytest
 from mena.settings import AppSettings, RuntimePaths
 from mena.setup import (
     ALPHA_LOCAL_PROFILE_ID,
+    FALLBACK_LOCAL_PROFILE_ID,
     PYANNOTE_COMMUNITY_CHECKPOINT,
+    RUNTIME_PROFILE_CATALOG_VERSION,
     CommandCheck,
     CommandIdentity,
     CommandRun,
@@ -28,6 +32,8 @@ from mena.setup import (
     _detect_avx2,
     _detect_nvidia_vram_gb,
     _parse_ollama_model_names,
+    _pyannote_cache_check_command,
+    build_runtime_profile_state,
     default_profile_catalog,
     detect_command_identity,
     detect_local_installation_state,
@@ -36,6 +42,8 @@ from mena.setup import (
     final_provider_readiness,
     format_setup_report,
     get_alpha_local_profile,
+    load_runtime_profile_state,
+    persist_runtime_profile_state,
 )
 
 
@@ -44,6 +52,7 @@ def test_profile_catalog_exposes_fixed_linux_alpha_local_profile() -> None:
 
     assert profile.id == ALPHA_LOCAL_PROFILE_ID
     assert profile.version
+    assert profile.catalog_version == RUNTIME_PROFILE_CATALOG_VERSION
     assert profile.requires_linux
     assert profile.required_commands == ("mena", "uv", "ollama", "pw-dump", "pw-cli", "wpctl")
     assert profile.playback_commands == ("ffplay", "pw-play", "paplay", "aplay")
@@ -59,6 +68,37 @@ def test_profile_catalog_exposes_fixed_linux_alpha_local_profile() -> None:
     assert _stage_model(profile, "summarization") == "llama3.2:3b"
 
 
+def test_profile_catalog_exposes_supported_cpu_fallback_profile() -> None:
+    fallback = default_profile_catalog("llama3.2:3b")[1]
+
+    assert fallback.id == FALLBACK_LOCAL_PROFILE_ID
+    assert fallback.fallback
+    assert fallback.catalog_version == RUNTIME_PROFILE_CATALOG_VERSION
+    assert fallback.minimum_cuda_vram_gb == 0.0
+    assert _stage_model(fallback, "transcription") == "small"
+
+
+def test_cpu_fallback_profile_requires_cpu_capable_hardware() -> None:
+    fallback = default_profile_catalog("llama3.2:3b")[1]
+    evaluation = evaluate_setup(
+        fallback,
+        _state(
+            hardware=HardwareFacts(
+                system="Linux",
+                ram_gb=32.0,
+                cuda_available=True,
+                vram_gb=24.0,
+                avx2_available=False,
+            ),
+            asr_model_present=True,
+            diarization_model_present=True,
+        ),
+    )
+
+    assert not evaluation.ready
+    assert "requires an AVX2-capable CPU" in evaluation.blocking_reasons[0]
+
+
 def test_evaluation_is_pure_and_reports_ready_state_without_actions() -> None:
     profile = get_alpha_local_profile()
     state = _state(asr_model_present=True, diarization_model_present=True)
@@ -68,6 +108,48 @@ def test_evaluation_is_pure_and_reports_ready_state_without_actions() -> None:
     assert evaluation.ready
     assert evaluation.plan.actions == ()
     assert evaluation.blocking_reasons == ()
+
+
+def test_runtime_profile_state_persists_under_runtime_state_home(tmp_path: Path) -> None:
+    profile = get_alpha_local_profile()
+    state = _state(runtime_paths=_runtime_paths(tmp_path), asr_model_present=True)
+    evaluation = evaluate_setup(profile, state)
+
+    accepted = build_runtime_profile_state(evaluation)
+    state_path = persist_runtime_profile_state(accepted, paths=state.runtime_paths)
+    loaded = load_runtime_profile_state(state.runtime_paths)
+
+    assert state_path == state.runtime_paths.state_home / "setup-state.json"
+    assert loaded.accepted_profile_id == profile.id
+    assert loaded.catalog_version == RUNTIME_PROFILE_CATALOG_VERSION
+    assert loaded.evidence_digest == accepted.evidence_digest
+    assert loaded.selected_asr_profile.id == evaluation.selected_asr_profile.id
+
+
+def test_runtime_profile_state_rejects_incomplete_setup() -> None:
+    profile = get_alpha_local_profile()
+    evaluation = evaluate_setup(profile, _state(missing_commands={"ollama"}))
+
+    with pytest.raises(ValueError, match="ready setup evaluation"):
+        build_runtime_profile_state(evaluation)
+
+
+def test_runtime_profile_state_load_rejects_invalid_json(tmp_path: Path) -> None:
+    paths = _runtime_paths(tmp_path)
+    paths.state_home.mkdir(parents=True)
+    (paths.state_home / "setup-state.json").write_text("{not-json", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="invalid JSON"):
+        load_runtime_profile_state(paths)
+
+
+def test_runtime_profile_state_load_rejects_invalid_utf8(tmp_path: Path) -> None:
+    paths = _runtime_paths(tmp_path)
+    paths.state_home.mkdir(parents=True)
+    (paths.state_home / "setup-state.json").write_bytes(b"\xff\xfe")
+
+    with pytest.raises(ValueError, match="not valid UTF-8"):
+        load_runtime_profile_state(paths)
 
 
 def test_evaluation_distinguishes_missing_required_commands() -> None:
@@ -445,6 +527,73 @@ def test_diarization_cache_probe_clears_ambient_tokens_when_env_has_none(
     assert runner.run_envs[pyannote_call_index]["HUGGING_FACE_HUB_TOKEN"] == ""
 
 
+def test_diarization_cache_probe_validates_selected_device(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    runner = FakeRunner()
+
+    detect_local_installation_state(
+        settings,
+        runner=runner,
+        command_identity=CommandIdentity(
+            current_executable=Path("/bin/mena"),
+            plain_mena_path=Path("/bin/mena"),
+            version="0.1.0",
+            invocation_mode="installed-product",
+        ),
+        hardware=HardwareFacts(
+            system="Linux",
+            ram_gb=32.0,
+            cuda_available=True,
+            vram_gb=12.0,
+            avx2_available=True,
+        ),
+        env={"HF_TOKEN": "token"},
+        python_executable=Path("/target/python"),
+    )
+
+    pyannote_call = next(
+        call for call in runner.run_calls if len(call) > 2 and "Pipeline.from_pretrained" in call[2]
+    )
+    assert "__import__('torch').device('cuda')" in pyannote_call[2]
+    assert "getattr(pipeline, 'to', None)" in pyannote_call[2]
+
+
+def test_pyannote_cache_probe_success_path_does_not_raise_none(tmp_path: Path) -> None:
+    pyannote_package = tmp_path / "pyannote" / "audio"
+    pyannote_package.mkdir(parents=True)
+    (tmp_path / "pyannote" / "__init__.py").write_text("", encoding="utf-8")
+    (pyannote_package / "__init__.py").write_text(
+        "\n".join(
+            (
+                "class Pipeline:",
+                "    @classmethod",
+                "    def from_pretrained(cls, *_args, **_kwargs):",
+                "        return cls()",
+                "    def to(self, device):",
+                "        self.device = device",
+                "        return self",
+            )
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "torch.py").write_text(
+        "def device(value):\n    return value\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        _pyannote_cache_check_command(Path(sys.executable), device="cuda"),
+        check=False,
+        env={**os.environ, "PYTHONPATH": str(tmp_path)},
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_detection_helpers_parse_cpu_gpu_and_ollama_outputs(tmp_path: Path) -> None:
     cpuinfo = tmp_path / "cpuinfo"
     cpuinfo.write_text("flags\t: fpu sse avx2 sse4\n", encoding="utf-8")
@@ -650,6 +799,7 @@ class FakeRunner:
 def _state(
     *,
     command_identity: CommandIdentity | None = None,
+    runtime_paths: RuntimePaths | None = None,
     hardware: HardwareFacts | None = None,
     missing_commands: set[str] | None = None,
     python_surfaces: dict[str, bool] | None = None,
@@ -688,7 +838,7 @@ def _state(
             version="0.1.0",
             invocation_mode="installed-product",
         ),
-        runtime_paths=_runtime_paths(Path("/home/user")),
+        runtime_paths=runtime_paths or _runtime_paths(Path("/home/user")),
         hardware=hardware
         or HardwareFacts(
             system="Linux",
