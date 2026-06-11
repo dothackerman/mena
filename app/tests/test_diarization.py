@@ -835,6 +835,78 @@ def test_pyannote_provider_maps_turns_without_confidence_scores(tmp_path: Path) 
     assert result.speakers[0].embedding.status == "unavailable"
 
 
+def test_pyannote_provider_normalizes_community_diarize_output(tmp_path: Path) -> None:
+    class FakeTurn:
+        def __init__(self, start: float, end: float) -> None:
+            self.start = start
+            self.end = end
+
+    class FakeAnnotation:
+        def __init__(self, tracks: list[tuple[FakeTurn, str, str]]) -> None:
+            self._tracks = tracks
+
+        def itertracks(self, *, yield_label: bool) -> list[tuple[FakeTurn, str, str]]:
+            assert yield_label is True
+            return self._tracks
+
+    class FakeDiarizeOutput:
+        def __init__(self) -> None:
+            self.speaker_diarization = FakeAnnotation(
+                [
+                    (FakeTurn(0.0, 1.0), "track-a", "SPEAKER_00"),
+                    (FakeTurn(0.8, 2.0), "track-b", "SPEAKER_01"),
+                ]
+            )
+            self.exclusive_speaker_diarization = FakeAnnotation(
+                [
+                    (FakeTurn(0.0, 0.8), "track-a", "SPEAKER_00"),
+                    (FakeTurn(0.8, 2.0), "track-b", "SPEAKER_01"),
+                ]
+            )
+
+    class FakePipeline:
+        def __call__(self, audio_path: str) -> FakeDiarizeOutput:
+            return FakeDiarizeOutput()
+
+    source_ref = ArtifactRef(
+        id=f"{SESSION_ID}:artifacts/source_audio/system.wav",
+        artifact_type="source_audio",
+        version=1,
+        sha256="0" * 64,
+    )
+    provider = PyannoteCommunityDiarizationProvider(
+        pipeline_factory=lambda *_args, **_kwargs: FakePipeline()
+    )
+
+    result = provider.diarize(
+        DiarizationRequest(
+            session_id=SESSION_ID,
+            source_artifact=source_ref,
+            source_id="system_audio",
+            context=DiarizationContext(
+                capture_profile="online_dual_stream",
+                source_id="system_audio",
+            ),
+            audio_path=tmp_path / "system.wav",
+        )
+    )
+
+    assert [segment.id for segment in result.regular_segments] == [
+        "turn_000001",
+        "turn_000002",
+    ]
+    assert [segment.overlapped for segment in result.regular_segments] == [True, True]
+    assert [segment.id for segment in result.exclusive_segments] == [
+        "exclusive_000001",
+        "exclusive_000002",
+    ]
+    assert [segment.overlapped for segment in result.exclusive_segments] == [False, False]
+    assert [segment.speaker_id for segment in result.exclusive_segments] == [
+        "speaker_00",
+        "speaker_01",
+    ]
+
+
 def test_pyannote_provider_converts_cpu_device_before_moving_pipeline(tmp_path: Path) -> None:
     class FakeTorchDevice:
         def __init__(self, device: str) -> None:
