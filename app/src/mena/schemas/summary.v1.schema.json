@@ -74,7 +74,7 @@
           "type": "integer"
         },
         "prompt_policy": {
-          "const": "meeting-summary-json-v1",
+          "const": "meeting-summary-json-schema-v1",
           "type": "string"
         }
       },
@@ -110,7 +110,7 @@
           "type": "string"
         },
         "prompt_policy": {
-          "const": "meeting-summary-json-v1",
+          "const": "meeting-summary-json-schema-v1",
           "type": "string"
         }
       },

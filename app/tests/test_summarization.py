@@ -575,6 +575,19 @@ def test_ollama_summarization_provider_parses_strict_json_response(
         assert path == "/api/chat"
         assert isinstance(payload, dict)
         assert payload["model"] == "test-model"
+        assert payload["stream"] is False
+        assert payload["options"] == {"temperature": 0}
+        schema = cast(dict[str, object], payload["format"])
+        assert schema["type"] == "object"
+        assert schema["additionalProperties"] is False
+        assert schema["required"] == [
+            "timeline",
+            "important_points",
+            "action_items",
+            "general_summary",
+        ]
+        properties = cast(dict[str, dict[str, object]], schema["properties"])
+        assert properties["general_summary"] == {"type": "string", "minLength": 1}
         messages = cast(list[dict[str, str]], payload["messages"])
         assert "meeting_summary" in messages[1]["content"]
         return {"message": {"content": json.dumps(_summary_result().to_dict())}}
@@ -596,8 +609,39 @@ def test_ollama_summarization_provider_rejects_invalid_json_response(
 
     monkeypatch.setattr(provider, "_post_json", fake_post_json)
 
-    with pytest.raises(SummarizationContractError, match="not valid JSON"):
+    with pytest.raises(SummarizationContractError) as exc_info:
         provider.summarize(_summary_request())
+
+    message = str(exc_info.value)
+    assert "not valid JSON" in message
+    assert "Raw Ollama message content: not-json" in message
+
+
+def test_ollama_summarization_provider_preserves_raw_output_on_contract_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OllamaSummarizationProvider(model="test-model")
+    raw_content = json.dumps(
+        {
+            "timeline": ["Discussed migration risk."],
+            "important_points": ["Database migration needs rollback coverage."],
+            "action_items": [],
+            "general_summary": None,
+        }
+    )
+
+    def fake_post_json(path: str, payload: object) -> dict[str, object]:
+        return {"message": {"content": raw_content}}
+
+    monkeypatch.setattr(provider, "_post_json", fake_post_json)
+
+    with pytest.raises(SummarizationContractError) as exc_info:
+        provider.summarize(_summary_request())
+
+    message = str(exc_info.value)
+    assert "Field 'general_summary' in Summary result must be a non-empty string." in message
+    assert "Raw Ollama message content:" in message
+    assert raw_content in message
 
 
 def test_summarization_policy_and_result_validate_contract() -> None:
