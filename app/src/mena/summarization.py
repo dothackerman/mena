@@ -43,8 +43,44 @@ MANUAL_NOTES_ARTIFACT_TYPE = "manual_notes"
 MANUAL_NOTES_CONTRACT = "manual-notes.raw"
 SUMMARIZATION_STAGE = "summarization"
 SUMMARIZATION_POLICY_VERSION = 1
-PROMPT_POLICY = "meeting-summary-json-v1"
+LEGACY_PROMPT_POLICY = "meeting-summary-json-v1"
+PROMPT_POLICY = "meeting-summary-json-schema-v1"
+SUPPORTED_PROMPT_POLICIES = frozenset({LEGACY_PROMPT_POLICY, PROMPT_POLICY})
 DEFAULT_LANGUAGE = "en"
+SUMMARY_RESPONSE_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["timeline", "important_points", "action_items", "general_summary"],
+    "properties": {
+        "timeline": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+        "important_points": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+        "action_items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["text", "owner", "due"],
+                "properties": {
+                    "text": {"type": "string", "minLength": 1},
+                    "owner": {
+                        "anyOf": [
+                            {"type": "string", "minLength": 1},
+                            {"type": "null"},
+                        ]
+                    },
+                    "due": {
+                        "anyOf": [
+                            {"type": "string", "minLength": 1},
+                            {"type": "null"},
+                        ]
+                    },
+                },
+            },
+        },
+        "general_summary": {"type": "string", "minLength": 1},
+    },
+}
+OLLAMA_DETERMINISTIC_OPTIONS: dict[str, object] = {"temperature": 0}
 
 
 class SummarizationError(RuntimeError):
@@ -83,7 +119,7 @@ class SummarizationPolicy:
         )
         if policy.policy_version != SUMMARIZATION_POLICY_VERSION:
             raise SummarizationContractError("Unsupported summarization policy version.")
-        if policy.prompt_policy != PROMPT_POLICY:
+        if policy.prompt_policy not in SUPPORTED_PROMPT_POLICIES:
             raise SummarizationContractError("Unsupported summarization prompt policy.")
         return policy
 
@@ -217,6 +253,8 @@ class OllamaSummarizationProvider:
         payload = {
             "model": self.metadata.model,
             "stream": False,
+            "format": SUMMARY_RESPONSE_SCHEMA,
+            "options": OLLAMA_DETERMINISTIC_OPTIONS,
             "messages": [
                 {
                     "role": "system",
@@ -235,8 +273,18 @@ class OllamaSummarizationProvider:
         try:
             decoded = json.loads(strip_json_fence(content))
         except json.JSONDecodeError as exc:
-            raise SummarizationContractError("Ollama summary response was not valid JSON.") from exc
-        return SummaryResult.from_dict(decoded)
+            raise SummarizationContractError(
+                _with_raw_ollama_message_content(
+                    "Ollama summary response was not valid JSON.",
+                    content,
+                )
+            ) from exc
+        try:
+            return SummaryResult.from_dict(decoded)
+        except SummarizationContractError as exc:
+            raise SummarizationContractError(
+                _with_raw_ollama_message_content(str(exc), content)
+            ) from exc
 
     def _post_json(self, path: str, payload: Mapping[str, object]) -> Mapping[str, object]:
         try:
@@ -534,7 +582,7 @@ def run_summarization_stage(
             stage=stage,
             input_artifacts=input_artifacts,
             error=ProcessingErrorInfo(
-                message=str(exc),
+                message=_processing_error_message(exc),
                 retryable=isinstance(exc, SummarizationProviderUnavailable),
                 code="summarization_failed",
             ),
@@ -719,6 +767,24 @@ def _summarization_local_ollama_endpoint(endpoint: str) -> str:
         raise SummarizationContractError(str(exc)) from exc
 
 
+def _with_raw_ollama_message_content(message: str, content: str) -> str:
+    return f"{message} Raw Ollama message content: {_diagnostic_excerpt(content)}"
+
+
+def _processing_error_message(exc: BaseException) -> str:
+    message = str(exc)
+    if isinstance(exc, SummarizationContractError):
+        message = message.split(" Raw Ollama message content:", 1)[0]
+    return message
+
+
+def _diagnostic_excerpt(content: str, *, limit: int = 1000) -> str:
+    stripped = content.strip()
+    if len(stripped) <= limit:
+        return stripped
+    return f"{stripped[:limit]}... [truncated]"
+
+
 def _provider_from_dict(data: object) -> SummarizationProviderMetadata:
     item = _mapping(data, "Summary provider")
     provider = SummarizationProviderMetadata(
@@ -727,7 +793,7 @@ def _provider_from_dict(data: object) -> SummarizationProviderMetadata:
         endpoint=_optional_str(item, "endpoint", "Summary provider"),
         prompt_policy=_required_str(item, "prompt_policy", "Summary provider"),
     )
-    if provider.prompt_policy != PROMPT_POLICY:
+    if provider.prompt_policy not in SUPPORTED_PROMPT_POLICIES:
         raise SummarizationContractError("Unsupported summary provider prompt policy.")
     return provider
 
