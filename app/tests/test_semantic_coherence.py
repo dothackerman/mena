@@ -259,7 +259,7 @@ def test_semantic_coherence_stage_ignores_contract_invalid_reusable_output() -> 
                     "policy_version": 1,
                     "context_window_segments": -1,
                     "min_flag_confidence": 0.8,
-                    "prompt_policy": "semantic-coherence-json-v1",
+                    "prompt_policy": "semantic-coherence-json-schema-v1",
                     "provider_config_id": provider.metadata.config_id,
                 },
                 "flags": [],
@@ -347,6 +347,17 @@ def test_ollama_semantic_provider_parses_strict_json_response(
         assert path == "/api/chat"
         assert isinstance(payload, dict)
         assert payload["model"] == "test-model"
+        assert payload["stream"] is False
+        assert payload["options"] == {"temperature": 0}
+        schema = cast(dict[str, object], payload["format"])
+        assert schema["type"] == "object"
+        assert schema["additionalProperties"] is False
+        assert schema["required"] == ["coherent", "confidence", "reason", "evidence"]
+        properties = cast(dict[str, dict[str, object]], schema["properties"])
+        assert properties["coherent"] == {"type": "boolean"}
+        assert properties["confidence"] == {"type": "number", "minimum": 0, "maximum": 1}
+        assert properties["reason"] == {"type": "string", "minLength": 1}
+        assert properties["evidence"] == {"type": "object"}
         return {
             "message": {
                 "content": json.dumps(
@@ -367,6 +378,33 @@ def test_ollama_semantic_provider_parses_strict_json_response(
     assert result.coherent is False
     assert result.confidence == pytest.approx(0.77)
     assert result.reason == "context mismatch"
+
+
+def test_ollama_semantic_provider_normalizes_numeric_string_confidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OllamaSemanticCoherenceProvider(model="test-model")
+
+    def fake_post_json(path: str, payload: object) -> dict[str, object]:
+        return {
+            "message": {
+                "content": json.dumps(
+                    {
+                        "coherent": False,
+                        "confidence": "0.77",
+                        "reason": "context mismatch",
+                        "evidence": {"window": "previous/current/next"},
+                    }
+                )
+            }
+        }
+
+    monkeypatch.setattr(provider, "_post_json", fake_post_json)
+
+    result = provider.check(_semantic_request())
+
+    assert result.coherent is False
+    assert result.confidence == pytest.approx(0.77)
 
 
 def test_ollama_semantic_provider_accepts_fenced_json_response(
@@ -401,8 +439,66 @@ def test_ollama_semantic_provider_rejects_invalid_json_response(
 
     monkeypatch.setattr(provider, "_post_json", fake_post_json)
 
-    with pytest.raises(SemanticCoherenceContractError, match="not valid JSON"):
+    with pytest.raises(SemanticCoherenceContractError) as exc_info:
         provider.check(_semantic_request())
+
+    message = str(exc_info.value)
+    assert "not valid JSON" in message
+    assert "Raw Ollama message content: not-json" in message
+
+
+def test_ollama_semantic_provider_preserves_raw_output_on_contract_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OllamaSemanticCoherenceProvider(model="test-model")
+    raw_content = json.dumps(
+        {
+            "coherent": False,
+            "confidence": "high",
+            "reason": "context mismatch",
+            "evidence": {"window": "previous/current/next"},
+        }
+    )
+
+    def fake_post_json(path: str, payload: object) -> dict[str, object]:
+        return {"message": {"content": raw_content}}
+
+    monkeypatch.setattr(provider, "_post_json", fake_post_json)
+
+    with pytest.raises(SemanticCoherenceContractError) as exc_info:
+        provider.check(_semantic_request())
+
+    message = str(exc_info.value)
+    assert "Field 'confidence' in Semantic coherence result must be a number." in message
+    assert "Raw Ollama message content:" in message
+    assert raw_content in message
+
+
+def test_ollama_semantic_provider_preserves_raw_output_on_null_confidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OllamaSemanticCoherenceProvider(model="test-model")
+    raw_content = json.dumps(
+        {
+            "coherent": False,
+            "confidence": None,
+            "reason": "topic-breaking",
+            "evidence": {"contextual": "yes"},
+        }
+    )
+
+    def fake_post_json(path: str, payload: object) -> dict[str, object]:
+        return {"message": {"content": raw_content}}
+
+    monkeypatch.setattr(provider, "_post_json", fake_post_json)
+
+    with pytest.raises(SemanticCoherenceContractError) as exc_info:
+        provider.check(_semantic_request())
+
+    message = str(exc_info.value)
+    assert "Field 'confidence' in Semantic coherence result must be a number." in message
+    assert "Raw Ollama message content:" in message
+    assert raw_content in message
 
 
 @pytest.mark.parametrize(
@@ -535,7 +631,7 @@ def test_semantic_coherence_policy_from_dict_validates_contract() -> None:
             "policy_version": 1,
             "context_window_segments": 2,
             "min_flag_confidence": 0.7,
-            "prompt_policy": "semantic-coherence-json-v1",
+            "prompt_policy": "semantic-coherence-json-schema-v1",
         }
     )
 
@@ -548,7 +644,7 @@ def test_semantic_coherence_policy_from_dict_validates_contract() -> None:
                 "policy_version": 99,
                 "context_window_segments": 1,
                 "min_flag_confidence": 0.7,
-                "prompt_policy": "semantic-coherence-json-v1",
+                "prompt_policy": "semantic-coherence-json-schema-v1",
             }
         )
     with pytest.raises(SemanticCoherenceContractError, match="must be non-negative"):
@@ -557,7 +653,7 @@ def test_semantic_coherence_policy_from_dict_validates_contract() -> None:
                 "policy_version": 1,
                 "context_window_segments": -1,
                 "min_flag_confidence": 0.7,
-                "prompt_policy": "semantic-coherence-json-v1",
+                "prompt_policy": "semantic-coherence-json-schema-v1",
             }
         )
     with pytest.raises(SemanticCoherenceContractError, match="must be within"):
@@ -566,7 +662,7 @@ def test_semantic_coherence_policy_from_dict_validates_contract() -> None:
                 "policy_version": 1,
                 "context_window_segments": 1,
                 "min_flag_confidence": 1.7,
-                "prompt_policy": "semantic-coherence-json-v1",
+                "prompt_policy": "semantic-coherence-json-schema-v1",
             }
         )
     with pytest.raises(

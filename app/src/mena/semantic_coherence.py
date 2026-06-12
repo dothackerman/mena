@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -44,7 +45,19 @@ from mena.review_flagging import (
 SEMANTIC_COHERENCE_STAGE = "semantic_coherence"
 SEMANTIC_COHERENCE_POLICY_VERSION = 1
 SEMANTIC_INCOHERENCE_REASON = "semantic_incoherence"
-PROMPT_POLICY = "semantic-coherence-json-v1"
+PROMPT_POLICY = "semantic-coherence-json-schema-v1"
+SEMANTIC_COHERENCE_RESPONSE_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["coherent", "confidence", "reason", "evidence"],
+    "properties": {
+        "coherent": {"type": "boolean"},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "reason": {"type": "string", "minLength": 1},
+        "evidence": {"type": "object"},
+    },
+}
+OLLAMA_DETERMINISTIC_OPTIONS: dict[str, object] = {"temperature": 0}
 
 
 class SemanticCoherenceError(RuntimeError):
@@ -208,6 +221,8 @@ class OllamaSemanticCoherenceProvider:
         payload = {
             "model": self.metadata.model,
             "stream": False,
+            "format": SEMANTIC_COHERENCE_RESPONSE_SCHEMA,
+            "options": OLLAMA_DETERMINISTIC_OPTIONS,
             "messages": [
                 {
                     "role": "system",
@@ -227,9 +242,17 @@ class OllamaSemanticCoherenceProvider:
             decoded = json.loads(strip_json_fence(content))
         except json.JSONDecodeError as exc:
             raise SemanticCoherenceContractError(
-                "Ollama semantic coherence response was not valid JSON."
+                _with_raw_ollama_message_content(
+                    "Ollama semantic coherence response was not valid JSON.",
+                    content,
+                )
             ) from exc
-        return SemanticCoherenceResult.from_dict(decoded)
+        try:
+            return _semantic_result_from_provider_payload(decoded)
+        except SemanticCoherenceContractError as exc:
+            raise SemanticCoherenceContractError(
+                _with_raw_ollama_message_content(str(exc), content)
+            ) from exc
 
     def _post_json(self, path: str, payload: Mapping[str, object]) -> Mapping[str, object]:
         try:
@@ -582,6 +605,47 @@ def _semantic_local_ollama_endpoint(endpoint: str) -> str:
         return local_ollama_endpoint(endpoint)
     except LocalLLMContractError as exc:
         raise SemanticCoherenceContractError(str(exc)) from exc
+
+
+def _with_raw_ollama_message_content(message: str, content: str) -> str:
+    return f"{message} Raw Ollama message content: {_diagnostic_excerpt(content)}"
+
+
+def _semantic_result_from_provider_payload(data: object) -> SemanticCoherenceResult:
+    try:
+        return SemanticCoherenceResult.from_dict(data)
+    except SemanticCoherenceContractError:
+        normalized = _with_normalized_numeric_confidence(data)
+        if normalized is None:
+            raise
+        return SemanticCoherenceResult.from_dict(normalized)
+
+
+def _with_normalized_numeric_confidence(data: object) -> Mapping[str, object] | None:
+    if not isinstance(data, Mapping):
+        return None
+    confidence = data.get("confidence")
+    if not isinstance(confidence, str):
+        return None
+    stripped = confidence.strip()
+    if not stripped:
+        return None
+    try:
+        parsed_confidence = float(stripped)
+    except ValueError:
+        return None
+    if not math.isfinite(parsed_confidence):
+        return None
+    normalized = dict(data)
+    normalized["confidence"] = parsed_confidence
+    return normalized
+
+
+def _diagnostic_excerpt(content: str, *, limit: int = 4096) -> str:
+    if len(content) <= limit:
+        return content
+    omitted = len(content) - limit
+    return f"{content[:limit]}... [truncated {omitted} characters]"
 
 
 def _mapping(data: object, label: str) -> Mapping[str, object]:

@@ -30,7 +30,13 @@ REVIEW_QUEUE_SCHEMA_VERSION = 1
 CONFIDENCE_FLAGGING_STAGE = "confidence_flagging"
 FLAGGING_POLICY_VERSION = 1
 SEMANTIC_REVIEW_POLICY_VERSION = 1
-SEMANTIC_REVIEW_PROMPT_POLICY = "semantic-coherence-json-v1"
+SEMANTIC_REVIEW_PROMPT_POLICY = "semantic-coherence-json-schema-v1"
+SUPPORTED_SEMANTIC_REVIEW_PROMPT_POLICIES = frozenset(
+    {
+        SEMANTIC_REVIEW_PROMPT_POLICY,
+        "semantic-coherence-json-v1",
+    }
+)
 REASON_CODES = frozenset(
     {
         "low_transcription_confidence",
@@ -614,7 +620,7 @@ def _validate_semantic_policy(policy: Mapping[str, object]) -> None:
     _required_str(policy, "provider_config_id", "Semantic review policy")
     if policy_version != SEMANTIC_REVIEW_POLICY_VERSION:
         raise ReviewFlaggingContractError("Unsupported semantic review policy version.")
-    if prompt_policy != SEMANTIC_REVIEW_PROMPT_POLICY:
+    if prompt_policy not in SUPPORTED_SEMANTIC_REVIEW_PROMPT_POLICIES:
         raise ReviewFlaggingContractError("Unsupported semantic review prompt policy.")
     if context_window_segments < 0:
         raise ReviewFlaggingContractError(
