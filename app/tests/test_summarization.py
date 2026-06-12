@@ -566,6 +566,37 @@ def test_summarization_stage_marks_failed_checkpoint_when_provider_unavailable()
     assert failed.error.code == "summarization_failed"
 
 
+def test_summarization_stage_sanitizes_raw_provider_output_in_failed_checkpoint() -> None:
+    class InvalidContractProvider:
+        metadata = FakeSummarizationProvider(result=_summary_result()).metadata
+
+        def summarize(self, request: object) -> SummaryResult:
+            raise SummarizationContractError(
+                "Ollama summary response was not valid JSON. "
+                "Raw Ollama message content: confidential transcript text"
+            )
+
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    merged_record = _persist_merged_transcript(store=store)
+    ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+
+    with pytest.raises(SummarizationError) as exc_info:
+        run_summarization_stage(
+            store=store,
+            ledger=ledger,
+            merged_transcript_record=merged_record,
+            provider=InvalidContractProvider(),
+            now=NOW,
+        )
+
+    assert str(exc_info.value) == "Ollama summary response was not valid JSON."
+    failed = ledger.states(stage=SUMMARIZATION_STAGE)[-1]
+    assert failed.status == "failed"
+    assert failed.error is not None
+    assert failed.error.message == "Ollama summary response was not valid JSON."
+    assert "confidential transcript text" not in failed.error.message
+
+
 def test_ollama_summarization_provider_parses_strict_json_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -588,6 +619,15 @@ def test_ollama_summarization_provider_parses_strict_json_response(
         ]
         properties = cast(dict[str, dict[str, object]], schema["properties"])
         assert properties["general_summary"] == {"type": "string", "minLength": 1}
+        action_items = properties["action_items"]
+        action_item_schema = cast(dict[str, object], action_items["items"])
+        action_properties = cast(dict[str, dict[str, object]], action_item_schema["properties"])
+        assert action_properties["owner"] == {
+            "anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}]
+        }
+        assert action_properties["due"] == {
+            "anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}]
+        }
         messages = cast(list[dict[str, str]], payload["messages"])
         assert "meeting_summary" in messages[1]["content"]
         return {"message": {"content": json.dumps(_summary_result().to_dict())}}
@@ -697,6 +737,36 @@ def test_summary_artifact_from_dict_validates_contract() -> None:
     cast(dict[str, object], payload["provider"])["prompt_policy"] = "other"
     with pytest.raises(SummarizationContractError, match="Unsupported summary provider"):
         SummaryArtifact.from_dict(payload)
+
+
+def test_summary_artifact_from_dict_accepts_legacy_prompt_policy() -> None:
+    artifact = SummaryArtifact(
+        version=1,
+        session_id=SESSION_ID,
+        merged_transcript_artifact=ArtifactRef(
+            id=f"{SESSION_ID}:artifacts/merged_transcript/merged.json",
+            artifact_type="merged_transcript",
+            version=1,
+            sha256="1" * 64,
+        ),
+        manual_notes_artifact=None,
+        policy=SummarizationPolicy(language="en").to_dict(),
+        provider=FakeSummarizationProvider(result=_summary_result()).metadata,
+        timeline=_summary_result().timeline,
+        important_points=_summary_result().important_points,
+        action_items=_summary_result().action_items,
+        general_summary=_summary_result().general_summary,
+        created_at="2026-05-18T17:00:00Z",
+    )
+    payload = artifact.to_dict()
+    cast(dict[str, object], payload["policy"])["prompt_policy"] = "meeting-summary-json-v1"
+    cast(dict[str, object], payload["provider"])["prompt_policy"] = "meeting-summary-json-v1"
+
+    loaded = SummaryArtifact.from_dict(payload)
+
+    assert loaded.policy["prompt_policy"] == "meeting-summary-json-v1"
+    assert loaded.provider.prompt_policy == "meeting-summary-json-v1"
+    Draft202012Validator(_load_summary_schema(), format_checker=FormatChecker()).validate(payload)
 
 
 def test_summary_schema_validates_contract() -> None:
