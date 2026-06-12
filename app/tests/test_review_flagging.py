@@ -291,12 +291,28 @@ def test_review_queue_artifact_from_dict_rejects_invalid_semantic_policy() -> No
         "policy_version": 1,
         "context_window_segments": -1,
         "min_flag_confidence": 0.8,
-        "prompt_policy": "semantic-coherence-json-v1",
+        "prompt_policy": "semantic-coherence-json-schema-v1",
         "provider_config_id": "provider",
     }
 
     with pytest.raises(ReviewFlaggingContractError, match="must be non-negative"):
         ReviewQueueArtifact.from_dict(payload)
+
+
+def test_review_queue_artifact_from_dict_accepts_legacy_semantic_prompt_policy() -> None:
+    payload = _review_queue_payload().to_dict()
+    payload["policy"] = {
+        "policy_version": 1,
+        "context_window_segments": 1,
+        "min_flag_confidence": 0.8,
+        "prompt_policy": "semantic-coherence-json-v1",
+        "provider_config_id": "provider",
+    }
+
+    artifact = ReviewQueueArtifact.from_dict(payload)
+
+    policy = cast(dict[str, object], artifact.policy)
+    assert policy["prompt_policy"] == "semantic-coherence-json-v1"
 
 
 def test_review_queue_artifact_from_dict_rejects_unknown_policy_shape() -> None:
