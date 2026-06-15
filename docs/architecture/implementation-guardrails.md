@@ -49,6 +49,16 @@ Examples:
 
 Unused application surface creates maintenance cost and gives coding agents extra paths to implement, test, and accidentally break.
 
+## Provider Adapter Boundary
+
+Provider adapters own runtime-specific mechanics, not product policy.
+
+Adapters may expose typed capabilities and failures, such as how Ollama releases a model runner, how pyannote constructs and moves a pipeline, or how faster-whisper invokes a model on a device. Core workflow and stewardship code owns user authorization, fallback policy, cross-stage resource ownership, release/retry/degradation decisions, and provenance.
+
+For example, the runtime steward may decide that a terminal local-LLM lease must be released after `process` or `summarize`; the Ollama adapter decides the concrete Ollama request needed to release that model residency.
+
+This keeps future provider replacement from requiring a rewrite of setup evaluation, resource ownership, fallback authorization, or provenance semantics.
+
 ## Persisted Contract Rule
 
 Persisted contracts are meta-system scaffolding, not optional polish.
