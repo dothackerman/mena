@@ -505,17 +505,36 @@ Architectural rule:
 - each review item must carry a stable source reference so that playback and traceability remain reliable
 - playback must always be reachable from a flagged segment, but the user may choose to resolve a flag without playing audio
 
-#### Phase 5: Finalization
+#### Phase 5: Summarization
 
-The finalization step combines:
+The summarization step combines:
 
 - corrected transcript view
 - optional sealed manual-notes artifact
 
-It then performs summarization and export generation.
+It then produces a summary artifact.
 
 Manual notes are imported explicitly before summarization, copied into the session bundle, and treated as a versioned sealed input artifact.
 If the user changes the original notes later, the changed notes are imported as a new notes artifact version and summarization is rerun to produce a new summary candidate.
+
+#### Phase 6: Export
+
+The export step renders selected summary artifacts into user-facing output formats such as markdown.
+Export is intentionally separate from summarization because it should be retryable and regenerable without invoking provider runtimes again.
+
+#### Post-Meeting Processing Boundaries
+
+From a user perspective, recording, processing, correction, summarization, and export may feel like one meeting workflow.
+Architecturally they remain separate boundaries:
+
+- `record`: capture source audio and durable source metadata
+- `process`: automated transcription, diarization, merge/timing, confidence flagging, and semantic review
+- `correct`: user-interactive correction over a review queue; no LLM dependency in the current contract
+- `summarize`: LLM-derived summary from the active correction overlay and optional manual notes
+- `export`: render persisted summary artifacts; no LLM dependency
+
+These boundaries matter because each step has different retry, provenance, resource, and human-decision rules.
+The end of `process` and the end of `summarize` are terminal local-LLM resource boundaries for the CLI PoC.
 
 ### 6.2 Runtime Diagram
 
@@ -557,7 +576,8 @@ flowchart TD
 
     NOTES[Optional Manual Notes] --> SUM[Summarization]
     CVIEW --> SUM
-    SUM --> OUT[Final Markdown Outputs]
+    SUM --> SUMMARY[Summary Artifact]
+    SUMMARY --> OUT[Exported Markdown Outputs]
     OUT --> STORE
 ```
 
@@ -578,7 +598,8 @@ The initial architecture-facing command set is:
 - `show`: inspect one session's state and artifacts
 - `process`: run or resume automated post-meeting processing
 - `correct`: run or resume the correction workflow
-- `export`: generate or inspect final markdown outputs
+- `summarize`: generate or regenerate a structured summary artifact
+- `export`: generate or inspect final markdown outputs from summary artifacts
 - `resume`: continue the next pending step for a session where that is unambiguous
 
 Exact CLI flags and prompt wording are interface-adapter details.
@@ -1181,10 +1202,10 @@ The system must not retry indefinitely.
 Examples:
 
 - recording failure preserves flushed segments, marks capture interrupted, and informs the user; no fallback replaces failed capture
-- transcription may automatically switch from local GPU to local CPU when available, but must not use remote fallback
+- transcription may automatically switch from the accepted primary runtime to the accepted local CPU fallback when authorized, but must not use remote fallback
 - missing local model is a setup/preflight problem and should produce an actionable message
-- diarization failure may offer retry, skip diarization, or continue with capture-profile default labels
-- semantic flagging failure may allow correction to continue with available flags if the step is optional
+- diarization failure may offer retry, accepted local CPU fallback, skip diarization, or continue with capture-profile default labels
+- semantic flagging failure may allow correction to continue with confidence-based flags when local LLM execution is unavailable and no supported fallback exists
 - summarization tries local first and may offer ZDR-bearing direct Mistral API fallback for that session when policy, credentials, and consent allow it
 - export failure is retryable and must not invalidate upstream artifacts
 
@@ -1298,8 +1319,9 @@ Provider selection must consider:
 `semantic coherence flagging`:
 
 - local preferred
-- policy-approved fallback may be allowed
-- details pending research
+- no controlled CPU fallback for Ollama in the PoC
+- may degrade or skip when local LLM execution remains unavailable after Mena-owned resource release
+- remote fallback remains deferred unless a separate policy decision allows it
 
 `summarization`:
 
@@ -1335,7 +1357,7 @@ Status: Confirmed (per `ADR-021`, `ADR-022`, `ADR-023`)
 
 The architecture preserves provider-port replaceability, but the PoC pins concrete first adapters so coding agents can ship without re-litigating the choice:
 
-- **Local LLM (summarisation, semantic flagging) — `ADR-021`.** PoC default adapter is **Ollama**. A second adapter for owned `llama.cpp` (`llama-server`) should be added as an early hardening slice once the first model-dependent workflow exists, so the Inference Port boundary is validated before model work becomes product-critical. Default model profile: 3B–4B-parameter quantised instruct model; 1B–3B fallback profile on ≤8 GB RAM machines; 7B is opt-in for stronger machines; 12B-class models are not the baseline. vLLM is out of scope for the PoC. Workflow code asks for stage-level capabilities ("structured summary", "semantic coherence check"), not for `/v1/chat/completions`.
+- **Local LLM (summarisation, semantic flagging) — `ADR-021`, with resource stewardship from `ADR-030`.** PoC default adapter is **Ollama**. A second adapter for owned `llama.cpp` (`llama-server`) should be added as an early hardening slice once model-dependent workflow code is stable enough to validate the Inference Port boundary. Default model profile: 3B-4B-parameter quantised instruct model; 1B-3B fallback profile on <=8 GB RAM machines; 7B is opt-in for stronger machines; 12B-class models are not the baseline. vLLM is out of scope for the PoC. Workflow code asks for stage-level capabilities ("structured summary", "semantic coherence check"), not for `/v1/chat/completions`. Mena manages Mena-owned local LLM model residency at stage boundaries; it does not stop the Ollama daemon as routine behavior.
 - **ASR — `ADR-022`.** PoC primary ASR adapter is **`faster-whisper`** with hardware-selected Whisper-family profiles. `large-v3-turbo` is the quality ceiling for machines with sufficient VRAM/RAM headroom, not a universal default; `large-v3` is retained only as an explicit quality-reference rerun on stronger machines. Installation/preflight should choose a suitable model-size configuration from available VRAM/RAM and adapter capability. **`whisper.cpp`** is the first fallback adapter for weaker or more brittle environments (CPU-only, ≤8 GB RAM, no AVX2). Provider metadata (provider name, checkpoint, quantisation, device type, decode parameters including `condition_on_previous_text` and `hallucination_silence_threshold`, detected language, timestamp mode) is persisted with every transcript so reruns are deterministic. Vocabulary support uses `initial_prompt` and hotword hints (soft biasing); deterministic vocabulary control remains out of scope.
 - **Diarisation — `ADR-023`.** PoC adapter is **`pyannote/speaker-diarization-community-1`**, invoked **scenario-aware**: not run on the local mic in `online_dual_stream` (structural attribution from the local mic is sufficient), run on the remote/system stream only when there are multiple remote speakers worth distinguishing, and run on the room mic for `in_person_single_mic`. The combined dual-stream is **not** fed to `community-1` because the model card requires mono input and downmixes stereo by averaging. Three diarisation artifacts are persisted: regular timeline (preserves overlap), exclusive projection, and correction overlay. Confidence is a **product-level heuristic layer** (overlap presence, very short speaker turns, speaker-flipping rate, regular-vs-exclusive disagreement, speaker-count instability) rather than a model signal — `community-1` does not expose calibrated confidence. Graceful degradation uses coarse labels (`You`, `Remote speaker 1`, `Speaker unknown`, `Room`) rather than confident-but-wrong identities.
 
@@ -1343,7 +1365,7 @@ Full per-adapter rationale and divergence resolution lives in the [research synt
 
 #### Installation Profile and Setup Policy
 
-Status: Confirmed (per `ADR-028`, extended by `ADR-029`)
+Status: Confirmed (per `ADR-028`, extended by `ADR-029` and `ADR-031`)
 
 Installation and preflight must not decide provider setup by inspecting the machine and installing whatever happens to be possible.
 
@@ -1375,6 +1397,30 @@ Remote fallback setup, profile updates, telemetry-informed recommendations, doct
 Issue #72 adds accepted runtime profile state. Successful setup persists the accepted profile under `RuntimePaths.state_home` as product state, not repository state or user-authored configuration. Processing loads that accepted state, revalidates current runtime evidence before constructing providers, and uses the accepted or explicitly selected fallback profile instead of provider defaults.
 
 Processing fallback is explicit per run. If the accepted profile is stale or unavailable, non-interactive processing fails unless the command carries an explicit fallback policy. When fallback is used, run-level provenance records the accepted profile, actual profile, and fallback reason; stage artifacts continue to record provider/model/device metadata through their provider contracts.
+
+Issue #78 extends this into setup-time fallback authorization. Setup should persist the accepted primary profile, accepted fallback profile or fallback capabilities, and whether local fallback may be used automatically. Runtime commands consume only those accepted choices; they do not invent new fallback profiles during processing. If automatic local fallback is not authorized, interactive commands ask before fallback and non-interactive commands fail unless a one-run fallback authorization is present.
+
+Local fallback authorization and remote fallback authorization are separate typed decisions. Authorizing local CPU fallback never authorizes sending meeting substance to a remote provider.
+
+#### Local Runtime Resource Stewardship
+
+Status: Confirmed (per `ADR-030`)
+
+Post-meeting processing is a resource-managed local workflow, not a set of independent provider calls.
+
+Mena should prefer checkpoint-safe completion over speed when an accepted slower local fallback exists. The active orchestrator owns resource recovery decisions because it has stage policy, session state, artifact integrity, and user intent.
+
+Resource stewardship rules:
+
+- keep provider runtimes warm during active stage work
+- release Mena-owned provider residency at terminal stage or command boundaries
+- never stop the Ollama daemon as normal product behavior
+- never unload arbitrary model runners that Mena cannot reasonably claim it loaded or used
+- before using local CPU fallback, release Mena-owned competing resources and recheck whether primary execution is plausible
+- apply #78 fallback at source/artifact granularity, not arbitrary audio-chunk granularity
+
+For the current CLI PoC, the end of `process` and the end of `summarize` are terminal local-LLM boundaries.
+If a future command runs semantic review and summarization as one contiguous active workflow, the local LLM lease may span both stages and release at the final summarization boundary.
 
 #### User Configuration Rule
 
@@ -2034,10 +2080,10 @@ The goal is to prevent early implementation convenience from hard-coding the PoC
 | User interface | `CLI` | Yes | First adapter only; future adapters include `OpenClaw`, web UI, desktop UI |
 | Capture topology | `online_dual_stream` first, then `in_person_single_mic` | Yes | Both are PoC profiles expressed through `Capture Profiles` |
 | Capture implementation | Linux audio stack | Partly | PoC is Linux-only, but capture stays behind `Capture Port` |
-| ASR provider | Not fixed yet | Yes | Must remain behind `Transcription Port` |
-| Diarization provider | Not fixed yet | Yes | Must remain behind `Diarization Port` |
+| ASR provider | `faster-whisper` with hardware-selected profile | Yes | Must remain behind `Transcription Port`; accepted local CPU fallback is setup-governed |
+| Diarization provider | `pyannote/community-1`, scenario-aware | Yes | Must remain behind `Diarization Port`; accepted local CPU fallback is setup-governed |
 | Summarization provider | Local-first with ZDR-bearing direct Mistral API fallback | Yes | Fallback is constrained to the summarization stage in the PoC |
-| Semantic flagging provider | Not fixed yet | Yes | Same policy constraints as summarization |
+| Semantic flagging provider | Local Ollama semantic review | Yes | May degrade/skip when local LLM remains unavailable; remote fallback is deferred |
 | Artifact persistence pattern | Local artifact store | Partly | First-class subsystem; exact implementation still open |
 | Metadata/index store | Not fixed yet | Yes | May begin minimal and grow later |
 | Process topology | Orchestrator plus capture worker | Partly | Additional worker processes beyond this pair are not fixed |
@@ -2349,6 +2395,7 @@ Status: Open
 - Compare local summarisation output against ZDR-bearing direct Mistral API fallback output during PoC testing where the operator-attested allow-conditions in `ADR-026` are met.
 - Validate `ADR-024` device/route discovery and tiered fallback behaviour against representative meeting tools (Zoom desktop, kMeet, Google Meet in-browser) and identify per-client quirks.
 - Validate `ADR-021` model profile thresholds against representative tester hardware (modern dev laptop, 16 GB no-dGPU, 8 GB no-dGPU) and confirm the chunked map-reduce summarisation strategy.
+- Validate `ADR-030` resource stewardship thresholds and release behavior on constrained GPU machines during #40/#78 UAT.
 - Validate `ADR-026` user-facing disclosure copy with at least one tester before enabling remote fallback by default in any environment.
 - R-03 (future OS compatibility) and R-07 (install/update/uninstall) are now Ready and remain to be executed.
 
@@ -2500,6 +2547,21 @@ Expected:
 
 - product files can be installed and removed cleanly
 - uninstalling the product does not imply deleting the repository or user session data by default
+
+##### 4.3 Constrained local processing prefers completion
+
+Scenario:
+
+- post-meeting processing runs on a constrained local machine after another Mena LLM stage left model residency behind
+
+Expected:
+
+- Mena releases only Mena-owned resources
+- the Ollama daemon is not stopped as routine product behavior
+- primary runtime is retried only when current evidence says it is plausible
+- accepted local CPU fallback may be used automatically only when setup or a one-run command authorization allows it
+- local fallback authorization does not authorize remote fallback
+- fallback, degradation, or failure is recorded in provenance and explained to the user
 
 #### 5. Replaceability / Evolvability
 
