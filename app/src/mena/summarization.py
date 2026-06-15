@@ -27,6 +27,7 @@ from mena.local_llm import (
     ollama_message_content,
     post_ollama_json,
     strip_json_fence,
+    unload_ollama_model,
 )
 from mena.merge_timing import MergedTranscriptArtifact, MergeTimingContractError
 from mena.processing import (
@@ -35,6 +36,7 @@ from mena.processing import (
     ProcessingStageLedger,
     ProcessingStageState,
 )
+from mena.runtime_stewardship import RuntimeLease, RuntimeReleaseResult
 
 SUMMARY_ARTIFACT_TYPE = "summary"
 SUMMARY_ARTIFACT_VERSION = 1
@@ -300,6 +302,27 @@ class OllamaSummarizationProvider:
             ) from exc
         except LocalLLMContractError as exc:
             raise SummarizationContractError(str(exc)) from exc
+
+    def release_runtime_resource(self, lease: RuntimeLease) -> RuntimeReleaseResult:
+        """Release this provider's local Ollama model residency."""
+
+        try:
+            done_reason = unload_ollama_model(
+                endpoint=str(self.metadata.endpoint),
+                model=self.metadata.model,
+                timeout_seconds=self.timeout_seconds,
+            )
+        except LocalLLMProviderUnavailable as exc:
+            raise SummarizationProviderUnavailable(
+                "Ollama summarization provider is unavailable during release."
+            ) from exc
+        except LocalLLMContractError as exc:
+            raise SummarizationContractError(str(exc)) from exc
+        return RuntimeReleaseResult(
+            lease=lease,
+            status="released",
+            detail=f"Ollama model release completed: {done_reason}.",
+        )
 
 
 @dataclass(frozen=True)

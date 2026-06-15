@@ -21,6 +21,7 @@ from mena.merge_timing import (
 )
 from mena.processing import ArtifactRef, ProcessingStageLedger
 from mena.review_flagging import REVIEW_QUEUE_ARTIFACT_TYPE
+from mena.runtime_stewardship import RuntimeLease
 from mena.semantic_coherence import (
     SEMANTIC_COHERENCE_STAGE,
     FakeSemanticCoherenceProvider,
@@ -609,6 +610,50 @@ def test_ollama_post_json_handles_success_invalid_json_and_unavailable(
     monkeypatch.setattr("mena.local_llm.urllib.request.urlopen", unavailable_urlopen)
     with pytest.raises(SemanticCoherenceProviderUnavailable, match="provider is unavailable"):
         provider._post_json("/api/chat", {"model": "test-model"})
+
+
+def test_ollama_semantic_provider_releases_runtime_resource(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OllamaSemanticCoherenceProvider(
+        model="test-model",
+        endpoint="http://localhost:11434",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_unload_ollama_model(
+        *,
+        endpoint: str,
+        model: str,
+        timeout_seconds: float,
+    ) -> str:
+        captured["endpoint"] = endpoint
+        captured["model"] = model
+        captured["timeout_seconds"] = timeout_seconds
+        return "unload"
+
+    monkeypatch.setattr(
+        "mena.semantic_coherence.unload_ollama_model",
+        fake_unload_ollama_model,
+    )
+    lease = RuntimeLease(
+        resource_kind="local_llm",
+        stage="semantic-review",
+        boundary="process",
+        provider="ollama",
+        model="test-model",
+    )
+
+    result = provider.release_runtime_resource(lease)
+
+    assert result.status == "released"
+    assert result.lease == lease
+    assert result.detail == "Ollama model release completed: unload."
+    assert captured == {
+        "endpoint": "http://localhost:11434",
+        "model": "test-model",
+        "timeout_seconds": provider.timeout_seconds,
+    }
 
 
 @pytest.mark.parametrize(

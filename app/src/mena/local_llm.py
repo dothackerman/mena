@@ -98,6 +98,32 @@ def post_ollama_json(
     return mapping(decoded, "Ollama response envelope")
 
 
+def unload_ollama_model(
+    *,
+    endpoint: str,
+    model: str,
+    timeout_seconds: float,
+) -> str:
+    """Ask local Ollama to unload one model runner and return the done reason."""
+
+    response = post_ollama_json(
+        endpoint=endpoint,
+        path="/api/chat",
+        payload={
+            "model": model,
+            "messages": [],
+            "keep_alive": 0,
+        },
+        timeout_seconds=timeout_seconds,
+    )
+    if response.get("done") is not True:
+        raise LocalLLMContractError("Ollama unload response did not complete.")
+    done_reason = response.get("done_reason")
+    if done_reason is not None and not isinstance(done_reason, str):
+        raise LocalLLMContractError("Ollama unload response done_reason is invalid.")
+    return done_reason or "done"
+
+
 def ollama_message_content(response: Mapping[str, object]) -> str:
     """Extract assistant message content from an Ollama chat response envelope."""
 
