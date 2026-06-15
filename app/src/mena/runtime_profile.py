@@ -104,15 +104,26 @@ def select_runtime_profile(
             revalidation=accepted_evaluation,
         )
 
-    fallback_profile = next((profile for profile in catalog.values() if profile.fallback), None)
-    if not allow_runtime_fallback:
+    fallback_profile = _fallback_profile(
+        catalog=catalog,
+        accepted=accepted,
+        allow_runtime_fallback=allow_runtime_fallback,
+    )
+    fallback_authorized = allow_runtime_fallback or _automatic_local_fallback_authorized(
+        accepted,
+        scope,
+    )
+    if not fallback_authorized:
         raise ValueError(
             "Accepted runtime profile is unavailable: "
-            f"{accepted_failure} Re-run setup or pass --allow-runtime-fallback for an explicit "
-            "one-run fallback when supported."
+            f"{accepted_failure} Re-run setup to authorize local fallback or pass "
+            "--allow-runtime-fallback for an explicit one-run fallback when supported."
         )
     if fallback_profile is None:
-        raise ValueError(f"Accepted runtime profile is unavailable: {accepted_failure}")
+        raise ValueError(
+            "Accepted runtime profile is unavailable and no accepted fallback profile "
+            f"is configured: {accepted_failure}"
+        )
 
     fallback_detection_profile = _profile_for_scope(fallback_profile, scope)
     fallback_state = detect_local_installation_state(
@@ -255,6 +266,7 @@ def store_runtime_profile_provenance(
             "used": selection.fallback_used,
             "status": selection.fallback_status,
             "reason": selection.fallback_reason,
+            "authorization": selection.accepted.fallback_authorization.to_dict(),
         },
         "revalidation": {
             "ready": selection.revalidation.ready,
@@ -396,3 +408,43 @@ def _runtime_profile_failure(
             f"{expected.id}/{expected.checkpoint}/{expected.device}/{expected.compute_type})"
         )
     return None
+
+
+def _fallback_profile(
+    *,
+    catalog: dict[tuple[str, str], SetupProfile],
+    accepted: RuntimeProfileState,
+    allow_runtime_fallback: bool,
+) -> SetupProfile | None:
+    authorization = accepted.fallback_authorization
+    if (
+        authorization.local_profile_id is not None
+        and authorization.local_profile_version is not None
+    ):
+        fallback = catalog.get(
+            (authorization.local_profile_id, authorization.local_profile_version)
+        )
+        if fallback is None:
+            raise ValueError(
+                "Accepted fallback profile state is incompatible with the bundled profile catalog; "
+                "run `mena setup` again."
+            )
+        return fallback
+    if allow_runtime_fallback:
+        return next((profile for profile in catalog.values() if profile.fallback), None)
+    return None
+
+
+def _automatic_local_fallback_authorized(
+    accepted: RuntimeProfileState,
+    scope: RuntimeRevalidationScope | None,
+) -> bool:
+    authorization = accepted.fallback_authorization
+    if (
+        authorization.local_status != "authorized"
+        or not authorization.automatic_local_fallback_authorized
+    ):
+        return False
+    if scope is None:
+        return True
+    return scope.stages.issubset(set(authorization.stage_scope))

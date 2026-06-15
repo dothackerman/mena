@@ -124,6 +124,41 @@ def test_runtime_profile_state_persists_under_runtime_state_home(tmp_path: Path)
     assert loaded.catalog_version == RUNTIME_PROFILE_CATALOG_VERSION
     assert loaded.evidence_digest == accepted.evidence_digest
     assert loaded.selected_asr_profile.id == evaluation.selected_asr_profile.id
+    assert loaded.fallback_authorization.local_status == "authorized"
+    assert loaded.fallback_authorization.local_profile_id == FALLBACK_LOCAL_PROFILE_ID
+    assert loaded.fallback_authorization.automatic_local_fallback_authorized is True
+    assert set(loaded.fallback_authorization.stage_scope) == {
+        "transcription",
+        "diarization",
+        "summarization",
+        "semantic-review",
+    }
+    assert loaded.fallback_authorization.remote_status == "not_configured"
+
+
+def test_runtime_profile_state_records_unavailable_local_fallback() -> None:
+    profile = get_alpha_local_profile()
+    evaluation = evaluate_setup(
+        profile,
+        _state(
+            asr_model_present=True,
+            diarization_model_present=True,
+            hardware=HardwareFacts(
+                system="Linux",
+                ram_gb=32.0,
+                cuda_available=True,
+                vram_gb=12.0,
+                avx2_available=False,
+            ),
+        ),
+    )
+
+    accepted = build_runtime_profile_state(evaluation)
+
+    assert accepted.fallback_authorization.local_status == "unavailable"
+    assert accepted.fallback_authorization.local_profile_id == FALLBACK_LOCAL_PROFILE_ID
+    assert accepted.fallback_authorization.automatic_local_fallback_authorized is False
+    assert "requires an AVX2-capable CPU" in accepted.fallback_authorization.blocking_reasons[0]
 
 
 def test_runtime_profile_state_rejects_incomplete_setup() -> None:

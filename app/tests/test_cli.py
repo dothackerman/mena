@@ -1708,7 +1708,7 @@ model = "mistral:7b"
     assert selection.actual.accepted_profile_id == accepted.accepted_profile_id
 
 
-def test_runtime_profile_selection_requires_explicit_fallback(
+def test_runtime_profile_selection_uses_setup_authorized_local_fallback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1734,7 +1734,57 @@ def test_runtime_profile_selection_requires_explicit_fallback(
         lambda *_args, **_kwargs: stale_state,
     )
 
-    with pytest.raises(ValueError, match="--allow-runtime-fallback"):
+    selection = select_runtime_profile(
+        settings=settings,
+        runner=None,
+        command_identity=None,
+        hardware=None,
+        allow_runtime_fallback=False,
+    )
+
+    assert selection.fallback_used
+    assert selection.actual.accepted_profile_id.endswith("cpu-fallback-v1")
+    assert selection.fallback_reason is not None
+
+
+def test_runtime_profile_selection_requires_authorization_when_setup_did_not_authorize_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    accepted_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = build_runtime_profile_state(
+        evaluate_setup(get_alpha_local_profile(), accepted_state)
+    )
+    payload = accepted.to_dict()
+    cast(dict[str, object], payload["fallback_authorization"])["local_status"] = (
+        "configured_unauthorized"
+    )
+    cast(dict[str, object], payload["fallback_authorization"])[
+        "automatic_local_fallback_authorized"
+    ] = False
+    settings.paths.state_home.mkdir(parents=True)
+    (settings.paths.state_home / "setup-state.json").write_text(
+        json.dumps(payload),
+        encoding="utf-8",
+    )
+    stale_state = _setup_state(
+        settings=settings,
+        hardware=HardwareFacts(
+            system="Linux",
+            ram_gb=32.0,
+            cuda_available=False,
+            vram_gb=None,
+            avx2_available=True,
+        ),
+        pyannote_token_present=True,
+    )
+    monkeypatch.setattr(
+        "mena.runtime_profile.detect_local_installation_state",
+        lambda *_args, **_kwargs: stale_state,
+    )
+
+    with pytest.raises(ValueError, match="authorize local fallback"):
         select_runtime_profile(
             settings=settings,
             runner=None,
@@ -1743,7 +1793,7 @@ def test_runtime_profile_selection_requires_explicit_fallback(
             allow_runtime_fallback=False,
         )
 
-    fallback_selection = select_runtime_profile(
+    selection = select_runtime_profile(
         settings=settings,
         runner=None,
         command_identity=None,
@@ -1751,9 +1801,8 @@ def test_runtime_profile_selection_requires_explicit_fallback(
         allow_runtime_fallback=True,
     )
 
-    assert fallback_selection.fallback_used
-    assert fallback_selection.actual.accepted_profile_id.endswith("cpu-fallback-v1")
-    assert fallback_selection.fallback_reason is not None
+    assert selection.fallback_used
+    assert selection.actual.accepted_profile_id.endswith("cpu-fallback-v1")
 
 
 def test_runtime_profile_selection_revalidates_fallback_against_fallback_profile(
@@ -1854,6 +1903,8 @@ def test_runtime_profile_provenance_records_accepted_actual_and_fallback(
     assert payload["actual_profile"]["stages"][0]["device"] == "cuda"
     assert payload["fallback"]["used"] is False
     assert payload["fallback"]["status"] == "not_needed"
+    assert payload["fallback"]["authorization"]["local_status"] == "authorized"
+    assert payload["fallback"]["authorization"]["local_profile_id"].endswith("cpu-fallback-v1")
     assert payload["contract"] == "runtime-profile-provenance.v1"
     assert payload["current_product"]["version"] == setup_state.command_identity.version
     assert record.metadata["attempt"] == 3
