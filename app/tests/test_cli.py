@@ -78,6 +78,7 @@ from mena.semantic_coherence import (
     FakeSemanticCoherenceProvider,
     OllamaSemanticCoherenceProvider,
     SemanticCoherenceProvider,
+    SemanticCoherenceProviderUnavailable,
 )
 from mena.sessions import (
     SESSION_RECORD_FILENAME,
@@ -739,6 +740,52 @@ def test_main_summarize_uses_unique_runtime_profile_provenance_per_run(
     assert len(run_ids) == 2
 
 
+def test_main_summarize_records_terminal_runtime_stewardship_release(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    session_dir, store, _, _ = _build_summarize_session_bundle(tmp_path)
+
+    def _fake_unload_ollama_model(**_kwargs: object) -> str:
+        return "unloaded"
+
+    def _fake_run_summarization_stage(
+        *,
+        store: ArtifactStore,
+        ledger: ProcessingStageLedger,
+        provider: object,
+        **_kwargs: object,
+    ) -> SimpleNamespace:
+        cast(Any, provider)._runtime_resource_used = True
+        return SimpleNamespace(
+            summary_record=store.store(
+                artifact_type="summary",
+                name=f"summary/{ledger.run_id}.json",
+                data=b"{}",
+                version=1,
+            ),
+        )
+
+    monkeypatch.setattr("mena.summarization.unload_ollama_model", _fake_unload_ollama_model)
+    monkeypatch.setattr("mena.cli.run_summarization_stage", _fake_run_summarization_stage)
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    _persist_ready_runtime_profile_state(settings, monkeypatch)
+
+    exit_code = main(["summarize", str(session_dir)], settings=settings)
+    captured = capsys.readouterr()
+
+    stewardship_records = store.list(artifact_type="runtime_stewardship_provenance")
+    assert exit_code == 0
+    assert "Runtime stewardship: Ollama model release completed: unloaded." in captured.out
+    assert len(stewardship_records) == 1
+    payload = json.loads(store.retrieve(stewardship_records[0].id))
+    assert payload["boundary"] == "summarize"
+    assert payload["releases"][0]["status"] == "released"
+    assert payload["releases"][0]["lease"]["stage"] == "summarization"
+    assert payload["releases"][0]["lease"]["provider"] == "ollama"
+
+
 def test_main_summarize_uses_configured_defaults(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1390,6 +1437,25 @@ def test_main_correct_reports_playback_source_reference_errors(
     assert "missing transcript artifact" in captured.out
 
 
+def test_main_correct_does_not_select_runtime_profile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[Path] = []
+
+    def _fake_run_correction_workflow(**kwargs: object) -> None:
+        calls.append(cast(Path, kwargs["session_path"]))
+
+    def _fail_runtime_profile_selection(**_kwargs: object) -> None:
+        raise AssertionError("correction must not acquire runtime resources")
+
+    monkeypatch.setattr("mena.cli.run_correction_workflow", _fake_run_correction_workflow)
+    monkeypatch.setattr("mena.cli.select_runtime_profile", _fail_runtime_profile_selection)
+
+    assert main(["correct", str(tmp_path)]) == 0
+    assert calls == [tmp_path]
+
+
 def test_run_processing_command_executes_stage_pipeline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1544,6 +1610,95 @@ def test_run_processing_command_executes_stage_pipeline(
     assert "merge" in calls
     assert "confidence" in calls
     assert "semantic" in calls
+
+
+def test_run_processing_command_skips_semantic_stage_when_provider_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _build_processing_session(tmp_path)
+
+    def _fake_run_transcription_stage(
+        *,
+        store: FileSystemArtifactStore,
+        source_id: str | None = None,
+        **_kwargs: object,
+    ) -> object:
+        transcript_record = store.store(
+            artifact_type="transcript",
+            name=f"transcript-{source_id}.json",
+            data=b"{}",
+            version=1,
+            metadata={},
+        )
+        return SimpleNamespace(transcript_record=transcript_record)
+
+    def _fake_run_diarization_stage(**_kwargs: object) -> object:
+        return SimpleNamespace(artifacts=(), artifact_records=(), skipped=True)
+
+    def _fake_run_merge_timing_stage(
+        *,
+        store: FileSystemArtifactStore,
+        **_kwargs: object,
+    ) -> object:
+        merged_record = store.store(
+            artifact_type="merged_transcript",
+            name="merged.json",
+            data=b"{}",
+            version=1,
+            metadata={
+                "policy_config_id": "cfg",
+                "local_source_id": "local_mic",
+                "remote_source_id": "system_audio",
+                "remote_diarization_status": "skipped",
+                "remote_diarization_reason": "provider unavailable",
+            },
+        )
+        return SimpleNamespace(merged_transcript_record=merged_record)
+
+    def _fake_run_confidence_flagging_stage(**_kwargs: object) -> object:
+        return SimpleNamespace(review_queue_record=None, skipped=False)
+
+    def _fake_run_semantic_coherence_stage(**_kwargs: object) -> object:
+        raise SemanticCoherenceProviderUnavailable("provider unavailable")
+
+    monkeypatch.setattr("mena.cli.run_transcription_stage", _fake_run_transcription_stage)
+    monkeypatch.setattr("mena.cli.run_diarization_stage", _fake_run_diarization_stage)
+    monkeypatch.setattr("mena.cli.run_merge_timing_stage", _fake_run_merge_timing_stage)
+    monkeypatch.setattr(
+        "mena.cli.run_confidence_flagging_stage", _fake_run_confidence_flagging_stage
+    )
+    monkeypatch.setattr("mena.cli.run_semantic_coherence_stage", _fake_run_semantic_coherence_stage)
+
+    exit_code = _run_processing_command(
+        session_path=session.record_path,
+        run_id="semantic-unavailable",
+        attempt=1,
+        now=datetime(2026, 5, 8, 6, 0, 0, tzinfo=UTC),
+        transcription_provider_factory=lambda: SimpleNamespace(
+            name="fake", transcribe=lambda _: None
+        ),
+        diarization_provider_factory=lambda: SimpleNamespace(
+            name="fake", config_id="cfg", diarize=lambda _: None
+        ),
+        semantic_coherence_provider_factory=lambda: SimpleNamespace(
+            name="fake",
+            metadata=SimpleNamespace(config_id="cfg", to_dict=lambda: {"config_id": "cfg"}),
+            check=lambda *_args, **_kwargs: True,
+        ),
+    )
+
+    store = FileSystemArtifactStore(session_id=session.record.id, session_dir=session.bundle_path)
+    ledger = ProcessingStageLedger(
+        store=store, session_id=session.record.id, run_id="semantic-unavailable"
+    )
+    state = ledger.latest("semantic_coherence")
+
+    assert exit_code == 0
+    assert state is not None
+    assert state.status == "skipped"
+    assert state.output_artifacts == ()
+    assert state.error is None
 
 
 def test_main_process_requires_accepted_runtime_profile_state(
@@ -1957,6 +2112,48 @@ def test_main_process_stores_runtime_profile_provenance_before_processing_stages
     provenance = json.loads(store.retrieve(provenance_records[0].id))
     assert provenance["run_id"] == "run-before-stage"
     assert provenance["attempt"] == 1
+
+
+def test_main_process_records_terminal_runtime_stewardship_release(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    session = _build_processing_session(tmp_path)
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    _persist_ready_runtime_profile_state(settings, monkeypatch)
+
+    def _fake_unload_ollama_model(**_kwargs: object) -> str:
+        return "unloaded"
+
+    def _fake_run_processing_stages(
+        *,
+        semantic_coherence_provider: object,
+        **_kwargs: object,
+    ) -> None:
+        cast(Any, semantic_coherence_provider)._runtime_resource_used = True
+
+    monkeypatch.setattr("mena.semantic_coherence.unload_ollama_model", _fake_unload_ollama_model)
+    monkeypatch.setattr("mena.cli._run_processing_stages", _fake_run_processing_stages)
+
+    exit_code = main(
+        ["process", str(session.record_path)],
+        settings=settings,
+        run_id="process-release",
+    )
+    captured = capsys.readouterr()
+
+    store = FileSystemArtifactStore(session_id=session.record.id, session_dir=session.bundle_path)
+    stewardship_records = store.list(artifact_type="runtime_stewardship_provenance")
+    assert exit_code == 0
+    assert "Runtime stewardship: Ollama model release completed: unloaded." in captured.out
+    assert len(stewardship_records) == 1
+    payload = json.loads(store.retrieve(stewardship_records[0].id))
+    assert payload["run_id"] == "process-release"
+    assert payload["boundary"] == "process"
+    assert payload["releases"][0]["status"] == "released"
+    assert payload["releases"][0]["lease"]["stage"] == "semantic-review"
+    assert payload["releases"][0]["lease"]["provider"] == "ollama"
 
 
 def test_main_resume_stores_runtime_profile_provenance_per_attempt(

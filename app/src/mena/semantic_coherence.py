@@ -218,6 +218,11 @@ class OllamaSemanticCoherenceProvider:
             endpoint=sanitized_endpoint,
         )
         self.timeout_seconds = timeout_seconds
+        self._runtime_resource_used = False
+
+    @property
+    def runtime_resource_used(self) -> bool:
+        return self._runtime_resource_used
 
     def check(self, request: SemanticCoherenceRequest) -> SemanticCoherenceResult:
         payload = {
@@ -258,6 +263,8 @@ class OllamaSemanticCoherenceProvider:
 
     def _post_json(self, path: str, payload: Mapping[str, object]) -> Mapping[str, object]:
         try:
+            if path == "/api/chat":
+                self._runtime_resource_used = True
             return post_ollama_json(
                 endpoint=str(self.metadata.endpoint),
                 path=path,

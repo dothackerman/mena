@@ -250,6 +250,11 @@ class OllamaSummarizationProvider:
             endpoint=_summarization_local_ollama_endpoint(endpoint),
         )
         self.timeout_seconds = timeout_seconds
+        self._runtime_resource_used = False
+
+    @property
+    def runtime_resource_used(self) -> bool:
+        return self._runtime_resource_used
 
     def summarize(self, request: SummarizationRequest) -> SummaryResult:
         payload = {
@@ -290,6 +295,8 @@ class OllamaSummarizationProvider:
 
     def _post_json(self, path: str, payload: Mapping[str, object]) -> Mapping[str, object]:
         try:
+            if path == "/api/chat":
+                self._runtime_resource_used = True
             return post_ollama_json(
                 endpoint=str(self.metadata.endpoint),
                 path=path,

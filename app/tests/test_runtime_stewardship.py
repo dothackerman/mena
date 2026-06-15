@@ -68,6 +68,24 @@ def test_release_terminal_local_llm_records_missing_or_failed_release_capability
     assert failed.detail == "release failed"
 
 
+def test_release_terminal_local_llm_skips_provider_without_observed_resource_use() -> None:
+    class Provider:
+        metadata = type("Metadata", (), {"name": "fake-llm", "model": "model-a"})()
+        runtime_resource_used = False
+
+        def release_runtime_resource(self, lease: RuntimeLease) -> RuntimeReleaseResult:
+            raise AssertionError("release should not run when no runtime resource was used")
+
+    result = release_terminal_local_llm(
+        provider=Provider(),
+        stage="summarization",
+        boundary="summarize",
+    )
+
+    assert result.status == "not_supported"
+    assert "did not observe Mena-owned runtime resource use" in result.detail
+
+
 def test_runtime_stewardship_provenance_persists_release_results() -> None:
     store = InMemoryArtifactStore(session_id="session-1")
     released = RuntimeReleaseResult(

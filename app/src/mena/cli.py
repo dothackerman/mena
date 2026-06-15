@@ -53,6 +53,8 @@ from mena.merge_timing import (
 )
 from mena.processing import (
     PROCESSING_STATE_ARTIFACT_TYPE,
+    PROCESSING_STATE_VERSION,
+    ArtifactRef,
     ProcessingStageLedger,
     ProcessingStageState,
     ProcessingStateError,
@@ -82,11 +84,17 @@ from mena.runtime_profile import (
     select_runtime_profile,
     store_runtime_profile_provenance,
 )
+from mena.runtime_stewardship import (
+    RuntimeReleaseResult,
+    release_terminal_local_llm,
+    store_runtime_stewardship_provenance,
+)
 from mena.semantic_coherence import (
     SEMANTIC_COHERENCE_STAGE,
     OllamaSemanticCoherenceProvider,
     SemanticCoherenceError,
     SemanticCoherenceProvider,
+    SemanticCoherenceProviderUnavailable,
     run_semantic_coherence_stage,
 )
 from mena.session_integrity import (
@@ -632,23 +640,34 @@ def _run_summarize_command(
         attempt=1,
         selection=runtime_selection,
     )
-
-    result = run_summarization_stage(
-        store=store,
-        ledger=ProcessingStageLedger(
-            store=store,
-            session_id=session_id,
-            run_id=run_id,
-        ),
-        merged_transcript_record=merged_transcript_record,
-        correction_overlay_record=resolved_overlay[0],
-        manual_notes_record=manual_notes_record,
-        provider=runtime_summarization_provider(
-            settings=settings,
-            runtime_state=runtime_selection.actual,
-        ),
-        policy=SummarizationPolicy(language=language),
+    provider = runtime_summarization_provider(
+        settings=settings,
+        runtime_state=runtime_selection.actual,
     )
+
+    try:
+        result = run_summarization_stage(
+            store=store,
+            ledger=ProcessingStageLedger(
+                store=store,
+                session_id=session_id,
+                run_id=run_id,
+            ),
+            merged_transcript_record=merged_transcript_record,
+            correction_overlay_record=resolved_overlay[0],
+            manual_notes_record=manual_notes_record,
+            provider=provider,
+            policy=SummarizationPolicy(language=language),
+        )
+    finally:
+        _record_terminal_local_llm_release(
+            store=store,
+            run_id=run_id,
+            attempt=1,
+            provider=provider,
+            stage="summarization",
+            boundary="summarize",
+        )
 
     print(f"Summary written to: {result.summary_record.path}")
     return 0
@@ -690,6 +709,36 @@ def _run_export_command(
     }
     print(f"Export provenance: {json.dumps(provenance, sort_keys=True)}")
     return 0
+
+
+def _record_terminal_local_llm_release(
+    *,
+    store: FileSystemArtifactStore,
+    run_id: str,
+    attempt: int,
+    provider: object,
+    stage: str,
+    boundary: str,
+) -> RuntimeReleaseResult | None:
+    result = release_terminal_local_llm(
+        provider=provider,
+        stage=stage,
+        boundary=boundary,
+    )
+    if result.status == "not_supported":
+        return None
+    store_runtime_stewardship_provenance(
+        store=store,
+        run_id=run_id,
+        attempt=attempt,
+        boundary=boundary,
+        release_results=(result,),
+    )
+    if result.status == "failed":
+        print(f"Runtime stewardship warning: {result.detail}")
+    else:
+        print(f"Runtime stewardship: {result.detail}")
+    return result
 
 
 def _run_inspect_command(
@@ -781,18 +830,29 @@ def _run_processing_command(
         "semantic_coherence",
     )
 
-    _run_processing_stages(
-        session_id=session_id,
-        profile=profile,
-        source_inputs=source_inputs,
-        store=store,
-        ledger=ProcessingStageLedger(store=store, session_id=session_id, run_id=run_id),
-        attempt=attempt,
-        now=pipeline_timestamp,
-        transcription_provider=transcription_provider,
-        diarization_provider=diarization_provider,
-        semantic_coherence_provider=semantic_coherence_provider,
-    )
+    try:
+        _run_processing_stages(
+            session_id=session_id,
+            profile=profile,
+            source_inputs=source_inputs,
+            store=store,
+            ledger=ProcessingStageLedger(store=store, session_id=session_id, run_id=run_id),
+            attempt=attempt,
+            now=pipeline_timestamp,
+            transcription_provider=transcription_provider,
+            diarization_provider=diarization_provider,
+            semantic_coherence_provider=semantic_coherence_provider,
+        )
+    finally:
+        if runtime_selection is not None:
+            _record_terminal_local_llm_release(
+                store=store,
+                run_id=run_id,
+                attempt=attempt,
+                provider=semantic_coherence_provider,
+                stage="semantic-review",
+                boundary="process",
+            )
 
     fallback = (
         " with explicit runtime fallback"
@@ -911,14 +971,32 @@ def _run_processing_stages(
         now=now,
     )
 
-    run_semantic_coherence_stage(
-        store=store,
-        ledger=ledger,
-        merged_transcript_record=merge_result.merged_transcript_record,
-        provider=semantic_coherence_provider,
-        attempt=attempt,
-        now=now,
-    )
+    try:
+        run_semantic_coherence_stage(
+            store=store,
+            ledger=ledger,
+            merged_transcript_record=merge_result.merged_transcript_record,
+            provider=semantic_coherence_provider,
+            attempt=attempt,
+            now=now,
+        )
+    except SemanticCoherenceProviderUnavailable:
+        timestamp = now.isoformat(timespec="seconds").replace("+00:00", "Z")
+        ledger.record(
+            ProcessingStageState(
+                version=PROCESSING_STATE_VERSION,
+                session_id=session_id,
+                run_id=ledger.run_id,
+                stage=SEMANTIC_COHERENCE_STAGE,
+                status="skipped",
+                input_artifacts=(ArtifactRef.from_record(merge_result.merged_transcript_record),),
+                output_artifacts=(),
+                started_at=timestamp,
+                completed_at=timestamp,
+                error=None,
+                attempt=attempt,
+            )
+        )
 
 
 def _validate_processing_profile_support(profile: CaptureProfile) -> None:
