@@ -114,8 +114,12 @@ def test_runtime_profile_state_persists_under_runtime_state_home(tmp_path: Path)
     profile = get_alpha_local_profile()
     state = _state(runtime_paths=_runtime_paths(tmp_path), asr_model_present=True)
     evaluation = evaluate_setup(profile, state)
+    fallback_evaluation = evaluate_setup(default_profile_catalog()[1], state)
 
-    accepted = build_runtime_profile_state(evaluation)
+    accepted = build_runtime_profile_state(
+        evaluation,
+        fallback_evaluation=fallback_evaluation,
+    )
     state_path = persist_runtime_profile_state(accepted, paths=state.runtime_paths)
     loaded = load_runtime_profile_state(state.runtime_paths)
 
@@ -136,24 +140,44 @@ def test_runtime_profile_state_persists_under_runtime_state_home(tmp_path: Path)
     assert loaded.fallback_authorization.remote_status == "not_configured"
 
 
-def test_runtime_profile_state_records_unavailable_local_fallback() -> None:
+def test_runtime_profile_state_does_not_authorize_unevaluated_local_fallback() -> None:
     profile = get_alpha_local_profile()
-    evaluation = evaluate_setup(
-        profile,
-        _state(
-            asr_model_present=True,
-            diarization_model_present=True,
-            hardware=HardwareFacts(
-                system="Linux",
-                ram_gb=32.0,
-                cuda_available=True,
-                vram_gb=12.0,
-                avx2_available=False,
-            ),
-        ),
-    )
+    evaluation = evaluate_setup(profile, _state(asr_model_present=True))
 
     accepted = build_runtime_profile_state(evaluation)
+
+    assert accepted.fallback_authorization.local_status == "configured_unauthorized"
+    assert accepted.fallback_authorization.local_profile_id == FALLBACK_LOCAL_PROFILE_ID
+    assert accepted.fallback_authorization.automatic_local_fallback_authorized is False
+
+
+def test_runtime_profile_state_records_unavailable_evaluated_local_fallback() -> None:
+    profile = get_alpha_local_profile()
+    fallback_profile = default_profile_catalog()[1]
+    state = _state(
+        asr_model_present=True,
+        diarization_model_present=True,
+        hardware=HardwareFacts(
+            system="Linux",
+            ram_gb=32.0,
+            cuda_available=True,
+            vram_gb=12.0,
+            avx2_available=False,
+        ),
+    )
+    evaluation = evaluate_setup(
+        profile,
+        state,
+    )
+    fallback_evaluation = evaluate_setup(
+        fallback_profile,
+        state,
+    )
+
+    accepted = build_runtime_profile_state(
+        evaluation,
+        fallback_evaluation=fallback_evaluation,
+    )
 
     assert accepted.fallback_authorization.local_status == "unavailable"
     assert accepted.fallback_authorization.local_profile_id == FALLBACK_LOCAL_PROFILE_ID

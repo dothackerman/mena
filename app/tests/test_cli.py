@@ -96,9 +96,12 @@ from mena.setup import (
     LocalInstallationState,
     OllamaState,
     PythonSurfaceCheck,
+    RuntimeProfileState,
     build_runtime_profile_state,
+    default_profile_catalog,
     evaluate_setup,
     get_alpha_local_profile,
+    load_runtime_profile_state,
     persist_runtime_profile_state,
 )
 from mena.summarization import (
@@ -322,7 +325,7 @@ def test_setup_yes_executes_planned_actions_through_runner(
     runner = SetupFakeRunner()
 
     def _detect_state(_settings: AppSettings, **_kwargs: object) -> LocalInstallationState:
-        return detected_states.pop(0)
+        return detected_states.pop(0) if detected_states else ready_state
 
     monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
 
@@ -342,6 +345,65 @@ def test_setup_yes_executes_planned_actions_through_runner(
         captured.out.rsplit("Mena Linux alpha setup preflight", maxsplit=1)[-1].count("[missing]")
         == 0
     )
+
+
+def test_setup_evaluates_fallback_profile_before_authorizing_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    primary_ready = _setup_state(settings=settings, pyannote_token_present=True)
+    fallback_missing_asr = _setup_state(
+        settings=settings,
+        asr_model_present=False,
+        pyannote_token_present=True,
+    )
+    observed_profiles: list[str] = []
+
+    def _detect_state(_settings: AppSettings, **kwargs: object) -> LocalInstallationState:
+        profile = cast(Any, kwargs.get("profile"))
+        if profile is not None and profile.fallback:
+            observed_profiles.append(profile.id)
+            return fallback_missing_asr
+        observed_profiles.append("primary")
+        return primary_ready
+
+    monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
+
+    assert main(["setup", "--yes"], settings=settings, setup_runner=SetupFakeRunner()) == 0
+
+    accepted = load_runtime_profile_state(settings.paths)
+    assert observed_profiles == ["primary", "linux-alpha-cpu-fallback-v1"]
+    assert accepted.fallback_authorization.local_status == "unavailable"
+    assert accepted.fallback_authorization.automatic_local_fallback_authorized is False
+    assert any(
+        "selected faster-whisper model" in reason
+        for reason in accepted.fallback_authorization.blocking_reasons
+    )
+
+
+def test_setup_interrupt_during_ready_fallback_evaluation_does_not_persist_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    primary_ready = _setup_state(settings=settings, pyannote_token_present=True)
+
+    def _detect_state(_settings: AppSettings, **kwargs: object) -> LocalInstallationState:
+        profile = cast(Any, kwargs.get("profile"))
+        if profile is not None and profile.fallback:
+            raise KeyboardInterrupt
+        return primary_ready
+
+    monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
+
+    exit_code = main(["setup", "--yes"], settings=settings, setup_runner=SetupFakeRunner())
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "Setup interrupted; local provider readiness is incomplete." in captured.out
+    assert not (settings.paths.state_home / "setup-state.json").exists()
 
 
 def test_setup_with_only_manual_actions_does_not_prompt_or_execute(
@@ -432,6 +494,40 @@ def test_setup_interrupt_during_post_action_refresh_does_not_traceback(
     assert exit_code == 1
     assert runner.run_calls
     assert "Setup interrupted; local provider readiness is incomplete." in captured.out
+
+
+def test_setup_interrupt_during_refreshed_fallback_evaluation_does_not_persist_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    initial_state = _setup_state(
+        settings=settings,
+        ollama_model_present=False,
+        asr_model_present=False,
+        diarization_model_present=False,
+        pyannote_token_present=True,
+    )
+    ready_state = _setup_state(settings=settings, pyannote_token_present=True)
+    detected_states: list[LocalInstallationState] = [initial_state, ready_state]
+    runner = SetupFakeRunner()
+
+    def _detect_state(_settings: AppSettings, **kwargs: object) -> LocalInstallationState:
+        profile = cast(Any, kwargs.get("profile"))
+        if profile is not None and profile.fallback:
+            raise KeyboardInterrupt
+        return detected_states.pop(0)
+
+    monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
+
+    exit_code = main(["setup", "--yes"], settings=settings, setup_runner=runner)
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert runner.run_calls
+    assert "Setup interrupted; local provider readiness is incomplete." in captured.out
+    assert not (settings.paths.state_home / "setup-state.json").exists()
 
 
 def test_record_help_lists_profile_options(capsys: CaptureFixture[str]) -> None:
@@ -1793,7 +1889,10 @@ def test_runtime_profile_selection_uses_accepted_state(
 ) -> None:
     settings = AppSettings.from_env(env={}, home=tmp_path)
     setup_state = _setup_state(settings=settings, pyannote_token_present=True)
-    accepted = build_runtime_profile_state(evaluate_setup(get_alpha_local_profile(), setup_state))
+    accepted = _runtime_profile_state_with_evaluated_fallback(
+        settings=settings,
+        setup_state=setup_state,
+    )
     persist_runtime_profile_state(accepted, paths=settings.paths)
     monkeypatch.setattr(
         "mena.runtime_profile.detect_local_installation_state",
@@ -1869,8 +1968,9 @@ def test_runtime_profile_selection_uses_setup_authorized_local_fallback(
 ) -> None:
     settings = AppSettings.from_env(env={}, home=tmp_path)
     accepted_state = _setup_state(settings=settings, pyannote_token_present=True)
-    accepted = build_runtime_profile_state(
-        evaluate_setup(get_alpha_local_profile(), accepted_state)
+    accepted = _runtime_profile_state_with_evaluated_fallback(
+        settings=settings,
+        setup_state=accepted_state,
     )
     persist_runtime_profile_state(accepted, paths=settings.paths)
     stale_state = _setup_state(
@@ -2007,7 +2107,10 @@ def test_runtime_profile_selection_rejects_stale_catalog_state(
 ) -> None:
     settings = AppSettings.from_env(env={}, home=tmp_path)
     setup_state = _setup_state(settings=settings, pyannote_token_present=True)
-    accepted = build_runtime_profile_state(evaluate_setup(get_alpha_local_profile(), setup_state))
+    accepted = _runtime_profile_state_with_evaluated_fallback(
+        settings=settings,
+        setup_state=setup_state,
+    )
     payload = accepted.to_dict()
     payload["catalog_version"] = "stale-catalog"
     settings.paths.state_home.mkdir(parents=True)
@@ -2031,7 +2134,10 @@ def test_runtime_profile_provenance_records_accepted_actual_and_fallback(
 ) -> None:
     settings = AppSettings.from_env(env={}, home=tmp_path)
     setup_state = _setup_state(settings=settings, pyannote_token_present=True)
-    accepted = build_runtime_profile_state(evaluate_setup(get_alpha_local_profile(), setup_state))
+    accepted = _runtime_profile_state_with_evaluated_fallback(
+        settings=settings,
+        setup_state=setup_state,
+    )
     selection = SimpleNamespace(
         accepted=accepted,
         actual=accepted,
@@ -4004,8 +4110,9 @@ def _persist_ready_runtime_profile_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> LocalInstallationState:
     setup_state = _setup_state(settings=settings, pyannote_token_present=True)
-    accepted = build_runtime_profile_state(
-        evaluate_setup(get_alpha_local_profile(settings.local_llm.ollama_model), setup_state)
+    accepted = _runtime_profile_state_with_evaluated_fallback(
+        settings=settings,
+        setup_state=setup_state,
     )
     persist_runtime_profile_state(accepted, paths=settings.paths)
     monkeypatch.setattr(
@@ -4013,6 +4120,19 @@ def _persist_ready_runtime_profile_state(
         lambda *_args, **_kwargs: setup_state,
     )
     return setup_state
+
+
+def _runtime_profile_state_with_evaluated_fallback(
+    *,
+    settings: AppSettings,
+    setup_state: LocalInstallationState,
+) -> RuntimeProfileState:
+    primary_profile = get_alpha_local_profile(settings.local_llm.ollama_model)
+    fallback_profile = default_profile_catalog(settings.local_llm.ollama_model)[1]
+    return build_runtime_profile_state(
+        evaluate_setup(primary_profile, setup_state),
+        fallback_evaluation=evaluate_setup(fallback_profile, setup_state),
+    )
 
 
 def _main_process_with_fake_providers(argv: Sequence[str]) -> int:

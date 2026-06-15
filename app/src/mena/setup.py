@@ -768,6 +768,7 @@ def build_runtime_profile_state(
     evaluation: SetupEvaluation,
     *,
     accepted_at: datetime | None = None,
+    fallback_evaluation: SetupEvaluation | None = None,
 ) -> RuntimeProfileState:
     """Build persisted state from an already-ready setup evaluation."""
 
@@ -790,7 +791,10 @@ def build_runtime_profile_state(
         readiness_summary=evaluation.readiness,
         evidence_digest=evidence_digest,
         evidence=evidence,
-        fallback_authorization=_build_runtime_fallback_authorization(evaluation),
+        fallback_authorization=_build_runtime_fallback_authorization(
+            evaluation,
+            fallback_evaluation=fallback_evaluation,
+        ),
     )
 
 
@@ -1511,6 +1515,8 @@ def _resolved_stage_profiles(evaluation: SetupEvaluation) -> tuple[StageProfile,
 
 def _build_runtime_fallback_authorization(
     evaluation: SetupEvaluation,
+    *,
+    fallback_evaluation: SetupEvaluation | None,
 ) -> RuntimeFallbackAuthorization:
     fallback_profile = next(
         (
@@ -1523,8 +1529,24 @@ def _build_runtime_fallback_authorization(
     if fallback_profile is None:
         return RuntimeFallbackAuthorization.legacy_default()
 
-    fallback_evaluation = evaluate_setup(fallback_profile, evaluation.state)
     stage_scope = tuple(stage.stage for stage in fallback_profile.stages)
+    if fallback_evaluation is None:
+        return RuntimeFallbackAuthorization(
+            local_status="configured_unauthorized",
+            local_profile_id=fallback_profile.id,
+            local_profile_version=fallback_profile.version,
+            automatic_local_fallback_authorized=False,
+            stage_scope=stage_scope,
+            placement_change_allowed=True,
+            profile_change_allowed=True,
+            remote_status="not_configured",
+            blocking_reasons=("fallback profile was not evaluated by setup",),
+        )
+    if (
+        fallback_evaluation.profile.id != fallback_profile.id
+        or fallback_evaluation.profile.version != fallback_profile.version
+    ):
+        raise ValueError("Fallback authorization evaluation must use the bundled fallback profile.")
     if not fallback_evaluation.ready:
         return RuntimeFallbackAuthorization(
             local_status="unavailable",

@@ -115,8 +115,10 @@ from mena.setup import (
     CommandRunner,
     HardwareFacts,
     ReadinessItem,
+    SetupEvaluation,
     SubprocessCommandRunner,
     build_runtime_profile_state,
+    default_profile_catalog,
     detect_local_installation_state,
     evaluate_setup,
     execute_setup_plan,
@@ -518,7 +520,20 @@ def _run_setup_command(
     if check_only:
         return 0 if evaluation.ready else 1
     if evaluation.ready:
-        accepted_state = build_runtime_profile_state(evaluation)
+        try:
+            fallback_evaluation = _evaluate_setup_fallback_authorization(
+                settings=settings,
+                runner=command_runner,
+                command_identity=command_identity,
+                hardware=hardware,
+            )
+        except KeyboardInterrupt:
+            print("Setup interrupted; local provider readiness is incomplete.")
+            return 1
+        accepted_state = build_runtime_profile_state(
+            evaluation,
+            fallback_evaluation=fallback_evaluation,
+        )
         state_path = persist_runtime_profile_state(accepted_state, paths=settings.paths)
         print(f"Accepted runtime profile state: {state_path}")
         return 0
@@ -568,10 +583,50 @@ def _run_setup_command(
         end="",
     )
     if final_ready:
-        accepted_state = build_runtime_profile_state(refreshed_evaluation)
+        try:
+            fallback_evaluation = _evaluate_setup_fallback_authorization(
+                settings=settings,
+                runner=command_runner,
+                command_identity=command_identity,
+                hardware=hardware,
+            )
+        except KeyboardInterrupt:
+            print("Setup interrupted; local provider readiness is incomplete.")
+            return 1
+        accepted_state = build_runtime_profile_state(
+            refreshed_evaluation,
+            fallback_evaluation=fallback_evaluation,
+        )
         state_path = persist_runtime_profile_state(accepted_state, paths=settings.paths)
         print(f"Accepted runtime profile state: {state_path}")
     return 0 if final_ready else 1
+
+
+def _evaluate_setup_fallback_authorization(
+    *,
+    settings: AppSettings,
+    runner: CommandRunner,
+    command_identity: CommandIdentity | None,
+    hardware: HardwareFacts | None,
+) -> SetupEvaluation | None:
+    fallback_profile = next(
+        (
+            profile
+            for profile in default_profile_catalog(settings.local_llm.ollama_model)
+            if profile.fallback
+        ),
+        None,
+    )
+    if fallback_profile is None:
+        return None
+    fallback_state = detect_local_installation_state(
+        settings,
+        runner=runner,
+        command_identity=command_identity,
+        hardware=hardware,
+        profile=fallback_profile,
+    )
+    return evaluate_setup(fallback_profile, fallback_state)
 
 
 def _readiness_item_failed(
