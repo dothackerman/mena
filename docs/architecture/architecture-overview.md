@@ -512,7 +512,10 @@ The processing orchestrator reads persisted source artifacts and performs:
 
 Derived artifacts are written separately from source artifacts.
 Processing consumes capture-source metadata plus ordered segment references, not a single WAV-path assumption.
-Provider adapters may stitch, chunk, downmix, or resample source segments into provider-prep artifacts when required, but the sealed source segments remain the canonical evidence for the meeting audio.
+When a provider needs a single compatible `audio_path`, the processing core creates provenance-backed provider-prep artifacts from ordered source segments.
+Provider adapters declare accepted or preferred input requirements and own provider invocation.
+For issue #83, ASR and diarization provider ports continue to receive a prepared `audio_path`; they do not accept raw capture-segment sequences directly.
+Sealed source segments remain the canonical evidence for the meeting audio.
 
 Language-sensitive processing uses the session language selected at recording time:
 

@@ -16,15 +16,21 @@ from mena.artifacts import (
     ArtifactStoreError,
     FileSystemArtifactStore,
 )
+from mena.capture import make_wav_bytes
 from mena.cli import (
     COMMANDS,
     WORKER_EXIT_TIMEOUT_SECONDS,
     SourceAudioInput,
+    _CaptureEventMonitor,
     _collect_capture_segments,
     _require_provider,
     _resolve_latest_merged_transcript_record,
+    _resolve_record_language,
+    _resolve_record_profile,
+    _resolve_route_selections,
     _run_processing_command,
     _run_processing_stages,
+    _wait_for_record_stop,
     main,
 )
 from mena.correction_overlay import (
@@ -57,7 +63,7 @@ from mena.processing import (
     ProcessingStageState,
 )
 from mena.profiles import CaptureProfileId, get_capture_profile, parse_capture_profile
-from mena.protocol import ProtocolError, ProtocolMessage
+from mena.protocol import ProtocolError, ProtocolMessage, StartCapturePayload, WorkerProcess
 from mena.review_flagging import (
     REVIEW_QUEUE_SCHEMA_VERSION,
     ConfidenceFlaggingPolicy,
@@ -448,10 +454,11 @@ def test_record_creates_session_bundle_and_record(
     tmp_path: Path, capsys: CaptureFixture[str]
 ) -> None:
     exit_code = main(
-        ["record", "--profile", "online", "--name", "Planning"],
+        ["record", "--profile", "online", "--language", "en", "--name", "Planning"],
         data_root=tmp_path,
         discoverer=_available_discoverer,
         worker_factory=FakeWorkerProcess,
+        input_fn=lambda _prompt: "q",
     )
 
     captured = capsys.readouterr()
@@ -466,9 +473,15 @@ def test_record_creates_session_bundle_and_record(
     assert record["id"]
     assert record["created_at"].endswith("Z")
     assert record["name"] == "Planning"
-    assert record["status"] == "created"
+    assert record["status"] == "recorded"
     assert record["profile"] == "online_dual_stream"
+    assert record["language"] == "en"
     assert record["discovery"]["status"] == "available"
+    assert record["capture_plan"]["status"] == "finalized"
+    assert record["capture_plan"]["selected_sources"] == ["local_mic", "system_audio"]
+    assert record["capture_plan"]["routes"][1]["route_id"] == "pulse:sink-input:151"
+    assert record["recording"]["stop_reason"] == "user_stop"
+    assert record["recording"]["finalization"]["status"] == "finalized"
     assert record["capture_metadata"]["segment_count"] == 0
 
 
@@ -514,13 +527,12 @@ def test_record_data_root_override_remains_session_scoped(
     assert not (tmp_path / "state").exists()
 
 
-def test_record_requires_profile(capsys: CaptureFixture[str]) -> None:
-    with pytest.raises(SystemExit) as exc_info:
-        main(["record"])
-
+def test_record_requires_profile_noninteractively(capsys: CaptureFixture[str]) -> None:
+    exit_code = main(["record"])
     captured = capsys.readouterr()
-    assert exc_info.value.code == 2
-    assert "the following arguments are required: --profile" in captured.err
+
+    assert exit_code == 1
+    assert "Capture profile is required in non-interactive mode" in captured.out
 
 
 def test_record_rejects_invalid_profile(capsys: CaptureFixture[str]) -> None:
@@ -532,6 +544,263 @@ def test_record_rejects_invalid_profile(capsys: CaptureFixture[str]) -> None:
     assert "invalid choice: 'room'" in captured.err
     assert "online" in captured.err
     assert "in-person" in captured.err
+
+
+def test_record_requires_language_before_capture(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    exit_code = main(
+        ["record", "--profile", "online"],
+        data_root=tmp_path,
+        discoverer=_available_discoverer,
+        worker_factory=FakeWorkerProcess,
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "Meeting language is required before recording" in captured.out
+    assert not (tmp_path / "sessions").exists()
+
+
+def test_record_prompts_for_profile_when_omitted(tmp_path: Path) -> None:
+    FakeWorkerProcess.last_start_payload = None
+    answers = iter(["2", "q"])
+
+    exit_code = main(
+        ["record", "--language", "fr-CH"],
+        data_root=tmp_path,
+        discoverer=_available_discoverer,
+        worker_factory=FakeWorkerProcess,
+        input_fn=lambda _prompt: next(answers),
+    )
+
+    assert exit_code == 0
+    assert FakeWorkerProcess.last_start_payload is not None
+    assert FakeWorkerProcess.last_start_payload.profile == "in_person_single_mic"
+    assert FakeWorkerProcess.last_start_payload.language == "fr-CH"
+    assert FakeWorkerProcess.last_start_payload.selected_sources == ("room_mic",)
+
+
+def test_resolve_record_profile_accepts_numeric_online_prompt() -> None:
+    selection = _resolve_record_profile(None, input_fn=lambda _prompt: "1")
+
+    assert selection.id is CaptureProfileId.ONLINE_DUAL_STREAM
+
+
+def test_resolve_record_language_prompts_with_default() -> None:
+    assert (
+        _resolve_record_language(
+            None,
+            default_language="de-CH",
+            input_fn=lambda _prompt: "",
+            dry_run=False,
+        )
+        == "de-CH"
+    )
+
+
+def test_resolve_route_selections_prompts_for_ambiguous_online_routes() -> None:
+    answers = iter(["2", "2", "2"])
+
+    selections = _resolve_route_selections(
+        profile=CaptureProfileId.ONLINE_DUAL_STREAM,
+        discovery=_ambiguous_discoverer(CaptureProfileId.ONLINE_DUAL_STREAM),
+        microphone_route_id=None,
+        playback_stream_route_id=None,
+        output_sink_route_id=None,
+        input_fn=lambda _prompt: next(answers),
+    )
+
+    assert selections.microphone_route_id == "pipewire:node:32"
+    assert selections.playback_stream_route_id == "pulse:sink-input:152"
+    assert selections.output_sink_route_id == "pipewire:node:43"
+
+
+def test_resolve_route_selections_rejects_in_person_online_flags() -> None:
+    with pytest.raises(ValueError, match="accepts --mic only"):
+        _resolve_route_selections(
+            profile=CaptureProfileId.IN_PERSON_SINGLE_MIC,
+            discovery=_available_discoverer(CaptureProfileId.IN_PERSON_SINGLE_MIC),
+            microphone_route_id=None,
+            playback_stream_route_id="pulse:sink-input:151",
+            output_sink_route_id=None,
+            input_fn=None,
+        )
+
+
+def test_resolve_route_selections_rejects_missing_playback_streams() -> None:
+    discovery = AudioDiscovery(
+        version=1,
+        profile=CaptureProfileId.ONLINE_DUAL_STREAM,
+        status=DiscoveryStatus.AVAILABLE,
+        sources=_available_discoverer(CaptureProfileId.ONLINE_DUAL_STREAM).sources,
+        sinks=_available_discoverer(CaptureProfileId.ONLINE_DUAL_STREAM).sinks,
+        playback_streams=(),
+    )
+
+    with pytest.raises(ValueError, match="No playback streams were discovered"):
+        _resolve_route_selections(
+            profile=CaptureProfileId.ONLINE_DUAL_STREAM,
+            discovery=discovery,
+            microphone_route_id=None,
+            playback_stream_route_id=None,
+            output_sink_route_id=None,
+            input_fn=None,
+        )
+
+
+def test_resolve_route_selections_rejects_invalid_prompt_choice() -> None:
+    with pytest.raises(ValueError, match="Invalid microphone routes selection"):
+        _resolve_route_selections(
+            profile=CaptureProfileId.ONLINE_DUAL_STREAM,
+            discovery=_ambiguous_discoverer(CaptureProfileId.ONLINE_DUAL_STREAM),
+            microphone_route_id=None,
+            playback_stream_route_id=None,
+            output_sink_route_id=None,
+            input_fn=lambda _prompt: "x",
+        )
+
+
+def test_wait_for_record_stop_rejects_invalid_command() -> None:
+    with pytest.raises(ValueError, match="must be q, quit, or stop"):
+        _wait_for_record_stop(lambda _prompt: "later")
+
+
+def test_capture_event_monitor_drains_progress_and_returns_finalization(
+    capsys: CaptureFixture[str],
+) -> None:
+    worker = _EventWorker(
+        [
+            ProtocolMessage(
+                type="segment_flushed",
+                session_id=SESSION_ID,
+                payload=_segment_payload(source_id="local_mic", index=1),
+            ),
+            ProtocolMessage(
+                type="capture_status",
+                session_id=SESSION_ID,
+                payload={
+                    "status": "recording",
+                    "elapsed_seconds": 12.5,
+                    "sealed_segment_count": 1,
+                },
+            ),
+            _finalized_capture_message(),
+        ]
+    )
+    monitor = _CaptureEventMonitor(cast(WorkerProcess, worker))
+
+    monitor.start()
+    finalized = monitor.wait_for_finalized()
+
+    captured = capsys.readouterr()
+    assert finalized.type == "capture_finalized"
+    assert "Sealed local_mic segment 1." in captured.out
+    assert "Recording: 12s elapsed, 1 sealed segment(s)." in captured.out
+
+
+def test_capture_event_monitor_raises_structured_worker_error() -> None:
+    worker = _EventWorker(
+        [
+            ProtocolMessage(
+                type="error",
+                session_id=SESSION_ID,
+                payload={
+                    "code": "capture_flush_failed",
+                    "message": "disk full",
+                    "recoverable": False,
+                    "details": {},
+                },
+            )
+        ]
+    )
+    monitor = _CaptureEventMonitor(cast(WorkerProcess, worker))
+
+    monitor.start()
+
+    with pytest.raises(ProtocolError, match="disk full"):
+        monitor.wait_for_finalized()
+
+
+def test_capture_event_monitor_propagates_reader_failure() -> None:
+    monitor = _CaptureEventMonitor(cast(WorkerProcess, _EventWorker([])))
+
+    monitor.start()
+
+    with pytest.raises(StopIteration):
+        monitor.wait_for_finalized()
+
+
+def test_capture_event_monitor_rejects_unexpected_event_type() -> None:
+    worker = _EventWorker([ProtocolMessage(type="hello_ack", session_id=SESSION_ID)])
+    monitor = _CaptureEventMonitor(cast(WorkerProcess, worker))
+
+    monitor.start()
+
+    with pytest.raises(ProtocolError, match="Unexpected capture event 'hello_ack'"):
+        monitor.wait_for_finalized()
+
+
+def test_record_requires_interactive_stop_before_capture_starts(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    exit_code = main(
+        ["record", "--profile", "online", "--language", "en"],
+        data_root=tmp_path,
+        discoverer=_available_discoverer,
+        worker_factory=FakeWorkerProcess,
+    )
+    captured = capsys.readouterr()
+    record_path = next((tmp_path / "sessions").iterdir()) / "session.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+
+    assert exit_code == 1
+    assert "recording requires an interactive terminal to stop" in captured.out
+    assert "capture_metadata" not in record
+
+
+def test_record_rejects_ambiguous_routes_without_explicit_selection(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    exit_code = main(
+        ["record", "--profile", "online", "--language", "en"],
+        data_root=tmp_path,
+        discoverer=_ambiguous_discoverer,
+        worker_factory=FakeWorkerProcess,
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "Multiple microphone routes were discovered; pass --mic." in captured.out
+
+
+def test_record_uses_explicit_noninteractive_route_flags(tmp_path: Path) -> None:
+    FakeWorkerProcess.last_start_payload = None
+
+    exit_code = main(
+        [
+            "record",
+            "--profile",
+            "online",
+            "--language",
+            "en",
+            "--mic",
+            "pipewire:node:32",
+            "--playback-stream",
+            "pulse:sink-input:152",
+            "--output-sink",
+            "pipewire:node:43",
+        ],
+        data_root=tmp_path,
+        discoverer=_ambiguous_discoverer,
+        worker_factory=FakeWorkerProcess,
+        input_fn=lambda _prompt: "q",
+    )
+
+    assert exit_code == 0
+    assert FakeWorkerProcess.last_start_payload is not None
+    route_ids = [route.route_id for route in FakeWorkerProcess.last_start_payload.routes]
+    assert route_ids == ["pipewire:node:32", "pulse:sink-input:152", "pipewire:node:43"]
 
 
 def test_record_dry_run_persists_discovery_and_prints_routes(
@@ -558,7 +827,7 @@ def test_record_does_not_start_capture_when_discovery_unavailable(
     tmp_path: Path, capsys: CaptureFixture[str]
 ) -> None:
     exit_code = main(
-        ["record", "--profile", "online"],
+        ["record", "--profile", "online", "--language", "en"],
         data_root=tmp_path,
         discoverer=_unavailable_discoverer,
         worker_factory=FakeWorkerProcess,
@@ -577,10 +846,11 @@ def test_record_reports_worker_failure_without_capture_metadata(
     tmp_path: Path, capsys: CaptureFixture[str]
 ) -> None:
     exit_code = main(
-        ["record", "--profile", "online"],
+        ["record", "--profile", "online", "--language", "en"],
         data_root=tmp_path,
         discoverer=_available_discoverer,
         worker_factory=FailingWorkerProcess,
+        input_fn=lambda _prompt: "q",
     )
 
     captured = capsys.readouterr()
@@ -596,10 +866,11 @@ def test_record_rejects_nonzero_worker_exit_without_capture_metadata(
     tmp_path: Path, capsys: CaptureFixture[str]
 ) -> None:
     exit_code = main(
-        ["record", "--profile", "online"],
+        ["record", "--profile", "online", "--language", "en"],
         data_root=tmp_path,
         discoverer=_available_discoverer,
         worker_factory=NonzeroExitWorkerProcess,
+        input_fn=lambda _prompt: "q",
     )
 
     captured = capsys.readouterr()
@@ -614,10 +885,11 @@ def test_record_uses_configurable_worker_exit_timeout(tmp_path: Path) -> None:
     TimeoutCapturingWorkerProcess.last_timeout = None
 
     exit_code = main(
-        ["record", "--profile", "online", "--worker-exit-timeout", "7.5"],
+        ["record", "--profile", "online", "--language", "en", "--worker-exit-timeout", "7.5"],
         data_root=tmp_path,
         discoverer=_available_discoverer,
         worker_factory=TimeoutCapturingWorkerProcess,
+        input_fn=lambda _prompt: "q",
     )
 
     assert exit_code == 0
@@ -739,7 +1011,7 @@ def test_main_summarize_uses_unique_runtime_profile_provenance_per_run(
     assert len(run_ids) == 2
 
 
-def test_main_summarize_uses_configured_defaults(
+def test_main_summarize_uses_session_language_before_config_default(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -748,7 +1020,7 @@ def test_main_summarize_uses_configured_defaults(
     config_path.write_text(
         """
 [summary]
-language = "fr-CH"
+language = "it-CH"
 
 [ollama]
 endpoint = "http://127.0.0.1:11436"
@@ -1406,10 +1678,11 @@ def test_run_processing_command_executes_stage_pipeline(
         source_artifact: object,
         source_id: str | None = None,
         audio_path: object = None,
+        language: str | None = None,
         attempt: int = 1,
         now: object = None,
     ) -> object:
-        calls.append(f"transcription:{source_id}")
+        calls.append(f"transcription:{source_id}:{language}")
         transcript_record = store.store(
             artifact_type="transcript",
             name=f"transcript-{source_id}.json",
@@ -1538,8 +1811,8 @@ def test_run_processing_command_executes_stage_pipeline(
     captured = capsys.readouterr()
     assert exit_code == 0
     assert "Processing completed for run 'manual-run-full' (attempt 1)." in captured.out
-    assert "transcription:local_mic" in calls
-    assert "transcription:system_audio" in calls
+    assert "transcription:local_mic:en" in calls
+    assert "transcription:system_audio:en" in calls
     assert calls.count("diarization") == 2
     assert "merge" in calls
     assert "confidence" in calls
@@ -2370,10 +2643,63 @@ def test_main_resume_without_checkpoint_reports_no_retry(
     assert "No retryable processing failure found to resume." in captured.out
 
 
+class _EventWorker:
+    def __init__(self, messages: Sequence[ProtocolMessage]) -> None:
+        self._messages = iter(messages)
+
+    def receive(self) -> ProtocolMessage:
+        return next(self._messages)
+
+
+def _segment_payload(*, source_id: str, index: int) -> dict[str, object]:
+    return {
+        "source_id": source_id,
+        "index": index,
+        "path": f"artifacts/source/{source_id}/{source_id}_{index:06d}.wav",
+        "sample_rate": 48_000,
+        "channels": 1,
+        "channel_layout": "mono",
+        "sample_format": "pcm_s16le",
+        "byte_count": 44,
+        "duration_seconds": 30.0,
+        "started_at": None,
+        "ended_at": None,
+        "sha256": "0" * 64,
+        "status": "sealed",
+        "format": "wav",
+    }
+
+
+def _finalized_capture_message() -> ProtocolMessage:
+    return ProtocolMessage(
+        type="capture_finalized",
+        session_id=SESSION_ID,
+        payload={
+            "status": "recorded",
+            "stop_reason": "user_stop",
+            "completed_at": None,
+            "error": None,
+            "capture_metadata": {
+                "version": 1,
+                "profile": "online_dual_stream",
+                "sample_rate": 48_000,
+                "channels": 1,
+                "segment_seconds": 30,
+                "segment_count": 0,
+                "segments": [],
+                "sources": [],
+            },
+        },
+    )
+
+
 class FakeWorkerProcess:
+    last_start_payload: StartCapturePayload | None = None
+
     def __init__(self, *, session_id: str, session_dir: Path) -> None:
         self.session_id = session_id
         self.session_dir = session_dir
+        self.start_payload: StartCapturePayload | None = None
 
     def __enter__(self) -> "FakeWorkerProcess":
         return self
@@ -2384,27 +2710,40 @@ class FakeWorkerProcess:
     def handshake(self) -> ProtocolMessage:
         return ProtocolMessage(type="hello_ack", session_id=self.session_id)
 
-    def start_capture(self, payload: dict[str, object] | None = None) -> ProtocolMessage:
+    def start_capture(self, payload: StartCapturePayload) -> ProtocolMessage:
+        self.start_payload = payload
+        self.__class__.last_start_payload = payload
         return ProtocolMessage(
             type="capture_started",
             session_id=self.session_id,
             payload={
                 "session_dir": str(self.session_dir),
-                "profile": payload["profile"] if payload else None,
+                "profile": payload.profile,
+                "segment_seconds": payload.segment_seconds,
+                "selected_sources": list(payload.selected_sources),
             },
         )
 
     def stop_capture(self) -> ProtocolMessage:
+        profile = self.start_payload.profile if self.start_payload else "online_dual_stream"
         return ProtocolMessage(
             type="capture_finalized",
             session_id=self.session_id,
             payload={
-                "version": 1,
-                "sample_rate": 48000,
-                "channels": 1,
-                "segment_seconds": 30,
-                "segment_count": 0,
-                "segments": [],
+                "status": "recorded",
+                "stop_reason": "user_stop",
+                "completed_at": None,
+                "error": None,
+                "capture_metadata": {
+                    "version": 1,
+                    "profile": profile,
+                    "sample_rate": 48000,
+                    "channels": 1,
+                    "segment_seconds": 30,
+                    "segment_count": 0,
+                    "segments": [],
+                    "sources": [],
+                },
             },
         )
 
@@ -2626,6 +2965,20 @@ def _create_session_record(tmp_path: Path) -> Path:
                 "name": None,
                 "status": "created",
                 "profile": "online_dual_stream",
+                "language": "fr-CH",
+                "recording": {
+                    "started_at": None,
+                    "stopped_at": None,
+                    "stop_reason": None,
+                    "finalization": {
+                        "status": "not_started",
+                        "completed_at": None,
+                        "error": None,
+                    },
+                },
+                "capture_plan": None,
+                "degradations": [],
+                "failures": [],
             },
             sort_keys=True,
         )
@@ -2830,6 +3183,72 @@ def _build_processing_session(tmp_path: Path) -> CreatedSession:
     return created_session
 
 
+def _build_multi_segment_processing_session(tmp_path: Path) -> CreatedSession:
+    created_session = create_session(
+        profile=parse_capture_profile("online"),
+        data_root=tmp_path,
+        now=datetime(2026, 5, 8, 5, 30, 0, tzinfo=UTC),
+    )
+    segment_facts: list[dict[str, object]] = []
+    for source_id in ("local_mic", "system_audio"):
+        for index in (1, 2):
+            path = created_session.bundle_path / f"{source_id}_{index:06d}.wav"
+            payload = make_wav_bytes(
+                bytes([index, index]) * 80,
+                sample_rate=8_000,
+                channels=1,
+            )
+            path.write_bytes(payload)
+            segment_facts.append(
+                {
+                    "source_id": source_id,
+                    "index": index,
+                    "path": str(path),
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                    "sample_rate": 8_000,
+                    "channels": 1,
+                    "channel_layout": "mono",
+                    "sample_format": "pcm_s16le",
+                    "byte_count": len(payload),
+                    "duration_seconds": 0.01,
+                    "started_at": None,
+                    "ended_at": None,
+                    "status": "sealed",
+                    "format": "wav",
+                }
+            )
+
+    update_session_capture_metadata(
+        created_session.record_path,
+        {
+            "version": 1,
+            "profile": "online_dual_stream",
+            "sample_rate": 8_000,
+            "channels": 1,
+            "segment_seconds": 30,
+            "segment_count": len(segment_facts),
+            "segments": segment_facts,
+            "sources": [
+                {
+                    "source_id": "local_mic",
+                    "route_id": None,
+                    "route_label": None,
+                    "channel_layout": "mono",
+                    "segment_count": 2,
+                },
+                {
+                    "source_id": "system_audio",
+                    "route_id": None,
+                    "route_label": None,
+                    "channel_layout": "mono",
+                    "segment_count": 2,
+                },
+            ],
+        },
+    )
+    return created_session
+
+
 def _build_single_source_processing_session(tmp_path: Path) -> CreatedSession:
     created_session = create_session(
         profile=parse_capture_profile("in-person"),
@@ -2885,11 +3304,14 @@ def _patch_processing_stages(
         transcription_provider: object,
         diarization_provider: object,
         semantic_coherence_provider: object,
+        session_language: str | None = None,
     ) -> None:
         invocation["session_id"] = session_id
         invocation["run_id"] = getattr(ledger, "run_id", None)
         invocation["attempt"] = attempt
+        invocation["session_language"] = session_language
         invocation["source_input_count"] = len(source_inputs)
+        invocation["source_inputs"] = source_inputs
         invocation["providers"] = (
             transcription_provider,
             diarization_provider,
@@ -2953,6 +3375,72 @@ def _available_discoverer(profile: CaptureProfileId) -> AudioDiscovery:
     )
 
 
+def _ambiguous_discoverer(profile: CaptureProfileId) -> AudioDiscovery:
+    return AudioDiscovery(
+        version=1,
+        profile=profile,
+        status=DiscoveryStatus.AVAILABLE,
+        sources=(
+            AudioRoute(
+                id=31,
+                route_id="pipewire:node:31",
+                name="Laptop Mic",
+                description=None,
+                media_class="Audio/Source",
+                active=True,
+            ),
+            AudioRoute(
+                id=32,
+                route_id="pipewire:node:32",
+                name="Headset Mic",
+                description=None,
+                media_class="Audio/Source",
+                active=True,
+            ),
+        ),
+        sinks=(
+            AudioRoute(
+                id=42,
+                route_id="pipewire:node:42",
+                name="Speakers",
+                description=None,
+                media_class="Audio/Sink",
+                active=True,
+            ),
+            AudioRoute(
+                id=43,
+                route_id="pipewire:node:43",
+                name="Headphones",
+                description=None,
+                media_class="Audio/Sink",
+                active=True,
+            ),
+        ),
+        playback_streams=(
+            PlaybackStream(
+                id=51,
+                route_id="pulse:sink-input:151",
+                name="Browser Stream",
+                app_binary_name="firefox",
+                stream_name="WebRTC playback",
+                media_name="Meet",
+                sink_input_id="151",
+                active=True,
+            ),
+            PlaybackStream(
+                id=52,
+                route_id="pulse:sink-input:152",
+                name="Call Stream",
+                app_binary_name="zoom",
+                stream_name="Zoom playback",
+                media_name="Zoom",
+                sink_input_id="152",
+                active=True,
+            ),
+        ),
+    )
+
+
 def test_collect_capture_segments_requires_capture_metadata() -> None:
     with pytest.raises(ValueError, match="Session does not include capture metadata"):
         _collect_capture_segments({}, ("local_mic", "system_audio"))
@@ -3010,22 +3498,41 @@ def test_collect_capture_segments_rejects_missing_segment_for_source() -> None:
         )
 
 
-def test_collect_capture_segments_rejects_multiple_segments_per_source() -> None:
-    with pytest.raises(ValueError, match="exactly one segment per source"):
+def test_collect_capture_segments_orders_multiple_segments_per_source() -> None:
+    assert _collect_capture_segments(
+        {
+            "capture_metadata": {
+                "segments": [
+                    {
+                        "source_id": "local_mic",
+                        "index": 2,
+                        "path": "local_mic_segment_2.wav",
+                    },
+                    {
+                        "source_id": "local_mic",
+                        "index": 1,
+                        "path": "local_mic_segment.wav",
+                    },
+                ]
+            }
+        },
+        ("local_mic",),
+    ) == {
+        "local_mic": (
+            ("local_mic_segment.wav", 1, None),
+            ("local_mic_segment_2.wav", 2, None),
+        )
+    }
+
+
+def test_collect_capture_segments_rejects_duplicate_segment_indexes() -> None:
+    with pytest.raises(ValueError, match="duplicate capture segment indexes"):
         _collect_capture_segments(
             {
                 "capture_metadata": {
                     "segments": [
-                        {
-                            "source_id": "local_mic",
-                            "index": 1,
-                            "path": "local_mic_segment.wav",
-                        },
-                        {
-                            "source_id": "local_mic",
-                            "index": 2,
-                            "path": "local_mic_segment_2.wav",
-                        },
+                        {"source_id": "local_mic", "index": 1, "path": "a.wav"},
+                        {"source_id": "local_mic", "index": 1, "path": "b.wav"},
                     ]
                 }
             },
@@ -3042,8 +3549,13 @@ def test_run_processing_stages_routes_in_person_room_mic_profile(
     ledger = ProcessingStageLedger(session_id="session-room", run_id="run-room", store=store)
     calls: list[str] = []
 
-    def _fake_run_transcription_stage(*, source_id: str | None = None, **_: object) -> object:
-        calls.append(f"transcription:{source_id}")
+    def _fake_run_transcription_stage(
+        *,
+        source_id: str | None = None,
+        language: str | None = None,
+        **_: object,
+    ) -> object:
+        calls.append(f"transcription:{source_id}:{language}")
         return SimpleNamespace(transcript_record=SimpleNamespace(id=f"{source_id}-transcript"))
 
     def _fake_run_diarization_stage(*, context: object, **_: object) -> object:
@@ -3133,10 +3645,11 @@ def test_run_processing_stages_routes_in_person_room_mic_profile(
             metadata=SimpleNamespace(config_id="cfg"),
             check=lambda *_args, **_kwargs: True,
         ),
+        session_language="de-CH",
     )
 
     assert calls == [
-        "transcription:room_mic",
+        "transcription:room_mic:de-CH",
         "diarization:room_mic",
         "room_merge:room_mic-transcript:room_mic-regular:room_mic-exclusive",
         "confidence:merged-room",
@@ -3286,6 +3799,49 @@ def test_main_process_uses_relative_capture_segment_paths(
     captured = capsys.readouterr()
     assert exit_code == 0
     assert "Processing completed for run '" in captured.out
+
+
+def test_main_process_prepares_provider_audio_for_multi_segment_sources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    session = _build_multi_segment_processing_session(tmp_path)
+    invocation = _patch_processing_stages(monkeypatch)
+
+    exit_code = _main_process_with_fake_providers(["process", str(session.record_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "Processing completed for run '" in captured.out
+    source_inputs = cast(dict[str, SourceAudioInput], invocation["source_inputs"])
+    assert source_inputs["local_mic"].artifact.artifact_type == "provider_prep_audio"
+    assert source_inputs["system_audio"].artifact.artifact_type == "provider_prep_audio"
+    assert source_inputs["local_mic"].path.name == "local_mic.wav"
+    store = FileSystemArtifactStore(
+        session_id=session.record.id,
+        session_dir=session.bundle_path,
+    )
+    assert len(store.list(artifact_type="source_audio")) == 4
+    prep_records = store.list(artifact_type="provider_prep_audio")
+    assert len(prep_records) == 2
+    assert prep_records[0].metadata["transformations"] == ["lossless_wav_stitch"]
+
+
+def test_main_process_passes_session_language_to_processing_stages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _build_processing_session(tmp_path)
+    record = json.loads(session.record_path.read_text(encoding="utf-8"))
+    record["language"] = "de-CH"
+    session.record_path.write_text(json.dumps(record), encoding="utf-8")
+    invocation = _patch_processing_stages(monkeypatch)
+
+    exit_code = _main_process_with_fake_providers(["process", str(session.record_path)])
+
+    assert exit_code == 0
+    assert invocation["session_language"] == "de-CH"
 
 
 def test_main_process_rejects_missing_capture_segment_file(
