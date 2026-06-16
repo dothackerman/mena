@@ -205,7 +205,7 @@ The system crashes, the laptop loses power, or the audio device disconnects duri
 
 `[REQ-F02]` **Segmented recording.** mena shall write audio to disk in segments (not as a single file written at recording end) to limit data loss in case of failure.
 
-`[REQ-F03]` **Language selection.** The user shall specify the meeting language when starting a recording. The language selection determines which transcription model configuration and lexicon are loaded.
+`[REQ-F03]` **Language selection.** The user shall specify the meeting language when starting a recording. The selected meeting language shall be persisted as a session-level fact and consumed by downstream processing where language affects behavior. At minimum, transcription/ASR configuration and lexicon or prompt-biasing shall use the selected language. Summarization shall use the selected language for prompt/output policy. Diarization treats language as session metadata unless the provider requires language-specific behavior.
 
 `[REQ-F04]` **Consent disclaimer.** mena shall display a one-to-two line disclaimer upon starting a recording, stating that the user is responsible for obtaining consent from meeting participants.
 

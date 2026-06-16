@@ -71,6 +71,7 @@ Proposed → Accepted → [Superseded | Deprecated | Rejected]
 | ADR-015 | Architecture | Output quality and CLI friction as PoC learning outcomes | Accepted | 2026-04-20 |
 | ADR-016 | Architecture | Include both capture scenarios in CLI PoC scope | Superseded | 2026-04-20 |
 | PDR-002 | Product | Include both online meeting and in-person single-mic modes in PoC CLI scope | Accepted | 2026-05-21 |
+| PDR-003 | Product | Record-time language is the session source of truth | Accepted | 2026-06-16 |
 | ADR-017 | Architecture | Versioned manual-notes input artifacts for summarization | Accepted | 2026-04-20 |
 | ADR-018 | Architecture | Narrow rebuildable global index | Accepted | 2026-04-20 |
 | ADR-019 | Architecture | Centralize error recovery authority in the active orchestrator | Accepted | 2026-04-20 |
