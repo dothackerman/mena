@@ -17,7 +17,9 @@ import sys
 import wave
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from io import BytesIO
 from pathlib import Path
+from typing import cast
 from uuid import UUID, uuid4
 
 APP_ROOT = Path(__file__).resolve().parents[1]
@@ -32,17 +34,21 @@ PROFILE_ID_BY_CLI = {
     PROFILE_IN_PERSON: "in_person_single_mic",
 }
 EXPECTED_CHANNELS_BY_PROFILE = {
-    PROFILE_ONLINE: 1,
-    PROFILE_IN_PERSON: 2,
+    PROFILE_ONLINE: {1},
+    PROFILE_IN_PERSON: {1, 2},
 }
 COPY_CHUNK_SIZE = 1024 * 1024
+UAT_CHUNK_COUNT = 6
+UAT_CHUNK_SECONDS = 30
 
 
 @dataclass(frozen=True)
 class WavInfo:
     sample_rate: int
     channels: int
+    sample_width: int
     frame_count: int
+    pcm_payload: bytes
 
     @property
     def duration_seconds(self) -> float:
@@ -75,7 +81,7 @@ def create_session_from_audio(args: argparse.Namespace) -> Path:
     session_id = _parse_session_id(args.session_id)
     source_inputs = _source_inputs(args)
 
-    data_root = args.data_root.expanduser().resolve()
+    data_root = cast(Path, args.data_root).expanduser().resolve()
     bundle_path = data_root / "sessions" / _bundle_directory_name(session_id, created_at)
     if bundle_path.exists():
         raise UatSessionError(f"Session bundle already exists: {bundle_path}")
@@ -90,8 +96,22 @@ def create_session_from_audio(args: argparse.Namespace) -> Path:
             "id": str(session_id),
             "created_at": _format_timestamp(created_at),
             "name": args.name,
-            "status": "created",
+            "status": "recorded",
             "profile": profile_id,
+            "language": args.language,
+            "recording": {
+                "started_at": _format_timestamp(created_at),
+                "stopped_at": _format_timestamp(created_at),
+                "stop_reason": "user_stop",
+                "finalization": {
+                    "status": "finalized",
+                    "completed_at": _format_timestamp(created_at),
+                    "error": None,
+                },
+            },
+            "capture_plan": None,
+            "degradations": [],
+            "failures": [],
             "capture_metadata": capture_metadata,
         }
         record_path = bundle_path / "session.json"
@@ -115,6 +135,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="Scratch data root. The session is written under <data-root>/sessions/.",
     )
     parser.add_argument("--name", default="Mena UAT synthetic fixture")
+    parser.add_argument("--language", default="en")
     parser.add_argument("--local-mic", type=Path, help="WAV for online local microphone audio.")
     parser.add_argument("--system-audio", type=Path, help="WAV for online remote/system audio.")
     parser.add_argument("--room-mic", type=Path, help="WAV for in-person room microphone audio.")
@@ -153,23 +174,30 @@ def _copy_capture_segments(
         info = _read_wav_info(wav_path)
         target_dir = bundle_path / "capture" / source.source_id
         target_dir.mkdir(parents=True, exist_ok=True)
-        target_path = target_dir / f"{source.source_id}_000001.wav"
-        copy_result = _copy_and_hash(wav_path, target_path)
-        segments.append(
-            {
-                "source_id": source.source_id,
-                "index": 1,
-                "path": target_path.relative_to(bundle_path).as_posix(),
-                "sample_rate": info.sample_rate,
-                "channels": info.channels,
-                "byte_count": copy_result.byte_count,
-                "sha256": copy_result.sha256,
-                "status": "sealed",
-                "format": "wav",
-                "_frame_count": info.frame_count,
-                "_duration_seconds": info.duration_seconds,
-            }
-        )
+        for index in range(1, UAT_CHUNK_COUNT + 1):
+            target_path = target_dir / f"{source.source_id}_{index:06d}.wav"
+            chunk_payload = _chunk_wav_bytes(info=info, chunk_index=index)
+            target_path.write_bytes(chunk_payload)
+            segments.append(
+                {
+                    "source_id": source.source_id,
+                    "index": index,
+                    "path": target_path.relative_to(bundle_path).as_posix(),
+                    "sample_rate": info.sample_rate,
+                    "channels": info.channels,
+                    "channel_layout": _channel_layout(info.channels),
+                    "sample_format": f"pcm_s{info.sample_width * 8}le",
+                    "byte_count": len(chunk_payload),
+                    "sha256": hashlib.sha256(chunk_payload).hexdigest(),
+                    "duration_seconds": float(UAT_CHUNK_SECONDS),
+                    "started_at": None,
+                    "ended_at": None,
+                    "status": "sealed",
+                    "format": "wav",
+                    "_frame_count": info.sample_rate * UAT_CHUNK_SECONDS,
+                    "_duration_seconds": float(UAT_CHUNK_SECONDS),
+                }
+            )
     return segments
 
 
@@ -191,7 +219,6 @@ def _copy_and_hash(source_path: Path, target_path: Path) -> CopyResult:
 
 
 def _read_wav_info(path: Path) -> WavInfo:
-    default_segment_seconds, max_segment_bytes = _capture_bounds()
     if not path.is_file():
         raise UatSessionError(f"WAV file does not exist: {path}")
     try:
@@ -210,46 +237,54 @@ def _read_wav_info(path: Path) -> WavInfo:
         raise UatSessionError(f"WAV file must be 16-bit PCM for current UAT fixtures: {path}")
     if frame_count <= 0:
         raise UatSessionError(f"WAV file contains no audio frames: {path}")
-    data_byte_count = frame_count * channels * sample_width
-    if len(payload) != data_byte_count:
+    expected_byte_count = frame_count * channels * sample_width
+    if len(payload) != expected_byte_count:
         raise UatSessionError(f"WAV file does not contain declared PCM frame data: {path}")
-    if data_byte_count > max_segment_bytes:
-        raise UatSessionError(
-            f"WAV file is too large for the current one-segment UAT helper: {path}"
-        )
-    duration_seconds = frame_count / sample_rate
-    if duration_seconds > default_segment_seconds:
-        raise UatSessionError(
-            f"WAV file is longer than the current one-segment UAT helper limit "
-            f"of {default_segment_seconds} seconds: {path}"
-        )
     return WavInfo(
         sample_rate=sample_rate,
         channels=channels,
+        sample_width=sample_width,
         frame_count=frame_count,
+        pcm_payload=payload,
     )
 
 
-def _capture_bounds() -> tuple[int, int]:
-    from mena.capture import DEFAULT_SEGMENT_SECONDS, MAX_SEGMENT_BYTES
+def _chunk_wav_bytes(*, info: WavInfo, chunk_index: int) -> bytes:
+    frames_per_chunk = info.sample_rate * UAT_CHUNK_SECONDS
+    bytes_per_frame = info.channels * info.sample_width
+    bytes_per_chunk = frames_per_chunk * bytes_per_frame
+    start = (chunk_index - 1) * bytes_per_chunk
+    payload = _repeat_or_slice(info.pcm_payload, start=start, byte_count=bytes_per_chunk)
+    output = BytesIO()
+    with wave.open(output, "wb") as wav_file:
+        wav_file.setnchannels(info.channels)
+        wav_file.setsampwidth(info.sample_width)
+        wav_file.setframerate(info.sample_rate)
+        wav_file.writeframes(payload)
+    return output.getvalue()
 
-    return DEFAULT_SEGMENT_SECONDS, MAX_SEGMENT_BYTES
+
+def _repeat_or_slice(payload: bytes, *, start: int, byte_count: int) -> bytes:
+    if not payload:
+        raise UatSessionError("WAV file contains no PCM payload.")
+    if start + byte_count <= len(payload):
+        return payload[start : start + byte_count]
+    repeated = payload * math.ceil((start + byte_count) / len(payload))
+    return repeated[start : start + byte_count]
 
 
 def _validate_audio_shape(*, profile: str, segments: list[dict[str, object]]) -> None:
     sample_rates = {segment["sample_rate"] for segment in segments}
     channels = {segment["channels"] for segment in segments}
-    frame_counts = {segment["_frame_count"] for segment in segments}
     if len(sample_rates) > 1:
         raise UatSessionError("All source WAV files must use the same sample rate.")
     if len(channels) > 1:
         raise UatSessionError("All source WAV files must use the same channel count.")
-    if profile == PROFILE_ONLINE and len(frame_counts) > 1:
-        raise UatSessionError("Online source WAV files must have the same frame count.")
     expected_channels = EXPECTED_CHANNELS_BY_PROFILE[profile]
-    if channels != {expected_channels}:
+    if not channels.issubset(expected_channels):
+        allowed = ", ".join(str(channel) for channel in sorted(expected_channels))
         raise UatSessionError(
-            f"{profile} fixtures must use {expected_channels} channel(s) per source."
+            f"{profile} fixtures must use one of these channel counts per source: {allowed}."
         )
 
 
@@ -267,12 +302,45 @@ def _capture_metadata(segments: list[dict[str, object]]) -> dict[str, object]:
 
     return {
         "version": 1,
+        "profile": _profile_for_segments(public_segments),
         "sample_rate": public_segments[0]["sample_rate"],
         "channels": public_segments[0]["channels"],
-        "segment_seconds": max(1, math.ceil(max_duration)),
+        "segment_seconds": UAT_CHUNK_SECONDS,
         "segment_count": len(public_segments),
         "segments": public_segments,
+        "sources": _source_summaries(public_segments),
     }
+
+
+def _profile_for_segments(segments: list[dict[str, object]]) -> str:
+    source_ids = {segment["source_id"] for segment in segments}
+    if source_ids == {"room_mic"}:
+        return "in_person_single_mic"
+    return "online_dual_stream"
+
+
+def _source_summaries(segments: list[dict[str, object]]) -> list[dict[str, object]]:
+    summaries: list[dict[str, object]] = []
+    for source_id in dict.fromkeys(str(segment["source_id"]) for segment in segments):
+        source_segments = [segment for segment in segments if segment["source_id"] == source_id]
+        summaries.append(
+            {
+                "source_id": source_id,
+                "route_id": None,
+                "route_label": None,
+                "channel_layout": source_segments[0]["channel_layout"],
+                "segment_count": len(source_segments),
+            }
+        )
+    return summaries
+
+
+def _channel_layout(channels: int) -> str:
+    if channels == 1:
+        return "mono"
+    if channels == 2:
+        return "stereo"
+    return f"{channels}_channels"
 
 
 def _parse_created_at(value: str | None) -> datetime:

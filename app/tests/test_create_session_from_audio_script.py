@@ -5,7 +5,6 @@ import sys
 import wave
 from pathlib import Path
 
-from mena.capture import DEFAULT_SEGMENT_SECONDS
 from mena.session_integrity import verify_session_bundle
 
 APP_ROOT = Path(__file__).resolve().parents[1]
@@ -54,11 +53,18 @@ def test_create_online_uat_session_from_audio(tmp_path: Path) -> None:
     assert record["id"] == SESSION_ID
     assert record["name"] == "Kai fixture"
     assert record["profile"] == "online_dual_stream"
-    assert record["capture_metadata"]["segment_count"] == 2
+    assert record["language"] == "en"
+    assert record["status"] == "recorded"
+    assert record["capture_metadata"]["segment_count"] == 12
     assert {segment["source_id"] for segment in record["capture_metadata"]["segments"]} == {
         "local_mic",
         "system_audio",
     }
+    assert {
+        segment["index"]
+        for segment in record["capture_metadata"]["segments"]
+        if segment["source_id"] == "local_mic"
+    } == {1, 2, 3, 4, 5, 6}
     assert verify_session_bundle(record_path).ok
 
     for segment in record["capture_metadata"]["segments"]:
@@ -72,7 +78,7 @@ def test_create_online_uat_session_from_audio(tmp_path: Path) -> None:
 def test_create_in_person_uat_session_from_room_audio(tmp_path: Path) -> None:
     room_wav = tmp_path / "room.wav"
     data_root = tmp_path / "uat-data"
-    _write_wav(room_wav, channels=2)
+    _write_wav(room_wav, channels=1)
 
     subprocess.run(
         [
@@ -98,7 +104,8 @@ def test_create_in_person_uat_session_from_room_audio(tmp_path: Path) -> None:
     record = json.loads(record_path.read_text(encoding="utf-8"))
 
     assert record["profile"] == "in_person_single_mic"
-    assert record["capture_metadata"]["channels"] == 2
+    assert record["capture_metadata"]["channels"] == 1
+    assert record["capture_metadata"]["segment_count"] == 6
     assert record["capture_metadata"]["segments"][0]["source_id"] == "room_mic"
     assert verify_session_bundle(record_path).ok
 
@@ -132,9 +139,10 @@ def test_create_uat_session_rejects_mismatched_online_audio_shape(tmp_path: Path
     assert not sessions_dir.exists() or list(sessions_dir.iterdir()) == []
 
 
-def test_create_uat_session_rejects_mismatched_online_frame_counts(tmp_path: Path) -> None:
+def test_create_uat_session_accepts_mismatched_online_input_lengths(tmp_path: Path) -> None:
     local_wav = tmp_path / "local.wav"
     system_wav = tmp_path / "system.wav"
+    data_root = tmp_path / "uat-data"
     _write_wav(local_wav, frame_count=1_600)
     _write_wav(system_wav, frame_count=3_200)
 
@@ -145,7 +153,7 @@ def test_create_uat_session_rejects_mismatched_online_frame_counts(tmp_path: Pat
             "--profile",
             "online",
             "--data-root",
-            str(tmp_path / "uat-data"),
+            str(data_root),
             "--local-mic",
             str(local_wav),
             "--system-audio",
@@ -155,10 +163,10 @@ def test_create_uat_session_rejects_mismatched_online_frame_counts(tmp_path: Pat
         text=True,
     )
 
-    assert result.returncode == 2
-    assert "Online source WAV files must have the same frame count." in result.stderr
-    sessions_dir = tmp_path / "uat-data" / "sessions"
-    assert not sessions_dir.exists() or list(sessions_dir.iterdir()) == []
+    assert result.returncode == 0
+    record_path = next((data_root / "sessions").iterdir()) / "session.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    assert record["capture_metadata"]["segment_count"] == 12
 
 
 def test_create_uat_session_rejects_online_stereo_sources(tmp_path: Path) -> None:
@@ -185,12 +193,13 @@ def test_create_uat_session_rejects_online_stereo_sources(tmp_path: Path) -> Non
     )
 
     assert result.returncode == 2
-    assert "online fixtures must use 1 channel(s) per source." in result.stderr
+    assert "online fixtures must use one of these channel counts per source: 1." in result.stderr
 
 
-def test_create_uat_session_rejects_in_person_mono_source(tmp_path: Path) -> None:
+def test_create_uat_session_accepts_in_person_stereo_source(tmp_path: Path) -> None:
     room_wav = tmp_path / "room.wav"
-    _write_wav(room_wav)
+    data_root = tmp_path / "uat-data"
+    _write_wav(room_wav, channels=2)
 
     result = subprocess.run(
         [
@@ -199,7 +208,7 @@ def test_create_uat_session_rejects_in_person_mono_source(tmp_path: Path) -> Non
             "--profile",
             "in-person",
             "--data-root",
-            str(tmp_path / "uat-data"),
+            str(data_root),
             "--room-mic",
             str(room_wav),
         ],
@@ -207,15 +216,18 @@ def test_create_uat_session_rejects_in_person_mono_source(tmp_path: Path) -> Non
         text=True,
     )
 
-    assert result.returncode == 2
-    assert "in-person fixtures must use 2 channel(s) per source." in result.stderr
+    assert result.returncode == 0
+    record_path = next((data_root / "sessions").iterdir()) / "session.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    assert record["capture_metadata"]["channels"] == 2
 
 
-def test_create_uat_session_rejects_audio_longer_than_one_capture_segment(
+def test_create_uat_session_splits_audio_longer_than_one_capture_segment(
     tmp_path: Path,
 ) -> None:
     room_wav = tmp_path / "room.wav"
-    _write_wav(room_wav, channels=2, frame_count=16_000 * 31)
+    data_root = tmp_path / "uat-data"
+    _write_wav(room_wav, channels=1, frame_count=16_000 * 31)
 
     result = subprocess.run(
         [
@@ -224,7 +236,7 @@ def test_create_uat_session_rejects_audio_longer_than_one_capture_segment(
             "--profile",
             "in-person",
             "--data-root",
-            str(tmp_path / "uat-data"),
+            str(data_root),
             "--room-mic",
             str(room_wav),
         ],
@@ -232,9 +244,10 @@ def test_create_uat_session_rejects_audio_longer_than_one_capture_segment(
         text=True,
     )
 
-    assert result.returncode == 2
-    assert "one-segment UAT helper limit" in result.stderr
-    assert str(DEFAULT_SEGMENT_SECONDS) in result.stderr
+    assert result.returncode == 0
+    record_path = next((data_root / "sessions").iterdir()) / "session.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    assert record["capture_metadata"]["segment_count"] == 6
 
 
 def test_create_uat_session_rejects_truncated_wav_payload(tmp_path: Path) -> None:
