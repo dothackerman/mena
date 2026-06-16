@@ -6,6 +6,8 @@ import hashlib
 import re
 import struct
 import subprocess
+import threading
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -70,6 +72,15 @@ class CaptureSegment:
 
 
 @dataclass(frozen=True)
+class CaptureSourceRoute:
+    """Selected OS route facts for one logical capture source."""
+
+    source_id: CaptureSourceId
+    route_id: str | None
+    route_label: str | None
+
+
+@dataclass(frozen=True)
 class CaptureMetadata:
     """Capture facts emitted by the worker and persisted by the orchestrator."""
 
@@ -79,6 +90,7 @@ class CaptureMetadata:
     channels: int
     segment_seconds: int
     segments: tuple[CaptureSegment, ...]
+    source_routes: tuple[CaptureSourceRoute, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -89,7 +101,7 @@ class CaptureMetadata:
             "segment_seconds": self.segment_seconds,
             "segment_count": len(self.segments),
             "segments": [segment.to_dict() for segment in self.segments],
-            "sources": _source_summaries(self.segments),
+            "sources": _source_summaries(self.segments, self.source_routes),
         }
 
 
@@ -210,15 +222,48 @@ class PipeWirePcmProvider:
         plan: CaptureRoutePlan,
         sink_name: str,
         segment_seconds: int,
+        stop_event: threading.Event | None = None,
     ) -> bytes:
         command = self._command_for_source(source_id, plan=plan, sink_name=sink_name)
+        if stop_event is not None:
+            process = self._popen_factory(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                shell=False,
+            )
+            stdout, stderr, returncode, timed_out = _communicate_bounded(
+                process,
+                segment_seconds,
+                stop_event=stop_event,
+            )
+            if returncode and not timed_out:
+                raise subprocess.CalledProcessError(
+                    returncode,
+                    command,
+                    output=stdout,
+                    stderr=stderr,
+                )
+            if not stdout:
+                raise subprocess.CalledProcessError(
+                    returncode,
+                    command,
+                    output=stdout,
+                    stderr=stderr,
+                )
+            return stdout
         try:
             completed = self._runner(
                 command, capture_output=True, check=True, timeout=segment_seconds
             )
         except subprocess.TimeoutExpired as exc:
             output = exc.output or b""
-            return output if isinstance(output, bytes) else output.encode("utf-8")
+            pcm = output if isinstance(output, bytes) else output.encode("utf-8")
+            if not pcm:
+                raise ValueError(
+                    f"PipeWire capture produced no PCM data for {source_id.value}."
+                ) from exc
+            return pcm
         return completed.stdout
 
     def read_aligned_segments(
@@ -227,6 +272,7 @@ class PipeWirePcmProvider:
         plan: CaptureRoutePlan,
         sink_name: str,
         segment_seconds: int,
+        stop_event: threading.Event | None = None,
     ) -> dict[CaptureSourceId, bytes]:
         """Record both sources inside the same bounded segment window."""
 
@@ -251,13 +297,25 @@ class PipeWirePcmProvider:
             raise
         with ThreadPoolExecutor(max_workers=len(processes)) as executor:
             results = {
-                source_id: executor.submit(_communicate_bounded, process, segment_seconds)
+                source_id: executor.submit(
+                    _communicate_bounded,
+                    process,
+                    segment_seconds,
+                    stop_event=stop_event,
+                )
                 for source_id, process in processes.items()
             }
         output: dict[CaptureSourceId, bytes] = {}
         for source_id, future in results.items():
-            stdout, stderr, returncode = future.result()
-            if returncode:
+            stdout, stderr, returncode, timed_out = future.result()
+            if returncode and not timed_out:
+                raise subprocess.CalledProcessError(
+                    returncode,
+                    commands[source_id],
+                    output=stdout,
+                    stderr=stderr,
+                )
+            if not stdout:
                 raise subprocess.CalledProcessError(
                     returncode,
                     commands[source_id],
@@ -403,11 +461,17 @@ class PipeWireCaptureAdapter:
         *,
         plan: CaptureRoutePlan,
         sink_name: str,
+        stop_event: threading.Event | None = None,
     ) -> tuple[CaptureSegment, ...]:
         if plan.profile_id is CaptureProfileId.IN_PERSON_SINGLE_MIC:
             room = self.segment_writer.write_segment(
                 CaptureSourceId.ROOM_MIC,
-                self._read_pcm(CaptureSourceId.ROOM_MIC, plan=plan, sink_name=sink_name),
+                self._read_pcm(
+                    CaptureSourceId.ROOM_MIC,
+                    plan=plan,
+                    sink_name=sink_name,
+                    stop_event=stop_event,
+                ),
             )
             return (room,)
         if self.pcm_provider is None:
@@ -415,6 +479,7 @@ class PipeWireCaptureAdapter:
                 plan=plan,
                 sink_name=sink_name,
                 segment_seconds=self.segment_seconds,
+                stop_event=stop_event,
             )
             local = self.segment_writer.write_segment(
                 CaptureSourceId.LOCAL_MIC,
@@ -427,11 +492,21 @@ class PipeWireCaptureAdapter:
             return (local, remote)
         local = self.segment_writer.write_segment(
             CaptureSourceId.LOCAL_MIC,
-            self._read_pcm(CaptureSourceId.LOCAL_MIC, plan=plan, sink_name=sink_name),
+            self._read_pcm(
+                CaptureSourceId.LOCAL_MIC,
+                plan=plan,
+                sink_name=sink_name,
+                stop_event=stop_event,
+            ),
         )
         remote = self.segment_writer.write_segment(
             CaptureSourceId.SYSTEM_AUDIO,
-            self._read_pcm(CaptureSourceId.SYSTEM_AUDIO, plan=plan, sink_name=sink_name),
+            self._read_pcm(
+                CaptureSourceId.SYSTEM_AUDIO,
+                plan=plan,
+                sink_name=sink_name,
+                stop_event=stop_event,
+            ),
         )
         return (local, remote)
 
@@ -441,6 +516,7 @@ class PipeWireCaptureAdapter:
         *,
         plan: CaptureRoutePlan,
         sink_name: str,
+        stop_event: threading.Event | None = None,
     ) -> bytes:
         if self.pcm_provider:
             return self.pcm_provider(source_id)
@@ -449,6 +525,7 @@ class PipeWireCaptureAdapter:
             plan=plan,
             sink_name=sink_name,
             segment_seconds=self.segment_seconds,
+            stop_event=stop_event,
         )
 
     def _cleanup(self, *, null_sink_module: str | None, loopback_module: str | None) -> None:
@@ -480,10 +557,16 @@ class ActivePipeWireCapture:
         self._segments: list[CaptureSegment] = []
         self._stopped = False
 
-    def flush_segments(self) -> tuple[CaptureSegment, ...]:
+    def flush_segments(
+        self, *, stop_event: threading.Event | None = None
+    ) -> tuple[CaptureSegment, ...]:
         if self._stopped:
             return ()
-        segments = self._adapter._flush_once(plan=self._plan, sink_name=self.sink_name)
+        segments = self._adapter._flush_once(
+            plan=self._plan,
+            sink_name=self.sink_name,
+            stop_event=stop_event,
+        )
         self._segments.extend(segments)
         return segments
 
@@ -568,14 +651,30 @@ def _pipewire_node_id(route_id: str) -> str:
 def _communicate_bounded(
     process: subprocess.Popen[bytes],
     timeout: int,
-) -> tuple[bytes, bytes, int]:
-    try:
-        stdout, stderr = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        stdout, stderr = process.communicate()
+    *,
+    stop_event: threading.Event | None = None,
+) -> tuple[bytes, bytes, int, bool]:
+    timed_out = False
+    deadline = time.monotonic() + timeout
+    while True:
+        if stop_event is not None and stop_event.is_set():
+            timed_out = True
+            process.kill()
+            stdout, stderr = process.communicate()
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            timed_out = True
+            process.kill()
+            stdout, stderr = process.communicate()
+            break
+        try:
+            stdout, stderr = process.communicate(timeout=min(remaining, 0.25))
+            break
+        except subprocess.TimeoutExpired:
+            continue
     returncode = getattr(process, "returncode", 0)
-    return stdout, stderr, returncode
+    return stdout, stderr, returncode, timed_out
 
 
 def _channel_layout(channels: int) -> str:
@@ -603,17 +702,22 @@ def _duration_seconds(
     return pcm_byte_count / frame_width / sample_rate
 
 
-def _source_summaries(segments: tuple[CaptureSegment, ...]) -> list[dict[str, object]]:
+def _source_summaries(
+    segments: tuple[CaptureSegment, ...],
+    source_routes: tuple[CaptureSourceRoute, ...] = (),
+) -> list[dict[str, object]]:
+    routes_by_source = {route.source_id: route for route in source_routes}
     ordered_source_ids = tuple(dict.fromkeys(segment.source_id for segment in segments))
     summaries: list[dict[str, object]] = []
     for source_id in ordered_source_ids:
         source_segments = [segment for segment in segments if segment.source_id is source_id]
         channel_layout = source_segments[-1].channel_layout if source_segments else "unknown"
+        source_route = routes_by_source.get(source_id)
         summaries.append(
             {
                 "source_id": source_id.value,
-                "route_id": None,
-                "route_label": None,
+                "route_id": None if source_route is None else source_route.route_id,
+                "route_label": None if source_route is None else source_route.route_label,
                 "channel_layout": channel_layout,
                 "segment_count": len(source_segments),
             }

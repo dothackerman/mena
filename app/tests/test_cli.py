@@ -465,6 +465,10 @@ def test_record_creates_session_bundle_and_record(
     sessions = list((tmp_path / "sessions").iterdir())
     assert exit_code == 0
     assert "Created session" in captured.out
+    assert "Recording notice: you are responsible for obtaining consent" in captured.out
+    assert f"To process this recording, run: mena process {sessions[0] / 'session.json'}" in (
+        captured.out
+    )
     assert len(sessions) == 1
 
     record_path = sessions[0] / "session.json"
@@ -859,6 +863,11 @@ def test_record_reports_worker_failure_without_capture_metadata(
     assert exit_code == 1
     assert "Capture failed: worker refused handshake" in captured.out
     assert record["discovery"]["status"] == "available"
+    assert record["status"] == "failed"
+    assert record["recording"]["stop_reason"] == "error"
+    assert record["recording"]["finalization"]["status"] == "failed"
+    assert record["capture_plan"]["status"] == "failed"
+    assert record["failures"][0]["message"] == "worker refused handshake"
     assert "capture_metadata" not in record
 
 
@@ -878,7 +887,35 @@ def test_record_rejects_nonzero_worker_exit_without_capture_metadata(
     record = json.loads(record_path.read_text(encoding="utf-8"))
     assert exit_code == 1
     assert "Capture failed: Worker exited with status 3." in captured.out
+    assert record["status"] == "failed"
+    assert record["recording"]["finalization"]["error"] == "Worker exited with status 3."
+    assert record["failures"][0]["code"] == "capture_failed"
     assert "capture_metadata" not in record
+
+
+def test_record_keyboard_interrupt_finalizes_with_interrupted_stop_reason(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    def _interrupt_stop(_prompt: str) -> str:
+        raise KeyboardInterrupt
+
+    exit_code = main(
+        ["record", "--profile", "online", "--language", "en"],
+        data_root=tmp_path,
+        discoverer=_available_discoverer,
+        worker_factory=FakeWorkerProcess,
+        input_fn=_interrupt_stop,
+    )
+
+    captured = capsys.readouterr()
+    record_path = next((tmp_path / "sessions").iterdir()) / "session.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert "Recording stop requested; finalizing capture." in captured.out
+    assert record["status"] == "recorded"
+    assert record["recording"]["stop_reason"] == "interrupted"
+    assert record["recording"]["finalization"]["status"] == "finalized"
 
 
 def test_record_uses_configurable_worker_exit_timeout(tmp_path: Path) -> None:

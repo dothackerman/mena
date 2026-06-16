@@ -283,7 +283,7 @@
           "type": ["string", "null"]
         },
         "source_id": {
-          "enum": ["local_mic", "system_audio", "room_mic"],
+          "enum": ["local_mic", "system_audio", "room_mic", null],
           "type": ["string", "null"]
         }
       },
@@ -309,7 +309,7 @@
           "type": "boolean"
         },
         "source_id": {
-          "enum": ["local_mic", "system_audio", "room_mic"],
+          "enum": ["local_mic", "system_audio", "room_mic", null],
           "type": ["string", "null"]
         }
       },

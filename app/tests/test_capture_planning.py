@@ -87,7 +87,60 @@ def test_build_payload_rejects_unknown_route() -> None:
         )
 
 
-def _discovery(profile: CaptureProfileId) -> AudioDiscovery:
+def test_build_payload_rejects_non_pipewire_microphone_route() -> None:
+    with pytest.raises(CapturePlanningError, match="Selected microphone route"):
+        build_start_capture_payload(
+            profile=CaptureProfileId.IN_PERSON_SINGLE_MIC,
+            language="en",
+            discovery=_discovery(
+                CaptureProfileId.IN_PERSON_SINGLE_MIC,
+                microphone_route_id="pulse:source:31",
+            ),
+            selections=RouteSelections(microphone_route_id="pulse:source:31"),
+        )
+
+
+def test_build_online_payload_rejects_non_pulse_playback_stream_route() -> None:
+    with pytest.raises(CapturePlanningError, match="Selected playback stream route"):
+        build_start_capture_payload(
+            profile=CaptureProfileId.ONLINE_DUAL_STREAM,
+            language="en",
+            discovery=_discovery(
+                CaptureProfileId.ONLINE_DUAL_STREAM,
+                playback_stream_route_id="pipewire:node:51",
+            ),
+            selections=RouteSelections(
+                microphone_route_id="pipewire:node:31",
+                playback_stream_route_id="pipewire:node:51",
+                output_sink_route_id="pipewire:node:42",
+            ),
+        )
+
+
+def test_build_online_payload_rejects_non_pipewire_output_sink_route() -> None:
+    with pytest.raises(CapturePlanningError, match="Selected output sink route"):
+        build_start_capture_payload(
+            profile=CaptureProfileId.ONLINE_DUAL_STREAM,
+            language="en",
+            discovery=_discovery(
+                CaptureProfileId.ONLINE_DUAL_STREAM,
+                output_sink_route_id="pulse:sink:42",
+            ),
+            selections=RouteSelections(
+                microphone_route_id="pipewire:node:31",
+                playback_stream_route_id="pulse:sink-input:151",
+                output_sink_route_id="pulse:sink:42",
+            ),
+        )
+
+
+def _discovery(
+    profile: CaptureProfileId,
+    *,
+    microphone_route_id: str = "pipewire:node:31",
+    playback_stream_route_id: str = "pulse:sink-input:151",
+    output_sink_route_id: str = "pipewire:node:42",
+) -> AudioDiscovery:
     return AudioDiscovery(
         version=1,
         profile=profile,
@@ -95,7 +148,7 @@ def _discovery(profile: CaptureProfileId) -> AudioDiscovery:
         sources=(
             AudioRoute(
                 id=31,
-                route_id="pipewire:node:31",
+                route_id=microphone_route_id,
                 name="Headset Mic",
                 description=None,
                 media_class="Audio/Source",
@@ -105,7 +158,7 @@ def _discovery(profile: CaptureProfileId) -> AudioDiscovery:
         sinks=(
             AudioRoute(
                 id=42,
-                route_id="pipewire:node:42",
+                route_id=output_sink_route_id,
                 name="Speakers",
                 description=None,
                 media_class="Audio/Sink",
@@ -115,7 +168,7 @@ def _discovery(profile: CaptureProfileId) -> AudioDiscovery:
         playback_streams=(
             PlaybackStream(
                 id=51,
-                route_id="pulse:sink-input:151",
+                route_id=playback_stream_route_id,
                 name="Meeting Stream",
                 app_binary_name="firefox",
                 stream_name="WebRTC playback",

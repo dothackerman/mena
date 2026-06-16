@@ -15,12 +15,13 @@ from mena.capture import (
     CaptureMetadata,
     CaptureRoutePlan,
     CaptureSegment,
+    CaptureSourceRoute,
     PipeWireCaptureAdapter,
     PipeWireClient,
     SilencePcmProvider,
     WavSegmentWriter,
 )
-from mena.profiles import CaptureProfileId
+from mena.profiles import CaptureProfileId, CaptureSourceId
 from mena.protocol import (
     CaptureFinalizedPayload,
     CaptureStartedPayload,
@@ -108,11 +109,13 @@ def run_worker(
             start_payload = StartCapturePayload.from_dict(message.payload)
             if test_deterministic_capture:
                 capture = WorkerCaptureSession.create_deterministic(
+                    session_id=session_id,
                     session_dir=session_dir,
                     start_payload=start_payload,
                 )
             else:
                 capture = WorkerCaptureSession.create_product(
+                    session_id=session_id,
                     session_dir=session_dir,
                     start_payload=start_payload,
                 )
@@ -185,9 +188,11 @@ class WorkerCaptureSession:
     def __init__(
         self,
         *,
+        session_id: str,
         start_payload: StartCapturePayload,
         adapter: PipeWireCaptureAdapter,
     ) -> None:
+        self.session_id = session_id
         self.start_payload = start_payload
         self.adapter = adapter
         self.segments: list[CaptureSegment] = []
@@ -198,11 +203,13 @@ class WorkerCaptureSession:
     def create_product(
         cls,
         *,
+        session_id: str,
         session_dir: Path,
         start_payload: StartCapturePayload,
     ) -> WorkerCaptureSession:
         writer = WavSegmentWriter(segment_dir=session_dir / "artifacts" / "source")
         return cls(
+            session_id=session_id,
             start_payload=start_payload,
             adapter=PipeWireCaptureAdapter(
                 client=PipeWireClient(),
@@ -215,12 +222,14 @@ class WorkerCaptureSession:
     def create_deterministic(
         cls,
         *,
+        session_id: str,
         session_dir: Path,
         start_payload: StartCapturePayload,
     ) -> WorkerCaptureSession:
         writer = WavSegmentWriter(segment_dir=session_dir / "artifacts" / "source")
         provider = SilencePcmProvider(seconds=start_payload.segment_seconds).read_segment
         return cls(
+            session_id=session_id,
             start_payload=start_payload,
             adapter=PipeWireCaptureAdapter(
                 client=NoopPipeWireClient(),
@@ -237,13 +246,13 @@ class WorkerCaptureSession:
         profile_id = CaptureProfileId(self.start_payload.profile)
         if profile_id is CaptureProfileId.IN_PERSON_SINGLE_MIC:
             route_plan = CaptureRoutePlan(
-                session_id="worker",
+                session_id=self.session_id,
                 microphone_route_id=self._route_id("microphone"),
                 profile_id=profile_id,
             )
         else:
             route_plan = CaptureRoutePlan(
-                session_id="worker",
+                session_id=self.session_id,
                 microphone_route_id=self._route_id("microphone"),
                 playback_stream_route_id=self._route_id("playback_stream"),
                 output_sink_route_id=self._route_id("output_sink"),
@@ -254,12 +263,16 @@ class WorkerCaptureSession:
         )
         return ()
 
-    def flush_once(self) -> tuple[CaptureSegment, ...]:
+    def flush_once(
+        self,
+        *,
+        stop_event: threading.Event | None = None,
+    ) -> tuple[CaptureSegment, ...]:
         if not self.started:
             self.start()
         if self.active_capture is None:
             raise RuntimeError("capture session did not start")
-        segments = self.active_capture.flush_segments()
+        segments = self.active_capture.flush_segments(stop_event=stop_event)
         self.segments.extend(segments)
         return segments
 
@@ -268,13 +281,36 @@ class WorkerCaptureSession:
             self.start()
         if self.active_capture is None:
             raise RuntimeError("capture session did not start")
-        return self.active_capture.stop()
+        metadata = self.active_capture.stop()
+        return CaptureMetadata(
+            version=metadata.version,
+            profile_id=metadata.profile_id,
+            sample_rate=metadata.sample_rate,
+            channels=metadata.channels,
+            segment_seconds=metadata.segment_seconds,
+            segments=metadata.segments,
+            source_routes=self._source_routes(),
+        )
 
     def _route_id(self, role: str) -> str:
         for route in self.start_payload.routes:
             if route.role == role:
                 return route.route_id
         raise ProtocolError(f"start_capture payload missing {role} route.")
+
+    def _source_routes(self) -> tuple[CaptureSourceRoute, ...]:
+        source_routes: list[CaptureSourceRoute] = []
+        for route in self.start_payload.routes:
+            if route.source_id is None:
+                continue
+            source_routes.append(
+                CaptureSourceRoute(
+                    source_id=CaptureSourceId(route.source_id),
+                    route_id=route.route_id,
+                    route_label=route.label,
+                )
+            )
+        return tuple(source_routes)
 
 
 class SegmentFlushLoop:
@@ -315,6 +351,7 @@ class SegmentFlushLoop:
                     write_lock=self.write_lock,
                     session_id=self.session_id,
                     capture=self.capture,
+                    stop_event=self._stop_requested,
                 )
                 with self.write_lock:
                     write_message(
@@ -359,8 +396,9 @@ def _write_flushed_segments(
     write_lock: threading.Lock,
     session_id: str,
     capture: WorkerCaptureSession,
+    stop_event: threading.Event | None = None,
 ) -> None:
-    flushed = capture.flush_once()
+    flushed = capture.flush_once(stop_event=stop_event)
     for segment in flushed:
         with write_lock:
             write_message(

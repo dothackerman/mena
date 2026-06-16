@@ -11,6 +11,8 @@ from jsonschema.exceptions import ValidationError
 from mena.profiles import CaptureProfileId, parse_capture_profile
 from mena.sessions import (
     SESSION_RECORD_VERSION,
+    append_session_degradation,
+    append_session_failure,
     create_session,
     default_data_root,
     read_session_record,
@@ -126,6 +128,55 @@ def test_create_session_rejects_empty_language(tmp_path: Path) -> None:
             data_root=tmp_path,
             now=datetime(2026, 5, 8, 5, 30, 0, tzinfo=UTC),
         )
+
+
+def test_append_session_degradation_persists_schema_valid_fact(tmp_path: Path) -> None:
+    created_session = create_session(
+        profile=parse_capture_profile("online"),
+        data_root=tmp_path,
+        now=datetime(2026, 5, 8, 5, 30, 0, tzinfo=UTC),
+    )
+    degradation = {
+        "code": "route_restoration_incomplete",
+        "message": "Capture completed, but route cleanup needs operator review.",
+        "source_id": None,
+        "occurred_at": "2026-05-08T05:31:00Z",
+    }
+
+    record = append_session_degradation(created_session.record_path, degradation)
+    validator = Draft202012Validator(
+        _load_session_record_schema(),
+        format_checker=FormatChecker(),
+    )
+
+    assert record["degradations"] == [degradation]
+    assert read_session_record(created_session.record_path)["degradations"] == [degradation]
+    validator.validate(record)
+
+
+def test_append_session_failure_persists_schema_valid_fact(tmp_path: Path) -> None:
+    created_session = create_session(
+        profile=parse_capture_profile("online"),
+        data_root=tmp_path,
+        now=datetime(2026, 5, 8, 5, 30, 0, tzinfo=UTC),
+    )
+    failure = {
+        "code": "capture_failed",
+        "message": "Worker exited with status 3.",
+        "source_id": None,
+        "occurred_at": "2026-05-08T05:31:00Z",
+        "recoverable": False,
+    }
+
+    record = append_session_failure(created_session.record_path, failure)
+    validator = Draft202012Validator(
+        _load_session_record_schema(),
+        format_checker=FormatChecker(),
+    )
+
+    assert record["failures"] == [failure]
+    assert read_session_record(created_session.record_path)["failures"] == [failure]
+    validator.validate(record)
 
 
 def test_update_session_record_writes_atomically(tmp_path: Path) -> None:

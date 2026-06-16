@@ -17,6 +17,8 @@ SESSION_RECORD_FILENAME = "session.json"
 SESSION_DISCOVERY_KEY = "discovery"
 SESSION_CAPTURE_PLAN_KEY = "capture_plan"
 SESSION_CAPTURE_METADATA_KEY = "capture_metadata"
+SESSION_DEGRADATIONS_KEY = "degradations"
+SESSION_FAILURES_KEY = "failures"
 DEFAULT_SESSION_LANGUAGE = "en"
 
 
@@ -164,6 +166,24 @@ def update_session_capture_metadata(
     )
 
 
+def append_session_degradation(
+    record_path: Path,
+    degradation: Mapping[str, object],
+) -> dict[str, object]:
+    """Append an explicit capture degradation fact to the session record."""
+
+    return _append_session_list_item(record_path, SESSION_DEGRADATIONS_KEY, degradation)
+
+
+def append_session_failure(
+    record_path: Path,
+    failure: Mapping[str, object],
+) -> dict[str, object]:
+    """Append an explicit capture failure fact to the session record."""
+
+    return _append_session_list_item(record_path, SESSION_FAILURES_KEY, failure)
+
+
 def _sessions_root(data_root: Path | None) -> Path:
     if data_root:
         return data_root / "sessions"
@@ -175,6 +195,20 @@ def _validate_language(language: str) -> str:
     if not normalized:
         raise ValueError("Session language must be a non-empty string.")
     return normalized
+
+
+def _append_session_list_item(
+    record_path: Path,
+    key: str,
+    item: Mapping[str, object],
+) -> dict[str, object]:
+    record = read_session_record(record_path)
+    existing = record.get(key, [])
+    if not isinstance(existing, list):
+        raise ValueError(f"Session field '{key}' must be an array.")
+    record[key] = [*existing, dict(item)]
+    _write_json_atomically(record_path, record)
+    return record
 
 
 def _bundle_directory_name(session_id: str, created_at: datetime) -> str:

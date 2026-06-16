@@ -125,6 +125,7 @@ from mena.session_integrity import (
 )
 from mena.sessions import (
     SESSION_RECORD_FILENAME,
+    append_session_failure,
     create_session,
     read_session_record,
     update_session_capture_metadata,
@@ -500,6 +501,7 @@ def main(
             session_dir=created_session.bundle_path,
         ) as worker:
             capture_monitor = _capture_event_monitor(worker)
+            interrupted_stop = False
             try:
                 worker.handshake()
                 print(
@@ -516,10 +518,19 @@ def main(
                     raise WorkerExitedError(f"Worker exited with status {exit_code}.")
             except (EOFError, KeyboardInterrupt):
                 print("Recording stop requested; finalizing capture.")
+                interrupted_stop = True
                 finalized = _finalize_recording(worker, capture_monitor)
                 exit_code = worker.wait(timeout=args.worker_exit_timeout)
                 if exit_code != 0:
-                    print(f"Capture failed: Worker exited with status {exit_code}.")
+                    message = f"Worker exited with status {exit_code}."
+                    _persist_capture_failure(
+                        record_path=created_session.record_path,
+                        start_payload=start_payload,
+                        started_at=started_at,
+                        error_message=message,
+                        now=now,
+                    )
+                    print(f"Capture failed: {message}")
                     return 1
             except (
                 ProtocolError,
@@ -527,10 +538,18 @@ def main(
                 subprocess.TimeoutExpired,
                 ValueError,
             ) as exc:
+                _persist_capture_failure(
+                    record_path=created_session.record_path,
+                    start_payload=start_payload,
+                    started_at=started_at,
+                    error_message=str(exc),
+                    now=now,
+                )
                 print(f"Capture failed: {exc}")
                 return 1
         finalized_payload = CaptureFinalizedPayload.from_dict(finalized.payload)
         completed_at = finalized_payload.completed_at or _utc_timestamp(now)
+        stop_reason = "interrupted" if interrupted_stop else finalized_payload.stop_reason
         update_session_capture_metadata(
             created_session.record_path,
             finalized_payload.capture_metadata,
@@ -542,7 +561,7 @@ def main(
                 "recording": _recording_lifecycle(
                     started_at=started_at,
                     stopped_at=completed_at,
-                    stop_reason=finalized_payload.stop_reason,
+                    stop_reason=stop_reason,
                     finalization_status=(
                         "finalized"
                         if finalized_payload.status == "recorded"
@@ -562,6 +581,7 @@ def main(
             },
         )
         print("Capture finalized")
+        print(f"To process this recording, run: mena process {created_session.record_path}")
         return 0
 
     if args.command == "correct":
@@ -738,6 +758,45 @@ def _recording_lifecycle(
             "error": error,
         },
     }
+
+
+def _persist_capture_failure(
+    *,
+    record_path: Path,
+    start_payload: StartCapturePayload,
+    started_at: str,
+    error_message: str,
+    now: datetime | None,
+) -> None:
+    completed_at = _utc_timestamp(now)
+    append_session_failure(
+        record_path,
+        {
+            "code": "capture_failed",
+            "message": error_message or "Capture failed.",
+            "source_id": None,
+            "occurred_at": completed_at,
+            "recoverable": False,
+        },
+    )
+    update_session_record(
+        record_path,
+        updates={
+            "status": "failed",
+            "recording": _recording_lifecycle(
+                started_at=started_at,
+                stopped_at=completed_at,
+                stop_reason="error",
+                finalization_status="failed",
+                completed_at=completed_at,
+                error=error_message or "Capture failed.",
+            ),
+            "capture_plan": _capture_plan_from_start_payload(
+                start_payload,
+                status="failed",
+            ),
+        },
+    )
 
 
 def _capture_event_monitor(worker: Any) -> _CaptureEventMonitor | None:
@@ -936,7 +995,7 @@ def _wait_for_record_stop(input_fn: Callable[[str], str] | None) -> None:
     reader = _record_input(input_fn)
     if reader is None:
         raise RuntimeError("Recording requires an interactive terminal to stop.")
-    print("Recording. Type q and press Enter to stop.")
+    print("Recording. Press q to stop.")
     answer = reader("record> ").strip().lower()
     if answer not in {"q", "quit", "stop"}:
         raise ValueError("Recording stop command must be q, quit, or stop.")

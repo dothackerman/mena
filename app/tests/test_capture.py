@@ -1,4 +1,5 @@
 import subprocess
+import threading
 import wave
 from pathlib import Path
 from typing import Any, cast
@@ -212,6 +213,21 @@ def test_pipewire_pcm_provider_returns_partial_output_after_timeout() -> None:
     )
 
 
+def test_pipewire_pcm_provider_rejects_empty_partial_output_after_timeout() -> None:
+    def runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        raise subprocess.TimeoutExpired(["pw-record"], 30, output=b"")
+
+    provider = PipeWirePcmProvider(runner=runner)
+
+    with pytest.raises(ValueError, match="produced no PCM data"):
+        provider.read_segment(
+            CaptureSourceId.ROOM_MIC,
+            plan=_in_person_route_plan(),
+            sink_name="",
+            segment_seconds=30,
+        )
+
+
 def test_pipewire_pcm_provider_starts_sources_before_collecting_output() -> None:
     started_commands: list[list[str]] = []
     communicated: list[list[str]] = []
@@ -246,6 +262,66 @@ def test_pipewire_pcm_provider_starts_sources_before_collecting_output() -> None
         CaptureSourceId.LOCAL_MIC: b"\x00\x00",
         CaptureSourceId.SYSTEM_AUDIO: b"\x00\x00",
     }
+
+
+def test_pipewire_pcm_provider_accepts_aligned_timeout_as_segment_boundary() -> None:
+    class FakeProcess:
+        def __init__(self, args: list[str], **_kwargs: object) -> None:
+            self.args = args
+            self.returncode = 0
+            self.killed = False
+
+        def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
+            if not self.killed:
+                raise subprocess.TimeoutExpired(self.args, timeout or 30)
+            return b"\x00\x00", b""
+
+        def kill(self) -> None:
+            self.killed = True
+            self.returncode = -9
+
+    provider = PipeWirePcmProvider(
+        sample_rate=8_000,
+        popen_factory=cast(Any, FakeProcess),
+    )
+
+    assert provider.read_aligned_segments(
+        plan=_route_plan(),
+        sink_name="mena_session_remote",
+        segment_seconds=30,
+    ) == {
+        CaptureSourceId.LOCAL_MIC: b"\x00\x00",
+        CaptureSourceId.SYSTEM_AUDIO: b"\x00\x00",
+    }
+
+
+def test_pipewire_pcm_provider_rejects_empty_aligned_timeout_output() -> None:
+    class FakeProcess:
+        def __init__(self, args: list[str], **_kwargs: object) -> None:
+            self.args = args
+            self.returncode = 0
+            self.killed = False
+
+        def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
+            if not self.killed:
+                raise subprocess.TimeoutExpired(self.args, timeout or 30)
+            return b"", b""
+
+        def kill(self) -> None:
+            self.killed = True
+            self.returncode = -9
+
+    provider = PipeWirePcmProvider(
+        sample_rate=8_000,
+        popen_factory=cast(Any, FakeProcess),
+    )
+
+    with pytest.raises(subprocess.CalledProcessError):
+        provider.read_aligned_segments(
+            plan=_route_plan(),
+            sink_name="mena_session_remote",
+            segment_seconds=30,
+        )
 
 
 def test_pipewire_pcm_provider_rejects_failed_aligned_process() -> None:
@@ -323,10 +399,12 @@ def test_pipewire_capture_adapter_default_flush_uses_aligned_segments(tmp_path: 
             plan: CaptureRoutePlan,
             sink_name: str,
             segment_seconds: int,
+            stop_event: threading.Event | None = None,
         ) -> dict[CaptureSourceId, bytes]:
             assert plan == _route_plan()
             assert sink_name == "mena_session_1_remote"
             assert segment_seconds == 30
+            assert stop_event is None
             return {
                 CaptureSourceId.LOCAL_MIC: b"\x00\x00",
                 CaptureSourceId.SYSTEM_AUDIO: b"\x00\x00",

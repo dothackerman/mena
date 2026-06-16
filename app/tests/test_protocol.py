@@ -1,6 +1,7 @@
 import subprocess
 import sys
 import threading
+import time
 import wave
 from io import BytesIO, StringIO
 from pathlib import Path
@@ -381,6 +382,12 @@ def test_worker_process_handshake_start_stop_round_trip(tmp_path: Path) -> None:
     }
     assert finalized_payload.status == "recorded"
     assert finalized_payload.capture_metadata["segment_count"] == 2
+    sources = finalized_payload.capture_metadata["sources"]
+    assert isinstance(sources, list)
+    assert sources[0]["route_id"] == "pipewire:node:1"
+    assert sources[0]["route_label"] == "Headset microphone"
+    assert sources[1]["route_id"] == "pulse:sink-input:2"
+    assert sources[1]["route_label"] == "Meeting playback"
     assert exit_code == 0
     assert stderr == ""
     assert (tmp_path / "artifacts" / "source" / "local_mic" / "local_mic_000001.wav").exists()
@@ -475,16 +482,19 @@ def test_worker_run_loop_handles_start_stop_with_in_memory_streams(tmp_path: Pat
 
 def test_worker_product_factory_uses_live_pipewire_provider(tmp_path: Path) -> None:
     capture = WorkerCaptureSession.create_product(
+        session_id="session-1",
         session_dir=tmp_path,
         start_payload=_start_payload(),
     )
 
+    assert capture.session_id == "session-1"
     assert capture.adapter.pcm_provider is None
     assert capture.start_payload.selected_sources == ("local_mic", "system_audio")
 
 
 def test_worker_capture_session_flush_starts_lazily(tmp_path: Path) -> None:
     capture = WorkerCaptureSession.create_deterministic(
+        session_id="session-room",
         session_dir=tmp_path,
         start_payload=_in_person_start_payload(),
     )
@@ -499,11 +509,14 @@ def test_worker_capture_session_flush_starts_lazily(tmp_path: Path) -> None:
 
 def test_worker_capture_session_start_is_idempotent(tmp_path: Path) -> None:
     capture = WorkerCaptureSession.create_deterministic(
+        session_id="session-1",
         session_dir=tmp_path,
         start_payload=_start_payload(),
     )
 
     assert capture.start() == ()
+    assert capture.active_capture is not None
+    assert capture.active_capture.sink_name == "mena_session_1_remote"
     assert capture.start() == ()
 
 
@@ -516,6 +529,7 @@ def test_worker_capture_session_rejects_missing_required_route(tmp_path: Path) -
         routes=_start_payload().routes[:2],
     )
     capture = WorkerCaptureSession.create_deterministic(
+        session_id="session-1",
         session_dir=tmp_path,
         start_payload=payload,
     )
@@ -530,7 +544,11 @@ def test_segment_flush_loop_emits_status_then_structured_error() -> None:
             self.segments: list[CaptureSegment] = []
             self.calls = 0
 
-        def flush_once(self) -> tuple[CaptureSegment, ...]:
+        def flush_once(
+            self,
+            *,
+            stop_event: threading.Event | None = None,
+        ) -> tuple[CaptureSegment, ...]:
             self.calls += 1
             if self.calls == 1:
                 segment = _capture_segment(source_id=CaptureSourceId.LOCAL_MIC, index=1)
@@ -554,6 +572,56 @@ def test_segment_flush_loop_emits_status_then_structured_error() -> None:
     assert frames[1].payload["sealed_segment_count"] == 1
     assert ErrorPayload.from_dict(frames[2].payload).message == "disk full"
     assert isinstance(loop.error, RuntimeError)
+
+
+def test_segment_flush_loop_emits_multiple_iterations_until_stopped() -> None:
+    class CountingCapture:
+        def __init__(self) -> None:
+            self.segments: list[CaptureSegment] = []
+            self.calls = 0
+            self.ready_to_stop = threading.Event()
+
+        def flush_once(
+            self,
+            *,
+            stop_event: threading.Event | None = None,
+        ) -> tuple[CaptureSegment, ...]:
+            self.calls += 1
+            segment = _capture_segment(source_id=CaptureSourceId.LOCAL_MIC, index=self.calls)
+            self.segments.append(segment)
+            if self.calls >= 3:
+                self.ready_to_stop.set()
+                while stop_event is not None and not stop_event.is_set():
+                    time.sleep(0.01)
+            return (segment,)
+
+    capture = CountingCapture()
+    output = BytesIO()
+    loop = SegmentFlushLoop(
+        capture=cast(WorkerCaptureSession, capture),
+        session_id="session-1",
+        protocol_out=output,
+        write_lock=threading.Lock(),
+    )
+
+    loop.start()
+    assert capture.ready_to_stop.wait(timeout=1.0)
+    loop.stop()
+    loop.join()
+
+    frames = [ProtocolMessage.decode(frame) for frame in output.getvalue().splitlines(True)]
+    flushed_indexes = [
+        SegmentFlushedPayload.from_dict(frame.payload).index
+        for frame in frames
+        if frame.type == "segment_flushed"
+    ]
+    status_counts = [
+        CaptureStatusPayload.from_dict(frame.payload).sealed_segment_count
+        for frame in frames
+        if frame.type == "capture_status"
+    ]
+    assert flushed_indexes == [1, 2, 3]
+    assert status_counts[-1] == 3
 
 
 def test_worker_run_loop_handles_in_person_room_mic_capture(tmp_path: Path) -> None:
@@ -585,8 +653,12 @@ def test_worker_run_loop_handles_in_person_room_mic_capture(tmp_path: Path) -> N
     assert exit_code == 0
     assert finalized.capture_metadata["profile"] == "in_person_single_mic"
     segments = finalized.capture_metadata["segments"]
+    sources = finalized.capture_metadata["sources"]
     assert isinstance(segments, list)
+    assert isinstance(sources, list)
     assert segments[0]["source_id"] == "room_mic"
+    assert sources[0]["route_id"] == "pipewire:node:1"
+    assert sources[0]["route_label"] == "Room microphone"
 
 
 def test_worker_run_loop_stops_on_orchestrator_eof(tmp_path: Path) -> None:

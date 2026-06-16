@@ -46,6 +46,7 @@ def build_start_capture_payload(
         selections.microphone_route_id,
         "microphone",
     )
+    _require_route_prefix(microphone.route_id, "pipewire:node:", "microphone")
     routes: list[CaptureRouteBindingPayload] = []
     selected_sources: tuple[str, ...]
 
@@ -73,11 +74,17 @@ def build_start_capture_payload(
             discovery.playback_streams,
             selections.playback_stream_route_id,
         )
+        _require_route_prefix(
+            playback_stream.route_id,
+            "pulse:sink-input:",
+            "playback stream",
+        )
         output_sink = _find_audio_route(
             discovery.sinks,
             selections.output_sink_route_id,
             "output sink",
         )
+        _require_route_prefix(output_sink.route_id, "pipewire:node:", "output sink")
         routes.extend(
             (
                 _route_binding(
@@ -164,3 +171,11 @@ def _route_backend(route_id: str) -> str:
     if ":" not in route_id:
         return "unknown"
     return route_id.split(":", 1)[0]
+
+
+def _require_route_prefix(route_id: str, prefix: str, role: str) -> None:
+    if not route_id.startswith(prefix):
+        raise CapturePlanningError(
+            f"Selected {role} route '{route_id}' is not supported by the PipeWire "
+            f"capture adapter; expected '{prefix}…'."
+        )
