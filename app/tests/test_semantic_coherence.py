@@ -67,17 +67,21 @@ def test_semantic_coherence_stage_persists_review_flags_and_checkpoint(
 
     assert result.skipped is False
     assert result.state.status == "completed"
-    payload = json.loads(store.retrieve(result.review_queue_record.id))
+    review_queue = result.review_queue
+    review_queue_record = result.review_queue_record
+    assert review_queue is not None
+    assert review_queue_record is not None
+    payload = json.loads(store.retrieve(review_queue_record.id))
     Draft202012Validator(
         _load_review_queue_schema(),
         format_checker=FormatChecker(),
     ).validate(payload)
-    assert result.review_queue_record.artifact_type == "review_queue"
-    assert result.review_queue_record.version == 1
-    policy = cast(dict[str, object], result.review_queue.policy)
+    assert review_queue_record.artifact_type == "review_queue"
+    assert review_queue_record.version == 1
+    policy = cast(dict[str, object], review_queue.policy)
     assert policy["provider_config_id"] == provider.metadata.config_id
-    assert len(result.review_queue.flags) == 1
-    flag = result.review_queue.flags[0]
+    assert len(review_queue.flags) == 1
+    flag = review_queue.flags[0]
     assert flag.reason_code == "semantic_incoherence"
     assert flag.segment_id == "merged_segment_000002"
     assert flag.metadata["confidence"] == pytest.approx(0.82)
@@ -157,6 +161,7 @@ def test_semantic_coherence_stage_respects_policy_threshold_and_provider_config(
         now=NOW,
     )
 
+    assert first.review_queue is not None
     assert first.review_queue.flags == ()
     assert second.skipped is False
 
@@ -186,6 +191,36 @@ def test_semantic_coherence_stage_marks_failed_checkpoint_when_provider_unavaila
     assert failed.error is not None
     assert failed.error.retryable is True
     assert failed.error.code == "semantic_coherence_failed"
+
+
+def test_semantic_coherence_stage_skips_provider_unavailable_when_requested() -> None:
+    class UnavailableProvider:
+        metadata = FakeSemanticCoherenceProvider(results={}).metadata
+
+        def check(self, request: object) -> SemanticCoherenceResult:
+            raise SemanticCoherenceProviderUnavailable("provider unavailable")
+
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    merged_record = _persist_merged_transcript(store=store)
+    ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+
+    result = run_semantic_coherence_stage(
+        store=store,
+        ledger=ledger,
+        merged_transcript_record=merged_record,
+        provider=UnavailableProvider(),
+        skip_provider_unavailable=True,
+        now=NOW,
+    )
+
+    states = ledger.states(stage=SEMANTIC_COHERENCE_STAGE)
+    assert result.skipped is True
+    assert result.skip_reason == "provider_unavailable"
+    assert result.review_queue is None
+    assert result.review_queue_record is None
+    assert result.state.status == "skipped"
+    assert states[-1].status == "skipped"
+    assert all(state.status != "failed" for state in states)
 
 
 def test_semantic_coherence_stage_fails_on_session_mismatch() -> None:
@@ -228,7 +263,9 @@ def test_semantic_coherence_stage_ignores_corrupt_reusable_output(tmp_path: Path
         provider=provider,
         now=NOW,
     )
-    (tmp_path / first.review_queue_record.path).write_bytes(b"corrupt")
+    first_review_queue_record = first.review_queue_record
+    assert first_review_queue_record is not None
+    (tmp_path / first_review_queue_record.path).write_bytes(b"corrupt")
     second = run_semantic_coherence_stage(
         store=store,
         ledger=ledger,
@@ -239,7 +276,8 @@ def test_semantic_coherence_stage_ignores_corrupt_reusable_output(tmp_path: Path
     )
 
     assert second.skipped is False
-    assert second.review_queue_record.id != first.review_queue_record.id
+    assert second.review_queue_record is not None
+    assert second.review_queue_record.id != first_review_queue_record.id
 
 
 def test_semantic_coherence_stage_ignores_contract_invalid_reusable_output() -> None:
@@ -288,6 +326,7 @@ def test_semantic_coherence_stage_ignores_contract_invalid_reusable_output() -> 
     )
 
     assert result.skipped is False
+    assert result.review_queue_record is not None
     assert result.review_queue_record.id != review_record.id
 
 

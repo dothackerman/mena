@@ -79,7 +79,6 @@ from mena.semantic_coherence import (
     FakeSemanticCoherenceProvider,
     OllamaSemanticCoherenceProvider,
     SemanticCoherenceProvider,
-    SemanticCoherenceProviderUnavailable,
 )
 from mena.sessions import (
     SESSION_RECORD_FILENAME,
@@ -1824,8 +1823,33 @@ def test_run_processing_command_skips_semantic_stage_when_provider_unavailable(
     def _fake_run_confidence_flagging_stage(**_kwargs: object) -> object:
         return SimpleNamespace(review_queue_record=None, skipped=False)
 
-    def _fake_run_semantic_coherence_stage(**_kwargs: object) -> object:
-        raise SemanticCoherenceProviderUnavailable("provider unavailable")
+    def _fake_run_semantic_coherence_stage(
+        *,
+        ledger: ProcessingStageLedger,
+        merged_transcript_record: ArtifactRecord,
+        attempt: int,
+        now: datetime,
+        skip_provider_unavailable: bool,
+        **_kwargs: object,
+    ) -> object:
+        assert skip_provider_unavailable is True
+        timestamp = now.isoformat(timespec="seconds").replace("+00:00", "Z")
+        state = ledger.record(
+            ProcessingStageState(
+                version=1,
+                session_id=ledger.session_id,
+                run_id=ledger.run_id,
+                stage="semantic_coherence",
+                status="skipped",
+                input_artifacts=(ArtifactRef.from_record(merged_transcript_record),),
+                output_artifacts=(),
+                started_at=timestamp,
+                completed_at=timestamp,
+                error=None,
+                attempt=attempt,
+            )
+        )
+        return SimpleNamespace(state=state, review_queue_record=None, skipped=True)
 
     monkeypatch.setattr("mena.cli.run_transcription_stage", _fake_run_transcription_stage)
     monkeypatch.setattr("mena.cli.run_diarization_stage", _fake_run_diarization_stage)

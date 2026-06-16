@@ -306,8 +306,8 @@ class SemanticCoherenceStageResult:
     """Result of running or reusing the semantic coherence stage."""
 
     state: ProcessingStageState
-    review_queue: ReviewQueueArtifact
-    review_queue_record: ArtifactRecord
+    review_queue: ReviewQueueArtifact | None
+    review_queue_record: ArtifactRecord | None
     skipped: bool = False
     skip_reason: str | None = None
 
@@ -322,6 +322,7 @@ def run_semantic_coherence_stage(
     stage: str = SEMANTIC_COHERENCE_STAGE,
     attempt: int = 1,
     skip_completed: bool = True,
+    skip_provider_unavailable: bool = False,
     now: datetime | None = None,
 ) -> SemanticCoherenceStageResult:
     """Generate semantic incoherence review flags from a merged transcript artifact."""
@@ -410,6 +411,30 @@ def run_semantic_coherence_stage(
         json.JSONDecodeError,
         UnicodeDecodeError,
     ) as exc:
+        if isinstance(exc, SemanticCoherenceProviderUnavailable) and skip_provider_unavailable:
+            timestamp = _timestamp(now)
+            skipped = ledger.record(
+                ProcessingStageState(
+                    version=1,
+                    session_id=ledger.session_id,
+                    run_id=ledger.run_id,
+                    stage=stage,
+                    status="skipped",
+                    input_artifacts=(input_ref,),
+                    output_artifacts=(),
+                    started_at=started.started_at,
+                    completed_at=timestamp,
+                    error=None,
+                    attempt=attempt,
+                )
+            )
+            return SemanticCoherenceStageResult(
+                state=skipped,
+                review_queue=None,
+                review_queue_record=None,
+                skipped=True,
+                skip_reason="provider_unavailable",
+            )
         failed = _mark_failed(
             ledger=ledger,
             stage=stage,

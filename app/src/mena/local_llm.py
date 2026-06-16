@@ -119,9 +119,11 @@ def unload_ollama_model(
     if response.get("done") is not True:
         raise LocalLLMContractError("Ollama unload response did not complete.")
     done_reason = response.get("done_reason")
-    if done_reason is not None and not isinstance(done_reason, str):
+    if not isinstance(done_reason, str):
         raise LocalLLMContractError("Ollama unload response done_reason is invalid.")
-    return done_reason or "done"
+    if done_reason != "unload":
+        raise LocalLLMContractError("Ollama unload response did not report done_reason=unload.")
+    return done_reason
 
 
 def ollama_message_content(response: Mapping[str, object]) -> str:

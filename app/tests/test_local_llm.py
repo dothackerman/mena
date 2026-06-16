@@ -49,8 +49,18 @@ def test_unload_ollama_model_posts_empty_chat_with_zero_keep_alive(
     }
 
 
-def test_unload_ollama_model_rejects_incomplete_response(
+@pytest.mark.parametrize(
+    ("response_payload", "message"),
+    [
+        (b'{"done": false}', "did not complete"),
+        (b'{"done": true}', "done_reason is invalid"),
+        (b'{"done": true, "done_reason": "load"}', "did not report done_reason=unload"),
+    ],
+)
+def test_unload_ollama_model_rejects_non_unload_responses(
     monkeypatch: pytest.MonkeyPatch,
+    response_payload: bytes,
+    message: str,
 ) -> None:
     class FakeResponse:
         def __enter__(self) -> FakeResponse:
@@ -60,14 +70,14 @@ def test_unload_ollama_model_rejects_incomplete_response(
             return None
 
         def read(self) -> bytes:
-            return b'{"done": false}'
+            return response_payload
 
     monkeypatch.setattr(
         "mena.local_llm.urllib.request.urlopen",
         lambda request, *, timeout: FakeResponse(),
     )
 
-    with pytest.raises(LocalLLMContractError, match="did not complete"):
+    with pytest.raises(LocalLLMContractError, match=message):
         unload_ollama_model(
             endpoint="http://localhost:11434",
             model="llama3.2:3b",

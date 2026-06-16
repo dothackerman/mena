@@ -133,12 +133,7 @@ def test_runtime_profile_state_persists_under_runtime_state_home(tmp_path: Path)
     assert loaded.fallback_authorization.local_status == "authorized"
     assert loaded.fallback_authorization.local_profile_id == FALLBACK_LOCAL_PROFILE_ID
     assert loaded.fallback_authorization.automatic_local_fallback_authorized is True
-    assert set(loaded.fallback_authorization.stage_scope) == {
-        "transcription",
-        "diarization",
-        "summarization",
-        "semantic-review",
-    }
+    assert set(loaded.fallback_authorization.stage_scope) == {"transcription", "diarization"}
     assert loaded.fallback_authorization.remote_status == "not_configured"
 
 

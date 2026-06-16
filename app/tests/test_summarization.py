@@ -838,6 +838,26 @@ def test_ollama_provider_rejects_remote_secret_or_malformed_endpoints(endpoint: 
         OllamaSummarizationProvider(endpoint=endpoint)
 
 
+def test_ollama_summarization_provider_does_not_mark_resource_used_after_failed_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OllamaSummarizationProvider(
+        model="test-model",
+        endpoint="http://localhost:11434",
+    )
+
+    def fake_urlopen(_request: object, *, timeout: float) -> object:
+        _ = timeout
+        raise OSError("connection refused")
+
+    monkeypatch.setattr("mena.local_llm.urllib.request.urlopen", fake_urlopen)
+
+    with pytest.raises(SummarizationProviderUnavailable, match="provider is unavailable"):
+        provider._post_json("/api/chat", {"model": "test-model"})
+
+    assert provider.runtime_resource_used is False
+
+
 def test_ollama_summarization_provider_releases_runtime_resource(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

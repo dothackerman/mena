@@ -37,6 +37,7 @@ REQUIRED_COMMANDS = ("mena", "uv", "ollama", "pw-dump", "pw-cli", "wpctl")
 PLAYBACK_COMMANDS = ("ffplay", "pw-play", "paplay", "aplay")
 MINIMUM_RAM_GB = 16.0
 MINIMUM_CUDA_VRAM_GB = 5.0
+LOCAL_FALLBACK_STAGE_SCOPE = ("transcription", "diarization")
 LOCAL_FALLBACK_STATUSES = frozenset(
     {"not_configured", "configured_unauthorized", "authorized", "unavailable"}
 )
@@ -1554,7 +1555,11 @@ def _build_runtime_fallback_authorization(
     if fallback_profile is None:
         return RuntimeFallbackAuthorization.legacy_default()
 
-    stage_scope = tuple(stage.stage for stage in fallback_profile.stages)
+    stage_scope = tuple(
+        stage.stage
+        for stage in fallback_profile.stages
+        if stage.stage in LOCAL_FALLBACK_STAGE_SCOPE
+    )
     if fallback_evaluation is None:
         return RuntimeFallbackAuthorization(
             local_status="configured_unauthorized",

@@ -53,8 +53,6 @@ from mena.merge_timing import (
 )
 from mena.processing import (
     PROCESSING_STATE_ARTIFACT_TYPE,
-    PROCESSING_STATE_VERSION,
-    ArtifactRef,
     ProcessingStageLedger,
     ProcessingStageState,
     ProcessingStateError,
@@ -94,7 +92,6 @@ from mena.semantic_coherence import (
     OllamaSemanticCoherenceProvider,
     SemanticCoherenceError,
     SemanticCoherenceProvider,
-    SemanticCoherenceProviderUnavailable,
     run_semantic_coherence_stage,
 )
 from mena.session_integrity import (
@@ -1062,32 +1059,15 @@ def _run_processing_stages(
         now=now,
     )
 
-    try:
-        run_semantic_coherence_stage(
-            store=store,
-            ledger=ledger,
-            merged_transcript_record=merge_result.merged_transcript_record,
-            provider=semantic_coherence_provider,
-            attempt=attempt,
-            now=now,
-        )
-    except SemanticCoherenceProviderUnavailable:
-        timestamp = now.isoformat(timespec="seconds").replace("+00:00", "Z")
-        ledger.record(
-            ProcessingStageState(
-                version=PROCESSING_STATE_VERSION,
-                session_id=session_id,
-                run_id=ledger.run_id,
-                stage=SEMANTIC_COHERENCE_STAGE,
-                status="skipped",
-                input_artifacts=(ArtifactRef.from_record(merge_result.merged_transcript_record),),
-                output_artifacts=(),
-                started_at=timestamp,
-                completed_at=timestamp,
-                error=None,
-                attempt=attempt,
-            )
-        )
+    run_semantic_coherence_stage(
+        store=store,
+        ledger=ledger,
+        merged_transcript_record=merge_result.merged_transcript_record,
+        provider=semantic_coherence_provider,
+        attempt=attempt,
+        now=now,
+        skip_provider_unavailable=True,
+    )
 
 
 def _validate_processing_profile_support(profile: CaptureProfile) -> None:
