@@ -130,16 +130,16 @@ These priorities reflect the customer's thinking as of April 14, 2026 and are ex
 ### 4.2 Main Flow
 
 **Step 1 — Start recording.**
-The user starts mena via CLI, specifying the meeting language. mena displays a one-to-two line consent disclaimer reminding the user that consent is their responsibility. mena begins capturing two audio streams: the local microphone input (the user's voice) and the system audio monitor (everything output by the call platform). Streams are recorded with segmented disk writes for crash safety.
+The user starts mena via CLI, specifying or confirming the meeting language and the required audio routes. mena displays a one-to-two line consent disclaimer reminding the user that consent is their responsibility. mena begins capturing two audio streams: the selected local microphone input (the user's voice) and the selected system audio monitor or meeting playback route (the remote participants). Streams are recorded with segmented disk writes for crash safety.
 
 **Step 2 — Meeting in progress.**
 The user participates in the meeting normally. Optionally, the user takes notes in a separate markdown file. mena is invisible during this phase — it records, nothing more.
 
 **Step 3 — Stop recording.**
-The user stops mena via CLI. The complete audio recording is finalized on disk.
+The user stops mena via CLI. The complete audio recording is finalized on disk, and mena prints the session identifier/path and the next processing command.
 
 **Step 4 — Post-meeting processing.**
-mena processes the recording automatically:
+The user runs post-meeting processing for the finalized recording, for example with `mena process <session>`. mena processes the recording:
 - The local microphone channel is the user's voice; the system audio channel contains the remote participants
 - The local channel is transcribed with all speech attributed to the user (no diarization needed)
 - The remote channel is transcribed and diarized to identify and label other participants
