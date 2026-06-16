@@ -612,6 +612,24 @@ def test_ollama_post_json_handles_success_invalid_json_and_unavailable(
         provider._post_json("/api/chat", {"model": "test-model"})
 
 
+def test_ollama_semantic_provider_marks_runtime_resource_used_only_after_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OllamaSemanticCoherenceProvider(
+        model="test-model", endpoint="http://localhost:11434"
+    )
+
+    def unavailable_urlopen(request: object, *, timeout: float) -> object:
+        raise OSError("connection refused")
+
+    monkeypatch.setattr("mena.local_llm.urllib.request.urlopen", unavailable_urlopen)
+
+    with pytest.raises(SemanticCoherenceProviderUnavailable, match="provider is unavailable"):
+        provider._post_json("/api/chat", {"model": "test-model"})
+
+    assert provider.runtime_resource_used is False
+
+
 def test_ollama_semantic_provider_releases_runtime_resource(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

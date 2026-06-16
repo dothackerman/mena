@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -570,6 +571,50 @@ def test_detect_local_installation_state_probes_surfaces_with_target_interpreter
         and "importlib.util.find_spec('pyannote.audio')" in call[2]
         for call in runner.run_calls
     )
+
+
+def test_detect_local_installation_state_skips_probes_outside_scoped_profile(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    base_profile = get_alpha_local_profile()
+    scoped_profile = replace(
+        base_profile,
+        stages=tuple(
+            stage
+            for stage in base_profile.stages
+            if stage.stage in {"transcription", "diarization"}
+        ),
+        required_commands=("mena",),
+        playback_commands=(),
+    )
+    runner = FakeRunner()
+
+    state = detect_local_installation_state(
+        settings,
+        runner=runner,
+        command_identity=CommandIdentity(
+            current_executable=Path("/bin/mena"),
+            plain_mena_path=Path("/bin/mena"),
+            version="0.1.0",
+            invocation_mode="installed-product",
+        ),
+        hardware=HardwareFacts(
+            system="Linux",
+            ram_gb=32.0,
+            cuda_available=False,
+            vram_gb=None,
+            avx2_available=True,
+        ),
+        profile=scoped_profile,
+        python_executable=Path("/target/python"),
+    )
+
+    assert ("ollama", "list") not in runner.run_calls
+    assert state.ollama.model_present is False
+    assert state.ollama.detail == "Ollama was not evaluated for this scoped runtime profile."
+    assert state.asr_model_present is True
+    assert state.diarization_model_present is True
 
 
 def test_diarization_cache_probe_clears_ambient_tokens_when_env_has_none(

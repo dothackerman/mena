@@ -15,6 +15,7 @@ from mena.runtime_stewardship import (
 def test_release_terminal_local_llm_delegates_to_provider_capability() -> None:
     class Provider:
         metadata = type("Metadata", (), {"name": "fake-llm", "model": "model-a"})()
+        runtime_resource_used = True
 
         def __init__(self) -> None:
             self.lease: RuntimeLease | None = None
@@ -45,9 +46,11 @@ def test_release_terminal_local_llm_delegates_to_provider_capability() -> None:
 def test_release_terminal_local_llm_records_missing_or_failed_release_capability() -> None:
     class NoReleaseProvider:
         metadata = type("Metadata", (), {"name": "fake-llm", "model": "model-a"})()
+        runtime_resource_used = True
 
     class FailingProvider:
         metadata = type("Metadata", (), {"name": "fake-llm", "model": "model-a"})()
+        runtime_resource_used = True
 
         def release_runtime_resource(self, lease: RuntimeLease) -> RuntimeReleaseResult:
             raise RuntimeError("release failed")

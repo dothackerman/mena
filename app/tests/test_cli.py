@@ -379,6 +379,43 @@ def test_setup_authorize_local_fallback_flag_persists_automatic_authorization(
     assert accepted.fallback_authorization.automatic_local_fallback_authorized is True
 
 
+def test_setup_authorize_local_fallback_reports_unavailable_blockers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    primary_ready = _setup_state(settings=settings, pyannote_token_present=True)
+    fallback_missing_asr = _setup_state(
+        settings=settings,
+        asr_model_present=False,
+        pyannote_token_present=True,
+    )
+
+    def _detect_state(_settings: AppSettings, **kwargs: object) -> LocalInstallationState:
+        profile = cast(Any, kwargs.get("profile"))
+        if profile is not None and profile.fallback:
+            return fallback_missing_asr
+        return primary_ready
+
+    monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
+
+    exit_code = main(
+        ["setup", "--yes", "--authorize-local-fallback"],
+        settings=settings,
+        setup_runner=SetupFakeRunner(),
+    )
+    captured = capsys.readouterr()
+
+    accepted = load_runtime_profile_state(settings.paths)
+    assert exit_code == 0
+    assert accepted.fallback_authorization.local_status == "unavailable"
+    assert accepted.fallback_authorization.automatic_local_fallback_authorized is False
+    assert "Automatic local runtime fallback is unavailable and remains disabled." in captured.out
+    assert "Fallback blocker:" in captured.out
+    assert "selected faster-whisper model" in captured.out
+
+
 def test_setup_evaluates_fallback_profile_before_authorizing_it(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2353,6 +2390,28 @@ def test_terminal_runtime_stewardship_records_unsupported_release_after_resource
     assert len(stewardship_records) == 1
     payload = json.loads(store.retrieve(stewardship_records[0].id))
     assert payload["releases"][0]["status"] == "not_supported"
+
+
+def test_terminal_runtime_stewardship_skips_provider_without_resource_use_signal(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    store = FileSystemArtifactStore(session_id="session-1", session_dir=tmp_path)
+    provider = SimpleNamespace(metadata=SimpleNamespace(name="fake", model="none"))
+
+    result = _record_terminal_local_llm_release(
+        store=store,
+        run_id="custom-semantic-provider",
+        attempt=1,
+        provider=provider,
+        stage="semantic-review",
+        boundary="process",
+    )
+    captured = capsys.readouterr()
+
+    assert result is None
+    assert captured.out == ""
+    assert store.list(artifact_type="runtime_stewardship_provenance") == ()
 
 
 def test_main_resume_stores_runtime_profile_provenance_per_attempt(

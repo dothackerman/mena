@@ -606,24 +606,35 @@ def detect_local_installation_state(
         )
         for requirement in evaluated_profile.python_surfaces
     )
-    ollama = _detect_ollama_state(
-        settings=settings,
-        model=_local_llm_model(evaluated_profile),
-        command=_command_check(commands, "ollama"),
-        runner=command_runner,
+    if _profile_has_any_stage(evaluated_profile, {"summarization", "semantic-review"}):
+        ollama = _detect_ollama_state(
+            settings=settings,
+            model=_local_llm_model(evaluated_profile),
+            command=_command_check(commands, "ollama"),
+            runner=command_runner,
+        )
+    else:
+        ollama = _not_evaluated_ollama_state(settings)
+    asr_model_present = (
+        _detect_asr_model_present(
+            runner=command_runner,
+            python_executable=resolved_python,
+            profile=selected_asr_profile,
+            python_surfaces=surfaces,
+        )
+        if _profile_has_stage(evaluated_profile, "transcription")
+        else None
     )
-    asr_model_present = _detect_asr_model_present(
-        runner=command_runner,
-        python_executable=resolved_python,
-        profile=selected_asr_profile,
-        python_surfaces=surfaces,
-    )
-    diarization_model_present = _detect_diarization_model_present(
-        runner=command_runner,
-        python_executable=resolved_python,
-        python_surfaces=surfaces,
-        env=current_env,
-        device=_stage_device(evaluated_profile, "diarization", selected_asr_profile),
+    diarization_model_present = (
+        _detect_diarization_model_present(
+            runner=command_runner,
+            python_executable=resolved_python,
+            python_surfaces=surfaces,
+            env=current_env,
+            device=_stage_device(evaluated_profile, "diarization", selected_asr_profile),
+        )
+        if _profile_has_stage(evaluated_profile, "diarization")
+        else None
     )
     return LocalInstallationState(
         command_identity=identity,
@@ -1344,6 +1355,17 @@ def _detect_ollama_state(
         reachable=True,
         model_present=model_present,
         detail=detail,
+    )
+
+
+def _not_evaluated_ollama_state(settings: AppSettings) -> OllamaState:
+    return OllamaState(
+        endpoint=settings.local_llm.ollama_endpoint,
+        model=settings.local_llm.ollama_model,
+        command=CommandCheck("ollama", None),
+        reachable=False,
+        model_present=False,
+        detail="Ollama was not evaluated for this scoped runtime profile.",
     )
 
 

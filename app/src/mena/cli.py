@@ -651,6 +651,10 @@ def _print_runtime_fallback_authorization_notice(state: RuntimeProfileState) -> 
             "Automatic local runtime fallback is not authorized; rerun `mena setup "
             "--authorize-local-fallback` to permit setup-evaluated local fallback."
         )
+    elif authorization.local_status == "unavailable":
+        print("Automatic local runtime fallback is unavailable and remains disabled.")
+        for reason in authorization.blocking_reasons:
+            print(f"Fallback blocker: {reason}")
 
 
 def _readiness_item_failed(

@@ -91,7 +91,7 @@ def release_terminal_local_llm(
     """Ask a provider to release a terminal local LLM lease without knowing provider mechanics."""
 
     lease = local_llm_lease(provider=provider, stage=stage, boundary=boundary)
-    if getattr(provider, "runtime_resource_used", True) is False:
+    if getattr(provider, "runtime_resource_used", False) is False:
         return RuntimeReleaseResult(
             lease=lease,
             status="not_supported",

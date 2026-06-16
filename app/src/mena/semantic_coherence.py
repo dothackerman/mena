@@ -263,14 +263,15 @@ class OllamaSemanticCoherenceProvider:
 
     def _post_json(self, path: str, payload: Mapping[str, object]) -> Mapping[str, object]:
         try:
-            if path == "/api/chat":
-                self._runtime_resource_used = True
-            return post_ollama_json(
+            response = post_ollama_json(
                 endpoint=str(self.metadata.endpoint),
                 path=path,
                 payload=payload,
                 timeout_seconds=self.timeout_seconds,
             )
+            if path == "/api/chat":
+                self._runtime_resource_used = True
+            return response
         except LocalLLMProviderUnavailable as exc:
             raise SemanticCoherenceProviderUnavailable(
                 "Ollama semantic coherence provider is unavailable."
