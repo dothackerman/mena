@@ -16,7 +16,7 @@ from mena.capture import (
     make_wav_bytes,
     session_null_sink_name,
 )
-from mena.profiles import CaptureSourceId
+from mena.profiles import CaptureProfileId, CaptureSourceId
 
 
 def test_wav_segment_writer_writes_valid_sealed_wav(tmp_path: Path) -> None:
@@ -170,6 +170,29 @@ def test_pipewire_pcm_provider_reads_local_source_with_bounded_pw_record() -> No
             30,
         )
     ]
+
+
+def test_pipewire_pcm_provider_reads_room_mic_from_selected_microphone() -> None:
+    calls: list[list[str]] = []
+
+    def runner(
+        args: list[str],
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[bytes]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout=b"\x01\x02", stderr=b"")
+
+    provider = PipeWirePcmProvider(sample_rate=8_000, runner=runner)
+
+    pcm = provider.read_segment(
+        CaptureSourceId.ROOM_MIC,
+        plan=_in_person_route_plan(),
+        sink_name="",
+        segment_seconds=30,
+    )
+
+    assert pcm == b"\x01\x02"
+    assert calls[0][:3] == ["pw-record", "--target", "31"]
 
 
 def test_pipewire_pcm_provider_returns_partial_output_after_timeout() -> None:
@@ -373,6 +396,33 @@ def test_pipewire_capture_adapter_flushes_segments_and_cleans_up(tmp_path: Path)
     assert all(segment.path.exists() for segment in metadata.segments)
 
 
+def test_pipewire_capture_adapter_flushes_in_person_room_mic_without_routing(
+    tmp_path: Path,
+) -> None:
+    calls: list[list[str]] = []
+
+    def runner(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    writer = WavSegmentWriter(segment_dir=tmp_path, sample_rate=8_000)
+    provider = SilencePcmProvider(sample_rate=8_000, seconds=1).read_segment
+    adapter = PipeWireCaptureAdapter(
+        client=PipeWireClient(runner=runner),
+        segment_writer=writer,
+        pcm_provider=provider,
+    )
+    active = adapter.start(_in_person_route_plan())
+
+    flushed = active.flush_segments()
+    metadata = active.stop()
+
+    assert calls == []
+    assert [segment.source_id for segment in flushed] == [CaptureSourceId.ROOM_MIC]
+    assert metadata.profile_id is CaptureProfileId.IN_PERSON_SINGLE_MIC
+    assert metadata.to_dict()["segment_count"] == 1
+
+
 def test_pipewire_capture_adapter_cleans_up_when_stop_flush_fails(tmp_path: Path) -> None:
     calls: list[list[str]] = []
     module_ids = iter(["101\n", "", "202\n", "", ""])
@@ -447,4 +497,12 @@ def _route_plan() -> CaptureRoutePlan:
         microphone_route_id="pipewire:node:31",
         playback_stream_route_id="pulse:sink-input:51",
         output_sink_route_id="pipewire:node:42",
+    )
+
+
+def _in_person_route_plan() -> CaptureRoutePlan:
+    return CaptureRoutePlan(
+        session_id="session-1",
+        microphone_route_id="pipewire:node:31",
+        profile_id=CaptureProfileId.IN_PERSON_SINGLE_MIC,
     )

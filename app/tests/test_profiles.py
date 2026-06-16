@@ -36,7 +36,7 @@ def test_in_person_profile_has_room_mic_source() -> None:
     profile = get_capture_profile(CaptureProfileId.IN_PERSON_SINGLE_MIC)
 
     assert [source.logical_id for source in profile.sources] == [CaptureSourceId.ROOM_MIC]
-    assert profile.sources[0].channel_layout is ChannelLayout.STEREO
+    assert profile.sources[0].channel_layout is ChannelLayout.MONO
     assert profile.sources[0].diarisation_policy is DiarisationPolicy.WHOLE_STREAM
 
 

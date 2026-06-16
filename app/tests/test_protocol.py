@@ -1,18 +1,29 @@
 import subprocess
 import sys
+import threading
 import wave
 from io import BytesIO, StringIO
 from pathlib import Path
+from typing import cast
 
 import pytest
 
-from mena.capture_worker import build_parser, run_worker
+from mena.capture import CaptureSegment
+from mena.capture_worker import SegmentFlushLoop, WorkerCaptureSession, build_parser, run_worker
+from mena.profiles import CaptureSourceId
 from mena.protocol import (
     ENVELOPE_VERSION,
     MAX_FRAME_BYTES,
     PROTOCOL_MAJOR,
+    PROTOCOL_MINOR,
+    CaptureFinalizedPayload,
+    CaptureRouteBindingPayload,
+    CaptureStatusPayload,
+    ErrorPayload,
     ProtocolError,
     ProtocolMessage,
+    SegmentFlushedPayload,
+    StartCapturePayload,
     WorkerExitedError,
     WorkerProcess,
     hello_message,
@@ -26,7 +37,7 @@ def test_protocol_message_encodes_compact_json_line() -> None:
         type="start_capture",
         id="message-1",
         session_id="session-1",
-        payload={"profile": "online_dual_stream"},
+        payload=_start_payload().to_dict(),
     )
 
     encoded = message.encode()
@@ -41,10 +52,14 @@ def test_protocol_message_encodes_compact_json_line() -> None:
 def test_protocol_encode_rejects_oversized_frame() -> None:
     with pytest.raises(ProtocolError, match="exceeds"):
         ProtocolMessage(
-            type="start_capture",
+            type="stop_capture",
             session_id="session-1",
             payload={"data": "x" * MAX_FRAME_BYTES},
         ).encode()
+
+
+def test_protocol_minor_is_bumped_for_issue_83_contract() -> None:
+    assert PROTOCOL_MINOR == 1
 
 
 def test_protocol_encode_rejects_unsupported_envelope_version() -> None:
@@ -78,6 +93,170 @@ def test_protocol_encode_rejects_non_json_payload() -> None:
             session_id="session-1",
             payload={"path": Path("not-json")},
         ).encode()
+
+
+def test_start_capture_payload_rejects_legacy_profile_only_shape() -> None:
+    with pytest.raises(ProtocolError, match="missing required field 'language'"):
+        ProtocolMessage(
+            type="start_capture",
+            session_id="session-1",
+            payload={"profile": "online_dual_stream"},
+        ).encode()
+
+
+def test_start_capture_payload_rejects_extra_fields() -> None:
+    payload = _start_payload().to_dict()
+    payload["simulate_error"] = True
+
+    with pytest.raises(ProtocolError, match="unsupported field 'simulate_error'"):
+        ProtocolMessage(
+            type="start_capture",
+            session_id="session-1",
+            payload=payload,
+        ).encode()
+
+
+def test_error_payload_rejects_unstructured_errors() -> None:
+    with pytest.raises(ProtocolError, match="missing required field 'code'"):
+        ProtocolMessage(
+            type="error",
+            session_id="session-1",
+            payload={"message": "boom"},
+        ).encode()
+
+
+def test_capture_status_payload_round_trips_through_protocol_validation() -> None:
+    payload = CaptureStatusPayload(
+        status="recording",
+        elapsed_seconds=12.5,
+        sealed_segment_count=4,
+    ).to_dict()
+
+    decoded = ProtocolMessage.decode(
+        ProtocolMessage(
+            type="capture_status",
+            session_id="session-1",
+            payload=payload,
+        ).encode()
+    )
+
+    assert CaptureStatusPayload.from_dict(decoded.payload) == CaptureStatusPayload(
+        status="recording",
+        elapsed_seconds=12.5,
+        sealed_segment_count=4,
+    )
+
+
+@pytest.mark.parametrize(
+    ("payload_update", "error"),
+    [
+        ({"status": "paused"}, "must be one of"),
+        ({"elapsed_seconds": True}, "must be a number"),
+        ({"elapsed_seconds": -0.1}, "must be non-negative"),
+        ({"sealed_segment_count": -1}, "must be non-negative"),
+    ],
+)
+def test_capture_status_payload_rejects_invalid_values(
+    payload_update: dict[str, object],
+    error: str,
+) -> None:
+    payload = CaptureStatusPayload(
+        status="recording",
+        elapsed_seconds=0.0,
+        sealed_segment_count=0,
+    ).to_dict()
+    payload.update(payload_update)
+
+    with pytest.raises(ProtocolError, match=error):
+        ProtocolMessage(
+            type="capture_status",
+            session_id="session-1",
+            payload=payload,
+        ).encode()
+
+
+def test_segment_flushed_payload_round_trips_through_protocol_validation() -> None:
+    payload = _segment_payload(source_id="local_mic")
+
+    decoded = ProtocolMessage.decode(
+        ProtocolMessage(
+            type="segment_flushed",
+            session_id="session-1",
+            payload=payload,
+        ).encode()
+    )
+
+    assert SegmentFlushedPayload.from_dict(decoded.payload).source_id == "local_mic"
+
+
+@pytest.mark.parametrize(
+    ("payload_update", "error"),
+    [
+        ({"format": "flac"}, "format must be 'wav'"),
+        ({"source_id": "mixed_audio"}, "must be one of"),
+        ({"sha256": "A" * 64}, "lowercase SHA-256"),
+        ({"started_at": ""}, "non-empty string or null"),
+    ],
+)
+def test_segment_flushed_payload_rejects_invalid_values(
+    payload_update: dict[str, object],
+    error: str,
+) -> None:
+    payload = _segment_payload(source_id="local_mic")
+    payload.update(payload_update)
+
+    with pytest.raises(ProtocolError, match=error):
+        ProtocolMessage(
+            type="segment_flushed",
+            session_id="session-1",
+            payload=payload,
+        ).encode()
+
+
+@pytest.mark.parametrize(
+    ("metadata_update", "error"),
+    [
+        ({"version": 2}, "version' must be 1"),
+        ({"segment_count": 2}, "segment_count must match"),
+        ({"segments": [7]}, "segments must contain JSON objects"),
+        ({"sources": [7]}, "sources must contain JSON objects"),
+    ],
+)
+def test_capture_finalized_payload_rejects_invalid_metadata(
+    metadata_update: dict[str, object],
+    error: str,
+) -> None:
+    metadata = _capture_metadata()
+    metadata.update(metadata_update)
+    payload = CaptureFinalizedPayload(
+        status="recorded",
+        stop_reason="user_stop",
+        completed_at=None,
+        error=None,
+        capture_metadata=metadata,
+    ).to_dict()
+
+    with pytest.raises(ProtocolError, match=error):
+        ProtocolMessage(
+            type="capture_finalized",
+            session_id="session-1",
+            payload=payload,
+        ).encode()
+
+
+def test_error_payload_round_trips_details() -> None:
+    payload = ErrorPayload(
+        code="capture_flush_failed",
+        message="boom",
+        recoverable=False,
+        details={"source_id": "local_mic"},
+    ).to_dict()
+
+    decoded = ProtocolMessage.decode(
+        ProtocolMessage(type="error", session_id="session-1", payload=payload).encode()
+    )
+
+    assert ErrorPayload.from_dict(decoded.payload).details == {"source_id": "local_mic"}
 
 
 def test_protocol_rejects_unknown_message_type() -> None:
@@ -181,16 +360,27 @@ def test_capture_worker_parser_requires_session_fields(tmp_path: Path) -> None:
 
 
 def test_worker_process_handshake_start_stop_round_trip(tmp_path: Path) -> None:
-    with WorkerProcess(session_id="session-1", session_dir=tmp_path) as worker:
+    with WorkerProcess(
+        session_id="session-1",
+        session_dir=tmp_path,
+        argv=_deterministic_worker_argv(session_id="session-1", session_dir=tmp_path),
+    ) as worker:
         hello_ack = worker.handshake()
-        started = worker.start_capture({"profile": "online_dual_stream"})
+        started = worker.start_capture(_start_payload())
         finalized = worker.stop_capture()
         exit_code = worker.wait(timeout=2)
         stderr = worker.read_stderr()
+    finalized_payload = CaptureFinalizedPayload.from_dict(finalized.payload)
 
     assert hello_ack.type == "hello_ack"
-    assert started.payload == {"session_dir": str(tmp_path)}
-    assert finalized.payload["segment_count"] == 2
+    assert started.payload == {
+        "session_dir": str(tmp_path),
+        "profile": "online_dual_stream",
+        "segment_seconds": 30,
+        "selected_sources": ["local_mic", "system_audio"],
+    }
+    assert finalized_payload.status == "recorded"
+    assert finalized_payload.capture_metadata["segment_count"] == 2
     assert exit_code == 0
     assert stderr == ""
     assert (tmp_path / "artifacts" / "source" / "local_mic" / "local_mic_000001.wav").exists()
@@ -250,7 +440,11 @@ def test_worker_run_loop_handles_start_stop_with_in_memory_streams(tmp_path: Pat
         b"".join(
             [
                 hello_message("session-1").encode(),
-                ProtocolMessage(type="start_capture", session_id="session-1").encode(),
+                ProtocolMessage(
+                    type="start_capture",
+                    session_id="session-1",
+                    payload=_start_payload().to_dict(),
+                ).encode(),
                 ProtocolMessage(type="stop_capture", session_id="session-1").encode(),
             ]
         )
@@ -264,6 +458,7 @@ def test_worker_run_loop_handles_start_stop_with_in_memory_streams(tmp_path: Pat
         stdin=stdin,
         stdout=stdout,
         stderr=stderr,
+        test_deterministic_capture=True,
     )
 
     frames = stdout.getvalue().splitlines(keepends=True)
@@ -276,6 +471,122 @@ def test_worker_run_loop_handles_start_stop_with_in_memory_streams(tmp_path: Pat
         "capture_finalized",
     ]
     assert stderr.getvalue() == ""
+
+
+def test_worker_product_factory_uses_live_pipewire_provider(tmp_path: Path) -> None:
+    capture = WorkerCaptureSession.create_product(
+        session_dir=tmp_path,
+        start_payload=_start_payload(),
+    )
+
+    assert capture.adapter.pcm_provider is None
+    assert capture.start_payload.selected_sources == ("local_mic", "system_audio")
+
+
+def test_worker_capture_session_flush_starts_lazily(tmp_path: Path) -> None:
+    capture = WorkerCaptureSession.create_deterministic(
+        session_dir=tmp_path,
+        start_payload=_in_person_start_payload(),
+    )
+
+    segments = capture.flush_once()
+    metadata = capture.finalize()
+
+    assert [segment.source_id for segment in segments] == [CaptureSourceId.ROOM_MIC]
+    assert metadata.profile_id.value == "in_person_single_mic"
+    assert metadata.segments == segments
+
+
+def test_worker_capture_session_start_is_idempotent(tmp_path: Path) -> None:
+    capture = WorkerCaptureSession.create_deterministic(
+        session_dir=tmp_path,
+        start_payload=_start_payload(),
+    )
+
+    assert capture.start() == ()
+    assert capture.start() == ()
+
+
+def test_worker_capture_session_rejects_missing_required_route(tmp_path: Path) -> None:
+    payload = StartCapturePayload(
+        profile="online_dual_stream",
+        language="en",
+        segment_seconds=30,
+        selected_sources=("local_mic", "system_audio"),
+        routes=_start_payload().routes[:2],
+    )
+    capture = WorkerCaptureSession.create_deterministic(
+        session_dir=tmp_path,
+        start_payload=payload,
+    )
+
+    with pytest.raises(ProtocolError, match="missing output_sink route"):
+        capture.start()
+
+
+def test_segment_flush_loop_emits_status_then_structured_error() -> None:
+    class FlakyCapture:
+        def __init__(self) -> None:
+            self.segments: list[CaptureSegment] = []
+            self.calls = 0
+
+        def flush_once(self) -> tuple[CaptureSegment, ...]:
+            self.calls += 1
+            if self.calls == 1:
+                segment = _capture_segment(source_id=CaptureSourceId.LOCAL_MIC, index=1)
+                self.segments.append(segment)
+                return (segment,)
+            raise RuntimeError("disk full")
+
+    output = BytesIO()
+    loop = SegmentFlushLoop(
+        capture=cast(WorkerCaptureSession, FlakyCapture()),
+        session_id="session-1",
+        protocol_out=output,
+        write_lock=threading.Lock(),
+    )
+
+    loop.start()
+    loop.join()
+
+    frames = [ProtocolMessage.decode(frame) for frame in output.getvalue().splitlines(True)]
+    assert [frame.type for frame in frames] == ["segment_flushed", "capture_status", "error"]
+    assert frames[1].payload["sealed_segment_count"] == 1
+    assert ErrorPayload.from_dict(frames[2].payload).message == "disk full"
+    assert isinstance(loop.error, RuntimeError)
+
+
+def test_worker_run_loop_handles_in_person_room_mic_capture(tmp_path: Path) -> None:
+    stdin = BytesIO(
+        b"".join(
+            [
+                hello_message("session-1").encode(),
+                ProtocolMessage(
+                    type="start_capture",
+                    session_id="session-1",
+                    payload=_in_person_start_payload().to_dict(),
+                ).encode(),
+                ProtocolMessage(type="stop_capture", session_id="session-1").encode(),
+            ]
+        )
+    )
+    stdout = BytesIO()
+
+    exit_code = run_worker(
+        session_id="session-1",
+        session_dir=tmp_path,
+        stdin=stdin,
+        stdout=stdout,
+        test_deterministic_capture=True,
+    )
+
+    frames = [ProtocolMessage.decode(frame) for frame in stdout.getvalue().splitlines(True)]
+    finalized = CaptureFinalizedPayload.from_dict(frames[-1].payload)
+    assert exit_code == 0
+    assert finalized.capture_metadata["profile"] == "in_person_single_mic"
+    segments = finalized.capture_metadata["segments"]
+    assert isinstance(segments, list)
+    assert segments[0]["source_id"] == "room_mic"
 
 
 def test_worker_run_loop_stops_on_orchestrator_eof(tmp_path: Path) -> None:
@@ -316,7 +627,16 @@ def test_worker_run_loop_handles_eof_before_hello(tmp_path: Path) -> None:
 def test_worker_run_loop_rejects_unexpected_command(tmp_path: Path) -> None:
     stdin = BytesIO(
         hello_message("session-1").encode()
-        + ProtocolMessage(type="capture_started", session_id="session-1").encode()
+        + ProtocolMessage(
+            type="capture_started",
+            session_id="session-1",
+            payload={
+                "session_dir": str(tmp_path),
+                "profile": "online_dual_stream",
+                "segment_seconds": 30,
+                "selected_sources": ["local_mic", "system_audio"],
+            },
+        ).encode()
     )
 
     with pytest.raises(ProtocolError, match="Unexpected worker command 'capture_started'"):
@@ -326,7 +646,11 @@ def test_worker_run_loop_rejects_unexpected_command(tmp_path: Path) -> None:
 def test_worker_run_loop_rejects_mismatched_session_id(tmp_path: Path) -> None:
     stdin = BytesIO(
         hello_message("session-1").encode()
-        + ProtocolMessage(type="start_capture", session_id="session-2").encode()
+        + ProtocolMessage(
+            type="start_capture",
+            session_id="session-2",
+            payload=_start_payload().to_dict(),
+        ).encode()
     )
 
     with pytest.raises(ProtocolError, match="session_id does not match"):
@@ -343,12 +667,26 @@ def test_worker_run_loop_rejects_mismatched_hello_session_id(tmp_path: Path) -> 
 def test_worker_run_loop_rejects_duplicate_start(tmp_path: Path) -> None:
     stdin = BytesIO(
         hello_message("session-1").encode()
-        + ProtocolMessage(type="start_capture", session_id="session-1").encode()
-        + ProtocolMessage(type="start_capture", session_id="session-1").encode()
+        + ProtocolMessage(
+            type="start_capture",
+            session_id="session-1",
+            payload=_start_payload().to_dict(),
+        ).encode()
+        + ProtocolMessage(
+            type="start_capture",
+            session_id="session-1",
+            payload=_start_payload().to_dict(),
+        ).encode()
     )
 
     with pytest.raises(ProtocolError, match="already started"):
-        run_worker(session_id="session-1", session_dir=tmp_path, stdin=stdin, stdout=BytesIO())
+        run_worker(
+            session_id="session-1",
+            session_dir=tmp_path,
+            stdin=stdin,
+            stdout=BytesIO(),
+            test_deterministic_capture=True,
+        )
 
 
 def test_worker_run_loop_rejects_stop_before_start(tmp_path: Path) -> None:
@@ -372,24 +710,30 @@ def test_worker_process_context_terminates_running_child(tmp_path: Path) -> None
     assert process.poll() is not None
 
 
-def test_worker_error_event_stays_on_stdout_and_diagnostics_stay_on_stderr(tmp_path: Path) -> None:
-    with WorkerProcess(session_id="session-1", session_dir=tmp_path) as worker:
-        worker.handshake()
-        worker.send(
-            ProtocolMessage(
-                type="start_capture",
-                session_id="session-1",
-                payload={"simulate_error": True},
-            )
-        )
-        message = worker.receive()
-        exit_code = worker.wait(timeout=2)
-        stderr = worker.read_stderr()
-
-    assert message.type == "error"
-    assert message.payload == {"message": "simulated capture start failure"}
-    assert exit_code == 1
-    assert stderr == ""
+def test_worker_process_stop_raises_structured_worker_error(tmp_path: Path) -> None:
+    with (
+        WorkerProcess(
+            session_id="session-1",
+            session_dir=tmp_path,
+            argv=[
+                sys.executable,
+                "-c",
+                (
+                    "import sys; "
+                    "sys.stdin.readline(); "
+                    "sys.stdout.write("
+                    '\'{"v":1,"type":"error","id":"message-1",'
+                    '"session_id":"session-1","payload":'
+                    '{"code":"capture_failed","message":"boom",'
+                    '"recoverable":false,"details":{}}}\\n\''
+                    "); "
+                    "sys.stdout.flush()"
+                ),
+            ],
+        ) as worker,
+        pytest.raises(ProtocolError, match="boom"),
+    ):
+        worker.stop_capture()
 
 
 def test_worker_process_redirects_stderr_to_session_log(tmp_path: Path) -> None:
@@ -410,9 +754,15 @@ def test_worker_process_redirects_stderr_to_session_log(tmp_path: Path) -> None:
 
 
 def test_worker_hard_kill_preserves_sealed_prior_segments(tmp_path: Path) -> None:
-    with WorkerProcess(session_id="session-1", session_dir=tmp_path) as worker:
+    with WorkerProcess(
+        session_id="session-1",
+        session_dir=tmp_path,
+        argv=_deterministic_worker_argv(session_id="session-1", session_dir=tmp_path),
+    ) as worker:
         worker.handshake()
-        worker.start_capture({"profile": "online_dual_stream"})
+        worker.start_capture(_start_payload())
+        worker.receive_expected("segment_flushed")
+        worker.receive_expected("segment_flushed")
         worker.process.kill()
         worker.wait(timeout=2)
 
@@ -428,7 +778,11 @@ def test_worker_hard_kill_preserves_sealed_prior_segments(tmp_path: Path) -> Non
 def test_worker_eof_after_start_finalizes_existing_segments(tmp_path: Path) -> None:
     stdin = BytesIO(
         hello_message("session-1").encode()
-        + ProtocolMessage(type="start_capture", session_id="session-1").encode()
+        + ProtocolMessage(
+            type="start_capture",
+            session_id="session-1",
+            payload=_start_payload().to_dict(),
+        ).encode()
     )
     stdout = BytesIO()
     stderr = StringIO()
@@ -439,6 +793,7 @@ def test_worker_eof_after_start_finalizes_existing_segments(tmp_path: Path) -> N
         stdin=stdin,
         stdout=stdout,
         stderr=stderr,
+        test_deterministic_capture=True,
     )
 
     assert exit_code == 0
@@ -490,3 +845,113 @@ def test_worker_process_detects_child_exit_before_event(tmp_path: Path) -> None:
         pytest.raises(WorkerExitedError, match="Worker exited"),
     ):
         worker.handshake()
+
+
+def _start_payload() -> StartCapturePayload:
+    return StartCapturePayload(
+        profile="online_dual_stream",
+        language="en",
+        segment_seconds=30,
+        selected_sources=("local_mic", "system_audio"),
+        routes=(
+            CaptureRouteBindingPayload(
+                role="microphone",
+                source_id="local_mic",
+                route_id="pipewire:node:1",
+                label="Headset microphone",
+                backend="pipewire",
+                required=True,
+            ),
+            CaptureRouteBindingPayload(
+                role="playback_stream",
+                source_id="system_audio",
+                route_id="pulse:sink-input:2",
+                label="Meeting playback",
+                backend="pulse",
+                required=True,
+            ),
+            CaptureRouteBindingPayload(
+                role="output_sink",
+                source_id=None,
+                route_id="pipewire:node:3",
+                label="Headphones",
+                backend="pipewire",
+                required=True,
+            ),
+        ),
+    )
+
+
+def _in_person_start_payload() -> StartCapturePayload:
+    return StartCapturePayload(
+        profile="in_person_single_mic",
+        language="de-CH",
+        segment_seconds=30,
+        selected_sources=("room_mic",),
+        routes=(
+            CaptureRouteBindingPayload(
+                role="microphone",
+                source_id="room_mic",
+                route_id="pipewire:node:1",
+                label="Room microphone",
+                backend="pipewire",
+                required=True,
+            ),
+        ),
+    )
+
+
+def _deterministic_worker_argv(*, session_id: str, session_dir: Path) -> list[str]:
+    return [
+        sys.executable,
+        "-m",
+        "mena.capture_worker",
+        "--session-id",
+        session_id,
+        "--session-dir",
+        str(session_dir),
+        "--test-deterministic-capture",
+    ]
+
+
+def _segment_payload(*, source_id: str) -> dict[str, object]:
+    return _capture_segment(source_id=CaptureSourceId(source_id), index=1).to_dict()
+
+
+def _capture_segment(*, source_id: CaptureSourceId, index: int) -> CaptureSegment:
+    return CaptureSegment(
+        source_id=source_id,
+        index=index,
+        path=Path(f"artifacts/source/{source_id.value}/{source_id.value}_{index:06d}.wav"),
+        sample_rate=48_000,
+        channels=1,
+        channel_layout="mono",
+        sample_format="pcm_s16le",
+        byte_count=44,
+        duration_seconds=30.0,
+        started_at=None,
+        ended_at=None,
+        sha256="0" * 64,
+    )
+
+
+def _capture_metadata() -> dict[str, object]:
+    segment = _segment_payload(source_id="local_mic")
+    return {
+        "version": 1,
+        "profile": "online_dual_stream",
+        "sample_rate": 48_000,
+        "channels": 1,
+        "segment_seconds": 30,
+        "segment_count": 1,
+        "segments": [segment],
+        "sources": [
+            {
+                "source_id": "local_mic",
+                "route_id": "pipewire:node:1",
+                "route_label": "Headset microphone",
+                "channel_layout": "mono",
+                "segment_count": 1,
+            }
+        ],
+    }

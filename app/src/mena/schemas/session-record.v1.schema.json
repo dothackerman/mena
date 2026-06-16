@@ -31,6 +31,139 @@
       "required": ["id", "route_id", "name", "description", "media_class", "active"],
       "type": "object"
     },
+    "capture_metadata": {
+      "additionalProperties": false,
+      "description": "Capture facts emitted by the worker and persisted by the orchestrator.",
+      "properties": {
+        "channels": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "profile": {
+          "enum": ["online_dual_stream", "in_person_single_mic"],
+          "type": "string"
+        },
+        "sample_rate": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "segment_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "segment_seconds": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "segments": {
+          "items": {
+            "$ref": "#/$defs/capture_segment"
+          },
+          "type": "array"
+        },
+        "sources": {
+          "items": {
+            "$ref": "#/$defs/capture_source_summary"
+          },
+          "type": "array"
+        },
+        "version": {
+          "const": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "profile",
+        "sample_rate",
+        "channels",
+        "segment_seconds",
+        "segment_count",
+        "segments",
+        "sources"
+      ],
+      "type": "object"
+    },
+    "capture_plan": {
+      "additionalProperties": false,
+      "properties": {
+        "language": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "profile": {
+          "enum": ["online_dual_stream", "in_person_single_mic"],
+          "type": "string"
+        },
+        "routes": {
+          "items": {
+            "$ref": "#/$defs/capture_route_binding"
+          },
+          "type": "array"
+        },
+        "segment_seconds": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "selected_sources": {
+          "items": {
+            "enum": ["local_mic", "system_audio", "room_mic"],
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "status": {
+          "enum": ["planned", "active", "finalized", "interrupted_partial", "failed"],
+          "type": "string"
+        },
+        "version": {
+          "const": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "profile",
+        "language",
+        "segment_seconds",
+        "selected_sources",
+        "routes",
+        "status"
+      ],
+      "type": "object"
+    },
+    "capture_route_binding": {
+      "additionalProperties": false,
+      "properties": {
+        "backend": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "label": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "role": {
+          "enum": ["microphone", "playback_stream", "output_sink"],
+          "type": "string"
+        },
+        "route_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "source_id": {
+          "enum": ["local_mic", "system_audio", "room_mic", null],
+          "type": ["string", "null"]
+        }
+      },
+      "required": ["role", "source_id", "route_id", "label", "backend", "required"],
+      "type": "object"
+    },
     "capture_segment": {
       "additionalProperties": false,
       "properties": {
@@ -38,9 +171,21 @@
           "minimum": 0,
           "type": "integer"
         },
+        "channel_layout": {
+          "minLength": 1,
+          "type": "string"
+        },
         "channels": {
           "minimum": 1,
           "type": "integer"
+        },
+        "duration_seconds": {
+          "minimum": 0,
+          "type": "number"
+        },
+        "ended_at": {
+          "format": "date-time",
+          "type": ["string", "null"]
         },
         "format": {
           "const": "wav",
@@ -51,6 +196,10 @@
           "type": "integer"
         },
         "path": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "sample_format": {
           "minLength": 1,
           "type": "string"
         },
@@ -66,8 +215,12 @@
           "enum": ["local_mic", "system_audio", "room_mic"],
           "type": "string"
         },
+        "started_at": {
+          "format": "date-time",
+          "type": ["string", "null"]
+        },
         "status": {
-          "const": "sealed",
+          "enum": ["sealed", "partial", "failed"],
           "type": "string"
         }
       },
@@ -77,11 +230,90 @@
         "path",
         "sample_rate",
         "channels",
+        "channel_layout",
+        "sample_format",
         "byte_count",
+        "duration_seconds",
+        "started_at",
+        "ended_at",
         "sha256",
         "status",
         "format"
       ],
+      "type": "object"
+    },
+    "capture_source_summary": {
+      "additionalProperties": false,
+      "properties": {
+        "channel_layout": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "route_id": {
+          "type": ["string", "null"]
+        },
+        "route_label": {
+          "type": ["string", "null"]
+        },
+        "segment_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "source_id": {
+          "enum": ["local_mic", "system_audio", "room_mic"],
+          "type": "string"
+        }
+      },
+      "required": ["source_id", "route_id", "route_label", "channel_layout", "segment_count"],
+      "type": "object"
+    },
+    "degradation": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "message": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "occurred_at": {
+          "format": "date-time",
+          "type": ["string", "null"]
+        },
+        "source_id": {
+          "enum": ["local_mic", "system_audio", "room_mic"],
+          "type": ["string", "null"]
+        }
+      },
+      "required": ["code", "message", "source_id", "occurred_at"],
+      "type": "object"
+    },
+    "failure": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "message": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "occurred_at": {
+          "format": "date-time",
+          "type": ["string", "null"]
+        },
+        "recoverable": {
+          "type": "boolean"
+        },
+        "source_id": {
+          "enum": ["local_mic", "system_audio", "room_mic"],
+          "type": ["string", "null"]
+        }
+      },
+      "required": ["code", "message", "source_id", "occurred_at", "recoverable"],
       "type": "object"
     },
     "playback_stream": {
@@ -126,49 +358,73 @@
         "active"
       ],
       "type": "object"
+    },
+    "recording": {
+      "additionalProperties": false,
+      "properties": {
+        "finalization": {
+          "$ref": "#/$defs/recording_finalization"
+        },
+        "started_at": {
+          "format": "date-time",
+          "type": ["string", "null"]
+        },
+        "stop_reason": {
+          "enum": ["user_stop", "orchestrator_eof", "interrupted", "error", null]
+        },
+        "stopped_at": {
+          "format": "date-time",
+          "type": ["string", "null"]
+        }
+      },
+      "required": ["started_at", "stopped_at", "stop_reason", "finalization"],
+      "type": "object"
+    },
+    "recording_finalization": {
+      "additionalProperties": false,
+      "properties": {
+        "completed_at": {
+          "format": "date-time",
+          "type": ["string", "null"]
+        },
+        "error": {
+          "type": ["string", "null"]
+        },
+        "status": {
+          "enum": ["not_started", "pending", "finalized", "interrupted_partial", "failed"],
+          "type": "string"
+        }
+      },
+      "required": ["status", "completed_at", "error"],
+      "type": "object"
     }
   },
   "additionalProperties": false,
-  "description": "Initial canonical session record written by `mena record`.",
+  "description": "Canonical session record written by `mena record`.",
   "properties": {
     "capture_metadata": {
-      "additionalProperties": false,
-      "description": "Capture facts emitted by the worker and persisted by the orchestrator.",
-      "properties": {
-        "channels": {
-          "minimum": 1,
-          "type": "integer"
+      "$ref": "#/$defs/capture_metadata"
+    },
+    "capture_plan": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/capture_plan"
         },
-        "sample_rate": {
-          "minimum": 1,
-          "type": "integer"
-        },
-        "segment_count": {
-          "minimum": 0,
-          "type": "integer"
-        },
-        "segment_seconds": {
-          "minimum": 1,
-          "type": "integer"
-        },
-        "segments": {
-          "items": {
-            "$ref": "#/$defs/capture_segment"
-          },
-          "type": "array"
-        },
-        "version": {
-          "const": 1,
-          "type": "integer"
+        {
+          "type": "null"
         }
-      },
-      "required": ["version", "sample_rate", "channels", "segment_seconds", "segment_count", "segments"],
-      "type": "object"
+      ]
     },
     "created_at": {
       "description": "UTC session creation timestamp.",
       "format": "date-time",
       "type": "string"
+    },
+    "degradations": {
+      "items": {
+        "$ref": "#/$defs/degradation"
+      },
+      "type": "array"
     },
     "discovery": {
       "additionalProperties": false,
@@ -211,9 +467,20 @@
       "required": ["version", "profile", "status", "sources", "sinks", "playback_streams", "error"],
       "type": "object"
     },
+    "failures": {
+      "items": {
+        "$ref": "#/$defs/failure"
+      },
+      "type": "array"
+    },
     "id": {
       "description": "Stable session UUID.",
       "format": "uuid",
+      "type": "string"
+    },
+    "language": {
+      "description": "Record-time meeting language used as downstream source of truth.",
+      "minLength": 1,
       "type": "string"
     },
     "name": {
@@ -225,9 +492,12 @@
       "enum": ["online_dual_stream", "in_person_single_mic"],
       "type": "string"
     },
+    "recording": {
+      "$ref": "#/$defs/recording"
+    },
     "status": {
-      "const": "created",
-      "description": "Initial lifecycle state for a newly created session.",
+      "description": "Session recording lifecycle state.",
+      "enum": ["created", "recording", "recorded", "interrupted_partial", "failed"],
       "type": "string"
     },
     "version": {
@@ -236,7 +506,19 @@
       "type": "integer"
     }
   },
-  "required": ["version", "id", "created_at", "name", "status", "profile"],
+  "required": [
+    "version",
+    "id",
+    "created_at",
+    "name",
+    "status",
+    "profile",
+    "language",
+    "recording",
+    "capture_plan",
+    "degradations",
+    "failures"
+  ],
   "title": "Mena Session Record v1",
   "type": "object"
 }

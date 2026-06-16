@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import argparse
 import sys
+import threading
+import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import IO, TextIO
 
 from mena.capture import (
-    DEFAULT_SEGMENT_SECONDS,
     ActivePipeWireCapture,
     CaptureMetadata,
     CaptureRoutePlan,
@@ -19,9 +20,15 @@ from mena.capture import (
     SilencePcmProvider,
     WavSegmentWriter,
 )
+from mena.profiles import CaptureProfileId
 from mena.protocol import (
+    CaptureFinalizedPayload,
+    CaptureStartedPayload,
+    CaptureStatusPayload,
+    ErrorPayload,
     ProtocolError,
     ProtocolMessage,
+    StartCapturePayload,
     hello_ack_message,
     read_message,
     validate_hello,
@@ -33,13 +40,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="mena.capture_worker")
     parser.add_argument("--session-id", required=True)
     parser.add_argument("--session-dir", type=Path, required=True)
+    parser.add_argument(
+        "--test-deterministic-capture",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        return run_worker(session_id=args.session_id, session_dir=args.session_dir)
+        return run_worker(
+            session_id=args.session_id,
+            session_dir=args.session_dir,
+            test_deterministic_capture=args.test_deterministic_capture,
+        )
     except ProtocolError as exc:
         print(f"protocol error: {exc}", file=sys.stderr)
         return 2
@@ -52,6 +68,7 @@ def run_worker(
     stdin: IO[bytes] | None = None,
     stdout: IO[bytes] | None = None,
     stderr: TextIO | None = None,
+    test_deterministic_capture: bool = False,
 ) -> int:
     protocol_in = stdin or sys.stdin.buffer
     protocol_out = stdout or sys.stdout.buffer
@@ -68,12 +85,17 @@ def run_worker(
     write_message(protocol_out, hello_ack_message(session_id=session_id, request_id=hello.id))
     capture: WorkerCaptureSession | None = None
     finalized_metadata: CaptureMetadata | None = None
+    write_lock = threading.Lock()
+    flush_loop: SegmentFlushLoop | None = None
 
     while True:
         try:
             message = read_message(protocol_in)
         except EOFError:
             if capture and finalized_metadata is None:
+                if flush_loop is not None:
+                    flush_loop.stop()
+                    flush_loop.join()
                 finalized_metadata = capture.finalize()
             print("orchestrator closed protocol stdin", file=diagnostics)
             return 0
@@ -83,39 +105,55 @@ def run_worker(
         if message.type == "start_capture":
             if capture is not None:
                 raise ProtocolError("Capture has already started.")
-            if message.payload.get("simulate_error") is True:
-                write_message(
-                    protocol_out,
-                    ProtocolMessage(
-                        type="error",
-                        session_id=session_id,
-                        payload={"message": "simulated capture start failure"},
-                    ),
+            start_payload = StartCapturePayload.from_dict(message.payload)
+            if test_deterministic_capture:
+                capture = WorkerCaptureSession.create_deterministic(
+                    session_dir=session_dir,
+                    start_payload=start_payload,
                 )
-                return 1
-            capture = WorkerCaptureSession(session_dir=session_dir)
-            flushed = capture.start()
+            else:
+                capture = WorkerCaptureSession.create_product(
+                    session_dir=session_dir,
+                    start_payload=start_payload,
+                )
+            capture.start()
             write_message(
                 protocol_out,
                 ProtocolMessage(
                     type="capture_started",
                     session_id=session_id,
-                    payload={"session_dir": str(session_dir)},
+                    payload=CaptureStartedPayload(
+                        session_dir=str(session_dir),
+                        profile=start_payload.profile,
+                        segment_seconds=start_payload.segment_seconds,
+                        selected_sources=start_payload.selected_sources,
+                    ).to_dict(),
                 ),
             )
-            for segment in flushed:
-                write_message(
-                    protocol_out,
-                    ProtocolMessage(
-                        type="segment_flushed",
-                        session_id=session_id,
-                        payload=segment.to_dict(),
-                    ),
+            if test_deterministic_capture:
+                _write_flushed_segments(
+                    protocol_out=protocol_out,
+                    write_lock=write_lock,
+                    session_id=session_id,
+                    capture=capture,
                 )
+            else:
+                flush_loop = SegmentFlushLoop(
+                    capture=capture,
+                    session_id=session_id,
+                    protocol_out=protocol_out,
+                    write_lock=write_lock,
+                )
+                flush_loop.start()
         elif message.type == "stop_capture":
             if capture is None:
                 raise ProtocolError("Cannot stop capture before it has started.")
             if capture and finalized_metadata is None:
+                if flush_loop is not None:
+                    flush_loop.stop()
+                    flush_loop.join()
+                    if flush_loop.error is not None:
+                        raise ProtocolError(f"Capture failed: {flush_loop.error}")
                 finalized_metadata = capture.finalize()
             if finalized_metadata is None:
                 raise ProtocolError("Capture did not finalize.")
@@ -124,43 +162,106 @@ def run_worker(
                 ProtocolMessage(
                     type="capture_finalized",
                     session_id=session_id,
-                    payload=finalized_metadata.to_dict(),
+                    payload=CaptureFinalizedPayload(
+                        status="recorded",
+                        stop_reason="user_stop",
+                        completed_at=None,
+                        error=None,
+                        capture_metadata=finalized_metadata.to_dict(),
+                    ).to_dict(),
                 ),
             )
             return 0
+        elif message.type == "error":
+            error = ErrorPayload.from_dict(message.payload)
+            raise ProtocolError(error.message)
         else:
             raise ProtocolError(f"Unexpected worker command '{message.type}'.")
 
 
 class WorkerCaptureSession:
-    """Worker-owned deterministic segment writer used by the current PoC slice."""
+    """Worker-owned capture session."""
 
-    def __init__(self, *, session_dir: Path) -> None:
-        writer = WavSegmentWriter(segment_dir=session_dir / "artifacts" / "source")
-        provider = SilencePcmProvider(seconds=DEFAULT_SEGMENT_SECONDS).read_segment
-        self.adapter = PipeWireCaptureAdapter(
-            client=NoopPipeWireClient(),
-            segment_writer=writer,
-            pcm_provider=provider,
-        )
+    def __init__(
+        self,
+        *,
+        start_payload: StartCapturePayload,
+        adapter: PipeWireCaptureAdapter,
+    ) -> None:
+        self.start_payload = start_payload
+        self.adapter = adapter
         self.segments: list[CaptureSegment] = []
         self.active_capture: ActivePipeWireCapture | None = None
         self.started = False
+
+    @classmethod
+    def create_product(
+        cls,
+        *,
+        session_dir: Path,
+        start_payload: StartCapturePayload,
+    ) -> WorkerCaptureSession:
+        writer = WavSegmentWriter(segment_dir=session_dir / "artifacts" / "source")
+        return cls(
+            start_payload=start_payload,
+            adapter=PipeWireCaptureAdapter(
+                client=PipeWireClient(),
+                segment_writer=writer,
+                segment_seconds=start_payload.segment_seconds,
+            ),
+        )
+
+    @classmethod
+    def create_deterministic(
+        cls,
+        *,
+        session_dir: Path,
+        start_payload: StartCapturePayload,
+    ) -> WorkerCaptureSession:
+        writer = WavSegmentWriter(segment_dir=session_dir / "artifacts" / "source")
+        provider = SilencePcmProvider(seconds=start_payload.segment_seconds).read_segment
+        return cls(
+            start_payload=start_payload,
+            adapter=PipeWireCaptureAdapter(
+                client=NoopPipeWireClient(),
+                segment_writer=writer,
+                pcm_provider=provider,
+                segment_seconds=start_payload.segment_seconds,
+            ),
+        )
 
     def start(self) -> tuple[CaptureSegment, ...]:
         if self.started:
             return ()
         self.started = True
-        self.active_capture = self.adapter.start(
-            CaptureRoutePlan(
+        profile_id = CaptureProfileId(self.start_payload.profile)
+        if profile_id is CaptureProfileId.IN_PERSON_SINGLE_MIC:
+            route_plan = CaptureRoutePlan(
                 session_id="worker",
-                microphone_route_id="pipewire:node:1",
-                playback_stream_route_id="pipewire:node:2",
-                output_sink_route_id="pipewire:node:3",
+                microphone_route_id=self._route_id("microphone"),
+                profile_id=profile_id,
             )
+        else:
+            route_plan = CaptureRoutePlan(
+                session_id="worker",
+                microphone_route_id=self._route_id("microphone"),
+                playback_stream_route_id=self._route_id("playback_stream"),
+                output_sink_route_id=self._route_id("output_sink"),
+                profile_id=profile_id,
+            )
+        self.active_capture = self.adapter.start(
+            route_plan,
         )
-        self.segments.extend(self.active_capture.flush_segments())
-        return tuple(self.segments)
+        return ()
+
+    def flush_once(self) -> tuple[CaptureSegment, ...]:
+        if not self.started:
+            self.start()
+        if self.active_capture is None:
+            raise RuntimeError("capture session did not start")
+        segments = self.active_capture.flush_segments()
+        self.segments.extend(segments)
+        return segments
 
     def finalize(self) -> CaptureMetadata:
         if not self.started:
@@ -168,6 +269,108 @@ class WorkerCaptureSession:
         if self.active_capture is None:
             raise RuntimeError("capture session did not start")
         return self.active_capture.stop()
+
+    def _route_id(self, role: str) -> str:
+        for route in self.start_payload.routes:
+            if route.role == role:
+                return route.route_id
+        raise ProtocolError(f"start_capture payload missing {role} route.")
+
+
+class SegmentFlushLoop:
+    """Background source-segment flusher for product capture."""
+
+    def __init__(
+        self,
+        *,
+        capture: WorkerCaptureSession,
+        session_id: str,
+        protocol_out: IO[bytes],
+        write_lock: threading.Lock,
+    ) -> None:
+        self.capture = capture
+        self.session_id = session_id
+        self.protocol_out = protocol_out
+        self.write_lock = write_lock
+        self.error: BaseException | None = None
+        self._started_at: float | None = None
+        self._stop_requested = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="mena-capture-flush", daemon=True)
+
+    def start(self) -> None:
+        self._started_at = time.monotonic()
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_requested.set()
+
+    def join(self) -> None:
+        self._thread.join()
+
+    def _run(self) -> None:
+        while not self._stop_requested.is_set():
+            try:
+                _write_flushed_segments(
+                    protocol_out=self.protocol_out,
+                    write_lock=self.write_lock,
+                    session_id=self.session_id,
+                    capture=self.capture,
+                )
+                with self.write_lock:
+                    write_message(
+                        self.protocol_out,
+                        ProtocolMessage(
+                            type="capture_status",
+                            session_id=self.session_id,
+                            payload=CaptureStatusPayload(
+                                status="recording",
+                                elapsed_seconds=self._elapsed_seconds(),
+                                sealed_segment_count=len(self.capture.segments),
+                            ).to_dict(),
+                        ),
+                    )
+            except BaseException as exc:
+                self.error = exc
+                with self.write_lock:
+                    write_message(
+                        self.protocol_out,
+                        ProtocolMessage(
+                            type="error",
+                            session_id=self.session_id,
+                            payload=ErrorPayload(
+                                code="capture_flush_failed",
+                                message=str(exc),
+                                recoverable=False,
+                                details={},
+                            ).to_dict(),
+                        ),
+                    )
+                return
+
+    def _elapsed_seconds(self) -> float:
+        if self._started_at is None:
+            return 0.0
+        return max(0.0, time.monotonic() - self._started_at)
+
+
+def _write_flushed_segments(
+    *,
+    protocol_out: IO[bytes],
+    write_lock: threading.Lock,
+    session_id: str,
+    capture: WorkerCaptureSession,
+) -> None:
+    flushed = capture.flush_once()
+    for segment in flushed:
+        with write_lock:
+            write_message(
+                protocol_out,
+                ProtocolMessage(
+                    type="segment_flushed",
+                    session_id=session_id,
+                    payload=segment.to_dict(),
+                ),
+            )
 
 
 class NoopPipeWireClient(PipeWireClient):

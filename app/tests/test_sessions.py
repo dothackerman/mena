@@ -15,6 +15,7 @@ from mena.sessions import (
     default_data_root,
     read_session_record,
     update_session_capture_metadata,
+    update_session_capture_plan,
     update_session_discovery,
 )
 from mena.settings import DATA_ROOT_ENV_VAR
@@ -76,10 +77,24 @@ def test_create_session_writes_minimal_record(tmp_path: Path) -> None:
 
     record = json.loads(created_session.record_path.read_text(encoding="utf-8"))
     assert record == {
+        "capture_plan": None,
         "created_at": "2026-05-08T05:30:00Z",
+        "degradations": [],
+        "failures": [],
         "id": created_session.record.id,
+        "language": "en",
         "name": "Demo",
         "profile": "online_dual_stream",
+        "recording": {
+            "finalization": {
+                "completed_at": None,
+                "error": None,
+                "status": "not_started",
+            },
+            "started_at": None,
+            "stop_reason": None,
+            "stopped_at": None,
+        },
         "status": "created",
         "version": 1,
     }
@@ -88,6 +103,7 @@ def test_create_session_writes_minimal_record(tmp_path: Path) -> None:
 def test_create_session_writes_record_matching_v1_schema(tmp_path: Path) -> None:
     created_session = create_session(
         profile=parse_capture_profile("in-person"),
+        language="de-CH",
         name="Schema check",
         data_root=tmp_path,
         now=datetime(2026, 5, 8, 5, 30, 0, tzinfo=UTC),
@@ -99,6 +115,17 @@ def test_create_session_writes_record_matching_v1_schema(tmp_path: Path) -> None
     )
 
     validator.validate(record)
+    assert record["language"] == "de-CH"
+
+
+def test_create_session_rejects_empty_language(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="Session language"):
+        create_session(
+            profile=parse_capture_profile("online"),
+            language=" ",
+            data_root=tmp_path,
+            now=datetime(2026, 5, 8, 5, 30, 0, tzinfo=UTC),
+        )
 
 
 def test_update_session_record_writes_atomically(tmp_path: Path) -> None:
@@ -165,6 +192,11 @@ def test_session_record_schema_rejects_malformed_discovery_route() -> None:
         "name": None,
         "status": "created",
         "profile": "online_dual_stream",
+        "language": "en",
+        "recording": _not_started_recording(),
+        "capture_plan": None,
+        "degradations": [],
+        "failures": [],
         "discovery": {
             "version": 1,
             "profile": "online_dual_stream",
@@ -190,6 +222,11 @@ def test_session_record_schema_rejects_extra_discovery_fields() -> None:
         "name": None,
         "status": "created",
         "profile": "online_dual_stream",
+        "language": "en",
+        "recording": _not_started_recording(),
+        "capture_plan": None,
+        "degradations": [],
+        "failures": [],
         "discovery": {
             "version": 1,
             "profile": "online_dual_stream",
@@ -207,6 +244,57 @@ def test_session_record_schema_rejects_extra_discovery_fields() -> None:
         validator.validate(record)
 
 
+def test_update_session_capture_plan_writes_schema_valid_session_record(tmp_path: Path) -> None:
+    created_session = create_session(
+        profile=parse_capture_profile("online"),
+        data_root=tmp_path,
+        now=datetime(2026, 5, 8, 5, 30, 0, tzinfo=UTC),
+    )
+    capture_plan = {
+        "version": 1,
+        "profile": "online_dual_stream",
+        "language": "en",
+        "segment_seconds": 30,
+        "selected_sources": ["local_mic", "system_audio"],
+        "routes": [
+            {
+                "role": "microphone",
+                "source_id": "local_mic",
+                "route_id": "pipewire:node:31",
+                "label": "Headset Mic",
+                "backend": "pipewire",
+                "required": True,
+            },
+            {
+                "role": "playback_stream",
+                "source_id": "system_audio",
+                "route_id": "pulse:sink-input:151",
+                "label": "Meeting Stream",
+                "backend": "pulse",
+                "required": True,
+            },
+            {
+                "role": "output_sink",
+                "source_id": None,
+                "route_id": "pipewire:node:42",
+                "label": "Speakers",
+                "backend": "pipewire",
+                "required": True,
+            },
+        ],
+        "status": "planned",
+    }
+
+    record = update_session_capture_plan(created_session.record_path, capture_plan)
+    validator = Draft202012Validator(
+        _load_session_record_schema(),
+        format_checker=FormatChecker(),
+    )
+
+    assert record["capture_plan"] == capture_plan
+    validator.validate(record)
+
+
 def test_update_session_capture_metadata_writes_schema_valid_session_record(
     tmp_path: Path,
 ) -> None:
@@ -217,6 +305,7 @@ def test_update_session_capture_metadata_writes_schema_valid_session_record(
     )
     capture_metadata = {
         "version": 1,
+        "profile": "online_dual_stream",
         "sample_rate": 48000,
         "channels": 1,
         "segment_seconds": 30,
@@ -228,10 +317,24 @@ def test_update_session_capture_metadata_writes_schema_valid_session_record(
                 "path": "/tmp/local_mic_000001.wav",
                 "sample_rate": 48000,
                 "channels": 1,
+                "channel_layout": "mono",
+                "sample_format": "pcm_s16le",
                 "byte_count": 44,
+                "duration_seconds": 30.0,
+                "started_at": None,
+                "ended_at": None,
                 "sha256": "0" * 64,
                 "status": "sealed",
                 "format": "wav",
+            }
+        ],
+        "sources": [
+            {
+                "source_id": "local_mic",
+                "route_id": "pipewire:node:31",
+                "route_label": "Headset Mic",
+                "channel_layout": "mono",
+                "segment_count": 1,
             }
         ],
     }
@@ -268,3 +371,16 @@ def test_parse_capture_profile_rejects_unknown_profile() -> None:
 def _load_session_record_schema() -> dict[str, object]:
     schema_path = files("mena.schemas").joinpath("session-record.v1.schema.json")
     return cast(dict[str, object], json.loads(schema_path.read_text(encoding="utf-8")))
+
+
+def _not_started_recording() -> dict[str, object]:
+    return {
+        "started_at": None,
+        "stopped_at": None,
+        "stop_reason": None,
+        "finalization": {
+            "status": "not_started",
+            "completed_at": None,
+            "error": None,
+        },
+    }

@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
-from mena.profiles import CaptureSourceId
+from mena.profiles import CaptureProfileId, CaptureSourceId
 
 CAPTURE_METADATA_VERSION = 1
 DEFAULT_SAMPLE_RATE = 48_000
@@ -26,8 +26,9 @@ class CaptureRoutePlan:
 
     session_id: str
     microphone_route_id: str
-    playback_stream_route_id: str
-    output_sink_route_id: str
+    playback_stream_route_id: str | None = None
+    output_sink_route_id: str | None = None
+    profile_id: CaptureProfileId = CaptureProfileId.ONLINE_DUAL_STREAM
 
 
 @dataclass(frozen=True)
@@ -39,7 +40,12 @@ class CaptureSegment:
     path: Path
     sample_rate: int
     channels: int
+    channel_layout: str
+    sample_format: str
     byte_count: int
+    duration_seconds: float
+    started_at: str | None
+    ended_at: str | None
     sha256: str
     status: str = "sealed"
     format: str = "wav"
@@ -51,7 +57,12 @@ class CaptureSegment:
             "path": str(self.path),
             "sample_rate": self.sample_rate,
             "channels": self.channels,
+            "channel_layout": self.channel_layout,
+            "sample_format": self.sample_format,
             "byte_count": self.byte_count,
+            "duration_seconds": self.duration_seconds,
+            "started_at": self.started_at,
+            "ended_at": self.ended_at,
             "sha256": self.sha256,
             "status": self.status,
             "format": self.format,
@@ -63,6 +74,7 @@ class CaptureMetadata:
     """Capture facts emitted by the worker and persisted by the orchestrator."""
 
     version: int
+    profile_id: CaptureProfileId
     sample_rate: int
     channels: int
     segment_seconds: int
@@ -71,11 +83,13 @@ class CaptureMetadata:
     def to_dict(self) -> dict[str, object]:
         return {
             "version": self.version,
+            "profile": self.profile_id.value,
             "sample_rate": self.sample_rate,
             "channels": self.channels,
             "segment_seconds": self.segment_seconds,
             "segment_count": len(self.segments),
             "segments": [segment.to_dict() for segment in self.segments],
+            "sources": _source_summaries(self.segments),
         }
 
 
@@ -120,7 +134,17 @@ class WavSegmentWriter:
             path=path,
             sample_rate=self.sample_rate,
             channels=self.channels,
+            channel_layout=_channel_layout(self.channels),
+            sample_format=_sample_format(self.sample_width_bytes),
             byte_count=len(wav_bytes),
+            duration_seconds=_duration_seconds(
+                len(pcm_bytes),
+                sample_rate=self.sample_rate,
+                channels=self.channels,
+                sample_width_bytes=self.sample_width_bytes,
+            ),
+            started_at=None,
+            ended_at=None,
             sha256=hashlib.sha256(wav_bytes).hexdigest(),
         )
 
@@ -274,6 +298,8 @@ class PipeWirePcmProvider:
     ) -> str:
         if source_id is CaptureSourceId.LOCAL_MIC:
             return _pipewire_node_id(plan.microphone_route_id)
+        if source_id is CaptureSourceId.ROOM_MIC:
+            return _pipewire_node_id(plan.microphone_route_id)
         if source_id is CaptureSourceId.SYSTEM_AUDIO:
             return f"{sink_name}.monitor"
         raise ValueError(f"Unsupported capture source '{source_id}'.")
@@ -344,6 +370,18 @@ class PipeWireCaptureAdapter:
 
     def start(self, plan: CaptureRoutePlan) -> ActivePipeWireCapture:
         sink_name = session_null_sink_name(plan.session_id)
+        if plan.profile_id is CaptureProfileId.IN_PERSON_SINGLE_MIC:
+            return ActivePipeWireCapture(
+                adapter=self,
+                plan=plan,
+                sink_name=sink_name,
+                null_sink_module=None,
+                loopback_module=None,
+            )
+        if plan.playback_stream_route_id is None:
+            raise ValueError("Online capture requires a playback stream route.")
+        if plan.output_sink_route_id is None:
+            raise ValueError("Online capture requires an output sink route.")
         null_sink_module = self.client.create_null_sink(sink_name)
         loopback_module: str | None = None
         try:
@@ -365,7 +403,13 @@ class PipeWireCaptureAdapter:
         *,
         plan: CaptureRoutePlan,
         sink_name: str,
-    ) -> tuple[CaptureSegment, CaptureSegment]:
+    ) -> tuple[CaptureSegment, ...]:
+        if plan.profile_id is CaptureProfileId.IN_PERSON_SINGLE_MIC:
+            room = self.segment_writer.write_segment(
+                CaptureSourceId.ROOM_MIC,
+                self._read_pcm(CaptureSourceId.ROOM_MIC, plan=plan, sink_name=sink_name),
+            )
+            return (room,)
         if self.pcm_provider is None:
             pcm_by_source = self.pipewire_pcm_provider.read_aligned_segments(
                 plan=plan,
@@ -425,7 +469,7 @@ class ActivePipeWireCapture:
         adapter: PipeWireCaptureAdapter,
         plan: CaptureRoutePlan,
         sink_name: str,
-        null_sink_module: str,
+        null_sink_module: str | None,
         loopback_module: str | None,
     ) -> None:
         self._adapter = adapter
@@ -456,6 +500,7 @@ class ActivePipeWireCapture:
                 self._stopped = True
         return CaptureMetadata(
             version=CAPTURE_METADATA_VERSION,
+            profile_id=self._plan.profile_id,
             sample_rate=self._adapter.segment_writer.sample_rate,
             channels=self._adapter.segment_writer.channels,
             segment_seconds=self._adapter.segment_seconds,
@@ -531,6 +576,49 @@ def _communicate_bounded(
         stdout, stderr = process.communicate()
     returncode = getattr(process, "returncode", 0)
     return stdout, stderr, returncode
+
+
+def _channel_layout(channels: int) -> str:
+    if channels == 1:
+        return "mono"
+    if channels == 2:
+        return "stereo"
+    return f"{channels}_channels"
+
+
+def _sample_format(sample_width_bytes: int) -> str:
+    return f"pcm_s{sample_width_bytes * 8}le"
+
+
+def _duration_seconds(
+    pcm_byte_count: int,
+    *,
+    sample_rate: int,
+    channels: int,
+    sample_width_bytes: int,
+) -> float:
+    frame_width = channels * sample_width_bytes
+    if frame_width <= 0 or sample_rate <= 0:
+        return 0.0
+    return pcm_byte_count / frame_width / sample_rate
+
+
+def _source_summaries(segments: tuple[CaptureSegment, ...]) -> list[dict[str, object]]:
+    ordered_source_ids = tuple(dict.fromkeys(segment.source_id for segment in segments))
+    summaries: list[dict[str, object]] = []
+    for source_id in ordered_source_ids:
+        source_segments = [segment for segment in segments if segment.source_id is source_id]
+        channel_layout = source_segments[-1].channel_layout if source_segments else "unknown"
+        summaries.append(
+            {
+                "source_id": source_id.value,
+                "route_id": None,
+                "route_label": None,
+                "channel_layout": channel_layout,
+                "segment_count": len(source_segments),
+            }
+        )
+    return summaries
 
 
 def _pulse_sink_input_id(route_id: str) -> str:

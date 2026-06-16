@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import TracebackType
@@ -12,9 +13,17 @@ from typing import IO, Self
 from uuid import uuid4
 
 PROTOCOL_MAJOR = 1
-PROTOCOL_MINOR = 0
+PROTOCOL_MINOR = 1
 ENVELOPE_VERSION = 1
 MAX_FRAME_BYTES = 64 * 1024
+
+CAPTURE_PROFILE_IDS = frozenset({"online_dual_stream", "in_person_single_mic"})
+CAPTURE_SOURCE_IDS = frozenset({"local_mic", "system_audio", "room_mic"})
+CAPTURE_ROUTE_ROLES = frozenset({"microphone", "playback_stream", "output_sink"})
+CAPTURE_STATUS_VALUES = frozenset({"recording", "finalizing"})
+CAPTURE_FINALIZED_STATUS_VALUES = frozenset({"recorded", "interrupted_partial", "failed"})
+CAPTURE_STOP_REASONS = frozenset({"user_stop", "orchestrator_eof", "interrupted", "error"})
+SEGMENT_STATUS_VALUES = frozenset({"sealed", "partial", "failed"})
 
 MESSAGE_TYPES = frozenset(
     {
@@ -23,6 +32,7 @@ MESSAGE_TYPES = frozenset(
         "start_capture",
         "stop_capture",
         "capture_started",
+        "capture_status",
         "segment_flushed",
         "capture_finalized",
         "error",
@@ -60,6 +70,7 @@ class ProtocolMessage:
             raise ProtocolError("Protocol session_id must be a non-empty string.")
         if not isinstance(self.payload, dict):
             raise ProtocolError("Protocol payload must be a JSON object.")
+        validate_payload_for_type(self.type, self.payload)
         frame = {
             "v": self.v,
             "type": self.type,
@@ -102,6 +113,7 @@ class ProtocolMessage:
         payload = data.get("payload")
         if not isinstance(payload, dict):
             raise ProtocolError("Protocol payload must be a JSON object.")
+        validate_payload_for_type(message_type, payload)
 
         return cls(
             v=version,
@@ -118,6 +130,379 @@ def validate_message_type(message_type: str) -> None:
         raise ProtocolError(
             f"Unknown protocol message type '{message_type}'. Valid types: {valid_types}."
         )
+
+
+@dataclass(frozen=True)
+class CaptureRouteBindingPayload:
+    """One concrete route binding inside a start-capture request."""
+
+    role: str
+    source_id: str | None
+    route_id: str
+    label: str
+    backend: str
+    required: bool
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "role": self.role,
+            "source_id": self.source_id,
+            "route_id": self.route_id,
+            "label": self.label,
+            "backend": self.backend,
+            "required": self.required,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> Self:
+        payload = _ensure_mapping(data, "capture route binding")
+        _require_exact_keys(
+            payload,
+            {"role", "source_id", "route_id", "label", "backend", "required"},
+            "capture route binding",
+        )
+        source_id = _optional_enum_str(
+            payload,
+            "source_id",
+            CAPTURE_SOURCE_IDS,
+            "capture route binding",
+        )
+        return cls(
+            role=_required_enum_str(
+                payload,
+                "role",
+                CAPTURE_ROUTE_ROLES,
+                "capture route binding",
+            ),
+            source_id=source_id,
+            route_id=_required_str(payload, "route_id"),
+            label=_required_str(payload, "label"),
+            backend=_required_str(payload, "backend"),
+            required=_required_bool(payload, "required"),
+        )
+
+
+@dataclass(frozen=True)
+class StartCapturePayload:
+    """Strict route plan sent by the orchestrator before capture begins."""
+
+    profile: str
+    language: str
+    segment_seconds: int
+    selected_sources: tuple[str, ...]
+    routes: tuple[CaptureRouteBindingPayload, ...]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "profile": self.profile,
+            "language": self.language,
+            "segment_seconds": self.segment_seconds,
+            "selected_sources": list(self.selected_sources),
+            "routes": [route.to_dict() for route in self.routes],
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> Self:
+        payload = _ensure_mapping(data, "start_capture payload")
+        _require_exact_keys(
+            payload,
+            {"profile", "language", "segment_seconds", "selected_sources", "routes"},
+            "start_capture payload",
+        )
+        selected_sources = _required_str_sequence(
+            payload,
+            "selected_sources",
+            "start_capture payload",
+        )
+        if not selected_sources:
+            raise ProtocolError("start_capture payload selected_sources must not be empty.")
+        invalid_sources = sorted(set(selected_sources) - CAPTURE_SOURCE_IDS)
+        if invalid_sources:
+            raise ProtocolError(
+                "start_capture payload selected_sources contains unsupported source "
+                f"'{invalid_sources[0]}'."
+            )
+        if len(set(selected_sources)) != len(selected_sources):
+            raise ProtocolError("start_capture payload selected_sources must be unique.")
+        raw_routes = _required_list(payload, "routes", "start_capture payload")
+        parsed_routes: list[CaptureRouteBindingPayload] = []
+        for route in raw_routes:
+            if not isinstance(route, dict):
+                raise ProtocolError("start_capture payload routes must contain JSON objects.")
+            parsed_routes.append(CaptureRouteBindingPayload.from_dict(route))
+        routes = tuple(parsed_routes)
+        if not routes:
+            raise ProtocolError("start_capture payload routes must not be empty.")
+        return cls(
+            profile=_required_enum_str(
+                payload,
+                "profile",
+                CAPTURE_PROFILE_IDS,
+                "start_capture payload",
+            ),
+            language=_required_str(payload, "language"),
+            segment_seconds=_required_positive_int(payload, "segment_seconds"),
+            selected_sources=selected_sources,
+            routes=routes,
+        )
+
+
+@dataclass(frozen=True)
+class CaptureStartedPayload:
+    """Worker event confirming capture startup."""
+
+    session_dir: str
+    profile: str
+    segment_seconds: int
+    selected_sources: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "session_dir": self.session_dir,
+            "profile": self.profile,
+            "segment_seconds": self.segment_seconds,
+            "selected_sources": list(self.selected_sources),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> Self:
+        payload = _ensure_mapping(data, "capture_started payload")
+        _require_exact_keys(
+            payload,
+            {"session_dir", "profile", "segment_seconds", "selected_sources"},
+            "capture_started payload",
+        )
+        selected_sources = _required_str_sequence(
+            payload,
+            "selected_sources",
+            "capture_started payload",
+        )
+        if not selected_sources:
+            raise ProtocolError("capture_started payload selected_sources must not be empty.")
+        invalid_sources = sorted(set(selected_sources) - CAPTURE_SOURCE_IDS)
+        if invalid_sources:
+            raise ProtocolError(
+                "capture_started payload selected_sources contains unsupported source "
+                f"'{invalid_sources[0]}'."
+            )
+        return cls(
+            session_dir=_required_str(payload, "session_dir"),
+            profile=_required_enum_str(
+                payload,
+                "profile",
+                CAPTURE_PROFILE_IDS,
+                "capture_started payload",
+            ),
+            segment_seconds=_required_positive_int(payload, "segment_seconds"),
+            selected_sources=selected_sources,
+        )
+
+
+@dataclass(frozen=True)
+class CaptureStatusPayload:
+    """Worker heartbeat while capture is active."""
+
+    status: str
+    elapsed_seconds: float
+    sealed_segment_count: int
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "status": self.status,
+            "elapsed_seconds": self.elapsed_seconds,
+            "sealed_segment_count": self.sealed_segment_count,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> Self:
+        payload = _ensure_mapping(data, "capture_status payload")
+        _require_exact_keys(
+            payload,
+            {"status", "elapsed_seconds", "sealed_segment_count"},
+            "capture_status payload",
+        )
+        return cls(
+            status=_required_enum_str(
+                payload,
+                "status",
+                CAPTURE_STATUS_VALUES,
+                "capture_status payload",
+            ),
+            elapsed_seconds=_required_non_negative_number(payload, "elapsed_seconds"),
+            sealed_segment_count=_required_non_negative_int(payload, "sealed_segment_count"),
+        )
+
+
+@dataclass(frozen=True)
+class SegmentFlushedPayload:
+    """Worker event for one sealed source segment."""
+
+    source_id: str
+    index: int
+    path: str
+    sample_rate: int
+    channels: int
+    channel_layout: str
+    sample_format: str
+    byte_count: int
+    duration_seconds: float
+    started_at: str | None
+    ended_at: str | None
+    sha256: str
+    status: str
+    format: str
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> Self:
+        payload = _ensure_mapping(data, "segment_flushed payload")
+        _require_exact_keys(
+            payload,
+            {
+                "source_id",
+                "index",
+                "path",
+                "sample_rate",
+                "channels",
+                "channel_layout",
+                "sample_format",
+                "byte_count",
+                "duration_seconds",
+                "started_at",
+                "ended_at",
+                "sha256",
+                "status",
+                "format",
+            },
+            "segment_flushed payload",
+        )
+        segment_format = _required_str(payload, "format")
+        if segment_format != "wav":
+            raise ProtocolError("segment_flushed payload format must be 'wav'.")
+        return cls(
+            source_id=_required_enum_str(
+                payload,
+                "source_id",
+                CAPTURE_SOURCE_IDS,
+                "segment_flushed payload",
+            ),
+            index=_required_positive_int(payload, "index"),
+            path=_required_str(payload, "path"),
+            sample_rate=_required_positive_int(payload, "sample_rate"),
+            channels=_required_positive_int(payload, "channels"),
+            channel_layout=_required_str(payload, "channel_layout"),
+            sample_format=_required_str(payload, "sample_format"),
+            byte_count=_required_non_negative_int(payload, "byte_count"),
+            duration_seconds=_required_non_negative_number(payload, "duration_seconds"),
+            started_at=_optional_str(payload, "started_at", "segment_flushed payload"),
+            ended_at=_optional_str(payload, "ended_at", "segment_flushed payload"),
+            sha256=_required_sha256(payload, "sha256"),
+            status=_required_enum_str(
+                payload,
+                "status",
+                SEGMENT_STATUS_VALUES,
+                "segment_flushed payload",
+            ),
+            format=segment_format,
+        )
+
+
+@dataclass(frozen=True)
+class CaptureFinalizedPayload:
+    """Worker event for normal or partial capture finalization."""
+
+    status: str
+    stop_reason: str
+    completed_at: str | None
+    error: str | None
+    capture_metadata: dict[str, object]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "status": self.status,
+            "stop_reason": self.stop_reason,
+            "completed_at": self.completed_at,
+            "error": self.error,
+            "capture_metadata": self.capture_metadata,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> Self:
+        payload = _ensure_mapping(data, "capture_finalized payload")
+        _require_exact_keys(
+            payload,
+            {"status", "stop_reason", "completed_at", "error", "capture_metadata"},
+            "capture_finalized payload",
+        )
+        capture_metadata = _required_mapping(
+            payload,
+            "capture_metadata",
+            "capture_finalized payload",
+        )
+        _validate_capture_metadata(capture_metadata)
+        return cls(
+            status=_required_enum_str(
+                payload,
+                "status",
+                CAPTURE_FINALIZED_STATUS_VALUES,
+                "capture_finalized payload",
+            ),
+            stop_reason=_required_enum_str(
+                payload,
+                "stop_reason",
+                CAPTURE_STOP_REASONS,
+                "capture_finalized payload",
+            ),
+            completed_at=_optional_str(payload, "completed_at", "capture_finalized payload"),
+            error=_optional_str(payload, "error", "capture_finalized payload"),
+            capture_metadata=dict(capture_metadata),
+        )
+
+
+@dataclass(frozen=True)
+class ErrorPayload:
+    """Structured protocol error event."""
+
+    code: str
+    message: str
+    recoverable: bool
+    details: dict[str, object]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "code": self.code,
+            "message": self.message,
+            "recoverable": self.recoverable,
+            "details": self.details,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> Self:
+        payload = _ensure_mapping(data, "error payload")
+        _require_exact_keys(payload, {"code", "message", "recoverable", "details"}, "error payload")
+        details = _required_mapping(payload, "details", "error payload")
+        return cls(
+            code=_required_str(payload, "code"),
+            message=_required_str(payload, "message"),
+            recoverable=_required_bool(payload, "recoverable"),
+            details=dict(details),
+        )
+
+
+def validate_payload_for_type(message_type: str, payload: Mapping[str, object]) -> None:
+    """Validate typed payloads for #83 protocol messages."""
+
+    if message_type == "start_capture":
+        StartCapturePayload.from_dict(payload)
+    elif message_type == "capture_started":
+        CaptureStartedPayload.from_dict(payload)
+    elif message_type == "capture_status":
+        CaptureStatusPayload.from_dict(payload)
+    elif message_type == "segment_flushed":
+        SegmentFlushedPayload.from_dict(payload)
+    elif message_type == "capture_finalized":
+        CaptureFinalizedPayload.from_dict(payload)
+    elif message_type == "error":
+        ErrorPayload.from_dict(payload)
 
 
 def read_message(stream: IO[bytes]) -> ProtocolMessage:
@@ -165,6 +550,7 @@ def validate_hello(message: ProtocolMessage) -> None:
         raise ProtocolError(
             f"Unsupported protocol major version {protocol_major}; expected {PROTOCOL_MAJOR}."
         )
+    _required_int(message.payload, "protocol_minor")
     if message.payload.get("role") != "worker":
         raise ProtocolError("Hello role must be 'worker'.")
 
@@ -231,20 +617,30 @@ class WorkerProcess:
             raise ProtocolError("Worker rejected protocol handshake.")
         return response
 
-    def start_capture(self, payload: dict[str, object] | None = None) -> ProtocolMessage:
+    def start_capture(
+        self,
+        payload: StartCapturePayload | Mapping[str, object],
+    ) -> ProtocolMessage:
+        payload_dict = (
+            payload.to_dict() if isinstance(payload, StartCapturePayload) else dict(payload)
+        )
         self.send(
-            ProtocolMessage(type="start_capture", session_id=self.session_id, payload=payload or {})
+            ProtocolMessage(type="start_capture", session_id=self.session_id, payload=payload_dict)
         )
         return self.receive_expected("capture_started")
 
     def stop_capture(self) -> ProtocolMessage:
-        self.send(ProtocolMessage(type="stop_capture", session_id=self.session_id))
+        self.request_stop_capture()
         while True:
             message = self.receive()
             if message.type == "capture_finalized":
                 return message
             if message.type == "error":
-                raise ProtocolError(str(message.payload.get("message", "Worker capture error.")))
+                error = ErrorPayload.from_dict(message.payload)
+                raise ProtocolError(error.message)
+
+    def request_stop_capture(self) -> None:
+        self.send(ProtocolMessage(type="stop_capture", session_id=self.session_id))
 
     def send(self, message: ProtocolMessage) -> None:
         if self.process.stdin is None:
@@ -302,6 +698,188 @@ def _required_str(data: dict[str, object], key: str) -> str:
 
 def _required_int(data: dict[str, object], key: str) -> int:
     value = data.get(key)
-    if not isinstance(value, int):
+    if type(value) is not int:
         raise ProtocolError(f"Protocol field '{key}' must be an integer.")
     return value
+
+
+def _required_positive_int(data: dict[str, object], key: str) -> int:
+    value = _required_int(data, key)
+    if value < 1:
+        raise ProtocolError(f"Protocol field '{key}' must be a positive integer.")
+    return value
+
+
+def _required_non_negative_int(data: dict[str, object], key: str) -> int:
+    value = _required_int(data, key)
+    if value < 0:
+        raise ProtocolError(f"Protocol field '{key}' must be non-negative.")
+    return value
+
+
+def _required_bool(data: dict[str, object], key: str) -> bool:
+    value = data.get(key)
+    if type(value) is not bool:
+        raise ProtocolError(f"Protocol field '{key}' must be a boolean.")
+    return value
+
+
+def _required_non_negative_number(data: dict[str, object], key: str) -> float:
+    value = data.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ProtocolError(f"Protocol field '{key}' must be a number.")
+    normalized = float(value)
+    if normalized < 0:
+        raise ProtocolError(f"Protocol field '{key}' must be non-negative.")
+    return normalized
+
+
+def _required_enum_str(
+    data: dict[str, object],
+    key: str,
+    allowed_values: frozenset[str],
+    context: str,
+) -> str:
+    value = _required_str(data, key)
+    if value not in allowed_values:
+        allowed = ", ".join(sorted(allowed_values))
+        raise ProtocolError(f"{context} field '{key}' must be one of: {allowed}.")
+    return value
+
+
+def _optional_enum_str(
+    data: dict[str, object],
+    key: str,
+    allowed_values: frozenset[str],
+    context: str,
+) -> str | None:
+    value = data.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise ProtocolError(f"{context} field '{key}' must be a non-empty string or null.")
+    if value not in allowed_values:
+        allowed = ", ".join(sorted(allowed_values))
+        raise ProtocolError(f"{context} field '{key}' must be one of: {allowed}, or null.")
+    return value
+
+
+def _optional_str(data: dict[str, object], key: str, context: str) -> str | None:
+    value = data.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise ProtocolError(f"{context} field '{key}' must be a non-empty string or null.")
+    return value
+
+
+def _required_sha256(data: dict[str, object], key: str) -> str:
+    value = _required_str(data, key)
+    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+        raise ProtocolError(f"Protocol field '{key}' must be a lowercase SHA-256 hex digest.")
+    return value
+
+
+def _ensure_mapping(data: Mapping[str, object], context: str) -> dict[str, object]:
+    if not isinstance(data, dict):
+        raise ProtocolError(f"{context} must be a JSON object.")
+    return data
+
+
+def _required_mapping(
+    data: dict[str, object],
+    key: str,
+    context: str,
+) -> dict[str, object]:
+    value = data.get(key)
+    if not isinstance(value, dict):
+        raise ProtocolError(f"{context} field '{key}' must be a JSON object.")
+    return value
+
+
+def _required_list(
+    data: dict[str, object],
+    key: str,
+    context: str,
+) -> list[object]:
+    value = data.get(key)
+    if not isinstance(value, list):
+        raise ProtocolError(f"{context} field '{key}' must be an array.")
+    return value
+
+
+def _required_str_sequence(
+    data: dict[str, object],
+    key: str,
+    context: str,
+) -> tuple[str, ...]:
+    values = _required_list(data, key, context)
+    strings: list[str] = []
+    for index, value in enumerate(values):
+        if not isinstance(value, str) or not value:
+            raise ProtocolError(f"{context} field '{key}' item {index} must be a non-empty string.")
+        strings.append(value)
+    return tuple(strings)
+
+
+def _require_exact_keys(
+    data: Mapping[str, object],
+    required_keys: set[str],
+    context: str,
+) -> None:
+    keys = set(data)
+    missing = sorted(required_keys - keys)
+    if missing:
+        raise ProtocolError(f"{context} is missing required field '{missing[0]}'.")
+    extra = sorted(keys - required_keys)
+    if extra:
+        raise ProtocolError(f"{context} contains unsupported field '{extra[0]}'.")
+
+
+def _validate_capture_metadata(data: dict[str, object]) -> None:
+    _require_exact_keys(
+        data,
+        {
+            "version",
+            "profile",
+            "sample_rate",
+            "channels",
+            "segment_seconds",
+            "segment_count",
+            "segments",
+            "sources",
+        },
+        "capture_metadata",
+    )
+    if _required_int(data, "version") != 1:
+        raise ProtocolError("capture_metadata field 'version' must be 1.")
+    _required_enum_str(data, "profile", CAPTURE_PROFILE_IDS, "capture_metadata")
+    _required_positive_int(data, "sample_rate")
+    _required_positive_int(data, "channels")
+    _required_positive_int(data, "segment_seconds")
+    segment_count = _required_non_negative_int(data, "segment_count")
+    segments = _required_list(data, "segments", "capture_metadata")
+    if segment_count != len(segments):
+        raise ProtocolError("capture_metadata segment_count must match segments length.")
+    for segment in segments:
+        if not isinstance(segment, dict):
+            raise ProtocolError("capture_metadata segments must contain JSON objects.")
+        SegmentFlushedPayload.from_dict(segment)
+    sources = _required_list(data, "sources", "capture_metadata")
+    for source in sources:
+        if not isinstance(source, dict):
+            raise ProtocolError("capture_metadata sources must contain JSON objects.")
+        _validate_capture_source_summary(source)
+
+
+def _validate_capture_source_summary(data: dict[str, object]) -> None:
+    _require_exact_keys(
+        data,
+        {"source_id", "route_id", "route_label", "channel_layout", "segment_count"},
+        "capture source summary",
+    )
+    _required_enum_str(data, "source_id", CAPTURE_SOURCE_IDS, "capture source summary")
+    _optional_str(data, "route_id", "capture source summary")
+    _optional_str(data, "route_label", "capture source summary")
+    _required_str(data, "channel_layout")
+    _required_non_negative_int(data, "segment_count")
