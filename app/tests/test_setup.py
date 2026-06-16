@@ -119,6 +119,7 @@ def test_runtime_profile_state_persists_under_runtime_state_home(tmp_path: Path)
     accepted = build_runtime_profile_state(
         evaluation,
         fallback_evaluation=fallback_evaluation,
+        authorize_local_fallback=True,
     )
     state_path = persist_runtime_profile_state(accepted, paths=state.runtime_paths)
     loaded = load_runtime_profile_state(state.runtime_paths)
@@ -138,6 +139,26 @@ def test_runtime_profile_state_persists_under_runtime_state_home(tmp_path: Path)
         "semantic-review",
     }
     assert loaded.fallback_authorization.remote_status == "not_configured"
+
+
+def test_runtime_profile_state_requires_explicit_local_fallback_authorization() -> None:
+    profile = get_alpha_local_profile()
+    state = _state(asr_model_present=True, diarization_model_present=True)
+    evaluation = evaluate_setup(profile, state)
+    fallback_evaluation = evaluate_setup(default_profile_catalog()[1], state)
+
+    accepted = build_runtime_profile_state(
+        evaluation,
+        fallback_evaluation=fallback_evaluation,
+    )
+
+    assert accepted.fallback_authorization.local_status == "configured_unauthorized"
+    assert accepted.fallback_authorization.local_profile_id == FALLBACK_LOCAL_PROFILE_ID
+    assert accepted.fallback_authorization.automatic_local_fallback_authorized is False
+    assert (
+        "automatic local fallback was not authorized by setup"
+        in accepted.fallback_authorization.blocking_reasons
+    )
 
 
 def test_runtime_profile_state_does_not_authorize_unevaluated_local_fallback() -> None:

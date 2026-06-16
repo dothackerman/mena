@@ -31,7 +31,9 @@ from mena.transcription import FasterWhisperTranscriptionProvider
 
 ProviderFactory = Callable[[], Any]
 RUNTIME_PROFILE_PROVENANCE_CONTRACT = "runtime-profile-provenance.v1"
-PROCESSING_RUNTIME_STAGES = frozenset({"transcription", "diarization", "semantic-review"})
+PROCESSING_REQUIRED_RUNTIME_STAGES = frozenset({"transcription", "diarization"})
+PROCESSING_OPTIONAL_RUNTIME_STAGES = frozenset({"semantic-review"})
+PROCESSING_RUNTIME_STAGES = PROCESSING_REQUIRED_RUNTIME_STAGES | PROCESSING_OPTIONAL_RUNTIME_STAGES
 SUMMARIZATION_RUNTIME_STAGES = frozenset({"summarization"})
 
 

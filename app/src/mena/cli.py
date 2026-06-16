@@ -73,7 +73,7 @@ from mena.review_flagging import (
     run_confidence_flagging_stage,
 )
 from mena.runtime_profile import (
-    PROCESSING_RUNTIME_STAGES,
+    PROCESSING_REQUIRED_RUNTIME_STAGES,
     SUMMARIZATION_RUNTIME_STAGES,
     RuntimeProfileSelection,
     production_runtime_required,
@@ -115,6 +115,7 @@ from mena.setup import (
     CommandRunner,
     HardwareFacts,
     ReadinessItem,
+    RuntimeProfileState,
     SetupEvaluation,
     SubprocessCommandRunner,
     build_runtime_profile_state,
@@ -218,6 +219,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Confirm planned automated setup actions without prompting.",
     )
+    setup_parser.add_argument(
+        "--authorize-local-fallback",
+        action="store_true",
+        help="Authorize automatic local runtime fallback when the fallback profile is ready.",
+    )
     setup_parser.set_defaults(command="setup")
 
     for command in COMMANDS[1:]:
@@ -310,6 +316,7 @@ def main(
         return _run_setup_command(
             check_only=args.check,
             assume_yes=args.yes,
+            authorize_local_fallback=args.authorize_local_fallback,
             settings=app_settings,
             input_fn=input_fn,
             runner=setup_runner,
@@ -496,6 +503,7 @@ def _run_setup_command(
     *,
     check_only: bool,
     assume_yes: bool,
+    authorize_local_fallback: bool,
     settings: AppSettings,
     input_fn: Callable[[str], str] | None,
     runner: CommandRunner | None,
@@ -533,8 +541,10 @@ def _run_setup_command(
         accepted_state = build_runtime_profile_state(
             evaluation,
             fallback_evaluation=fallback_evaluation,
+            authorize_local_fallback=authorize_local_fallback,
         )
         state_path = persist_runtime_profile_state(accepted_state, paths=settings.paths)
+        _print_runtime_fallback_authorization_notice(accepted_state)
         print(f"Accepted runtime profile state: {state_path}")
         return 0
     if not evaluation.plan.actions:
@@ -596,8 +606,10 @@ def _run_setup_command(
         accepted_state = build_runtime_profile_state(
             refreshed_evaluation,
             fallback_evaluation=fallback_evaluation,
+            authorize_local_fallback=authorize_local_fallback,
         )
         state_path = persist_runtime_profile_state(accepted_state, paths=settings.paths)
+        _print_runtime_fallback_authorization_notice(accepted_state)
         print(f"Accepted runtime profile state: {state_path}")
     return 0 if final_ready else 1
 
@@ -627,6 +639,18 @@ def _evaluate_setup_fallback_authorization(
         profile=fallback_profile,
     )
     return evaluate_setup(fallback_profile, fallback_state)
+
+
+def _print_runtime_fallback_authorization_notice(state: RuntimeProfileState) -> None:
+    authorization = state.fallback_authorization
+    if authorization.local_status == "authorized":
+        stages = ", ".join(authorization.stage_scope)
+        print(f"Automatic local runtime fallback authorized for: {stages}.")
+    elif authorization.local_status == "configured_unauthorized":
+        print(
+            "Automatic local runtime fallback is not authorized; rerun `mena setup "
+            "--authorize-local-fallback` to permit setup-evaluated local fallback."
+        )
 
 
 def _readiness_item_failed(
@@ -780,7 +804,7 @@ def _record_terminal_local_llm_release(
         stage=stage,
         boundary=boundary,
     )
-    if result.status == "not_supported":
+    if _release_skipped_without_observed_resource_use(result):
         return None
     store_runtime_stewardship_provenance(
         store=store,
@@ -789,11 +813,19 @@ def _record_terminal_local_llm_release(
         boundary=boundary,
         release_results=(result,),
     )
-    if result.status == "failed":
+    if result.status in {"failed", "not_supported"}:
         print(f"Runtime stewardship warning: {result.detail}")
     else:
         print(f"Runtime stewardship: {result.detail}")
     return result
+
+
+def _release_skipped_without_observed_resource_use(result: RuntimeReleaseResult) -> bool:
+    return (
+        result.status == "not_supported"
+        and result.detail
+        == "Provider did not observe Mena-owned runtime resource use for this lease."
+    )
 
 
 def _run_inspect_command(
@@ -846,7 +878,7 @@ def _run_processing_command(
             command_identity=setup_command_identity,
             hardware=setup_hardware,
             allow_runtime_fallback=allow_runtime_fallback,
-            required_stages=PROCESSING_RUNTIME_STAGES,
+            required_stages=PROCESSING_REQUIRED_RUNTIME_STAGES,
         )
         store_runtime_profile_provenance(
             store=store,
@@ -865,7 +897,7 @@ def _run_processing_command(
         semantic_coherence_provider_factory = runtime_semantic_factory(
             semantic_coherence_provider_factory,
             settings=effective_settings,
-            runtime_state=runtime_selection.actual,
+            runtime_state=runtime_selection.accepted,
         )
 
     pipeline_timestamp = now if now is not None else datetime.now(UTC)

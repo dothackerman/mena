@@ -21,6 +21,7 @@ from mena.cli import (
     WORKER_EXIT_TIMEOUT_SECONDS,
     SourceAudioInput,
     _collect_capture_segments,
+    _record_terminal_local_llm_release,
     _require_provider,
     _resolve_latest_merged_transcript_record,
     _run_processing_command,
@@ -66,7 +67,7 @@ from mena.review_flagging import (
     persist_review_queue_artifact,
 )
 from mena.runtime_profile import (
-    PROCESSING_RUNTIME_STAGES,
+    PROCESSING_REQUIRED_RUNTIME_STAGES,
     SUMMARIZATION_RUNTIME_STAGES,
     runtime_diarization_factory,
     runtime_semantic_factory,
@@ -338,13 +339,44 @@ def test_setup_yes_executes_planned_actions_through_runner(
     assert any(call[1] == "-c" and "pyannote.audio" in call[2] for call in runner.run_calls)
     assert "Setup action results:" in captured.out
     assert "Local provider readiness: complete" in captured.out
+    assert "Automatic local runtime fallback is not authorized" in captured.out
     assert "Accepted runtime profile state:" in captured.out
     assert (settings.paths.state_home / "setup-state.json").is_file()
+    accepted = load_runtime_profile_state(settings.paths)
+    assert accepted.fallback_authorization.local_status == "configured_unauthorized"
+    assert accepted.fallback_authorization.automatic_local_fallback_authorized is False
     assert "[missing]" in captured.out
     assert (
         captured.out.rsplit("Mena Linux alpha setup preflight", maxsplit=1)[-1].count("[missing]")
         == 0
     )
+
+
+def test_setup_authorize_local_fallback_flag_persists_automatic_authorization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    state = _setup_state(settings=settings, pyannote_token_present=True)
+
+    def _detect_state(_settings: AppSettings, **_kwargs: object) -> LocalInstallationState:
+        return state
+
+    monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
+
+    exit_code = main(
+        ["setup", "--yes", "--authorize-local-fallback"],
+        settings=settings,
+        setup_runner=SetupFakeRunner(),
+    )
+    captured = capsys.readouterr()
+
+    accepted = load_runtime_profile_state(settings.paths)
+    assert exit_code == 0
+    assert "Automatic local runtime fallback authorized for:" in captured.out
+    assert accepted.fallback_authorization.local_status == "authorized"
+    assert accepted.fallback_authorization.automatic_local_fallback_authorized is True
 
 
 def test_setup_evaluates_fallback_profile_before_authorizing_it(
@@ -1848,10 +1880,42 @@ def test_main_process_revalidates_only_derived_runtime_dependencies(
 
     assert main(["process", str(session.record_path)], settings=settings) == 0
 
-    assert set(cast(tuple[str, ...], observed["stages"])) == PROCESSING_RUNTIME_STAGES
-    assert observed["commands"] == ("mena", "ollama")
+    assert set(cast(tuple[str, ...], observed["stages"])) == PROCESSING_REQUIRED_RUNTIME_STAGES
+    assert observed["commands"] == ("mena",)
     assert observed["playback"] == ()
     assert observed["surfaces"] == ("faster_whisper", "pyannote.audio")
+    assert processing_calls["session_id"] == session.record.id
+
+
+def test_main_process_does_not_preflight_optional_semantic_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _build_processing_session(tmp_path)
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    ready_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = build_runtime_profile_state(evaluate_setup(get_alpha_local_profile(), ready_state))
+    persist_runtime_profile_state(accepted, paths=settings.paths)
+
+    def _detect_processing_state(
+        _settings: AppSettings,
+        **kwargs: object,
+    ) -> LocalInstallationState:
+        profile = cast(Any, kwargs["profile"])
+        assert {stage.stage for stage in profile.stages} == PROCESSING_REQUIRED_RUNTIME_STAGES
+        return _setup_state(
+            settings=settings,
+            ollama_model_present=False,
+            pyannote_token_present=True,
+        )
+
+    monkeypatch.setattr(
+        "mena.runtime_profile.detect_local_installation_state", _detect_processing_state
+    )
+    processing_calls = _patch_processing_stages(monkeypatch)
+
+    assert main(["process", str(session.record_path)], settings=settings) == 0
+
     assert processing_calls["session_id"] == session.record.id
 
 
@@ -2260,6 +2324,35 @@ def test_main_process_records_terminal_runtime_stewardship_release(
     assert payload["releases"][0]["status"] == "released"
     assert payload["releases"][0]["lease"]["stage"] == "semantic-review"
     assert payload["releases"][0]["lease"]["provider"] == "ollama"
+
+
+def test_terminal_runtime_stewardship_records_unsupported_release_after_resource_use(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    store = FileSystemArtifactStore(session_id="session-1", session_dir=tmp_path)
+    provider = SimpleNamespace(
+        metadata=SimpleNamespace(name="fake-llm", model="model-a"),
+        runtime_resource_used=True,
+    )
+
+    result = _record_terminal_local_llm_release(
+        store=store,
+        run_id="unsupported-release",
+        attempt=1,
+        provider=provider,
+        stage="semantic-review",
+        boundary="process",
+    )
+    captured = capsys.readouterr()
+
+    stewardship_records = store.list(artifact_type="runtime_stewardship_provenance")
+    assert result is not None
+    assert result.status == "not_supported"
+    assert "Runtime stewardship warning: Provider does not expose" in captured.out
+    assert len(stewardship_records) == 1
+    payload = json.loads(store.retrieve(stewardship_records[0].id))
+    assert payload["releases"][0]["status"] == "not_supported"
 
 
 def test_main_resume_stores_runtime_profile_provenance_per_attempt(
@@ -4132,6 +4225,7 @@ def _runtime_profile_state_with_evaluated_fallback(
     return build_runtime_profile_state(
         evaluate_setup(primary_profile, setup_state),
         fallback_evaluation=evaluate_setup(fallback_profile, setup_state),
+        authorize_local_fallback=True,
     )
 
 

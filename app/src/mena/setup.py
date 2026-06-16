@@ -769,6 +769,7 @@ def build_runtime_profile_state(
     *,
     accepted_at: datetime | None = None,
     fallback_evaluation: SetupEvaluation | None = None,
+    authorize_local_fallback: bool = False,
 ) -> RuntimeProfileState:
     """Build persisted state from an already-ready setup evaluation."""
 
@@ -794,6 +795,7 @@ def build_runtime_profile_state(
         fallback_authorization=_build_runtime_fallback_authorization(
             evaluation,
             fallback_evaluation=fallback_evaluation,
+            authorize_local_fallback=authorize_local_fallback,
         ),
     )
 
@@ -1517,13 +1519,14 @@ def _build_runtime_fallback_authorization(
     evaluation: SetupEvaluation,
     *,
     fallback_evaluation: SetupEvaluation | None,
+    authorize_local_fallback: bool,
 ) -> RuntimeFallbackAuthorization:
+    try:
+        local_llm_model = _local_llm_model(evaluation.profile)
+    except ValueError:
+        return RuntimeFallbackAuthorization.legacy_default()
     fallback_profile = next(
-        (
-            profile
-            for profile in default_profile_catalog(_local_llm_model(evaluation.profile))
-            if profile.fallback
-        ),
+        (profile for profile in default_profile_catalog(local_llm_model) if profile.fallback),
         None,
     )
     if fallback_profile is None:
@@ -1558,6 +1561,18 @@ def _build_runtime_fallback_authorization(
             profile_change_allowed=True,
             remote_status="not_configured",
             blocking_reasons=fallback_evaluation.blocking_reasons,
+        )
+    if not authorize_local_fallback:
+        return RuntimeFallbackAuthorization(
+            local_status="configured_unauthorized",
+            local_profile_id=fallback_profile.id,
+            local_profile_version=fallback_profile.version,
+            automatic_local_fallback_authorized=False,
+            stage_scope=stage_scope,
+            placement_change_allowed=True,
+            profile_change_allowed=True,
+            remote_status="not_configured",
+            blocking_reasons=("automatic local fallback was not authorized by setup",),
         )
     return RuntimeFallbackAuthorization(
         local_status="authorized",
