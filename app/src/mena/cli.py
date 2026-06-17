@@ -6,14 +6,15 @@ import argparse
 import hashlib
 import json
 import queue
+import shutil
 import subprocess
 import sys
 import threading
 import wave
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from io import BytesIO
 from pathlib import Path
 from typing import Any, TypeVar, cast
 from uuid import uuid4
@@ -1730,18 +1731,27 @@ def _prepare_source_audio_inputs(
             )
             continue
 
-        prep_payload, prep_metadata = _stitch_provider_prep_audio(
-            source_id=source_id,
-            segments=tuple(segment_inputs),
-        )
-        prep_sha = hashlib.sha256(prep_payload).hexdigest()
-        prep_artifact = _ensure_provider_prep_audio_artifact(
-            store=store,
-            source_id=source_id,
-            payload=prep_payload,
-            artifact_sha=prep_sha,
-            metadata=prep_metadata,
-        )
+        prep_temp_dir = store.artifact_root / ".provider-prep-tmp"
+        prep_temp_dir.mkdir(parents=True, exist_ok=True)
+        prep_path = prep_temp_dir / f"{source_id}.{uuid4()}.wav"
+        try:
+            prep_metadata = _stitch_provider_prep_audio(
+                source_id=source_id,
+                segments=tuple(segment_inputs),
+                output_path=prep_path,
+            )
+            prep_sha = _required_str(prep_metadata, "sha256")
+            prep_artifact = _ensure_provider_prep_audio_artifact(
+                store=store,
+                source_id=source_id,
+                source_path=prep_path,
+                artifact_sha=prep_sha,
+                metadata=prep_metadata,
+            )
+        finally:
+            prep_path.unlink(missing_ok=True)
+            with suppress(OSError):
+                prep_temp_dir.rmdir()
         inputs[source_id] = SourceAudioInput(
             source_id=source_id,
             index=1,
@@ -1889,44 +1899,44 @@ def _stitch_provider_prep_audio(
     *,
     source_id: str,
     segments: tuple[CaptureSegmentInput, ...],
-) -> tuple[bytes, dict[str, object]]:
+    output_path: Path,
+) -> dict[str, object]:
     if len(segments) < 2:
         raise ValueError("Provider-prep audio requires at least two source segments.")
 
     params: tuple[int, int, int] | None = None
-    frame_chunks: list[bytes] = []
     frame_count = 0
-    for segment in segments:
-        with wave.open(str(segment.path), "rb") as wav_file:
-            if wav_file.getcomptype() != "NONE":
-                raise ValueError(
-                    f"Capture segment for source '{source_id}' must be uncompressed PCM WAV."
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(output_path), "wb") as out:
+        for segment in segments:
+            with wave.open(str(segment.path), "rb") as wav_file:
+                if wav_file.getcomptype() != "NONE":
+                    raise ValueError(
+                        f"Capture segment for source '{source_id}' must be uncompressed PCM WAV."
+                    )
+                segment_params = (
+                    wav_file.getframerate(),
+                    wav_file.getnchannels(),
+                    wav_file.getsampwidth(),
                 )
-            segment_params = (
-                wav_file.getframerate(),
-                wav_file.getnchannels(),
-                wav_file.getsampwidth(),
-            )
-            if params is None:
-                params = segment_params
-            elif segment_params != params:
-                raise ValueError(
-                    f"Capture segments for source '{source_id}' have incompatible WAV format."
-                )
-            frames = wav_file.readframes(wav_file.getnframes())
-            frame_chunks.append(frames)
-            frame_count += wav_file.getnframes()
+                if params is None:
+                    params = segment_params
+                    sample_rate, channels, sample_width = params
+                    out.setnchannels(channels)
+                    out.setsampwidth(sample_width)
+                    out.setframerate(sample_rate)
+                elif segment_params != params:
+                    raise ValueError(
+                        f"Capture segments for source '{source_id}' have incompatible WAV format."
+                    )
+                frame_count += wav_file.getnframes()
+                while frames := wav_file.readframes(32_768):
+                    out.writeframesraw(frames)
 
     if params is None:
         raise ValueError(f"Session is missing provider-prep segments for source '{source_id}'.")
     sample_rate, channels, sample_width = params
-    output = BytesIO()
-    with wave.open(output, "wb") as out:
-        out.setnchannels(channels)
-        out.setsampwidth(sample_width)
-        out.setframerate(sample_rate)
-        out.writeframes(b"".join(frame_chunks))
-    payload = output.getvalue()
+    prep_sha = _sha256_file(output_path)
     metadata: dict[str, object] = {
         "source_id": source_id,
         "derived_from_segments": [
@@ -1949,15 +1959,15 @@ def _stitch_provider_prep_audio(
         "sample_format": f"pcm_s{sample_width * 8}le",
         "duration_seconds": frame_count / sample_rate,
     }
-    metadata["sha256"] = hashlib.sha256(payload).hexdigest()
-    return payload, metadata
+    metadata["sha256"] = prep_sha
+    return metadata
 
 
 def _ensure_provider_prep_audio_artifact(
     *,
     store: FileSystemArtifactStore,
     source_id: str,
-    payload: bytes,
+    source_path: Path,
     artifact_sha: str,
     metadata: dict[str, object],
 ) -> ArtifactRecord:
@@ -1973,7 +1983,7 @@ def _ensure_provider_prep_audio_artifact(
         if not verification.ok or verification.expected_sha256 != artifact_sha:
             artifact_path = store.session_dir / existing.path
             artifact_path.parent.mkdir(parents=True, exist_ok=True)
-            artifact_path.write_bytes(payload)
+            _replace_file_from_path(source_path=source_path, destination_path=artifact_path)
             verification = store.verify(existing.id)
             if not verification.ok or verification.expected_sha256 != artifact_sha:
                 raise ValueError(
@@ -1981,10 +1991,46 @@ def _ensure_provider_prep_audio_artifact(
                 )
         return existing
 
-    return store.store(
+    stored = _store_provider_prep_audio_artifact(
+        store=store,
+        source_id=source_id,
+        source_path=source_path,
+        metadata=metadata,
+    )
+    if stored.sha256 != artifact_sha:
+        raise ValueError(f"Provider-prep artifact checksum drifted for source '{source_id}'.")
+    return stored
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _replace_file_from_path(*, source_path: Path, destination_path: Path) -> None:
+    temp_path = destination_path.with_name(f".{destination_path.name}.{uuid4()}.tmp")
+    try:
+        with source_path.open("rb") as source, temp_path.open("xb") as destination:
+            shutil.copyfileobj(source, destination, length=1024 * 1024)
+        temp_path.replace(destination_path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def _store_provider_prep_audio_artifact(
+    *,
+    store: FileSystemArtifactStore,
+    source_id: str,
+    source_path: Path,
+    metadata: dict[str, object],
+) -> ArtifactRecord:
+    return store.store_file(
         artifact_type="provider_prep_audio",
         name=f"provider-prep/{source_id}.wav",
-        data=payload,
+        source_path=source_path,
         status="sealed",
         metadata=metadata,
     )

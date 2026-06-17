@@ -84,6 +84,24 @@ def test_file_system_artifact_store_writes_manifest_matching_v1_schema(tmp_path:
     validator.validate(manifest)
 
 
+def test_file_system_artifact_store_stores_existing_file(tmp_path: Path) -> None:
+    store = _file_system_store(tmp_path)
+    source_path = tmp_path / "source.wav"
+    source_path.write_bytes(b"audio" * 1024)
+
+    record = store.store_file(
+        artifact_type="provider_prep_audio",
+        name="provider-prep/local_mic.wav",
+        source_path=source_path,
+        metadata={"source_id": "local_mic"},
+    )
+
+    assert record.id == (f"{SESSION_ID}:artifacts/provider_prep_audio/provider-prep/local_mic.wav")
+    assert record.byte_count == source_path.stat().st_size
+    assert record.sha256 == store.verify(record.id).actual_sha256
+    assert store.retrieve(record.id) == source_path.read_bytes()
+
+
 def test_artifact_manifest_schema_rejects_incomplete_records() -> None:
     manifest = {
         "version": 1,
@@ -267,6 +285,29 @@ def test_file_system_artifact_store_rolls_back_artifact_when_manifest_write_fail
 
     with pytest.raises(OSError, match="disk full"):
         store.store(artifact_type="transcript", name="same.json", data=b"first")
+
+    assert not (tmp_path / "artifacts" / "transcript" / "same.json").exists()
+
+
+def test_file_system_artifact_store_rolls_back_file_artifact_when_manifest_write_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=tmp_path)
+    source_path = tmp_path / "source.bin"
+    source_path.write_bytes(b"first")
+
+    def fail_write(_records: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(store, "_write_records", fail_write)
+
+    with pytest.raises(OSError, match="disk full"):
+        store.store_file(
+            artifact_type="transcript",
+            name="same.json",
+            source_path=source_path,
+        )
 
     assert not (tmp_path / "artifacts" / "transcript" / "same.json").exists()
 

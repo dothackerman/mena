@@ -4086,6 +4086,9 @@ def test_main_process_prepares_provider_audio_for_multi_segment_sources(
     prep_records = store.list(artifact_type="provider_prep_audio")
     assert len(prep_records) == 2
     assert prep_records[0].metadata["transformations"] == ["lossless_wav_stitch"]
+    assert all(record.metadata["sha256"] == record.sha256 for record in prep_records)
+    prep_temp_dir = session.bundle_path / "artifacts" / ".provider-prep-tmp"
+    assert not prep_temp_dir.exists() or not any(prep_temp_dir.iterdir())
 
 
 def test_main_process_passes_session_language_to_processing_stages(
