@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import select
 import struct
@@ -21,6 +22,7 @@ DEFAULT_SAMPLE_RATE = 48_000
 DEFAULT_SAMPLE_WIDTH_BYTES = 2
 DEFAULT_SEGMENT_SECONDS = 30
 MAX_SEGMENT_BYTES = 50 * 1024 * 1024
+MAX_PROCESS_STDERR_BYTES = 64 * 1024
 CAPTURE_MODE_SELECTED_MICROPHONE = "selected_microphone"
 CAPTURE_MODE_DEDICATED_ROUTE = "dedicated_route"
 CAPTURE_MODE_SYSTEM_MIX_REMOTE = "system_mix_remote"
@@ -366,6 +368,8 @@ class PipeWirePcmProvider:
                 failure_exc,
                 partial_pcm_by_source=output,
             ) from failure_exc
+        if stop_event is not None and stop_event.is_set():
+            return _aligned_stop_pcm_or_empty(output, frame_width=frame_width)
         return output
 
     def probe_source(
@@ -750,6 +754,13 @@ class PipeWireCaptureAdapter:
                     )
                     if pcm:
                         pcm_by_source[source_id] = pcm
+            if stop_event is not None and stop_event.is_set():
+                pcm_by_source = _aligned_stop_pcm_or_empty(
+                    pcm_by_source,
+                    frame_width=(
+                        self.segment_writer.channels * self.segment_writer.sample_width_bytes
+                    ),
+                )
             segments: list[CaptureSegment] = []
             for source_id in (CaptureSourceId.LOCAL_MIC, CaptureSourceId.SYSTEM_AUDIO):
                 source_pcm = pcm_by_source.get(source_id)
@@ -1186,10 +1197,60 @@ def _read_process_stderr(process: subprocess.Popen[bytes]) -> bytes:
         return b""
     if not _pipe_has_data(stderr, timeout=0):
         return b""
-    data = stderr.read()
+    fileno = getattr(stderr, "fileno", None)
+    if callable(fileno):
+        try:
+            fd = fileno()
+        except (OSError, ValueError):
+            return _read_bounded_stream(stderr)
+        return _read_available_fd(fd, max_bytes=MAX_PROCESS_STDERR_BYTES)
+    return _read_bounded_stream(stderr)
+
+
+def _read_bounded_stream(stream: object) -> bytes:
+    read = getattr(stream, "read", None)
+    if not callable(read):
+        return b""
+    try:
+        data = read(MAX_PROCESS_STDERR_BYTES)
+    except TypeError:
+        data = read()
     if isinstance(data, bytes):
         return data
     return b""
+
+
+def _read_available_fd(fd: int, *, max_bytes: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = max_bytes
+    while remaining > 0:
+        readable, _, _ = select.select([fd], [], [], 0)
+        if not readable:
+            break
+        try:
+            chunk = os.read(fd, min(remaining, 8192))
+        except (BlockingIOError, OSError):
+            break
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _aligned_stop_pcm_or_empty(
+    pcm_by_source: Mapping[CaptureSourceId, bytes],
+    *,
+    frame_width: int,
+) -> dict[CaptureSourceId, bytes]:
+    required_sources = (CaptureSourceId.LOCAL_MIC, CaptureSourceId.SYSTEM_AUDIO)
+    selected = {source_id: pcm_by_source.get(source_id, b"") for source_id in required_sources}
+    if any(not pcm for pcm in selected.values()):
+        return {}
+    frame_counts = {len(pcm) // frame_width for pcm in selected.values()}
+    if len(frame_counts) != 1:
+        return {}
+    return selected
 
 
 def _channel_layout(channels: int) -> str:

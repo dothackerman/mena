@@ -1,4 +1,5 @@
 import io
+import os
 import subprocess
 import threading
 import wave
@@ -342,6 +343,113 @@ def test_pipewire_pcm_provider_starts_sources_before_collecting_continuous_chunk
     }
 
 
+def test_pipewire_pcm_provider_drops_mismatched_stop_partial_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = PipeWirePcmProvider(sample_rate=2)
+    stop_event = threading.Event()
+
+    class FakeStream:
+        def __init__(self, pcm: bytes) -> None:
+            self.pcm = pcm
+
+        def read_chunk(
+            self,
+            expected_bytes: int,
+            *,
+            frame_width: int,
+            stop_event: threading.Event | None = None,
+            max_wait_seconds: float | None = None,
+        ) -> bytes:
+            assert expected_bytes == 4
+            assert frame_width == 2
+            assert max_wait_seconds is None
+            if stop_event is not None:
+                stop_event.set()
+            return self.pcm
+
+    streams = {
+        CaptureSourceId.LOCAL_MIC: FakeStream(b"\x00\x00\x00\x00"),
+        CaptureSourceId.SYSTEM_AUDIO: FakeStream(b"\x01\x01"),
+    }
+
+    def stream_for_source(
+        source_id: CaptureSourceId,
+        *,
+        plan: CaptureRoutePlan,
+        sink_name: str,
+    ) -> FakeStream:
+        assert plan == _route_plan()
+        assert sink_name == "mena_session_remote"
+        return streams[source_id]
+
+    monkeypatch.setattr(provider, "_stream_for_source", stream_for_source)
+
+    pcm = provider.read_aligned_segments(
+        plan=_route_plan(),
+        sink_name="mena_session_remote",
+        segment_seconds=1,
+        stop_event=stop_event,
+    )
+
+    assert pcm == {}
+
+
+def test_pipewire_pcm_provider_keeps_matched_stop_partial_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = PipeWirePcmProvider(sample_rate=2)
+    stop_event = threading.Event()
+
+    class FakeStream:
+        def __init__(self, pcm: bytes) -> None:
+            self.pcm = pcm
+
+        def read_chunk(
+            self,
+            expected_bytes: int,
+            *,
+            frame_width: int,
+            stop_event: threading.Event | None = None,
+            max_wait_seconds: float | None = None,
+        ) -> bytes:
+            assert expected_bytes == 4
+            assert frame_width == 2
+            assert max_wait_seconds is None
+            if stop_event is not None:
+                stop_event.set()
+            return self.pcm
+
+    streams = {
+        CaptureSourceId.LOCAL_MIC: FakeStream(b"\x00\x00"),
+        CaptureSourceId.SYSTEM_AUDIO: FakeStream(b"\x01\x01"),
+    }
+
+    def stream_for_source(
+        source_id: CaptureSourceId,
+        *,
+        plan: CaptureRoutePlan,
+        sink_name: str,
+    ) -> FakeStream:
+        assert plan == _route_plan()
+        assert sink_name == "mena_session_remote"
+        return streams[source_id]
+
+    monkeypatch.setattr(provider, "_stream_for_source", stream_for_source)
+
+    pcm = provider.read_aligned_segments(
+        plan=_route_plan(),
+        sink_name="mena_session_remote",
+        segment_seconds=1,
+        stop_event=stop_event,
+    )
+
+    assert pcm == {
+        CaptureSourceId.LOCAL_MIC: b"\x00\x00",
+        CaptureSourceId.SYSTEM_AUDIO: b"\x01\x01",
+    }
+
+
 def test_pipewire_pcm_provider_probes_candidate_stream_before_switching() -> None:
     started_commands: list[list[str]] = []
     processes: list[object] = []
@@ -541,6 +649,39 @@ def test_pipewire_pcm_provider_rejects_unexpected_short_chunk() -> None:
         )
 
     assert exc_info.value.output == b"\x00\x00"
+    assert exc_info.value.stderr == b"route disappeared"
+
+
+def test_pipewire_pcm_provider_reads_live_stderr_without_waiting_for_eof() -> None:
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, b"route disappeared")
+
+    class FakeProcess:
+        def __init__(self, args: list[str], **_kwargs: object) -> None:
+            self.args = args
+            self.stdout = io.BytesIO(b"\x00\x00")
+            self.stderr = os.fdopen(read_fd, "rb", buffering=0)
+            self.returncode = 1
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+    provider = PipeWirePcmProvider(
+        sample_rate=2,
+        popen_factory=cast(Any, FakeProcess),
+    )
+
+    try:
+        with pytest.raises(subprocess.CalledProcessError) as exc_info:
+            provider.read_segment(
+                CaptureSourceId.LOCAL_MIC,
+                plan=_route_plan(),
+                sink_name="mena_session_remote",
+                segment_seconds=1,
+            )
+    finally:
+        os.close(write_fd)
+
     assert exc_info.value.stderr == b"route disappeared"
 
 
@@ -947,6 +1088,59 @@ def test_pipewire_capture_adapter_preserves_mic_chunk_when_system_audio_degrades
         CaptureSourceId.LOCAL_MIC,
         CaptureSourceId.SYSTEM_AUDIO,
     ]
+    assert provider.read_segment_calls == [CaptureSourceId.SYSTEM_AUDIO]
+
+
+def test_pipewire_capture_adapter_drops_mismatched_prefilled_stop_partial(
+    tmp_path: Path,
+) -> None:
+    class FallbackProvider:
+        def __init__(self) -> None:
+            self.read_segment_calls: list[CaptureSourceId] = []
+
+        def read_aligned_segments(
+            self,
+            *,
+            plan: CaptureRoutePlan,
+            sink_name: str,
+            segment_seconds: int,
+            stop_event: threading.Event | None = None,
+        ) -> dict[CaptureSourceId, bytes]:
+            raise AssertionError("prefilled stop partial should not read aligned segments")
+
+        def read_segment(
+            self,
+            source_id: CaptureSourceId,
+            *,
+            plan: CaptureRoutePlan,
+            sink_name: str,
+            segment_seconds: int,
+            stop_event: threading.Event | None = None,
+        ) -> bytes:
+            self.read_segment_calls.append(source_id)
+            assert source_id is CaptureSourceId.SYSTEM_AUDIO
+            assert stop_event is not None and stop_event.is_set()
+            return b"\x01\x01"
+
+    provider = FallbackProvider()
+    adapter = PipeWireCaptureAdapter(
+        client=PipeWireClient(
+            runner=lambda args, **_kwargs: subprocess.CompletedProcess(args, 0, stdout="")
+        ),
+        segment_writer=WavSegmentWriter(segment_dir=tmp_path, sample_rate=2),
+    )
+    adapter.pipewire_pcm_provider = cast(Any, provider)
+    stop_event = threading.Event()
+    stop_event.set()
+
+    segments = adapter._flush_once(  # noqa: SLF001
+        plan=_route_plan(),
+        sink_name="mena_session_remote",
+        stop_event=stop_event,
+        prefilled_pcm_by_source={CaptureSourceId.LOCAL_MIC: b"\x00\x00\x00\x00"},
+    )
+
+    assert segments == ()
     assert provider.read_segment_calls == [CaptureSourceId.SYSTEM_AUDIO]
 
 
