@@ -927,11 +927,11 @@ def test_pipewire_pcm_provider_rejects_unknown_system_audio_mode() -> None:
         )
 
 
-def test_pipewire_capture_adapter_degrades_and_recovers_at_segment_boundary(
+def test_pipewire_capture_adapter_stays_degraded_after_runtime_route_failure(
     tmp_path: Path,
 ) -> None:
     calls: list[list[str]] = []
-    module_ids = iter(["101\n", "202\n", "", "", "303\n", "404\n"])
+    module_ids = iter(["101\n", "202\n", "", "", ""])
 
     def runner(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append(args)
@@ -943,6 +943,7 @@ def test_pipewire_capture_adapter_degrades_and_recovers_at_segment_boundary(
             self.modes: list[str] = []
             self.closed = 0
             self.closed_sources: list[tuple[CaptureSourceId, str]] = []
+            self.probe_attempts = 0
 
         def read_aligned_segments(
             self,
@@ -971,10 +972,7 @@ def test_pipewire_capture_adapter_degrades_and_recovers_at_segment_boundary(
             sink_name: str,
             timeout_seconds: float,
         ) -> None:
-            self.modes.append(f"probe:{plan.system_audio_mode}")
-            assert source_id is CaptureSourceId.SYSTEM_AUDIO
-            assert sink_name == "mena_session_1_remote"
-            assert timeout_seconds > 0
+            self.probe_attempts += 1
 
         def close(self) -> None:
             self.closed += 1
@@ -998,8 +996,8 @@ def test_pipewire_capture_adapter_degrades_and_recovers_at_segment_boundary(
 
     degraded_segments = active.flush_segments()
     degraded_events = active.drain_route_events()
-    recovered_segments = active.flush_segments()
-    recovered_events = active.drain_route_events()
+    still_degraded_segments = active.flush_segments()
+    later_events = active.drain_route_events()
 
     assert [segment.capture_mode for segment in degraded_segments] == [
         CAPTURE_MODE_SELECTED_MICROPHONE,
@@ -1007,22 +1005,19 @@ def test_pipewire_capture_adapter_degrades_and_recovers_at_segment_boundary(
     ]
     assert degraded_events[0].code == "dedicated_route_runtime_failed"
     assert degraded_events[0].route_id == "pipewire:node:42"
-    assert [segment.capture_mode for segment in recovered_segments] == [
+    assert [segment.capture_mode for segment in still_degraded_segments] == [
         CAPTURE_MODE_SELECTED_MICROPHONE,
-        CAPTURE_MODE_DEDICATED_ROUTE,
+        CAPTURE_MODE_SYSTEM_MIX_REMOTE,
     ]
-    assert recovered_events[0].code == "dedicated_route_recovered"
+    assert later_events == ()
     assert provider.modes == [
         CAPTURE_MODE_DEDICATED_ROUTE,
         CAPTURE_MODE_SYSTEM_MIX_REMOTE,
-        f"probe:{CAPTURE_MODE_DEDICATED_ROUTE}",
-        CAPTURE_MODE_DEDICATED_ROUTE,
+        CAPTURE_MODE_SYSTEM_MIX_REMOTE,
     ]
     assert provider.closed == 0
-    assert provider.closed_sources == [
-        (CaptureSourceId.SYSTEM_AUDIO, CAPTURE_MODE_DEDICATED_ROUTE),
-        (CaptureSourceId.SYSTEM_AUDIO, CAPTURE_MODE_SYSTEM_MIX_REMOTE),
-    ]
+    assert provider.probe_attempts == 0
+    assert provider.closed_sources == [(CaptureSourceId.SYSTEM_AUDIO, CAPTURE_MODE_DEDICATED_ROUTE)]
     assert calls[3:6] == [
         ["pactl", "move-sink-input", "51", "alsa_output.usb_headphones"],
         ["pactl", "unload-module", "202"],
@@ -1149,7 +1144,7 @@ def test_pipewire_capture_adapter_drops_mismatched_prefilled_stop_partial(
     assert provider.read_segment_calls == [CaptureSourceId.SYSTEM_AUDIO]
 
 
-def test_pipewire_capture_adapter_keeps_system_mix_when_recovery_fails(
+def test_pipewire_capture_adapter_keeps_system_mix_after_setup_degradation(
     tmp_path: Path,
 ) -> None:
     calls: list[list[str]] = []
@@ -1208,208 +1203,16 @@ def test_pipewire_capture_adapter_keeps_system_mix_when_recovery_fails(
     first = active.flush_segments()
     second = active.flush_segments()
     third = active.flush_segments()
-    recovery_events = active.drain_route_events()
+    later_events = active.drain_route_events()
 
     assert setup_events[0].code == "dedicated_route_unavailable"
     assert first[1].capture_mode == CAPTURE_MODE_SYSTEM_MIX_REMOTE
     assert second[1].capture_mode == CAPTURE_MODE_SYSTEM_MIX_REMOTE
     assert third[1].capture_mode == CAPTURE_MODE_SYSTEM_MIX_REMOTE
-    assert recovery_events == ()
+    assert later_events == ()
     assert provider.flushes == 3
     assert provider.probe_attempts == 0
     assert provider.closed == 0
-
-
-def test_pipewire_capture_adapter_keeps_system_mix_when_recovery_probe_fails(
-    tmp_path: Path,
-) -> None:
-    module_ids = iter(["101\n", "202\n", "303\n", "404\n", "505\n", "606\n"])
-    calls: list[list[str]] = []
-
-    def runner(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        calls.append(args)
-        stdout = next(module_ids, "") if args[:2] == ["pactl", "load-module"] else ""
-        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
-
-    class FallbackProvider:
-        def __init__(self) -> None:
-            self.modes: list[str] = []
-            self.closed = 0
-            self.closed_sources: list[tuple[CaptureSourceId, str]] = []
-            self.probe_attempts = 0
-
-        def read_aligned_segments(
-            self,
-            *,
-            plan: CaptureRoutePlan,
-            sink_name: str,
-            segment_seconds: int,
-            stop_event: threading.Event | None = None,
-        ) -> dict[CaptureSourceId, bytes]:
-            self.modes.append(plan.system_audio_mode)
-            if len(self.modes) == 1:
-                raise CaptureSourceError(
-                    CaptureSourceId.SYSTEM_AUDIO,
-                    RuntimeError("route disappeared"),
-                )
-            return {
-                CaptureSourceId.LOCAL_MIC: b"\x00\x00",
-                CaptureSourceId.SYSTEM_AUDIO: b"\x01\x01",
-            }
-
-        def probe_source(
-            self,
-            source_id: CaptureSourceId,
-            *,
-            plan: CaptureRoutePlan,
-            sink_name: str,
-            timeout_seconds: float,
-        ) -> None:
-            self.probe_attempts += 1
-            raise subprocess.TimeoutExpired(["pw-record"], timeout_seconds)
-
-        def close(self) -> None:
-            self.closed += 1
-
-        def close_source(
-            self,
-            source_id: CaptureSourceId,
-            *,
-            plan: CaptureRoutePlan,
-            sink_name: str,
-        ) -> None:
-            self.closed_sources.append((source_id, plan.system_audio_mode))
-
-    provider = FallbackProvider()
-    adapter = PipeWireCaptureAdapter(
-        client=PipeWireClient(runner=runner),
-        segment_writer=WavSegmentWriter(segment_dir=tmp_path, sample_rate=1),
-    )
-    adapter.pipewire_pcm_provider = cast(Any, provider)
-    active = adapter.start(_route_plan())
-
-    degraded_segments = active.flush_segments()
-    active.drain_route_events()
-    still_degraded_segments = active.flush_segments()
-    recovery_events = active.drain_route_events()
-    backoff_segments = active.flush_segments()
-
-    assert degraded_segments[1].capture_mode == CAPTURE_MODE_SYSTEM_MIX_REMOTE
-    assert still_degraded_segments[1].capture_mode == CAPTURE_MODE_SYSTEM_MIX_REMOTE
-    assert backoff_segments[1].capture_mode == CAPTURE_MODE_SYSTEM_MIX_REMOTE
-    assert recovery_events == ()
-    assert provider.closed == 0
-    assert provider.probe_attempts == 1
-    assert provider.closed_sources == [(CaptureSourceId.SYSTEM_AUDIO, CAPTURE_MODE_DEDICATED_ROUTE)]
-    assert calls[3:6] == [
-        ["pactl", "move-sink-input", "51", "alsa_output.usb_headphones"],
-        ["pactl", "unload-module", "202"],
-        ["pactl", "unload-module", "101"],
-    ]
-    assert calls[9:12] == [
-        ["pactl", "move-sink-input", "51", "alsa_output.usb_headphones"],
-        ["pactl", "unload-module", "404"],
-        ["pactl", "unload-module", "303"],
-    ]
-
-
-def test_pipewire_capture_adapter_keeps_system_mix_when_recovered_segment_fails(
-    tmp_path: Path,
-) -> None:
-    module_ids = iter(["101\n", "202\n", "303\n", "404\n", "505\n", "606\n"])
-    calls: list[list[str]] = []
-
-    def runner(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        calls.append(args)
-        stdout = next(module_ids, "") if args[:2] == ["pactl", "load-module"] else ""
-        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
-
-    class FallbackProvider:
-        def __init__(self) -> None:
-            self.dedicated_reads = 0
-            self.probe_attempts = 0
-            self.closed = 0
-            self.closed_sources: list[tuple[CaptureSourceId, str]] = []
-
-        def read_aligned_segments(
-            self,
-            *,
-            plan: CaptureRoutePlan,
-            sink_name: str,
-            segment_seconds: int,
-            stop_event: threading.Event | None = None,
-        ) -> dict[CaptureSourceId, bytes]:
-            if plan.system_audio_mode == CAPTURE_MODE_DEDICATED_ROUTE:
-                self.dedicated_reads += 1
-                raise CaptureSourceError(
-                    CaptureSourceId.SYSTEM_AUDIO,
-                    RuntimeError("dedicated stream failed"),
-                )
-            return {
-                CaptureSourceId.LOCAL_MIC: b"\x00\x00",
-                CaptureSourceId.SYSTEM_AUDIO: b"\x01\x01",
-            }
-
-        def probe_source(
-            self,
-            source_id: CaptureSourceId,
-            *,
-            plan: CaptureRoutePlan,
-            sink_name: str,
-            timeout_seconds: float,
-        ) -> None:
-            self.probe_attempts += 1
-
-        def close(self) -> None:
-            self.closed += 1
-
-        def close_source(
-            self,
-            source_id: CaptureSourceId,
-            *,
-            plan: CaptureRoutePlan,
-            sink_name: str,
-        ) -> None:
-            self.closed_sources.append((source_id, plan.system_audio_mode))
-
-    provider = FallbackProvider()
-    adapter = PipeWireCaptureAdapter(
-        client=PipeWireClient(runner=runner),
-        segment_writer=WavSegmentWriter(segment_dir=tmp_path, sample_rate=1),
-    )
-    adapter.pipewire_pcm_provider = cast(Any, provider)
-    active = adapter.start(_route_plan())
-
-    degraded_segments = active.flush_segments()
-    first_events = active.drain_route_events()
-    still_degraded_segments = active.flush_segments()
-    second_events = active.drain_route_events()
-    backoff_segments = active.flush_segments()
-    backoff_events = active.drain_route_events()
-
-    assert degraded_segments[1].capture_mode == CAPTURE_MODE_SYSTEM_MIX_REMOTE
-    assert first_events[0].event == "degraded"
-    assert still_degraded_segments[1].capture_mode == CAPTURE_MODE_SYSTEM_MIX_REMOTE
-    assert [event.event for event in second_events] == ["degraded"]
-    assert backoff_segments[1].capture_mode == CAPTURE_MODE_SYSTEM_MIX_REMOTE
-    assert backoff_events == ()
-    assert provider.probe_attempts == 1
-    assert provider.dedicated_reads == 2
-    assert provider.closed == 0
-    assert provider.closed_sources == [
-        (CaptureSourceId.SYSTEM_AUDIO, CAPTURE_MODE_DEDICATED_ROUTE),
-        (CaptureSourceId.SYSTEM_AUDIO, CAPTURE_MODE_DEDICATED_ROUTE),
-    ]
-    assert calls[3:6] == [
-        ["pactl", "move-sink-input", "51", "alsa_output.usb_headphones"],
-        ["pactl", "unload-module", "202"],
-        ["pactl", "unload-module", "101"],
-    ]
-    assert calls[9:12] == [
-        ["pactl", "move-sink-input", "51", "alsa_output.usb_headphones"],
-        ["pactl", "unload-module", "404"],
-        ["pactl", "unload-module", "303"],
-    ]
 
 
 def test_pipewire_capture_adapter_flushes_segments_and_cleans_up(tmp_path: Path) -> None:

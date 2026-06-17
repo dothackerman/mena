@@ -20,6 +20,7 @@ Issue #83 narrows the online fallback ladder for the PoC installed product:
 
 - Planning-time absence of a microphone, playback stream, or output sink is a validation failure, not a degradation. Recording must not start until the user has selected or confirmed a valid online route plan.
 - After a valid online route plan exists, setup-time or runtime failure of the dedicated meeting route may degrade to recording the selected output sink monitor as `system_audio` / `system_mix_remote`.
+- After runtime degradation, #83 stays degraded until stop. Automatic recovery is deferred because the current `pw-record`/`pactl` route handoff would need to move the meeting playback stream away from the selected output monitor before recovery is proven.
 - `mic_only` is not an acceptable fallback for `online_dual_stream` in #83. If neither the dedicated meeting route nor the selected output sink monitor can provide system audio, online capture fails or finalizes as partial while preserving already sealed chunks.
 - In-person `in_person_single_mic` currently has no degraded capture mode. Loss of the selected room microphone is a failure or partial recording, not an automatic switch to another microphone.
 - Degradation records are typed route/timeline facts connected to affected capture segments or elapsed recording time. They are not alternate audio-chunk containers; all sealed audio remains in `capture_metadata.segments`.

@@ -26,8 +26,6 @@ MAX_PROCESS_STDERR_BYTES = 64 * 1024
 CAPTURE_MODE_SELECTED_MICROPHONE = "selected_microphone"
 CAPTURE_MODE_DEDICATED_ROUTE = "dedicated_route"
 CAPTURE_MODE_SYSTEM_MIX_REMOTE = "system_mix_remote"
-RECOVERY_BACKOFF_SEGMENTS = 4
-RECOVERY_PROBE_TIMEOUT_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -921,17 +919,12 @@ class ActivePipeWireCapture:
         self._segments: list[CaptureSegment] = []
         self._route_events: list[CaptureRouteEvent] = list(route_events)
         self._stopped = False
-        self._next_recovery_after_system_audio_segment_count = 1
-        self._pending_recovered_system_mix_plan: CaptureRoutePlan | None = None
-        self._pending_recovery_event: CaptureRouteEvent | None = None
 
     def flush_segments(
         self, *, stop_event: threading.Event | None = None
     ) -> tuple[CaptureSegment, ...]:
         if self._stopped:
             return ()
-        if self._should_attempt_recovery():
-            self._try_recover_dedicated_route()
         try:
             segments = self._adapter._flush_once(
                 plan=self._plan,
@@ -950,7 +943,6 @@ class ActivePipeWireCapture:
             else:
                 raise
         self._segments.extend(segments)
-        self._finish_pending_recovery_cleanup(segments)
         return segments
 
     def drain_route_events(self) -> tuple[CaptureRouteEvent, ...]:
@@ -985,7 +977,6 @@ class ActivePipeWireCapture:
 
     def _degrade_to_system_mix(self) -> None:
         dedicated_plan = self._plan
-        pending_recovery_failed = self._pending_recovered_system_mix_plan is not None
         self._adapter._teardown_dedicated_route(
             plan=dedicated_plan,
             null_sink_module=self.null_sink_module,
@@ -1000,16 +991,10 @@ class ActivePipeWireCapture:
             )
         self.null_sink_module = None
         self.loopback_module = None
-        self._plan = self._pending_recovered_system_mix_plan or replace(
+        self._plan = replace(
             self._plan,
             system_audio_mode=CAPTURE_MODE_SYSTEM_MIX_REMOTE,
         )
-        self._pending_recovered_system_mix_plan = None
-        self._pending_recovery_event = None
-        if pending_recovery_failed:
-            self._defer_next_recovery_attempt()
-        else:
-            self._next_recovery_after_system_audio_segment_count = 1
         self._route_events.append(
             _route_event(
                 event="degraded",
@@ -1023,82 +1008,6 @@ class ActivePipeWireCapture:
                 segment_index=self._next_segment_index(CaptureSourceId.SYSTEM_AUDIO),
             )
         )
-
-    def _should_attempt_recovery(self) -> bool:
-        fallback_segment_count = self._source_segment_count(CaptureSourceId.SYSTEM_AUDIO)
-        return (
-            self._plan.profile_id is CaptureProfileId.ONLINE_DUAL_STREAM
-            and self._plan.system_audio_mode == CAPTURE_MODE_SYSTEM_MIX_REMOTE
-            and fallback_segment_count > 0
-            and fallback_segment_count >= self._next_recovery_after_system_audio_segment_count
-        )
-
-    def _try_recover_dedicated_route(self) -> None:
-        fallback_plan = self._plan
-        primary_plan = replace(self._plan, system_audio_mode=CAPTURE_MODE_DEDICATED_ROUTE)
-        try:
-            null_sink_module, loopback_module = self._adapter._setup_dedicated_route(
-                plan=primary_plan,
-                sink_name=self.sink_name,
-            )
-        except Exception:
-            self._defer_next_recovery_attempt()
-            return
-        try:
-            self._adapter.pipewire_pcm_provider.probe_source(
-                CaptureSourceId.SYSTEM_AUDIO,
-                plan=primary_plan,
-                sink_name=self.sink_name,
-                timeout_seconds=RECOVERY_PROBE_TIMEOUT_SECONDS,
-            )
-        except Exception:
-            self._adapter._teardown_dedicated_route(
-                plan=primary_plan,
-                null_sink_module=null_sink_module,
-                loopback_module=loopback_module,
-            )
-            self._defer_next_recovery_attempt()
-            return
-        self.null_sink_module = null_sink_module
-        self.loopback_module = loopback_module
-        self._pending_recovered_system_mix_plan = fallback_plan
-        self._plan = primary_plan
-        self._pending_recovery_event = _route_event(
-            event="recovered",
-            code="dedicated_route_recovered",
-            message="Dedicated meeting route recovered; recording isolated meeting playback.",
-            source_id=CaptureSourceId.SYSTEM_AUDIO,
-            plan=self._plan,
-            segment_index=self._next_segment_index(CaptureSourceId.SYSTEM_AUDIO),
-        )
-
-    def _defer_next_recovery_attempt(self) -> None:
-        self._next_recovery_after_system_audio_segment_count = (
-            self._source_segment_count(CaptureSourceId.SYSTEM_AUDIO) + RECOVERY_BACKOFF_SEGMENTS
-        )
-
-    def _finish_pending_recovery_cleanup(self, segments: tuple[CaptureSegment, ...]) -> None:
-        fallback_plan = self._pending_recovered_system_mix_plan
-        if fallback_plan is None:
-            return
-        recovered_system_audio = any(
-            segment.source_id is CaptureSourceId.SYSTEM_AUDIO
-            and segment.capture_mode == CAPTURE_MODE_DEDICATED_ROUTE
-            for segment in segments
-        )
-        if not recovered_system_audio:
-            return
-        close_source = getattr(self._adapter.pipewire_pcm_provider, "close_source", None)
-        if callable(close_source):
-            close_source(
-                CaptureSourceId.SYSTEM_AUDIO,
-                plan=fallback_plan,
-                sink_name=self.sink_name,
-            )
-        if self._pending_recovery_event is not None:
-            self._route_events.append(self._pending_recovery_event)
-            self._pending_recovery_event = None
-        self._pending_recovered_system_mix_plan = None
 
     def _source_segment_count(self, source_id: CaptureSourceId) -> int:
         return sum(1 for segment in self._segments if segment.source_id is source_id)

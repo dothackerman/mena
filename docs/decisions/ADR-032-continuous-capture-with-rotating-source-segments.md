@@ -26,8 +26,8 @@ Mena's source-capture contract is **continuous capture with rotating persistence
 - a logical capture source owns a long-lived capture stream/process for the recording attempt;
 - the capture adapter emits raw PCM frames to a Mena-owned segment writer;
 - the segment writer seals independently readable WAV chunks at fixed frame-count boundaries;
-- fallback and recovery decisions happen at segment boundaries so a sealed chunk has one effective capture mode;
-- recovery is make-before-break: an active degraded capture path remains recording until a candidate replacement route is established, observed producing PCM frames, and switched at a segment boundary;
+- fallback decisions happen at segment boundaries so a sealed chunk has one effective capture mode;
+- the #83 `pw-record` adapter does not automatically recover from runtime `system_mix_remote` degradation back to the dedicated route; once runtime degradation occurs, recording continuity wins and Mena stays degraded until stop;
 - already sealed chunks are durable and processable;
 - the current unsealed chunk may be sealed on stop when enough aligned PCM exists; otherwise it remains unpersisted and the session-level finalization or failure record carries the partial outcome;
 - processing consumes ordered, verified, sealed source segments, not live capture implementation details.
@@ -39,13 +39,14 @@ Issue #83 implements the amended ADR-024 online fallback semantics:
 - no planning-time degraded fallback is invented; missing or invalid route choices are pre-recording validation failures;
 - `online_dual_stream` primary system audio is the selected meeting playback stream isolated through the dedicated Mena route;
 - if the primary route fails during setup or runtime, Mena may degrade to the selected output sink monitor, which is persisted as system-mix remote audio rather than clean selected meeting audio;
+- after runtime degradation, the #83 PoC adapter stays on `system_mix_remote` until stop rather than probing for recovery in a way that would move the active meeting playback stream away from the selected output monitor;
 - if the primary route is already a general system/output monitor, there is no lower-quality online fallback for #83;
 - `mic_only` is not a valid online fallback for #83;
 - `in_person_single_mic` has no degraded mode in #83; selected microphone loss is a failure or partial recording.
 
 Degradations are typed route/timeline events, not audio artifacts. All sealed audio chunks remain in `capture_metadata.segments`; segment metadata must identify the effective capture mode and route where it matters. Degradation records must be linkable to the meeting timeline by elapsed seconds, segment index, or both, and user-visible messages should be derived from typed codes rather than stored as the only source of truth.
 
-Failed recovery attempts must not tear down or interrupt the active degraded capture stream. Recovery retries should use backoff so Mena does not repeatedly perturb the live audio graph during a permanently degraded recording.
+Automatic runtime recovery is deferred for this adapter because `pactl move-sink-input` would move the active meeting playback stream away from the selected output monitor before recovery is proven. A future adapter may reintroduce recovery only if it can prove a true make-before-break handover that does not interrupt the active degraded recording path.
 
 GStreamer/PyGObject is the intended future adapter family when Mena needs stronger media-pipeline ownership, richer bus/error handling, more explicit timing/caps diagnostics, or better multi-source coordination. That future adapter must remain behind the same capture port and session-record contract; it must not leak GStreamer-specific concepts into durable session artifacts.
 
