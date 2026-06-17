@@ -102,6 +102,90 @@ def test_file_system_artifact_store_stores_existing_file(tmp_path: Path) -> None
     assert store.retrieve(record.id) == source_path.read_bytes()
 
 
+def test_in_memory_artifact_store_stores_existing_file(tmp_path: Path) -> None:
+    store = _memory_store(tmp_path)
+    source_path = tmp_path / "source.wav"
+    source_path.write_bytes(b"audio")
+
+    record = store.store_file(
+        artifact_type="provider_prep_audio",
+        name="provider-prep/local_mic.wav",
+        source_path=source_path,
+        metadata={"source_id": "local_mic"},
+    )
+
+    assert record.byte_count == 5
+    assert store.retrieve(record.id) == b"audio"
+
+
+def test_file_system_artifact_store_rejects_missing_source_file(tmp_path: Path) -> None:
+    store = _file_system_store(tmp_path)
+
+    with pytest.raises(ArtifactStoreError, match="source path"):
+        store.store_file(
+            artifact_type="provider_prep_audio",
+            name="provider-prep/local_mic.wav",
+            source_path=tmp_path / "missing.wav",
+        )
+
+
+def test_file_system_artifact_store_refuses_to_store_file_over_existing_artifact(
+    tmp_path: Path,
+) -> None:
+    store = _file_system_store(tmp_path)
+    source_path = tmp_path / "source.wav"
+    source_path.write_bytes(b"audio")
+
+    store.store_file(
+        artifact_type="provider_prep_audio",
+        name="provider-prep/local_mic.wav",
+        source_path=source_path,
+    )
+
+    with pytest.raises(FileExistsError, match="Artifact already exists"):
+        store.store_file(
+            artifact_type="provider_prep_audio",
+            name="provider-prep/local_mic.wav",
+            source_path=source_path,
+        )
+
+
+def test_file_system_artifact_store_refuses_to_copy_file_over_untracked_path(
+    tmp_path: Path,
+) -> None:
+    store = _file_system_store(tmp_path)
+    source_path = tmp_path / "source.wav"
+    source_path.write_bytes(b"audio")
+    existing_path = tmp_path / "artifacts/provider_prep_audio/provider-prep/local_mic.wav"
+    existing_path.parent.mkdir(parents=True)
+    existing_path.write_bytes(b"untracked")
+
+    with pytest.raises(FileExistsError, match="Artifact path already exists"):
+        store.store_file(
+            artifact_type="provider_prep_audio",
+            name="provider-prep/local_mic.wav",
+            source_path=source_path,
+        )
+
+    assert store.list() == ()
+
+
+def test_file_system_artifact_store_rejects_invalid_file_artifact_version(
+    tmp_path: Path,
+) -> None:
+    store = _file_system_store(tmp_path)
+    source_path = tmp_path / "source.wav"
+    source_path.write_bytes(b"audio")
+
+    with pytest.raises(ArtifactStoreError, match="version"):
+        store.store_file(
+            artifact_type="provider_prep_audio",
+            name="provider-prep/local_mic.wav",
+            source_path=source_path,
+            version=0,
+        )
+
+
 def test_artifact_manifest_schema_rejects_incomplete_records() -> None:
     manifest = {
         "version": 1,
@@ -174,6 +258,20 @@ def test_file_system_artifact_store_detects_missing_artifact(tmp_path: Path) -> 
     assert verification.actual_sha256 is None
     assert verification.actual_byte_count is None
     assert verification.error == "artifact file is missing"
+
+
+def test_file_system_artifact_store_detects_artifact_directory_path(tmp_path: Path) -> None:
+    store = _file_system_store(tmp_path)
+    record = store.store(artifact_type="transcript", name="same.json", data=b"first")
+
+    (tmp_path / record.path).unlink()
+    (tmp_path / record.path).mkdir()
+    verification = store.verify(record.id)
+
+    assert verification.ok is False
+    assert verification.actual_sha256 is None
+    assert verification.actual_byte_count is None
+    assert verification.error == "artifact path is not a file"
 
 
 def test_file_system_artifact_store_reads_existing_manifest(tmp_path: Path) -> None:

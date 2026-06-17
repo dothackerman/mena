@@ -4091,6 +4091,40 @@ def test_main_process_prepares_provider_audio_for_multi_segment_sources(
     assert not prep_temp_dir.exists() or not any(prep_temp_dir.iterdir())
 
 
+def test_main_process_rematerializes_corrupt_reused_provider_prep_audio(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    session = _build_multi_segment_processing_session(tmp_path)
+    monkeypatch.setattr(
+        "mena.cli._run_processing_stages",
+        lambda **_kwargs: None,
+    )
+
+    first_exit_code = _main_process_with_fake_providers(["process", str(session.record_path)])
+    store = FileSystemArtifactStore(
+        session_id=session.record.id,
+        session_dir=session.bundle_path,
+    )
+    prep_record = next(
+        record
+        for record in store.list(artifact_type="provider_prep_audio")
+        if record.metadata["source_id"] == "local_mic"
+    )
+    prep_path = session.bundle_path / prep_record.path
+    prep_path.write_bytes(b"truncated")
+
+    second_exit_code = _main_process_with_fake_providers(["process", str(session.record_path)])
+
+    captured = capsys.readouterr()
+    assert first_exit_code == 0
+    assert second_exit_code == 0
+    assert store.verify(prep_record.id).ok is True
+    assert hashlib.sha256(prep_path.read_bytes()).hexdigest() == prep_record.sha256
+    assert captured.out.count("Processing completed for run '") == 2
+
+
 def test_main_process_passes_session_language_to_processing_stages(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
