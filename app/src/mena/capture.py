@@ -813,9 +813,19 @@ class PipeWireCaptureAdapter:
             stop_event=stop_event,
         )
 
-    def _cleanup(self, *, null_sink_module: str | None, loopback_module: str | None) -> None:
+    def _cleanup(
+        self,
+        *,
+        plan: CaptureRoutePlan,
+        null_sink_module: str | None,
+        loopback_module: str | None,
+    ) -> None:
         self.pipewire_pcm_provider.close()
-        self._cleanup_routes(null_sink_module=null_sink_module, loopback_module=loopback_module)
+        self._teardown_dedicated_route(
+            plan=plan,
+            null_sink_module=null_sink_module,
+            loopback_module=loopback_module,
+        )
 
     def _cleanup_routes(
         self,
@@ -829,6 +839,17 @@ class PipeWireCaptureAdapter:
                     self.client.unload_module(module_id)
                 except (subprocess.CalledProcessError, OSError):
                     continue
+
+    def _teardown_dedicated_route(
+        self,
+        *,
+        plan: CaptureRoutePlan,
+        null_sink_module: str | None,
+        loopback_module: str | None,
+    ) -> None:
+        if null_sink_module is not None or loopback_module is not None:
+            self._restore_playback_route(plan)
+        self._cleanup_routes(null_sink_module=null_sink_module, loopback_module=loopback_module)
 
     def _setup_dedicated_route(
         self,
@@ -854,11 +875,16 @@ class PipeWireCaptureAdapter:
             )
         except Exception:
             if playback_moved:
-                self._restore_playback_route(plan)
-            self._cleanup_routes(
-                null_sink_module=null_sink_module,
-                loopback_module=loopback_module,
-            )
+                self._teardown_dedicated_route(
+                    plan=plan,
+                    null_sink_module=null_sink_module,
+                    loopback_module=loopback_module,
+                )
+            else:
+                self._cleanup_routes(
+                    null_sink_module=null_sink_module,
+                    loopback_module=loopback_module,
+                )
             raise
         return null_sink_module, loopback_module
 
@@ -935,6 +961,7 @@ class ActivePipeWireCapture:
     def stop(self) -> CaptureMetadata:
         if not self._stopped:
             self._adapter._cleanup(
+                plan=self._plan,
                 null_sink_module=self.null_sink_module,
                 loopback_module=self.loopback_module,
             )
@@ -959,7 +986,8 @@ class ActivePipeWireCapture:
     def _degrade_to_system_mix(self) -> None:
         dedicated_plan = self._plan
         pending_recovery_failed = self._pending_recovered_system_mix_plan is not None
-        self._adapter._cleanup_routes(
+        self._adapter._teardown_dedicated_route(
+            plan=dedicated_plan,
             null_sink_module=self.null_sink_module,
             loopback_module=self.loopback_module,
         )
@@ -1024,7 +1052,8 @@ class ActivePipeWireCapture:
                 timeout_seconds=RECOVERY_PROBE_TIMEOUT_SECONDS,
             )
         except Exception:
-            self._adapter._cleanup_routes(
+            self._adapter._teardown_dedicated_route(
+                plan=primary_plan,
                 null_sink_module=null_sink_module,
                 loopback_module=loopback_module,
             )

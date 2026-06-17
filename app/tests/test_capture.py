@@ -1023,6 +1023,11 @@ def test_pipewire_capture_adapter_degrades_and_recovers_at_segment_boundary(
         (CaptureSourceId.SYSTEM_AUDIO, CAPTURE_MODE_DEDICATED_ROUTE),
         (CaptureSourceId.SYSTEM_AUDIO, CAPTURE_MODE_SYSTEM_MIX_REMOTE),
     ]
+    assert calls[3:6] == [
+        ["pactl", "move-sink-input", "51", "alsa_output.usb_headphones"],
+        ["pactl", "unload-module", "202"],
+        ["pactl", "unload-module", "101"],
+    ]
 
 
 def test_pipewire_capture_adapter_preserves_mic_chunk_when_system_audio_degrades(
@@ -1296,14 +1301,26 @@ def test_pipewire_capture_adapter_keeps_system_mix_when_recovery_probe_fails(
     assert provider.closed == 0
     assert provider.probe_attempts == 1
     assert provider.closed_sources == [(CaptureSourceId.SYSTEM_AUDIO, CAPTURE_MODE_DEDICATED_ROUTE)]
+    assert calls[3:6] == [
+        ["pactl", "move-sink-input", "51", "alsa_output.usb_headphones"],
+        ["pactl", "unload-module", "202"],
+        ["pactl", "unload-module", "101"],
+    ]
+    assert calls[9:12] == [
+        ["pactl", "move-sink-input", "51", "alsa_output.usb_headphones"],
+        ["pactl", "unload-module", "404"],
+        ["pactl", "unload-module", "303"],
+    ]
 
 
 def test_pipewire_capture_adapter_keeps_system_mix_when_recovered_segment_fails(
     tmp_path: Path,
 ) -> None:
     module_ids = iter(["101\n", "202\n", "303\n", "404\n", "505\n", "606\n"])
+    calls: list[list[str]] = []
 
     def runner(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
         stdout = next(module_ids, "") if args[:2] == ["pactl", "load-module"] else ""
         return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
 
@@ -1383,11 +1400,21 @@ def test_pipewire_capture_adapter_keeps_system_mix_when_recovered_segment_fails(
         (CaptureSourceId.SYSTEM_AUDIO, CAPTURE_MODE_DEDICATED_ROUTE),
         (CaptureSourceId.SYSTEM_AUDIO, CAPTURE_MODE_DEDICATED_ROUTE),
     ]
+    assert calls[3:6] == [
+        ["pactl", "move-sink-input", "51", "alsa_output.usb_headphones"],
+        ["pactl", "unload-module", "202"],
+        ["pactl", "unload-module", "101"],
+    ]
+    assert calls[9:12] == [
+        ["pactl", "move-sink-input", "51", "alsa_output.usb_headphones"],
+        ["pactl", "unload-module", "404"],
+        ["pactl", "unload-module", "303"],
+    ]
 
 
 def test_pipewire_capture_adapter_flushes_segments_and_cleans_up(tmp_path: Path) -> None:
     calls: list[list[str]] = []
-    module_ids = iter(["101\n", "", "202\n", "", ""])
+    module_ids = iter(["101\n", "", "202\n", "", "", ""])
 
     def runner(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append(args)
@@ -1413,7 +1440,11 @@ def test_pipewire_capture_adapter_flushes_segments_and_cleans_up(tmp_path: Path)
     ]
     assert metadata.to_dict()["segment_count"] == 2
     assert second_stop == metadata
-    assert calls[-2:] == [["pactl", "unload-module", "202"], ["pactl", "unload-module", "101"]]
+    assert calls[-3:] == [
+        ["pactl", "move-sink-input", "51", "alsa_output.usb_headphones"],
+        ["pactl", "unload-module", "202"],
+        ["pactl", "unload-module", "101"],
+    ]
     assert all(segment.path.exists() for segment in metadata.segments)
 
 
@@ -1479,7 +1510,7 @@ def test_pipewire_capture_adapter_skips_empty_in_person_stop_segment(
 
 def test_pipewire_capture_adapter_stop_cleans_up_without_starting_flush(tmp_path: Path) -> None:
     calls: list[list[str]] = []
-    module_ids = iter(["101\n", "", "202\n", "", ""])
+    module_ids = iter(["101\n", "", "202\n", "", "", ""])
 
     def runner(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append(args)
@@ -1498,7 +1529,11 @@ def test_pipewire_capture_adapter_stop_cleans_up_without_starting_flush(tmp_path
     metadata = active.stop()
 
     assert metadata.segments == ()
-    assert calls[-2:] == [["pactl", "unload-module", "202"], ["pactl", "unload-module", "101"]]
+    assert calls[-3:] == [
+        ["pactl", "move-sink-input", "51", "alsa_output.usb_headphones"],
+        ["pactl", "unload-module", "202"],
+        ["pactl", "unload-module", "101"],
+    ]
 
 
 def test_pipewire_capture_adapter_degrades_on_partial_setup_failure(tmp_path: Path) -> None:
