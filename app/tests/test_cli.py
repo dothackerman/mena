@@ -1,5 +1,6 @@
 import hashlib
 import json
+import queue
 import threading
 import time
 from collections.abc import Mapping, Sequence
@@ -1038,6 +1039,34 @@ def test_record_reports_worker_failure_without_capture_metadata(
     assert "capture_metadata" not in record
 
 
+def test_record_persists_worker_spawn_failure_without_capture_metadata(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    def _spawn_fails(*, session_id: str, session_dir: Path) -> FakeWorkerProcess:
+        raise OSError("worker process limit reached")
+
+    exit_code = main(
+        ["record", "--profile", "online", "--language", "en"],
+        data_root=tmp_path,
+        discoverer=_available_discoverer,
+        worker_factory=_spawn_fails,
+        input_fn=lambda _prompt: "q",
+    )
+
+    captured = capsys.readouterr()
+    record_path = next((tmp_path / "sessions").iterdir()) / "session.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    assert exit_code == 1
+    assert "Capture failed: worker process limit reached" in captured.out
+    assert record["status"] == "failed"
+    assert record["recording"]["stop_reason"] == "error"
+    assert record["recording"]["finalization"]["status"] == "failed"
+    assert record["recording"]["finalization"]["error"] == "worker process limit reached"
+    assert record["capture_plan"]["status"] == "failed"
+    assert record["failures"][0]["message"] == "worker process limit reached"
+    assert "capture_metadata" not in record
+
+
 def test_record_rejects_nonzero_worker_exit_without_capture_metadata(
     tmp_path: Path, capsys: CaptureFixture[str]
 ) -> None:
@@ -1083,6 +1112,55 @@ def test_record_keyboard_interrupt_finalizes_with_interrupted_stop_reason(
     assert record["status"] == "recorded"
     assert record["recording"]["stop_reason"] == "interrupted"
     assert record["recording"]["finalization"]["status"] == "finalized"
+
+
+def test_record_real_worker_monitor_path_finalizes(
+    tmp_path: Path,
+) -> None:
+    MonitoredWorkerProcess.stop_requested = False
+
+    exit_code = main(
+        ["record", "--profile", "online", "--language", "en"],
+        data_root=tmp_path,
+        discoverer=_available_discoverer,
+        worker_factory=MonitoredWorkerProcess,
+        input_fn=lambda _prompt: "q",
+    )
+
+    record_path = next((tmp_path / "sessions").iterdir()) / "session.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert MonitoredWorkerProcess.stop_requested
+    assert record["status"] == "recorded"
+    assert record["recording"]["finalization"]["status"] == "finalized"
+
+
+def test_record_startup_interrupt_does_not_wait_on_unstarted_monitor(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    InterruptingStartWorkerProcess.stop_requested = False
+    InterruptingStartWorkerProcess.exited = False
+
+    exit_code = main(
+        ["record", "--profile", "online", "--language", "en"],
+        data_root=tmp_path,
+        discoverer=_available_discoverer,
+        worker_factory=InterruptingStartWorkerProcess,
+        input_fn=lambda _prompt: "q",
+    )
+
+    captured = capsys.readouterr()
+    record_path = next((tmp_path / "sessions").iterdir()) / "session.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    assert exit_code == 1
+    assert "Recording setup cancelled." in captured.out
+    assert not InterruptingStartWorkerProcess.stop_requested
+    assert InterruptingStartWorkerProcess.exited
+    assert record["status"] == "failed"
+    assert record["recording"]["finalization"]["error"] == "Recording setup cancelled."
+    assert record["failures"][0]["message"] == "Recording setup cancelled."
+    assert "capture_metadata" not in record
 
 
 def test_record_keyboard_interrupt_persists_finalization_failure(
@@ -3016,6 +3094,110 @@ class FakeWorkerProcess:
                 },
             },
         )
+
+    def wait(self, timeout: float | None = None) -> int:
+        return 0
+
+
+class InterruptingStartWorkerProcess(WorkerProcess):
+    stop_requested = False
+    exited = False
+
+    def __init__(self, *, session_id: str, session_dir: Path) -> None:
+        self.session_id = session_id
+        self.session_dir = session_dir
+
+    def __enter__(self) -> "InterruptingStartWorkerProcess":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.__class__.exited = True
+
+    def handshake(self) -> ProtocolMessage:
+        return ProtocolMessage(type="hello_ack", session_id=self.session_id)
+
+    def start_capture(
+        self,
+        payload: StartCapturePayload | Mapping[str, object],
+    ) -> ProtocolMessage:
+        raise KeyboardInterrupt
+
+    def request_stop_capture(self) -> None:
+        self.__class__.stop_requested = True
+
+    def stop_capture(self) -> ProtocolMessage:
+        raise AssertionError("startup cancellation should not finalize capture")
+
+
+class MonitoredWorkerProcess(WorkerProcess):
+    stop_requested = False
+
+    def __init__(self, *, session_id: str, session_dir: Path) -> None:
+        self.session_id = session_id
+        self.session_dir = session_dir
+        self._messages: queue.Queue[ProtocolMessage] = queue.Queue()
+        self.profile = "online_dual_stream"
+
+    def __enter__(self) -> "MonitoredWorkerProcess":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def handshake(self) -> ProtocolMessage:
+        return ProtocolMessage(type="hello_ack", session_id=self.session_id)
+
+    def start_capture(
+        self,
+        payload: StartCapturePayload | Mapping[str, object],
+    ) -> ProtocolMessage:
+        if isinstance(payload, StartCapturePayload):
+            self.profile = payload.profile
+        else:
+            raw_profile = payload.get("profile")
+            if isinstance(raw_profile, str):
+                self.profile = raw_profile
+        return ProtocolMessage(
+            type="capture_started",
+            session_id=self.session_id,
+            payload={
+                "session_dir": str(self.session_dir),
+                "profile": self.profile,
+                "segment_seconds": 30,
+                "selected_sources": ["local_mic", "system_audio"],
+            },
+        )
+
+    def request_stop_capture(self) -> None:
+        self.__class__.stop_requested = True
+        self._messages.put(
+            ProtocolMessage(
+                type="capture_finalized",
+                session_id=self.session_id,
+                payload={
+                    "status": "recorded",
+                    "stop_reason": "user_stop",
+                    "completed_at": None,
+                    "error": None,
+                    "capture_metadata": {
+                        "version": 1,
+                        "profile": self.profile,
+                        "sample_rate": 48000,
+                        "channels": 1,
+                        "segment_seconds": 30,
+                        "segment_count": 0,
+                        "segments": [],
+                        "sources": [],
+                    },
+                },
+            )
+        )
+
+    def receive(self) -> ProtocolMessage:
+        try:
+            return self._messages.get(timeout=1)
+        except queue.Empty as exc:
+            raise AssertionError("monitor waited for an unexpected worker message") from exc
 
     def wait(self, timeout: float | None = None) -> int:
         return 0

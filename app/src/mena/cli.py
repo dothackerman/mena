@@ -559,16 +559,31 @@ def main(
                 ),
             },
         )
-        with worker_factory(
-            session_id=created_session.record.id,
-            session_dir=created_session.bundle_path,
-        ) as worker:
+        try:
+            worker_context = worker_factory(
+                session_id=created_session.record.id,
+                session_dir=created_session.bundle_path,
+            )
+            worker = worker_context.__enter__()
+        except (OSError, subprocess.SubprocessError) as exc:
+            _persist_capture_failure(
+                record_path=created_session.record_path,
+                start_payload=start_payload,
+                started_at=started_at,
+                error_message=str(exc),
+                now=now,
+            )
+            print(f"Capture failed: {exc}")
+            return 1
+        try:
             capture_monitor = _capture_event_monitor(
                 worker,
                 record_path=created_session.record_path,
                 start_payload=start_payload,
             )
             interrupted_stop = False
+            capture_started = False
+            monitor_started = False
             try:
                 worker.handshake()
                 print(
@@ -576,18 +591,36 @@ def main(
                     "from meeting participants."
                 )
                 worker.start_capture(start_payload)
+                capture_started = True
                 if capture_monitor is not None:
                     capture_monitor.start()
+                    monitor_started = True
                 _wait_for_record_stop(input_fn, capture_monitor=capture_monitor)
-                finalized = _finalize_recording(worker, capture_monitor)
+                finalized = _finalize_recording(
+                    worker,
+                    capture_monitor if monitor_started else None,
+                )
                 exit_code = worker.wait(timeout=args.worker_exit_timeout)
                 if exit_code != 0:
                     raise WorkerExitedError(f"Worker exited with status {exit_code}.")
             except (EOFError, KeyboardInterrupt):
+                if not capture_started:
+                    _persist_capture_failure(
+                        record_path=created_session.record_path,
+                        start_payload=start_payload,
+                        started_at=started_at,
+                        error_message="Recording setup cancelled.",
+                        now=now,
+                    )
+                    print("Recording setup cancelled.")
+                    return 1
                 print("Recording stop requested; finalizing capture.")
                 interrupted_stop = True
                 try:
-                    finalized = _finalize_recording(worker, capture_monitor)
+                    finalized = _finalize_recording(
+                        worker,
+                        capture_monitor if monitor_started else None,
+                    )
                     exit_code = worker.wait(timeout=args.worker_exit_timeout)
                     if exit_code != 0:
                         raise WorkerExitedError(f"Worker exited with status {exit_code}.")
@@ -621,6 +654,8 @@ def main(
                 )
                 print(f"Capture failed: {exc}")
                 return 1
+        finally:
+            worker_context.__exit__(*sys.exc_info())
         finalized_payload = CaptureFinalizedPayload.from_dict(finalized.payload)
         completed_at = finalized_payload.completed_at or _utc_timestamp(now)
         stop_reason = "interrupted" if interrupted_stop else finalized_payload.stop_reason
