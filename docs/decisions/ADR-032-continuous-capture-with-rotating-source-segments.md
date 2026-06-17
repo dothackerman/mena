@@ -27,7 +27,7 @@ Mena's source-capture contract is **continuous capture with rotating persistence
 - the capture adapter emits raw PCM frames to a Mena-owned segment writer;
 - the segment writer seals independently readable WAV chunks at fixed frame-count boundaries;
 - already sealed chunks are durable and processable;
-- the current unsealed chunk may be sealed on stop or marked incomplete/lost on failure;
+- the current unsealed chunk may be sealed on stop when enough aligned PCM exists; otherwise it remains unpersisted and the session-level finalization or failure record carries the partial outcome;
 - processing consumes ordered, verified, sealed source segments, not live capture implementation details.
 
 For issue #83, the PoC implementation uses long-lived `pw-record --raw -` subprocesses per selected logical source and a Python-owned PCM/WAV segment writer. This keeps the correct lifecycle boundary without introducing GStreamer integration into the first live-capture slice.
@@ -40,4 +40,6 @@ GStreamer/PyGObject is the intended future adapter family when Mena needs strong
 - Segment duration is enforced by frame counts, not by killing a recorder process at a wall-clock timeout.
 - Route selection, sample rate, channels, sample format, byte counts, checksums, and segment ordering remain Mena-owned persisted facts.
 - The current adapter can be replaced by a GStreamer/PyGObject adapter without changing `session-record.v1` or downstream processing contracts.
+- The current `pw-record` adapter is Linux/POSIX-specific and uses pipe readiness polling around stdout; this is acceptable inside the Linux PipeWire adapter and must not leak into the core capture contract.
+- Per-segment `incomplete` or `lost` statuses are not produced by the #83 PoC adapter. They are reserved for a future adapter/runtime that can distinguish and persist a partial source fragment as a first-class segment artifact.
 - Review and smoke tests must check for contiguous frame counts, independently readable chunks, prior sealed chunk preservation after stop/failure, and stable dual-source offset across segment boundaries.

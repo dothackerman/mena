@@ -256,6 +256,8 @@ class _CaptureEventMonitor:
         if message.type == "segment_flushed":
             segment = SegmentFlushedPayload.from_dict(message.payload)
             self.segments.append(dict(message.payload))
+            # Incremental metadata is intentional: a session can be interrupted
+            # before finalization and still retain processable sealed chunks.
             update_session_capture_metadata(
                 self.record_path,
                 _capture_metadata_from_segments(

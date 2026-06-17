@@ -616,6 +616,24 @@ def test_pipewire_capture_adapter_flushes_in_person_room_mic_without_routing(
     assert metadata.to_dict()["segment_count"] == 1
 
 
+def test_pipewire_capture_adapter_skips_empty_in_person_stop_segment(
+    tmp_path: Path,
+) -> None:
+    adapter = PipeWireCaptureAdapter(
+        client=PipeWireClient(runner=lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0)),
+        segment_writer=WavSegmentWriter(segment_dir=tmp_path),
+        pcm_provider=lambda _source_id: b"",
+    )
+    active = adapter.start(_in_person_route_plan())
+
+    flushed = active.flush_segments(stop_event=threading.Event())
+    metadata = active.stop()
+
+    assert flushed == ()
+    assert metadata.segments == ()
+    assert not (tmp_path / CaptureSourceId.ROOM_MIC.value).exists()
+
+
 def test_pipewire_capture_adapter_cleans_up_when_stop_flush_fails(tmp_path: Path) -> None:
     calls: list[list[str]] = []
     module_ids = iter(["101\n", "", "202\n", "", ""])

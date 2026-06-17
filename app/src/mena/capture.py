@@ -531,16 +531,15 @@ class PipeWireCaptureAdapter:
         stop_event: threading.Event | None = None,
     ) -> tuple[CaptureSegment, ...]:
         if plan.profile_id is CaptureProfileId.IN_PERSON_SINGLE_MIC:
-            room = self.segment_writer.write_segment(
+            room_pcm = self._read_pcm(
                 CaptureSourceId.ROOM_MIC,
-                self._read_pcm(
-                    CaptureSourceId.ROOM_MIC,
-                    plan=plan,
-                    sink_name=sink_name,
-                    stop_event=stop_event,
-                ),
+                plan=plan,
+                sink_name=sink_name,
+                stop_event=stop_event,
             )
-            return (room,)
+            if not room_pcm:
+                return ()
+            return (self.segment_writer.write_segment(CaptureSourceId.ROOM_MIC, room_pcm),)
         if self.pcm_provider is None:
             pcm_by_source = self.pipewire_pcm_provider.read_aligned_segments(
                 plan=plan,
@@ -554,25 +553,17 @@ class PipeWireCaptureAdapter:
                 if pcm:
                     segments.append(self.segment_writer.write_segment(source_id, pcm))
             return tuple(segments)
-        local = self.segment_writer.write_segment(
-            CaptureSourceId.LOCAL_MIC,
-            self._read_pcm(
-                CaptureSourceId.LOCAL_MIC,
+        segments = []
+        for source_id in (CaptureSourceId.LOCAL_MIC, CaptureSourceId.SYSTEM_AUDIO):
+            pcm = self._read_pcm(
+                source_id,
                 plan=plan,
                 sink_name=sink_name,
                 stop_event=stop_event,
-            ),
-        )
-        remote = self.segment_writer.write_segment(
-            CaptureSourceId.SYSTEM_AUDIO,
-            self._read_pcm(
-                CaptureSourceId.SYSTEM_AUDIO,
-                plan=plan,
-                sink_name=sink_name,
-                stop_event=stop_event,
-            ),
-        )
-        return (local, remote)
+            )
+            if pcm:
+                segments.append(self.segment_writer.write_segment(source_id, pcm))
+        return tuple(segments)
 
     def _read_pcm(
         self,
