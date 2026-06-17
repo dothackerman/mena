@@ -14,6 +14,7 @@ import json
 import shutil
 import sys
 import wave
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from io import BytesIO
@@ -36,7 +37,6 @@ EXPECTED_CHANNELS_BY_PROFILE = {
     PROFILE_ONLINE: {1},
     PROFILE_IN_PERSON: {1, 2},
 }
-COPY_CHUNK_SIZE = 1024 * 1024
 UAT_CHUNK_SECONDS = 30
 
 
@@ -46,7 +46,6 @@ class WavInfo:
     channels: int
     sample_width: int
     frame_count: int
-    pcm_payload: bytes
 
     @property
     def duration_seconds(self) -> float:
@@ -57,6 +56,13 @@ class WavInfo:
 class SourceInput:
     source_id: str
     source_path: Path
+
+
+@dataclass(frozen=True)
+class SourceWav:
+    source_id: str
+    source_path: Path
+    info: WavInfo
 
 
 @dataclass(frozen=True)
@@ -93,8 +99,9 @@ def create_session_from_audio(args: argparse.Namespace) -> Path:
     bundle_path.mkdir(parents=True)
 
     try:
-        segments = _copy_capture_segments(bundle_path=bundle_path, source_inputs=source_inputs)
-        _validate_audio_shape(profile=args.profile, segments=segments)
+        source_wavs = _read_source_wavs(source_inputs)
+        _validate_audio_shape(profile=args.profile, source_wavs=source_wavs)
+        segments = _copy_capture_segments(bundle_path=bundle_path, source_wavs=source_wavs)
         capture_metadata = _capture_metadata(segments)
         session_record = {
             "version": 1,
@@ -171,15 +178,14 @@ def _source_inputs(args: argparse.Namespace) -> tuple[SourceInput, ...]:
 def _copy_capture_segments(
     *,
     bundle_path: Path,
-    source_inputs: tuple[SourceInput, ...],
+    source_wavs: tuple[SourceWav, ...],
 ) -> list[dict[str, object]]:
     segments: list[dict[str, object]] = []
-    for source in source_inputs:
-        wav_path = source.source_path.expanduser().resolve()
-        info = _read_wav_info(wav_path)
+    for source in source_wavs:
+        info = source.info
         target_dir = bundle_path / "capture" / source.source_id
         target_dir.mkdir(parents=True, exist_ok=True)
-        for index, chunk in enumerate(_iter_wav_chunks(info), start=1):
+        for index, chunk in enumerate(_iter_wav_chunks(source.source_path, info), start=1):
             target_path = target_dir / f"{source.source_id}_{index:06d}.wav"
             target_path.write_bytes(chunk.payload)
             segments.append(
@@ -208,21 +214,18 @@ def _copy_capture_segments(
     return segments
 
 
-@dataclass(frozen=True)
-class CopyResult:
-    byte_count: int
-    sha256: str
-
-
-def _copy_and_hash(source_path: Path, target_path: Path) -> CopyResult:
-    digest = hashlib.sha256()
-    byte_count = 0
-    with source_path.open("rb") as source_file, target_path.open("wb") as target_file:
-        for chunk in iter(lambda: source_file.read(COPY_CHUNK_SIZE), b""):
-            byte_count += len(chunk)
-            digest.update(chunk)
-            target_file.write(chunk)
-    return CopyResult(byte_count=byte_count, sha256=digest.hexdigest())
+def _read_source_wavs(source_inputs: tuple[SourceInput, ...]) -> tuple[SourceWav, ...]:
+    source_wavs: list[SourceWav] = []
+    for source in source_inputs:
+        wav_path = source.source_path.expanduser().resolve()
+        source_wavs.append(
+            SourceWav(
+                source_id=source.source_id,
+                source_path=wav_path,
+                info=_read_wav_info(wav_path),
+            )
+        )
+    return tuple(source_wavs)
 
 
 def _read_wav_info(path: Path) -> WavInfo:
@@ -234,7 +237,6 @@ def _read_wav_info(path: Path) -> WavInfo:
             sample_rate = wav_file.getframerate()
             sample_width = wav_file.getsampwidth()
             frame_count = wav_file.getnframes()
-            payload = wav_file.readframes(frame_count)
     except (EOFError, wave.Error) as exc:
         raise UatSessionError(f"Not a supported PCM WAV file: {path}") from exc
 
@@ -244,35 +246,36 @@ def _read_wav_info(path: Path) -> WavInfo:
         raise UatSessionError(f"WAV file must be 16-bit PCM for current UAT fixtures: {path}")
     if frame_count <= 0:
         raise UatSessionError(f"WAV file contains no audio frames: {path}")
-    expected_byte_count = frame_count * channels * sample_width
-    if len(payload) != expected_byte_count:
-        raise UatSessionError(f"WAV file does not contain declared PCM frame data: {path}")
     return WavInfo(
         sample_rate=sample_rate,
         channels=channels,
         sample_width=sample_width,
         frame_count=frame_count,
-        pcm_payload=payload,
     )
 
 
-def _iter_wav_chunks(info: WavInfo) -> tuple[WavChunk, ...]:
+def _iter_wav_chunks(path: Path, info: WavInfo) -> Iterator[WavChunk]:
     frames_per_chunk = info.sample_rate * UAT_CHUNK_SECONDS
     bytes_per_frame = info.channels * info.sample_width
-    chunks: list[WavChunk] = []
-    for start_frame in range(0, info.frame_count, frames_per_chunk):
-        frame_count = min(frames_per_chunk, info.frame_count - start_frame)
-        start_byte = start_frame * bytes_per_frame
-        byte_count = frame_count * bytes_per_frame
-        pcm_payload = info.pcm_payload[start_byte : start_byte + byte_count]
-        chunks.append(
-            WavChunk(
-                payload=_chunk_wav_bytes(info=info, pcm_payload=pcm_payload),
-                frame_count=frame_count,
-                duration_seconds=frame_count / info.sample_rate,
-            )
-        )
-    return tuple(chunks)
+    remaining_frames = info.frame_count
+    try:
+        with wave.open(str(path), "rb") as wav_file:
+            while remaining_frames > 0:
+                frame_count = min(frames_per_chunk, remaining_frames)
+                pcm_payload = wav_file.readframes(frame_count)
+                expected_byte_count = frame_count * bytes_per_frame
+                if len(pcm_payload) != expected_byte_count:
+                    raise UatSessionError(
+                        f"WAV file does not contain declared PCM frame data: {path}"
+                    )
+                yield WavChunk(
+                    payload=_chunk_wav_bytes(info=info, pcm_payload=pcm_payload),
+                    frame_count=frame_count,
+                    duration_seconds=frame_count / info.sample_rate,
+                )
+                remaining_frames -= frame_count
+    except (EOFError, wave.Error) as exc:
+        raise UatSessionError(f"Not a supported PCM WAV file: {path}") from exc
 
 
 def _chunk_wav_bytes(*, info: WavInfo, pcm_payload: bytes) -> bytes:
@@ -285,10 +288,10 @@ def _chunk_wav_bytes(*, info: WavInfo, pcm_payload: bytes) -> bytes:
     return output.getvalue()
 
 
-def _validate_audio_shape(*, profile: str, segments: list[dict[str, object]]) -> None:
-    sample_rates = {segment["sample_rate"] for segment in segments}
-    channels = {segment["channels"] for segment in segments}
-    frame_counts = {segment["_frame_count"] for segment in segments}
+def _validate_audio_shape(*, profile: str, source_wavs: tuple[SourceWav, ...]) -> None:
+    sample_rates = {source.info.sample_rate for source in source_wavs}
+    channels = {source.info.channels for source in source_wavs}
+    frame_counts = {source.info.frame_count for source in source_wavs}
     if len(sample_rates) > 1:
         raise UatSessionError("All source WAV files must use the same sample rate.")
     if len(channels) > 1:

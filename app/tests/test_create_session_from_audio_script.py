@@ -276,6 +276,49 @@ def test_create_uat_session_splits_audio_by_actual_length(
     ]
 
 
+def test_create_online_uat_session_accepts_equal_multichunk_inputs(
+    tmp_path: Path,
+) -> None:
+    local_wav = tmp_path / "local.wav"
+    system_wav = tmp_path / "system.wav"
+    data_root = tmp_path / "uat-data"
+    _write_wav(local_wav, frame_count=16_000 * 31)
+    _write_wav(system_wav, frame_count=16_000 * 31)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--profile",
+            "online",
+            "--data-root",
+            str(data_root),
+            "--local-mic",
+            str(local_wav),
+            "--system-audio",
+            str(system_wav),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    record_path = next((data_root / "sessions").iterdir()) / "session.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    segments = record["capture_metadata"]["segments"]
+    assert record["capture_metadata"]["segment_count"] == 4
+    assert {
+        (segment["source_id"], segment["index"], segment["duration_seconds"])
+        for segment in segments
+    } == {
+        ("local_mic", 1, 30.0),
+        ("local_mic", 2, 1.0),
+        ("system_audio", 1, 30.0),
+        ("system_audio", 2, 1.0),
+    }
+    assert verify_session_bundle(record_path).ok
+
+
 def test_create_uat_session_rejects_truncated_wav_payload(tmp_path: Path) -> None:
     room_wav = tmp_path / "room.wav"
     _write_wav(room_wav, channels=2)
