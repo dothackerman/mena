@@ -527,6 +527,9 @@ def main(
                 discovery=discovery,
                 selections=route_selections,
             )
+        except (EOFError, KeyboardInterrupt):
+            print("Recording setup cancelled.")
+            return 1
         except (CapturePlanningError, ValueError) as exc:
             print(f"Capture not started: {exc}")
             return 1

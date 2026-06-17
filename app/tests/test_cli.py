@@ -916,6 +916,35 @@ def test_record_rejects_ambiguous_routes_without_explicit_selection(
     assert "Multiple microphone routes were discovered; pass --mic." in captured.out
 
 
+@pytest.mark.parametrize("exc_type", [EOFError, KeyboardInterrupt])
+def test_record_route_prompt_cancellation_does_not_start_capture(
+    exc_type: type[BaseException],
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    FakeWorkerProcess.last_start_payload = None
+
+    def _cancel_route_prompt(_prompt: str) -> str:
+        raise exc_type
+
+    exit_code = main(
+        ["record", "--profile", "online", "--language", "en"],
+        data_root=tmp_path,
+        discoverer=_ambiguous_discoverer,
+        worker_factory=FakeWorkerProcess,
+        input_fn=_cancel_route_prompt,
+    )
+
+    captured = capsys.readouterr()
+    record_path = next((tmp_path / "sessions").iterdir()) / "session.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    assert exit_code == 1
+    assert "Recording setup cancelled." in captured.out
+    assert FakeWorkerProcess.last_start_payload is None
+    assert record["status"] == "created"
+    assert "capture" not in record
+
+
 def test_record_uses_explicit_noninteractive_route_flags(tmp_path: Path) -> None:
     FakeWorkerProcess.last_start_payload = None
 
