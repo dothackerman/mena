@@ -10,7 +10,7 @@ import subprocess
 import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from mena.profiles import CaptureProfileId, CaptureSourceId
@@ -20,6 +20,9 @@ DEFAULT_SAMPLE_RATE = 48_000
 DEFAULT_SAMPLE_WIDTH_BYTES = 2
 DEFAULT_SEGMENT_SECONDS = 30
 MAX_SEGMENT_BYTES = 50 * 1024 * 1024
+CAPTURE_MODE_SELECTED_MICROPHONE = "selected_microphone"
+CAPTURE_MODE_DEDICATED_ROUTE = "dedicated_route"
+CAPTURE_MODE_SYSTEM_MIX_REMOTE = "system_mix_remote"
 
 
 @dataclass(frozen=True)
@@ -31,6 +34,10 @@ class CaptureRoutePlan:
     playback_stream_route_id: str | None = None
     output_sink_route_id: str | None = None
     profile_id: CaptureProfileId = CaptureProfileId.ONLINE_DUAL_STREAM
+    microphone_route_label: str | None = None
+    playback_stream_route_label: str | None = None
+    output_sink_route_label: str | None = None
+    system_audio_mode: str = CAPTURE_MODE_DEDICATED_ROUTE
 
 
 @dataclass(frozen=True)
@@ -49,6 +56,9 @@ class CaptureSegment:
     started_at: str | None
     ended_at: str | None
     sha256: str
+    route_id: str | None = None
+    route_label: str | None = None
+    capture_mode: str | None = None
     status: str = "sealed"
     format: str = "wav"
 
@@ -66,6 +76,9 @@ class CaptureSegment:
             "started_at": self.started_at,
             "ended_at": self.ended_at,
             "sha256": self.sha256,
+            "route_id": self.route_id,
+            "route_label": self.route_label,
+            "capture_mode": self.capture_mode,
             "status": self.status,
             "format": self.format,
         }
@@ -78,6 +91,37 @@ class CaptureSourceRoute:
     source_id: CaptureSourceId
     route_id: str | None
     route_label: str | None
+    capture_mode: str | None = None
+
+
+@dataclass(frozen=True)
+class CaptureRouteEvent:
+    """A route-mode degradation or recovery event."""
+
+    event: str
+    code: str
+    message: str
+    source_id: CaptureSourceId | None
+    route_id: str | None
+    route_label: str | None
+    capture_mode: str | None
+    elapsed_seconds: float | None = None
+    segment_index: int | None = None
+    occurred_at: str | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "event": self.event,
+            "code": self.code,
+            "message": self.message,
+            "source_id": None if self.source_id is None else self.source_id.value,
+            "occurred_at": self.occurred_at,
+            "elapsed_seconds": self.elapsed_seconds,
+            "segment_index": self.segment_index,
+            "route_id": self.route_id,
+            "route_label": self.route_label,
+            "capture_mode": self.capture_mode,
+        }
 
 
 @dataclass(frozen=True)
@@ -122,7 +166,15 @@ class WavSegmentWriter:
         self.sample_width_bytes = sample_width_bytes
         self._indexes: dict[CaptureSourceId, int] = {}
 
-    def write_segment(self, source_id: CaptureSourceId, pcm_bytes: bytes) -> CaptureSegment:
+    def write_segment(
+        self,
+        source_id: CaptureSourceId,
+        pcm_bytes: bytes,
+        *,
+        route_id: str | None = None,
+        route_label: str | None = None,
+        capture_mode: str | None = None,
+    ) -> CaptureSegment:
         source_dir = self.segment_dir / source_id.value
         source_dir.mkdir(parents=True, exist_ok=True)
         index = self._next_index(source_id, source_dir)
@@ -158,6 +210,9 @@ class WavSegmentWriter:
             started_at=None,
             ended_at=None,
             sha256=hashlib.sha256(wav_bytes).hexdigest(),
+            route_id=route_id,
+            route_label=route_label,
+            capture_mode=capture_mode,
         )
 
     def _next_index(self, source_id: CaptureSourceId, source_dir: Path) -> int:
@@ -195,6 +250,15 @@ class SilencePcmProvider:
 
 
 PcmProvider = Callable[[CaptureSourceId], bytes]
+
+
+class CaptureSourceError(RuntimeError):
+    """A capture source failed while reading aligned source chunks."""
+
+    def __init__(self, source_id: CaptureSourceId, cause: BaseException) -> None:
+        self.source_id = source_id
+        self.cause = cause
+        super().__init__(f"{source_id.value} capture failed: {cause}")
 
 
 class PipeWirePcmProvider:
@@ -263,7 +327,10 @@ class PipeWirePcmProvider:
             }
         output: dict[CaptureSourceId, bytes] = {}
         for source_id, future in results.items():
-            pcm = future.result()
+            try:
+                pcm = future.result()
+            except BaseException as exc:
+                raise CaptureSourceError(source_id, exc) from exc
             if pcm:
                 output[source_id] = pcm
         return output
@@ -333,6 +400,14 @@ class PipeWirePcmProvider:
         if source_id is CaptureSourceId.ROOM_MIC:
             return _pipewire_node_id(plan.microphone_route_id)
         if source_id is CaptureSourceId.SYSTEM_AUDIO:
+            if plan.system_audio_mode == CAPTURE_MODE_SYSTEM_MIX_REMOTE:
+                if plan.output_sink_route_id is None:
+                    raise ValueError("System-mix fallback requires an output sink route.")
+                return _pipewire_monitor_target(plan.output_sink_route_id)
+            if plan.system_audio_mode != CAPTURE_MODE_DEDICATED_ROUTE:
+                raise ValueError(
+                    f"Unsupported system audio capture mode '{plan.system_audio_mode}'."
+                )
             return f"{sink_name}.monitor"
         raise ValueError(f"Unsupported capture source '{source_id}'.")
 
@@ -507,20 +582,36 @@ class PipeWireCaptureAdapter:
             raise ValueError("Online capture requires a playback stream route.")
         if plan.output_sink_route_id is None:
             raise ValueError("Online capture requires an output sink route.")
-        null_sink_module = self.client.create_null_sink(sink_name)
-        loopback_module: str | None = None
         try:
-            self.client.move_playback_stream(plan.playback_stream_route_id, sink_name)
-            loopback_module = self.client.create_loopback(sink_name, plan.output_sink_route_id)
+            null_sink_module, loopback_module = self._setup_dedicated_route(
+                plan=plan,
+                sink_name=sink_name,
+            )
+            route_events: tuple[CaptureRouteEvent, ...] = ()
         except Exception:
-            self._cleanup(null_sink_module=null_sink_module, loopback_module=loopback_module)
-            raise
+            plan = replace(plan, system_audio_mode=CAPTURE_MODE_SYSTEM_MIX_REMOTE)
+            null_sink_module = None
+            loopback_module = None
+            route_events = (
+                _route_event(
+                    event="degraded",
+                    code="dedicated_route_unavailable",
+                    message=(
+                        "Dedicated meeting route unavailable; recording selected output "
+                        "sink monitor as system-mix remote audio."
+                    ),
+                    source_id=CaptureSourceId.SYSTEM_AUDIO,
+                    plan=plan,
+                    segment_index=1,
+                ),
+            )
         return ActivePipeWireCapture(
             adapter=self,
             plan=plan,
             sink_name=sink_name,
             null_sink_module=null_sink_module,
             loopback_module=loopback_module,
+            route_events=route_events,
         )
 
     def _flush_once(
@@ -539,7 +630,7 @@ class PipeWireCaptureAdapter:
             )
             if not room_pcm:
                 return ()
-            return (self.segment_writer.write_segment(CaptureSourceId.ROOM_MIC, room_pcm),)
+            return (self._write_segment(CaptureSourceId.ROOM_MIC, room_pcm, plan=plan),)
         if self.pcm_provider is None:
             pcm_by_source = self.pipewire_pcm_provider.read_aligned_segments(
                 plan=plan,
@@ -551,7 +642,7 @@ class PipeWireCaptureAdapter:
             for source_id in (CaptureSourceId.LOCAL_MIC, CaptureSourceId.SYSTEM_AUDIO):
                 pcm = pcm_by_source.get(source_id)
                 if pcm:
-                    segments.append(self.segment_writer.write_segment(source_id, pcm))
+                    segments.append(self._write_segment(source_id, pcm, plan=plan))
             return tuple(segments)
         segments = []
         for source_id in (CaptureSourceId.LOCAL_MIC, CaptureSourceId.SYSTEM_AUDIO):
@@ -562,8 +653,24 @@ class PipeWireCaptureAdapter:
                 stop_event=stop_event,
             )
             if pcm:
-                segments.append(self.segment_writer.write_segment(source_id, pcm))
+                segments.append(self._write_segment(source_id, pcm, plan=plan))
         return tuple(segments)
+
+    def _write_segment(
+        self,
+        source_id: CaptureSourceId,
+        pcm: bytes,
+        *,
+        plan: CaptureRoutePlan,
+    ) -> CaptureSegment:
+        route_id, route_label, capture_mode = _segment_route_facts(plan, source_id)
+        return self.segment_writer.write_segment(
+            source_id,
+            pcm,
+            route_id=route_id,
+            route_label=route_label,
+            capture_mode=capture_mode,
+        )
 
     def _read_pcm(
         self,
@@ -592,6 +699,26 @@ class PipeWireCaptureAdapter:
                 except (subprocess.CalledProcessError, OSError):
                     continue
 
+    def _setup_dedicated_route(
+        self,
+        *,
+        plan: CaptureRoutePlan,
+        sink_name: str,
+    ) -> tuple[str, str | None]:
+        null_sink_module = self.client.create_null_sink(sink_name)
+        loopback_module: str | None = None
+        try:
+            if plan.playback_stream_route_id is None:
+                raise ValueError("Online capture requires a playback stream route.")
+            if plan.output_sink_route_id is None:
+                raise ValueError("Online capture requires an output sink route.")
+            self.client.move_playback_stream(plan.playback_stream_route_id, sink_name)
+            loopback_module = self.client.create_loopback(sink_name, plan.output_sink_route_id)
+        except Exception:
+            self._cleanup(null_sink_module=null_sink_module, loopback_module=loopback_module)
+            raise
+        return null_sink_module, loopback_module
+
 
 class ActivePipeWireCapture:
     """Active capture routing state owned by the worker."""
@@ -604,6 +731,7 @@ class ActivePipeWireCapture:
         sink_name: str,
         null_sink_module: str | None,
         loopback_module: str | None,
+        route_events: tuple[CaptureRouteEvent, ...] = (),
     ) -> None:
         self._adapter = adapter
         self._plan = plan
@@ -611,6 +739,7 @@ class ActivePipeWireCapture:
         self.null_sink_module = null_sink_module
         self.loopback_module = loopback_module
         self._segments: list[CaptureSegment] = []
+        self._route_events: list[CaptureRouteEvent] = list(route_events)
         self._stopped = False
 
     def flush_segments(
@@ -618,13 +747,31 @@ class ActivePipeWireCapture:
     ) -> tuple[CaptureSegment, ...]:
         if self._stopped:
             return ()
-        segments = self._adapter._flush_once(
-            plan=self._plan,
-            sink_name=self.sink_name,
-            stop_event=stop_event,
-        )
+        if self._should_attempt_recovery():
+            self._try_recover_dedicated_route()
+        try:
+            segments = self._adapter._flush_once(
+                plan=self._plan,
+                sink_name=self.sink_name,
+                stop_event=stop_event,
+            )
+        except CaptureSourceError as exc:
+            if self._can_degrade_to_system_mix(exc):
+                self._degrade_to_system_mix()
+                segments = self._adapter._flush_once(
+                    plan=self._plan,
+                    sink_name=self.sink_name,
+                    stop_event=stop_event,
+                )
+            else:
+                raise
         self._segments.extend(segments)
         return segments
+
+    def drain_route_events(self) -> tuple[CaptureRouteEvent, ...]:
+        events = tuple(self._route_events)
+        self._route_events.clear()
+        return events
 
     def stop(self) -> CaptureMetadata:
         if not self._stopped:
@@ -645,6 +792,73 @@ class ActivePipeWireCapture:
             segment_seconds=self._adapter.segment_seconds,
             segments=tuple(self._segments),
         )
+
+    def _can_degrade_to_system_mix(self, exc: CaptureSourceError) -> bool:
+        return (
+            self._plan.profile_id is CaptureProfileId.ONLINE_DUAL_STREAM
+            and self._plan.system_audio_mode == CAPTURE_MODE_DEDICATED_ROUTE
+            and exc.source_id is CaptureSourceId.SYSTEM_AUDIO
+            and self._plan.output_sink_route_id is not None
+        )
+
+    def _degrade_to_system_mix(self) -> None:
+        self._adapter._cleanup(
+            null_sink_module=self.null_sink_module,
+            loopback_module=self.loopback_module,
+        )
+        self.null_sink_module = None
+        self.loopback_module = None
+        self._plan = replace(self._plan, system_audio_mode=CAPTURE_MODE_SYSTEM_MIX_REMOTE)
+        self._route_events.append(
+            _route_event(
+                event="degraded",
+                code="dedicated_route_runtime_failed",
+                message=(
+                    "Dedicated meeting route failed during capture; recording selected "
+                    "output sink monitor as system-mix remote audio."
+                ),
+                source_id=CaptureSourceId.SYSTEM_AUDIO,
+                plan=self._plan,
+                segment_index=self._next_segment_index(CaptureSourceId.SYSTEM_AUDIO),
+            )
+        )
+
+    def _should_attempt_recovery(self) -> bool:
+        return (
+            self._plan.profile_id is CaptureProfileId.ONLINE_DUAL_STREAM
+            and self._plan.system_audio_mode == CAPTURE_MODE_SYSTEM_MIX_REMOTE
+            and self._source_segment_count(CaptureSourceId.SYSTEM_AUDIO) > 0
+        )
+
+    def _try_recover_dedicated_route(self) -> None:
+        self._adapter.pipewire_pcm_provider.close()
+        primary_plan = replace(self._plan, system_audio_mode=CAPTURE_MODE_DEDICATED_ROUTE)
+        try:
+            null_sink_module, loopback_module = self._adapter._setup_dedicated_route(
+                plan=primary_plan,
+                sink_name=self.sink_name,
+            )
+        except Exception:
+            return
+        self.null_sink_module = null_sink_module
+        self.loopback_module = loopback_module
+        self._plan = primary_plan
+        self._route_events.append(
+            _route_event(
+                event="recovered",
+                code="dedicated_route_recovered",
+                message="Dedicated meeting route recovered; recording isolated meeting playback.",
+                source_id=CaptureSourceId.SYSTEM_AUDIO,
+                plan=self._plan,
+                segment_index=self._next_segment_index(CaptureSourceId.SYSTEM_AUDIO),
+            )
+        )
+
+    def _source_segment_count(self, source_id: CaptureSourceId) -> int:
+        return sum(1 for segment in self._segments if segment.source_id is source_id)
+
+    def _next_segment_index(self, source_id: CaptureSourceId) -> int:
+        return self._source_segment_count(source_id) + 1
 
 
 def session_null_sink_name(session_id: str) -> str:
@@ -702,6 +916,58 @@ def _pipewire_node_id(route_id: str) -> str:
     if not node_id.isdigit():
         raise ValueError(f"Unsupported PipeWire route id '{route_id}'.")
     return node_id
+
+
+def _pipewire_monitor_target(route_id: str) -> str:
+    return f"{_pipewire_node_id(route_id)}.monitor"
+
+
+def _segment_route_facts(
+    plan: CaptureRoutePlan,
+    source_id: CaptureSourceId,
+) -> tuple[str | None, str | None, str | None]:
+    if source_id in {CaptureSourceId.LOCAL_MIC, CaptureSourceId.ROOM_MIC}:
+        return (
+            plan.microphone_route_id,
+            plan.microphone_route_label,
+            CAPTURE_MODE_SELECTED_MICROPHONE,
+        )
+    if source_id is CaptureSourceId.SYSTEM_AUDIO:
+        if plan.system_audio_mode == CAPTURE_MODE_SYSTEM_MIX_REMOTE:
+            return (
+                plan.output_sink_route_id,
+                plan.output_sink_route_label,
+                CAPTURE_MODE_SYSTEM_MIX_REMOTE,
+            )
+        return (
+            plan.playback_stream_route_id,
+            plan.playback_stream_route_label,
+            CAPTURE_MODE_DEDICATED_ROUTE,
+        )
+    return (None, None, None)
+
+
+def _route_event(
+    *,
+    event: str,
+    code: str,
+    message: str,
+    source_id: CaptureSourceId,
+    plan: CaptureRoutePlan,
+    segment_index: int,
+) -> CaptureRouteEvent:
+    route_id, route_label, capture_mode = _segment_route_facts(plan, source_id)
+    return CaptureRouteEvent(
+        event=event,
+        code=code,
+        message=message,
+        source_id=source_id,
+        route_id=route_id,
+        route_label=route_label,
+        capture_mode=capture_mode,
+        elapsed_seconds=None,
+        segment_index=segment_index,
+    )
 
 
 def _pipe_has_data(pipe: object, *, timeout: float) -> bool:
@@ -767,8 +1033,12 @@ def _source_summaries(
         summaries.append(
             {
                 "source_id": source_id.value,
-                "route_id": None if source_route is None else source_route.route_id,
-                "route_label": None if source_route is None else source_route.route_label,
+                "route_id": source_segments[-1].route_id
+                or (None if source_route is None else source_route.route_id),
+                "route_label": source_segments[-1].route_label
+                or (None if source_route is None else source_route.route_label),
+                "capture_mode": source_segments[-1].capture_mode
+                or (None if source_route is None else source_route.capture_mode),
                 "channel_layout": channel_layout,
                 "segment_count": len(source_segments),
             }

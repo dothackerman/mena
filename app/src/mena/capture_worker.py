@@ -13,6 +13,7 @@ from typing import IO, TextIO
 from mena.capture import (
     ActivePipeWireCapture,
     CaptureMetadata,
+    CaptureRouteEvent,
     CaptureRoutePlan,
     CaptureSegment,
     CaptureSourceRoute,
@@ -24,6 +25,7 @@ from mena.capture import (
 from mena.profiles import CaptureProfileId, CaptureSourceId
 from mena.protocol import (
     CaptureFinalizedPayload,
+    CaptureRouteEventPayload,
     CaptureStartedPayload,
     CaptureStatusPayload,
     ErrorPayload,
@@ -132,6 +134,12 @@ def run_worker(
                         selected_sources=start_payload.selected_sources,
                     ).to_dict(),
                 ),
+            )
+            _write_route_events(
+                protocol_out=protocol_out,
+                write_lock=write_lock,
+                session_id=session_id,
+                events=_drain_route_events(capture),
             )
             if test_deterministic_capture:
                 _write_flushed_segments(
@@ -249,6 +257,7 @@ class WorkerCaptureSession:
                 session_id=self.session_id,
                 microphone_route_id=self._route_id("microphone"),
                 profile_id=profile_id,
+                microphone_route_label=self._route_label("microphone"),
             )
         else:
             route_plan = CaptureRoutePlan(
@@ -257,6 +266,9 @@ class WorkerCaptureSession:
                 playback_stream_route_id=self._route_id("playback_stream"),
                 output_sink_route_id=self._route_id("output_sink"),
                 profile_id=profile_id,
+                microphone_route_label=self._route_label("microphone"),
+                playback_stream_route_label=self._route_label("playback_stream"),
+                output_sink_route_label=self._route_label("output_sink"),
             )
         self.active_capture = self.adapter.start(
             route_plan,
@@ -298,6 +310,17 @@ class WorkerCaptureSession:
                 return route.route_id
         raise ProtocolError(f"start_capture payload missing {role} route.")
 
+    def _route_label(self, role: str) -> str:
+        for route in self.start_payload.routes:
+            if route.role == role:
+                return route.label
+        raise ProtocolError(f"start_capture payload missing {role} route.")
+
+    def drain_route_events(self) -> tuple[CaptureRouteEvent, ...]:
+        if self.active_capture is None:
+            return ()
+        return self.active_capture.drain_route_events()
+
     def _source_routes(self) -> tuple[CaptureSourceRoute, ...]:
         source_routes: list[CaptureSourceRoute] = []
         for route in self.start_payload.routes:
@@ -308,6 +331,9 @@ class WorkerCaptureSession:
                     source_id=CaptureSourceId(route.source_id),
                     route_id=route.route_id,
                     route_label=route.label,
+                    capture_mode=(
+                        "selected_microphone" if route.role == "microphone" else "dedicated_route"
+                    ),
                 )
             )
         return tuple(source_routes)
@@ -399,6 +425,12 @@ def _write_flushed_segments(
     stop_event: threading.Event | None = None,
 ) -> None:
     flushed = capture.flush_once(stop_event=stop_event)
+    _write_route_events(
+        protocol_out=protocol_out,
+        write_lock=write_lock,
+        session_id=session_id,
+        events=_drain_route_events(capture),
+    )
     for segment in flushed:
         with write_lock:
             write_message(
@@ -407,6 +439,32 @@ def _write_flushed_segments(
                     type="segment_flushed",
                     session_id=session_id,
                     payload=segment.to_dict(),
+                ),
+            )
+
+
+def _drain_route_events(capture: WorkerCaptureSession) -> tuple[CaptureRouteEvent, ...]:
+    drain = getattr(capture, "drain_route_events", None)
+    if not callable(drain):
+        return ()
+    return tuple(drain())
+
+
+def _write_route_events(
+    *,
+    protocol_out: IO[bytes],
+    write_lock: threading.Lock,
+    session_id: str,
+    events: tuple[CaptureRouteEvent, ...],
+) -> None:
+    for event in events:
+        with write_lock:
+            write_message(
+                protocol_out,
+                ProtocolMessage(
+                    type="capture_route_event",
+                    session_id=session_id,
+                    payload=CaptureRouteEventPayload.from_dict(event.to_dict()).to_dict(),
                 ),
             )
 

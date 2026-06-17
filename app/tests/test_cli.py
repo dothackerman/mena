@@ -702,6 +702,38 @@ def test_capture_event_monitor_drains_progress_and_returns_finalization(
                     "sealed_segment_count": 1,
                 },
             ),
+            ProtocolMessage(
+                type="capture_route_event",
+                session_id=SESSION_ID,
+                payload={
+                    "event": "degraded",
+                    "code": "dedicated_route_unavailable",
+                    "message": "Using selected output sink monitor.",
+                    "source_id": "system_audio",
+                    "occurred_at": None,
+                    "elapsed_seconds": 0.0,
+                    "segment_index": 1,
+                    "route_id": "pipewire:node:42",
+                    "route_label": "Headphones",
+                    "capture_mode": "system_mix_remote",
+                },
+            ),
+            ProtocolMessage(
+                type="capture_route_event",
+                session_id=SESSION_ID,
+                payload={
+                    "event": "recovered",
+                    "code": "dedicated_route_recovered",
+                    "message": "Dedicated meeting route recovered.",
+                    "source_id": "system_audio",
+                    "occurred_at": None,
+                    "elapsed_seconds": 30.0,
+                    "segment_index": 2,
+                    "route_id": "pulse:sink-input:51",
+                    "route_label": "Video call",
+                    "capture_mode": "dedicated_route",
+                },
+            ),
             _finalized_capture_message(),
         ]
     )
@@ -720,8 +752,12 @@ def test_capture_event_monitor_drains_progress_and_returns_finalization(
     assert record["capture_metadata"]["segment_count"] == 1
     assert record["capture_metadata"]["segments"][0]["source_id"] == "local_mic"
     assert record["capture_metadata"]["sources"][0]["route_label"] == "Studio mic"
+    assert record["degradations"][0]["capture_mode"] == "system_mix_remote"
+    assert record["degradations"][1]["event"] == "recovered"
     assert "Sealed local_mic segment 1." in captured.out
     assert "Recording: 12s elapsed, 1 sealed segment(s)." in captured.out
+    assert "Capture degraded: Using selected output sink monitor." in captured.out
+    assert "Capture recovered: Dedicated meeting route recovered." in captured.out
 
 
 def test_capture_event_monitor_raises_structured_worker_error(tmp_path: Path) -> None:
@@ -2750,6 +2786,9 @@ def _segment_payload(*, source_id: str, index: int) -> dict[str, object]:
         "started_at": None,
         "ended_at": None,
         "sha256": "0" * 64,
+        "route_id": None,
+        "route_label": None,
+        "capture_mode": None,
         "status": "sealed",
         "format": "wav",
     }
@@ -3639,8 +3678,22 @@ def test_collect_capture_segments_orders_multiple_segments_per_source() -> None:
         ("local_mic",),
     ) == {
         "local_mic": (
-            ("local_mic_segment.wav", 1, None),
-            ("local_mic_segment_2.wav", 2, None),
+            {
+                "path": "local_mic_segment.wav",
+                "index": 1,
+                "sha256": None,
+                "route_id": None,
+                "route_label": None,
+                "capture_mode": None,
+            },
+            {
+                "path": "local_mic_segment_2.wav",
+                "index": 2,
+                "sha256": None,
+                "route_id": None,
+                "route_label": None,
+                "capture_mode": None,
+            },
         )
     }
 

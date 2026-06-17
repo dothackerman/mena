@@ -207,9 +207,19 @@
           "minimum": 1,
           "type": "integer"
         },
+        "capture_mode": {
+          "enum": ["selected_microphone", "dedicated_route", "system_mix_remote", null],
+          "type": ["string", "null"]
+        },
         "sha256": {
           "pattern": "^[0-9a-f]{64}$",
           "type": "string"
+        },
+        "route_id": {
+          "type": ["string", "null"]
+        },
+        "route_label": {
+          "type": ["string", "null"]
         },
         "source_id": {
           "enum": ["local_mic", "system_audio", "room_mic"],
@@ -237,6 +247,9 @@
         "started_at",
         "ended_at",
         "sha256",
+        "route_id",
+        "route_label",
+        "capture_mode",
         "status",
         "format"
       ],
@@ -248,6 +261,10 @@
         "channel_layout": {
           "minLength": 1,
           "type": "string"
+        },
+        "capture_mode": {
+          "enum": ["selected_microphone", "dedicated_route", "system_mix_remote", null],
+          "type": ["string", "null"]
         },
         "route_id": {
           "type": ["string", "null"]
@@ -264,14 +281,33 @@
           "type": "string"
         }
       },
-      "required": ["source_id", "route_id", "route_label", "channel_layout", "segment_count"],
+      "required": [
+        "source_id",
+        "route_id",
+        "route_label",
+        "capture_mode",
+        "channel_layout",
+        "segment_count"
+      ],
       "type": "object"
     },
     "degradation": {
       "additionalProperties": false,
       "properties": {
+        "capture_mode": {
+          "enum": ["selected_microphone", "dedicated_route", "system_mix_remote", null],
+          "type": ["string", "null"]
+        },
         "code": {
           "minLength": 1,
+          "type": "string"
+        },
+        "elapsed_seconds": {
+          "minimum": 0,
+          "type": ["number", "null"]
+        },
+        "event": {
+          "enum": ["degraded", "recovered"],
           "type": "string"
         },
         "message": {
@@ -285,9 +321,30 @@
         "source_id": {
           "enum": ["local_mic", "system_audio", "room_mic", null],
           "type": ["string", "null"]
+        },
+        "route_id": {
+          "type": ["string", "null"]
+        },
+        "route_label": {
+          "type": ["string", "null"]
+        },
+        "segment_index": {
+          "minimum": 1,
+          "type": ["integer", "null"]
         }
       },
-      "required": ["code", "message", "source_id", "occurred_at"],
+      "required": [
+        "event",
+        "code",
+        "message",
+        "source_id",
+        "occurred_at",
+        "elapsed_seconds",
+        "segment_index",
+        "route_id",
+        "route_label",
+        "capture_mode"
+      ],
       "type": "object"
     },
     "failure": {

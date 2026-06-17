@@ -85,6 +85,8 @@ from mena.profiles import (
 )
 from mena.protocol import (
     CaptureFinalizedPayload,
+    CaptureRouteBindingPayload,
+    CaptureRouteEventPayload,
     CaptureStatusPayload,
     ErrorPayload,
     ProtocolError,
@@ -125,6 +127,7 @@ from mena.session_integrity import (
 )
 from mena.sessions import (
     SESSION_RECORD_FILENAME,
+    append_session_degradation,
     append_session_failure,
     create_session,
     read_session_record,
@@ -208,6 +211,9 @@ class CaptureSegmentInput:
     path: Path
     artifact: ArtifactRecord
     sha256: str
+    route_id: str | None
+    route_label: str | None
+    capture_mode: str | None
 
 
 class _CaptureEventMonitor:
@@ -274,6 +280,12 @@ class _CaptureEventMonitor:
                 f"{int(status.elapsed_seconds)}s elapsed, "
                 f"{status.sealed_segment_count} sealed segment(s)."
             )
+            return True
+        if message.type == "capture_route_event":
+            event = CaptureRouteEventPayload.from_dict(message.payload)
+            append_session_degradation(self.record_path, event.to_dict())
+            label = "Capture recovered" if event.event == "recovered" else "Capture degraded"
+            print(f"{label}: {event.message}")
             return True
         if message.type == "capture_finalized":
             self._terminal_events.put(message)
@@ -795,16 +807,30 @@ def _capture_source_summaries(
         source_segments = [segment for segment in segments if segment.get("source_id") == source_id]
         route = routes_by_source.get(source_id)
         channel_layout = source_segments[-1].get("channel_layout", "unknown")
+        latest_route_id = source_segments[-1].get("route_id")
+        latest_route_label = source_segments[-1].get("route_label")
+        latest_capture_mode = source_segments[-1].get("capture_mode")
         summaries.append(
             {
                 "source_id": source_id,
-                "route_id": None if route is None else route.route_id,
-                "route_label": None if route is None else route.label,
+                "route_id": latest_route_id or (None if route is None else route.route_id),
+                "route_label": latest_route_label or (None if route is None else route.label),
+                "capture_mode": latest_capture_mode or _capture_mode_for_route(route),
                 "channel_layout": channel_layout,
                 "segment_count": len(source_segments),
             }
         )
     return summaries
+
+
+def _capture_mode_for_route(route: CaptureRouteBindingPayload | None) -> str | None:
+    if route is None:
+        return None
+    if route.role == "microphone":
+        return "selected_microphone"
+    if route.role == "playback_stream":
+        return "dedicated_route"
+    return None
 
 
 def _latest_segment_int(
@@ -1571,7 +1597,15 @@ def _prepare_source_audio_inputs(
     inputs: dict[str, SourceAudioInput] = {}
     for source_id in required_sources:
         segment_inputs: list[CaptureSegmentInput] = []
-        for raw_path, index, expected_sha in capture_segments[source_id]:
+        for segment_metadata in capture_segments[source_id]:
+            raw_path = _required_str(segment_metadata, "path")
+            index = _required_int(segment_metadata, "index")
+            expected_sha = segment_metadata.get("sha256")
+            if expected_sha is not None and not isinstance(expected_sha, str):
+                raise ValueError("Capture segment sha256 must be a string when provided.")
+            route_id = _optional_metadata_str(segment_metadata, "route_id")
+            route_label = _optional_metadata_str(segment_metadata, "route_label")
+            capture_mode = _optional_metadata_str(segment_metadata, "capture_mode")
             segment_path = Path(raw_path)
             if not segment_path.is_absolute():
                 segment_path = session_dir / segment_path
@@ -1595,6 +1629,9 @@ def _prepare_source_audio_inputs(
                 path=segment_path,
                 artifact_sha=actual_sha,
                 payload=payload,
+                route_id=route_id,
+                route_label=route_label,
+                capture_mode=capture_mode,
             )
             segment_inputs.append(
                 CaptureSegmentInput(
@@ -1603,6 +1640,9 @@ def _prepare_source_audio_inputs(
                     path=segment_path,
                     artifact=artifact,
                     sha256=actual_sha,
+                    route_id=route_id,
+                    route_label=route_label,
+                    capture_mode=capture_mode,
                 )
             )
 
@@ -1641,7 +1681,7 @@ def _prepare_source_audio_inputs(
 def _collect_capture_segments(
     session_record: dict[str, object],
     required_sources: tuple[str, ...],
-) -> dict[str, tuple[tuple[str, int, str | None], ...]]:
+) -> dict[str, tuple[dict[str, object], ...]]:
     capture_metadata = session_record.get("capture_metadata")
     if not isinstance(capture_metadata, dict):
         raise ValueError("Session does not include capture metadata.")
@@ -1650,7 +1690,7 @@ def _collect_capture_segments(
     if not isinstance(raw_segments, list):
         raise ValueError("Session capture metadata does not include segments.")
 
-    grouped: dict[str, list[tuple[str, int, str | None]]] = {}
+    grouped: dict[str, list[dict[str, object]]] = {}
     for source in required_sources:
         grouped[source] = []
     for raw_segment in raw_segments:
@@ -1666,15 +1706,33 @@ def _collect_capture_segments(
         expected_sha = raw_segment.get("sha256")
         if expected_sha is not None and not isinstance(expected_sha, str):
             raise ValueError("Capture segment sha256 must be a string when provided.")
-        grouped[source_id].append((path, index, expected_sha))
+        route_id = raw_segment.get("route_id")
+        if route_id is not None and not isinstance(route_id, str):
+            raise ValueError("Capture segment route_id must be a string when provided.")
+        route_label = raw_segment.get("route_label")
+        if route_label is not None and not isinstance(route_label, str):
+            raise ValueError("Capture segment route_label must be a string when provided.")
+        capture_mode = raw_segment.get("capture_mode")
+        if capture_mode is not None and not isinstance(capture_mode, str):
+            raise ValueError("Capture segment capture_mode must be a string when provided.")
+        grouped[source_id].append(
+            {
+                "path": path,
+                "index": index,
+                "sha256": expected_sha,
+                "route_id": route_id,
+                "route_label": route_label,
+                "capture_mode": capture_mode,
+            }
+        )
 
-    selected: dict[str, tuple[tuple[str, int, str | None], ...]] = {}
+    selected: dict[str, tuple[dict[str, object], ...]] = {}
     for source_id in required_sources:
         segments = grouped[source_id]
         if not segments:
             raise ValueError(f"Session is missing a capture segment for source '{source_id}'.")
-        ordered = tuple(sorted(segments, key=lambda segment: segment[1]))
-        indexes = [index for _, index, _ in ordered]
+        ordered = tuple(sorted(segments, key=_segment_metadata_index))
+        indexes = [_segment_metadata_index(segment) for segment in ordered]
         if len(set(indexes)) != len(indexes):
             raise ValueError(f"Session has duplicate capture segment indexes for '{source_id}'.")
         expected_indexes = list(range(1, len(indexes) + 1))
@@ -1688,6 +1746,13 @@ def _collect_capture_segments(
     return selected
 
 
+def _segment_metadata_index(segment: dict[str, object]) -> int:
+    value = segment.get("index")
+    if type(value) is not int:
+        raise ValueError("Capture segment index must be an integer.")
+    return value
+
+
 def _ensure_source_audio_artifact(
     *,
     store: FileSystemArtifactStore,
@@ -1696,6 +1761,9 @@ def _ensure_source_audio_artifact(
     path: Path,
     artifact_sha: str,
     payload: bytes,
+    route_id: str | None,
+    route_label: str | None,
+    capture_mode: str | None,
 ) -> ArtifactRecord:
     normalized_path = str(path.resolve(strict=True))
     metadata_path_key = "source_path"
@@ -1736,6 +1804,9 @@ def _ensure_source_audio_artifact(
             metadata_index_key: index,
             metadata_path_key: normalized_path,
             metadata_sha_key: artifact_sha,
+            "route_id": route_id,
+            "route_label": route_label,
+            "capture_mode": capture_mode,
         },
     )
 
@@ -1791,6 +1862,9 @@ def _stitch_provider_prep_audio(
                 "path": str(segment.path),
                 "artifact_id": segment.artifact.id,
                 "sha256": segment.sha256,
+                "route_id": segment.route_id,
+                "route_label": segment.route_label,
+                "capture_mode": segment.capture_mode,
             }
             for segment in segments
         ],
@@ -2027,6 +2101,15 @@ def _required_int(payload: dict[str, object], key: str) -> int:
     value = payload.get(key)
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"Session field '{key}' must be a positive integer.")
+    return value
+
+
+def _optional_metadata_str(payload: dict[str, object], key: str) -> str | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"Session field '{key}' must be a non-empty string or null.")
     return value
 
 

@@ -137,10 +137,16 @@ def test_append_session_degradation_persists_schema_valid_fact(tmp_path: Path) -
         now=datetime(2026, 5, 8, 5, 30, 0, tzinfo=UTC),
     )
     degradation = {
+        "event": "degraded",
         "code": "route_restoration_incomplete",
         "message": "Capture completed, but route cleanup needs operator review.",
         "source_id": None,
         "occurred_at": "2026-05-08T05:31:00Z",
+        "elapsed_seconds": None,
+        "segment_index": None,
+        "route_id": None,
+        "route_label": None,
+        "capture_mode": None,
     }
 
     record = append_session_degradation(created_session.record_path, degradation)
@@ -375,6 +381,9 @@ def test_update_session_capture_metadata_writes_schema_valid_session_record(
                 "started_at": None,
                 "ended_at": None,
                 "sha256": "0" * 64,
+                "route_id": "pipewire:node:31",
+                "route_label": "Headset Mic",
+                "capture_mode": "selected_microphone",
                 "status": "sealed",
                 "format": "wav",
             }
@@ -384,6 +393,7 @@ def test_update_session_capture_metadata_writes_schema_valid_session_record(
                 "source_id": "local_mic",
                 "route_id": "pipewire:node:31",
                 "route_label": "Headset Mic",
+                "capture_mode": "selected_microphone",
                 "channel_layout": "mono",
                 "segment_count": 1,
             }

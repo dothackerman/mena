@@ -24,6 +24,8 @@ CAPTURE_STATUS_VALUES = frozenset({"recording", "finalizing"})
 CAPTURE_FINALIZED_STATUS_VALUES = frozenset({"recorded", "interrupted_partial", "failed"})
 CAPTURE_STOP_REASONS = frozenset({"user_stop", "orchestrator_eof", "interrupted", "error"})
 SEGMENT_STATUS_VALUES = frozenset({"sealed", "partial", "failed"})
+CAPTURE_ROUTE_EVENT_TYPES = frozenset({"degraded", "recovered"})
+CAPTURE_MODE_VALUES = frozenset({"selected_microphone", "dedicated_route", "system_mix_remote"})
 
 MESSAGE_TYPES = frozenset(
     {
@@ -33,6 +35,7 @@ MESSAGE_TYPES = frozenset(
         "stop_capture",
         "capture_started",
         "capture_status",
+        "capture_route_event",
         "segment_flushed",
         "capture_finalized",
         "error",
@@ -334,6 +337,91 @@ class CaptureStatusPayload:
 
 
 @dataclass(frozen=True)
+class CaptureRouteEventPayload:
+    """Route-mode degradation or recovery event emitted by the worker."""
+
+    event: str
+    code: str
+    message: str
+    source_id: str | None
+    occurred_at: str | None
+    elapsed_seconds: float | None
+    segment_index: int | None
+    route_id: str | None
+    route_label: str | None
+    capture_mode: str | None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "event": self.event,
+            "code": self.code,
+            "message": self.message,
+            "source_id": self.source_id,
+            "occurred_at": self.occurred_at,
+            "elapsed_seconds": self.elapsed_seconds,
+            "segment_index": self.segment_index,
+            "route_id": self.route_id,
+            "route_label": self.route_label,
+            "capture_mode": self.capture_mode,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> Self:
+        payload = _ensure_mapping(data, "capture_route_event payload")
+        _require_exact_keys(
+            payload,
+            {
+                "event",
+                "code",
+                "message",
+                "source_id",
+                "occurred_at",
+                "elapsed_seconds",
+                "segment_index",
+                "route_id",
+                "route_label",
+                "capture_mode",
+            },
+            "capture_route_event payload",
+        )
+        return cls(
+            event=_required_enum_str(
+                payload,
+                "event",
+                CAPTURE_ROUTE_EVENT_TYPES,
+                "capture_route_event payload",
+            ),
+            code=_required_str(payload, "code"),
+            message=_required_str(payload, "message"),
+            source_id=_optional_enum_str(
+                payload,
+                "source_id",
+                CAPTURE_SOURCE_IDS,
+                "capture_route_event payload",
+            ),
+            occurred_at=_optional_str(payload, "occurred_at", "capture_route_event payload"),
+            elapsed_seconds=_optional_non_negative_number(
+                payload,
+                "elapsed_seconds",
+                "capture_route_event payload",
+            ),
+            segment_index=_optional_positive_int(
+                payload,
+                "segment_index",
+                "capture_route_event payload",
+            ),
+            route_id=_optional_str(payload, "route_id", "capture_route_event payload"),
+            route_label=_optional_str(payload, "route_label", "capture_route_event payload"),
+            capture_mode=_optional_enum_str(
+                payload,
+                "capture_mode",
+                CAPTURE_MODE_VALUES,
+                "capture_route_event payload",
+            ),
+        )
+
+
+@dataclass(frozen=True)
 class SegmentFlushedPayload:
     """Worker event for one sealed source segment."""
 
@@ -349,6 +437,9 @@ class SegmentFlushedPayload:
     started_at: str | None
     ended_at: str | None
     sha256: str
+    route_id: str | None
+    route_label: str | None
+    capture_mode: str | None
     status: str
     format: str
 
@@ -370,6 +461,9 @@ class SegmentFlushedPayload:
                 "started_at",
                 "ended_at",
                 "sha256",
+                "route_id",
+                "route_label",
+                "capture_mode",
                 "status",
                 "format",
             },
@@ -396,6 +490,14 @@ class SegmentFlushedPayload:
             started_at=_optional_str(payload, "started_at", "segment_flushed payload"),
             ended_at=_optional_str(payload, "ended_at", "segment_flushed payload"),
             sha256=_required_sha256(payload, "sha256"),
+            route_id=_optional_str(payload, "route_id", "segment_flushed payload"),
+            route_label=_optional_str(payload, "route_label", "segment_flushed payload"),
+            capture_mode=_optional_enum_str(
+                payload,
+                "capture_mode",
+                CAPTURE_MODE_VALUES,
+                "segment_flushed payload",
+            ),
             status=_required_enum_str(
                 payload,
                 "status",
@@ -497,6 +599,8 @@ def validate_payload_for_type(message_type: str, payload: Mapping[str, object]) 
         CaptureStartedPayload.from_dict(payload)
     elif message_type == "capture_status":
         CaptureStatusPayload.from_dict(payload)
+    elif message_type == "capture_route_event":
+        CaptureRouteEventPayload.from_dict(payload)
     elif message_type == "segment_flushed":
         SegmentFlushedPayload.from_dict(payload)
     elif message_type == "capture_finalized":
@@ -734,6 +838,37 @@ def _required_non_negative_number(data: dict[str, object], key: str) -> float:
     return normalized
 
 
+def _optional_non_negative_number(
+    data: dict[str, object],
+    key: str,
+    context: str,
+) -> float | None:
+    value = data.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ProtocolError(f"{context} field '{key}' must be a number or null.")
+    normalized = float(value)
+    if normalized < 0:
+        raise ProtocolError(f"{context} field '{key}' must be non-negative.")
+    return normalized
+
+
+def _optional_positive_int(
+    data: dict[str, object],
+    key: str,
+    context: str,
+) -> int | None:
+    value = data.get(key)
+    if value is None:
+        return None
+    if type(value) is not int:
+        raise ProtocolError(f"{context} field '{key}' must be an integer or null.")
+    if value < 1:
+        raise ProtocolError(f"{context} field '{key}' must be positive.")
+    return value
+
+
 def _required_enum_str(
     data: dict[str, object],
     key: str,
@@ -875,11 +1010,24 @@ def _validate_capture_metadata(data: dict[str, object]) -> None:
 def _validate_capture_source_summary(data: dict[str, object]) -> None:
     _require_exact_keys(
         data,
-        {"source_id", "route_id", "route_label", "channel_layout", "segment_count"},
+        {
+            "source_id",
+            "route_id",
+            "route_label",
+            "capture_mode",
+            "channel_layout",
+            "segment_count",
+        },
         "capture source summary",
     )
     _required_enum_str(data, "source_id", CAPTURE_SOURCE_IDS, "capture source summary")
     _optional_str(data, "route_id", "capture source summary")
     _optional_str(data, "route_label", "capture source summary")
+    _optional_enum_str(
+        data,
+        "capture_mode",
+        CAPTURE_MODE_VALUES,
+        "capture source summary",
+    )
     _required_str(data, "channel_layout")
     _required_non_negative_int(data, "segment_count")

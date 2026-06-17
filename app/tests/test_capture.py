@@ -8,8 +8,13 @@ from typing import Any, cast
 import pytest
 
 from mena.capture import (
+    CAPTURE_MODE_DEDICATED_ROUTE,
+    CAPTURE_MODE_SELECTED_MICROPHONE,
+    CAPTURE_MODE_SYSTEM_MIX_REMOTE,
     MAX_SEGMENT_BYTES,
+    CaptureRouteEvent,
     CaptureRoutePlan,
+    CaptureSourceError,
     PipeWireCaptureAdapter,
     PipeWireClient,
     PipeWirePcmProvider,
@@ -34,6 +39,20 @@ def test_wav_segment_writer_writes_valid_sealed_wav(tmp_path: Path) -> None:
         assert wav.getnchannels() == 1
         assert wav.getsampwidth() == 2
         assert wav.getnframes() == 800
+
+
+def test_wav_segment_writer_refuses_to_overwrite_existing_segment(tmp_path: Path) -> None:
+    writer = WavSegmentWriter(segment_dir=tmp_path, sample_rate=8_000)
+    source_dir = tmp_path / CaptureSourceId.LOCAL_MIC.value
+    source_dir.mkdir()
+    existing = source_dir / "local_mic_000001.wav"
+    existing.write_bytes(b"already sealed")
+    writer._next_index = lambda _source_id, _source_dir: 1  # type: ignore[assignment,method-assign]  # noqa: SLF001
+
+    with pytest.raises(FileExistsError, match="already exists"):
+        writer.write_segment(CaptureSourceId.LOCAL_MIC, b"\x00\x00" * 800)
+
+    assert existing.read_bytes() == b"already sealed"
 
 
 def test_wav_segment_writer_increments_per_source_indexes(tmp_path: Path) -> None:
@@ -130,6 +149,43 @@ def test_pipewire_client_rejects_unsupported_route_id() -> None:
 
     with pytest.raises(ValueError, match="Unsupported Pulse sink-input route id"):
         client.move_playback_stream("alsa:node:51", "mena_session_remote")
+
+
+def test_capture_route_event_serializes_null_source() -> None:
+    event = CaptureRouteEvent(
+        event="degraded",
+        code="route_restoration_incomplete",
+        message="Route cleanup needs operator review.",
+        source_id=None,
+        route_id=None,
+        route_label=None,
+        capture_mode=None,
+    )
+
+    assert event.to_dict()["source_id"] is None
+
+
+def test_pipewire_pcm_provider_rejects_invalid_pipewire_node_targets() -> None:
+    provider = PipeWirePcmProvider()
+
+    with pytest.raises(ValueError, match="Unsupported PipeWire route id"):
+        provider._command_for_source(  # noqa: SLF001
+            CaptureSourceId.LOCAL_MIC,
+            plan=CaptureRoutePlan(
+                session_id="session-1",
+                microphone_route_id="pulse:source:31",
+            ),
+            sink_name="mena_session_remote",
+        )
+    with pytest.raises(ValueError, match="Unsupported PipeWire route id"):
+        provider._command_for_source(  # noqa: SLF001
+            CaptureSourceId.LOCAL_MIC,
+            plan=CaptureRoutePlan(
+                session_id="session-1",
+                microphone_route_id="pipewire:node:not-a-number",
+            ),
+            sink_name="mena_session_remote",
+        )
 
 
 def test_pipewire_pcm_provider_reads_local_source_from_continuous_pw_record() -> None:
@@ -349,7 +405,7 @@ def test_pipewire_pcm_provider_rejects_empty_failed_stream() -> None:
         popen_factory=cast(Any, FakeProcess),
     )
 
-    with pytest.raises(subprocess.CalledProcessError):
+    with pytest.raises(CaptureSourceError):
         provider.read_aligned_segments(
             plan=_route_plan(),
             sink_name="mena_session_remote",
@@ -542,6 +598,162 @@ def test_pipewire_capture_adapter_default_flush_uses_aligned_segments(tmp_path: 
     ]
 
 
+def test_pipewire_pcm_provider_uses_output_sink_monitor_for_system_mix_fallback() -> None:
+    provider = PipeWirePcmProvider()
+    plan = CaptureRoutePlan(
+        session_id="session-1",
+        microphone_route_id="pipewire:node:31",
+        playback_stream_route_id="pulse:sink-input:51",
+        output_sink_route_id="pipewire:node:42",
+        system_audio_mode=CAPTURE_MODE_SYSTEM_MIX_REMOTE,
+    )
+
+    command = provider._command_for_source(  # noqa: SLF001
+        CaptureSourceId.SYSTEM_AUDIO,
+        plan=plan,
+        sink_name="mena_session_remote",
+    )
+
+    assert command[2] == "42.monitor"
+
+
+def test_pipewire_pcm_provider_rejects_unknown_system_audio_mode() -> None:
+    provider = PipeWirePcmProvider()
+    plan = CaptureRoutePlan(
+        session_id="session-1",
+        microphone_route_id="pipewire:node:31",
+        playback_stream_route_id="pulse:sink-input:51",
+        output_sink_route_id="pipewire:node:42",
+        system_audio_mode="mystery",
+    )
+
+    with pytest.raises(ValueError, match="Unsupported system audio capture mode"):
+        provider._command_for_source(  # noqa: SLF001
+            CaptureSourceId.SYSTEM_AUDIO,
+            plan=plan,
+            sink_name="mena_session_remote",
+        )
+
+
+def test_pipewire_capture_adapter_degrades_and_recovers_at_segment_boundary(
+    tmp_path: Path,
+) -> None:
+    calls: list[list[str]] = []
+    module_ids = iter(["101\n", "202\n", "", "", "303\n", "404\n"])
+
+    def runner(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        stdout = next(module_ids, "") if args[:2] == ["pactl", "load-module"] else ""
+        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+    class FallbackProvider:
+        def __init__(self) -> None:
+            self.modes: list[str] = []
+            self.closed = 0
+
+        def read_aligned_segments(
+            self,
+            *,
+            plan: CaptureRoutePlan,
+            sink_name: str,
+            segment_seconds: int,
+            stop_event: threading.Event | None = None,
+        ) -> dict[CaptureSourceId, bytes]:
+            self.modes.append(plan.system_audio_mode)
+            if len(self.modes) == 1:
+                raise CaptureSourceError(
+                    CaptureSourceId.SYSTEM_AUDIO,
+                    RuntimeError("route disappeared"),
+                )
+            return {
+                CaptureSourceId.LOCAL_MIC: b"\x00\x00",
+                CaptureSourceId.SYSTEM_AUDIO: b"\x01\x01",
+            }
+
+        def close(self) -> None:
+            self.closed += 1
+
+    provider = FallbackProvider()
+    adapter = PipeWireCaptureAdapter(
+        client=PipeWireClient(runner=runner),
+        segment_writer=WavSegmentWriter(segment_dir=tmp_path, sample_rate=1),
+    )
+    adapter.pipewire_pcm_provider = cast(Any, provider)
+    active = adapter.start(_route_plan())
+
+    degraded_segments = active.flush_segments()
+    degraded_events = active.drain_route_events()
+    recovered_segments = active.flush_segments()
+    recovered_events = active.drain_route_events()
+
+    assert [segment.capture_mode for segment in degraded_segments] == [
+        CAPTURE_MODE_SELECTED_MICROPHONE,
+        CAPTURE_MODE_SYSTEM_MIX_REMOTE,
+    ]
+    assert degraded_events[0].code == "dedicated_route_runtime_failed"
+    assert degraded_events[0].route_id == "pipewire:node:42"
+    assert [segment.capture_mode for segment in recovered_segments] == [
+        CAPTURE_MODE_SELECTED_MICROPHONE,
+        CAPTURE_MODE_DEDICATED_ROUTE,
+    ]
+    assert recovered_events[0].code == "dedicated_route_recovered"
+    assert provider.modes == [
+        CAPTURE_MODE_DEDICATED_ROUTE,
+        CAPTURE_MODE_SYSTEM_MIX_REMOTE,
+        CAPTURE_MODE_DEDICATED_ROUTE,
+    ]
+    assert provider.closed >= 2
+
+
+def test_pipewire_capture_adapter_keeps_system_mix_when_recovery_fails(
+    tmp_path: Path,
+) -> None:
+    calls: list[list[str]] = []
+    module_ids = iter(["101\n", "202\n"])
+
+    def runner(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        if args[:2] == ["pactl", "move-sink-input"]:
+            raise subprocess.CalledProcessError(1, args, stderr="move failed")
+        stdout = next(module_ids, "") if args[:2] == ["pactl", "load-module"] else ""
+        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+    class FallbackProvider:
+        def read_aligned_segments(
+            self,
+            *,
+            plan: CaptureRoutePlan,
+            sink_name: str,
+            segment_seconds: int,
+            stop_event: threading.Event | None = None,
+        ) -> dict[CaptureSourceId, bytes]:
+            assert plan.system_audio_mode == CAPTURE_MODE_SYSTEM_MIX_REMOTE
+            return {
+                CaptureSourceId.LOCAL_MIC: b"\x00\x00",
+                CaptureSourceId.SYSTEM_AUDIO: b"\x01\x01",
+            }
+
+        def close(self) -> None:
+            return None
+
+    adapter = PipeWireCaptureAdapter(
+        client=PipeWireClient(runner=runner),
+        segment_writer=WavSegmentWriter(segment_dir=tmp_path, sample_rate=1),
+    )
+    adapter.pipewire_pcm_provider = cast(Any, FallbackProvider())
+    active = adapter.start(_route_plan())
+    setup_events = active.drain_route_events()
+
+    first = active.flush_segments()
+    second = active.flush_segments()
+    recovery_events = active.drain_route_events()
+
+    assert setup_events[0].code == "dedicated_route_unavailable"
+    assert first[1].capture_mode == CAPTURE_MODE_SYSTEM_MIX_REMOTE
+    assert second[1].capture_mode == CAPTURE_MODE_SYSTEM_MIX_REMOTE
+    assert recovery_events == ()
+
+
 def test_pipewire_capture_adapter_flushes_segments_and_cleans_up(tmp_path: Path) -> None:
     calls: list[list[str]] = []
     module_ids = iter(["101\n", "", "202\n", "", ""])
@@ -658,7 +870,7 @@ def test_pipewire_capture_adapter_cleans_up_when_stop_flush_fails(tmp_path: Path
     assert calls[-2:] == [["pactl", "unload-module", "202"], ["pactl", "unload-module", "101"]]
 
 
-def test_pipewire_capture_adapter_cleans_up_partial_setup_on_failure(tmp_path: Path) -> None:
+def test_pipewire_capture_adapter_degrades_on_partial_setup_failure(tmp_path: Path) -> None:
     calls: list[list[str]] = []
 
     def runner(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -672,13 +884,16 @@ def test_pipewire_capture_adapter_cleans_up_partial_setup_on_failure(tmp_path: P
         segment_writer=WavSegmentWriter(segment_dir=tmp_path),
     )
 
-    with pytest.raises(subprocess.CalledProcessError):
-        adapter.start(_route_plan())
+    active = adapter.start(_route_plan())
+    route_events = active.drain_route_events()
 
     assert calls[-1] == ["pactl", "unload-module", "101"]
+    assert route_events[0].event == "degraded"
+    assert route_events[0].code == "dedicated_route_unavailable"
+    assert route_events[0].capture_mode == CAPTURE_MODE_SYSTEM_MIX_REMOTE
 
 
-def test_pipewire_capture_adapter_preserves_setup_failure_when_cleanup_fails(
+def test_pipewire_capture_adapter_degrades_when_cleanup_after_setup_failure_fails(
     tmp_path: Path,
 ) -> None:
     calls: list[list[str]] = []
@@ -696,10 +911,11 @@ def test_pipewire_capture_adapter_preserves_setup_failure_when_cleanup_fails(
         segment_writer=WavSegmentWriter(segment_dir=tmp_path),
     )
 
-    with pytest.raises(subprocess.CalledProcessError, match="move-sink-input"):
-        adapter.start(_route_plan())
+    active = adapter.start(_route_plan())
+    route_events = active.drain_route_events()
 
     assert calls[-1] == ["pactl", "unload-module", "101"]
+    assert route_events[0].event == "degraded"
 
 
 def _route_plan() -> CaptureRoutePlan:

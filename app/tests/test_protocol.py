@@ -9,9 +9,9 @@ from typing import cast
 
 import pytest
 
-from mena.capture import CaptureSegment
+from mena.capture import CaptureMetadata, CaptureRouteEvent, CaptureSegment
 from mena.capture_worker import SegmentFlushLoop, WorkerCaptureSession, build_parser, run_worker
-from mena.profiles import CaptureSourceId
+from mena.profiles import CaptureProfileId, CaptureSourceId
 from mena.protocol import (
     ENVELOPE_VERSION,
     MAX_FRAME_BYTES,
@@ -19,6 +19,7 @@ from mena.protocol import (
     PROTOCOL_MINOR,
     CaptureFinalizedPayload,
     CaptureRouteBindingPayload,
+    CaptureRouteEventPayload,
     CaptureStatusPayload,
     ErrorPayload,
     ProtocolError,
@@ -171,6 +172,67 @@ def test_capture_status_payload_rejects_invalid_values(
     with pytest.raises(ProtocolError, match=error):
         ProtocolMessage(
             type="capture_status",
+            session_id="session-1",
+            payload=payload,
+        ).encode()
+
+
+def test_capture_route_event_payload_round_trips_through_protocol_validation() -> None:
+    payload = CaptureRouteEventPayload(
+        event="degraded",
+        code="dedicated_route_unavailable",
+        message="Using selected output sink monitor.",
+        source_id="system_audio",
+        occurred_at=None,
+        elapsed_seconds=0.0,
+        segment_index=1,
+        route_id="pipewire:node:42",
+        route_label="Headphones",
+        capture_mode="system_mix_remote",
+    ).to_dict()
+
+    decoded = ProtocolMessage.decode(
+        ProtocolMessage(
+            type="capture_route_event",
+            session_id="session-1",
+            payload=payload,
+        ).encode()
+    )
+
+    assert CaptureRouteEventPayload.from_dict(decoded.payload).capture_mode == ("system_mix_remote")
+
+
+@pytest.mark.parametrize(
+    ("payload_update", "error"),
+    [
+        ({"event": "warning"}, "must be one of"),
+        ({"source_id": "mixed_audio"}, "must be one of"),
+        ({"elapsed_seconds": -1.0}, "must be non-negative"),
+        ({"segment_index": 0}, "must be positive"),
+        ({"capture_mode": "mic_only"}, "must be one of"),
+    ],
+)
+def test_capture_route_event_payload_rejects_invalid_values(
+    payload_update: dict[str, object],
+    error: str,
+) -> None:
+    payload = CaptureRouteEventPayload(
+        event="degraded",
+        code="dedicated_route_unavailable",
+        message="Using selected output sink monitor.",
+        source_id="system_audio",
+        occurred_at=None,
+        elapsed_seconds=0.0,
+        segment_index=1,
+        route_id="pipewire:node:42",
+        route_label="Headphones",
+        capture_mode="system_mix_remote",
+    ).to_dict()
+    payload.update(payload_update)
+
+    with pytest.raises(ProtocolError, match=error):
+        ProtocolMessage(
+            type="capture_route_event",
             session_id="session-1",
             payload=payload,
         ).encode()
@@ -478,6 +540,163 @@ def test_worker_run_loop_handles_start_stop_with_in_memory_streams(tmp_path: Pat
         "capture_finalized",
     ]
     assert stderr.getvalue() == ""
+
+
+def test_worker_run_loop_emits_capture_route_events(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RouteEventCapture:
+        def __init__(self) -> None:
+            self.segments: list[CaptureSegment] = []
+            self._events = [
+                CaptureRouteEvent(
+                    event="degraded",
+                    code="dedicated_route_unavailable",
+                    message="Using selected output sink monitor.",
+                    source_id=CaptureSourceId.SYSTEM_AUDIO,
+                    route_id="pipewire:node:3",
+                    route_label="Headphones",
+                    capture_mode="system_mix_remote",
+                    elapsed_seconds=0.0,
+                    segment_index=1,
+                )
+            ]
+
+        def start(self) -> tuple[CaptureSegment, ...]:
+            return ()
+
+        def flush_once(
+            self,
+            *,
+            stop_event: threading.Event | None = None,
+        ) -> tuple[CaptureSegment, ...]:
+            return ()
+
+        def finalize(self) -> CaptureMetadata:
+            return CaptureMetadata(
+                version=1,
+                profile_id=CaptureProfileId.ONLINE_DUAL_STREAM,
+                sample_rate=48_000,
+                channels=1,
+                segment_seconds=30,
+                segments=(),
+            )
+
+        def drain_route_events(self) -> tuple[CaptureRouteEvent, ...]:
+            events = tuple(self._events)
+            self._events.clear()
+            return events
+
+    monkeypatch.setattr(
+        WorkerCaptureSession,
+        "create_deterministic",
+        classmethod(lambda *_args, **_kwargs: RouteEventCapture()),
+    )
+    stdin = BytesIO(
+        b"".join(
+            [
+                hello_message("session-1").encode(),
+                ProtocolMessage(
+                    type="start_capture",
+                    session_id="session-1",
+                    payload=_start_payload().to_dict(),
+                ).encode(),
+                ProtocolMessage(type="stop_capture", session_id="session-1").encode(),
+            ]
+        )
+    )
+    stdout = BytesIO()
+
+    exit_code = run_worker(
+        session_id="session-1",
+        session_dir=tmp_path,
+        stdin=stdin,
+        stdout=stdout,
+        test_deterministic_capture=True,
+    )
+
+    frames = [ProtocolMessage.decode(frame) for frame in stdout.getvalue().splitlines(True)]
+    route_event = CaptureRouteEventPayload.from_dict(frames[2].payload)
+    assert exit_code == 0
+    assert [frame.type for frame in frames] == [
+        "hello_ack",
+        "capture_started",
+        "capture_route_event",
+        "capture_finalized",
+    ]
+    assert route_event.capture_mode == "system_mix_remote"
+
+
+def test_worker_run_loop_stops_product_flush_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class BlockingProductCapture:
+        def __init__(self) -> None:
+            self.segments: list[CaptureSegment] = []
+            self.finalized = False
+
+        def start(self) -> tuple[CaptureSegment, ...]:
+            return ()
+
+        def flush_once(
+            self,
+            *,
+            stop_event: threading.Event | None = None,
+        ) -> tuple[CaptureSegment, ...]:
+            while stop_event is not None and not stop_event.is_set():
+                time.sleep(0.01)
+            return ()
+
+        def finalize(self) -> CaptureMetadata:
+            self.finalized = True
+            return CaptureMetadata(
+                version=1,
+                profile_id=CaptureProfileId.ONLINE_DUAL_STREAM,
+                sample_rate=48_000,
+                channels=1,
+                segment_seconds=30,
+                segments=(),
+            )
+
+        def drain_route_events(self) -> tuple[CaptureRouteEvent, ...]:
+            return ()
+
+    capture = BlockingProductCapture()
+    monkeypatch.setattr(
+        WorkerCaptureSession,
+        "create_product",
+        classmethod(lambda *_args, **_kwargs: capture),
+    )
+    stdin = BytesIO(
+        b"".join(
+            [
+                hello_message("session-1").encode(),
+                ProtocolMessage(
+                    type="start_capture",
+                    session_id="session-1",
+                    payload=_start_payload().to_dict(),
+                ).encode(),
+                ProtocolMessage(type="stop_capture", session_id="session-1").encode(),
+            ]
+        )
+    )
+    stdout = BytesIO()
+
+    exit_code = run_worker(
+        session_id="session-1",
+        session_dir=tmp_path,
+        stdin=stdin,
+        stdout=stdout,
+    )
+
+    frames = [ProtocolMessage.decode(frame) for frame in stdout.getvalue().splitlines(True)]
+    assert exit_code == 0
+    assert capture.finalized
+    assert frames[0].type == "hello_ack"
+    assert frames[1].type == "capture_started"
+    assert frames[-1].type == "capture_finalized"
 
 
 def test_worker_product_factory_uses_live_pipewire_provider(tmp_path: Path) -> None:
@@ -1022,6 +1241,7 @@ def _capture_metadata() -> dict[str, object]:
                 "source_id": "local_mic",
                 "route_id": "pipewire:node:1",
                 "route_label": "Headset microphone",
+                "capture_mode": "selected_microphone",
                 "channel_layout": "mono",
                 "segment_count": 1,
             }
