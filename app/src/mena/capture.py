@@ -151,6 +151,17 @@ class CaptureMetadata:
             "sources": _source_summaries(self.segments, self.source_routes),
         }
 
+    def to_summary_dict(self) -> dict[str, object]:
+        return {
+            "version": self.version,
+            "profile": self.profile_id.value,
+            "sample_rate": self.sample_rate,
+            "channels": self.channels,
+            "segment_seconds": self.segment_seconds,
+            "segment_count": len(self.segments),
+            "sources": _source_summaries(self.segments, self.source_routes),
+        }
+
 
 class WavSegmentWriter:
     """Write sealed WAV source segments without mutating prior segments."""

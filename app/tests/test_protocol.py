@@ -25,6 +25,7 @@ from mena.protocol import (
     ProtocolError,
     ProtocolMessage,
     SegmentFlushedPayload,
+    SegmentsFlushedPayload,
     StartCapturePayload,
     WorkerExitedError,
     WorkerProcess,
@@ -252,6 +253,29 @@ def test_segment_flushed_payload_round_trips_through_protocol_validation() -> No
     assert SegmentFlushedPayload.from_dict(decoded.payload).source_id == "local_mic"
 
 
+def test_segments_flushed_payload_round_trips_aligned_batch() -> None:
+    payload = {
+        "segments": [
+            _segment_payload(source_id="local_mic"),
+            _segment_payload(source_id="system_audio"),
+        ]
+    }
+
+    decoded = ProtocolMessage.decode(
+        ProtocolMessage(
+            type="segments_flushed",
+            session_id="session-1",
+            payload=payload,
+        ).encode()
+    )
+
+    batch = SegmentsFlushedPayload.from_dict(decoded.payload)
+    assert [segment.source_id for segment in batch.segments] == [
+        "local_mic",
+        "system_audio",
+    ]
+
+
 @pytest.mark.parametrize(
     ("payload_update", "error"),
     [
@@ -444,6 +468,7 @@ def test_worker_process_handshake_start_stop_round_trip(tmp_path: Path) -> None:
     }
     assert finalized_payload.status == "recorded"
     assert finalized_payload.capture_metadata["segment_count"] == 2
+    assert "segments" not in finalized_payload.capture_metadata
     sources = finalized_payload.capture_metadata["sources"]
     assert isinstance(sources, list)
     assert sources[0]["route_id"] == "pipewire:node:1"
@@ -535,8 +560,7 @@ def test_worker_run_loop_handles_start_stop_with_in_memory_streams(tmp_path: Pat
     assert [ProtocolMessage.decode(frame).type for frame in frames] == [
         "hello_ack",
         "capture_started",
-        "segment_flushed",
-        "segment_flushed",
+        "segments_flushed",
         "capture_finalized",
     ]
     assert stderr.getvalue() == ""
@@ -787,7 +811,7 @@ def test_segment_flush_loop_emits_status_then_structured_error() -> None:
     loop.join()
 
     frames = [ProtocolMessage.decode(frame) for frame in output.getvalue().splitlines(True)]
-    assert [frame.type for frame in frames] == ["segment_flushed", "capture_status", "error"]
+    assert [frame.type for frame in frames] == ["segments_flushed", "capture_status", "error"]
     assert frames[1].payload["sealed_segment_count"] == 1
     assert ErrorPayload.from_dict(frames[2].payload).message == "disk full"
     assert isinstance(loop.error, RuntimeError)
@@ -830,9 +854,10 @@ def test_segment_flush_loop_emits_multiple_iterations_until_stopped() -> None:
 
     frames = [ProtocolMessage.decode(frame) for frame in output.getvalue().splitlines(True)]
     flushed_indexes = [
-        SegmentFlushedPayload.from_dict(frame.payload).index
+        segment.index
         for frame in frames
-        if frame.type == "segment_flushed"
+        if frame.type == "segments_flushed"
+        for segment in SegmentsFlushedPayload.from_dict(frame.payload).segments
     ]
     status_counts = [
         CaptureStatusPayload.from_dict(frame.payload).sealed_segment_count
@@ -871,11 +896,9 @@ def test_worker_run_loop_handles_in_person_room_mic_capture(tmp_path: Path) -> N
     finalized = CaptureFinalizedPayload.from_dict(frames[-1].payload)
     assert exit_code == 0
     assert finalized.capture_metadata["profile"] == "in_person_single_mic"
-    segments = finalized.capture_metadata["segments"]
     sources = finalized.capture_metadata["sources"]
-    assert isinstance(segments, list)
+    assert "segments" not in finalized.capture_metadata
     assert isinstance(sources, list)
-    assert segments[0]["source_id"] == "room_mic"
     assert sources[0]["route_id"] == "pipewire:node:1"
     assert sources[0]["route_label"] == "Room microphone"
 
@@ -1052,8 +1075,7 @@ def test_worker_hard_kill_preserves_sealed_prior_segments(tmp_path: Path) -> Non
     ) as worker:
         worker.handshake()
         worker.start_capture(_start_payload())
-        worker.receive_expected("segment_flushed")
-        worker.receive_expected("segment_flushed")
+        worker.receive_expected("segments_flushed")
         worker.process.kill()
         worker.wait(timeout=2)
 

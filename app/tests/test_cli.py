@@ -689,9 +689,14 @@ def test_capture_event_monitor_drains_progress_and_returns_finalization(
     worker = _EventWorker(
         [
             ProtocolMessage(
-                type="segment_flushed",
+                type="segments_flushed",
                 session_id=SESSION_ID,
-                payload=_segment_payload(source_id="local_mic", index=1),
+                payload={
+                    "segments": [
+                        _segment_payload(source_id="local_mic", index=1),
+                        _segment_payload(source_id="system_audio", index=1),
+                    ]
+                },
             ),
             ProtocolMessage(
                 type="capture_status",
@@ -749,12 +754,14 @@ def test_capture_event_monitor_drains_progress_and_returns_finalization(
     record = json.loads(created_session.record_path.read_text(encoding="utf-8"))
     captured = capsys.readouterr()
     assert finalized.type == "capture_finalized"
-    assert record["capture_metadata"]["segment_count"] == 1
+    assert record["capture_metadata"]["segment_count"] == 2
     assert record["capture_metadata"]["segments"][0]["source_id"] == "local_mic"
+    assert record["capture_metadata"]["segments"][1]["source_id"] == "system_audio"
     assert record["capture_metadata"]["sources"][0]["route_label"] == "Studio mic"
     assert record["degradations"][0]["capture_mode"] == "system_mix_remote"
     assert record["degradations"][1]["event"] == "recovered"
     assert "Sealed local_mic segment 1." in captured.out
+    assert "Sealed system_audio segment 1." in captured.out
     assert "Recording: 12s elapsed, 1 sealed segment(s)." in captured.out
     assert "Capture degraded: Using selected output sink monitor." in captured.out
     assert "Capture recovered: Dedicated meeting route recovered." in captured.out

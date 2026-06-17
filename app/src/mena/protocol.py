@@ -37,6 +37,7 @@ MESSAGE_TYPES = frozenset(
         "capture_status",
         "capture_route_event",
         "segment_flushed",
+        "segments_flushed",
         "capture_finalized",
         "error",
     }
@@ -509,6 +510,53 @@ class SegmentFlushedPayload:
 
 
 @dataclass(frozen=True)
+class SegmentsFlushedPayload:
+    """Worker event for one aligned flush containing one or more source segments."""
+
+    segments: tuple[SegmentFlushedPayload, ...]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "segments": [
+                {
+                    "source_id": segment.source_id,
+                    "index": segment.index,
+                    "path": segment.path,
+                    "sample_rate": segment.sample_rate,
+                    "channels": segment.channels,
+                    "channel_layout": segment.channel_layout,
+                    "sample_format": segment.sample_format,
+                    "byte_count": segment.byte_count,
+                    "duration_seconds": segment.duration_seconds,
+                    "started_at": segment.started_at,
+                    "ended_at": segment.ended_at,
+                    "sha256": segment.sha256,
+                    "route_id": segment.route_id,
+                    "route_label": segment.route_label,
+                    "capture_mode": segment.capture_mode,
+                    "status": segment.status,
+                    "format": segment.format,
+                }
+                for segment in self.segments
+            ]
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> Self:
+        payload = _ensure_mapping(data, "segments_flushed payload")
+        _require_exact_keys(payload, {"segments"}, "segments_flushed payload")
+        raw_segments = _required_list(payload, "segments", "segments_flushed payload")
+        if not raw_segments:
+            raise ProtocolError("segments_flushed payload segments must not be empty.")
+        segments: list[SegmentFlushedPayload] = []
+        for segment in raw_segments:
+            if not isinstance(segment, dict):
+                raise ProtocolError("segments_flushed payload segments must contain JSON objects.")
+            segments.append(SegmentFlushedPayload.from_dict(segment))
+        return cls(segments=tuple(segments))
+
+
+@dataclass(frozen=True)
 class CaptureFinalizedPayload:
     """Worker event for normal or partial capture finalization."""
 
@@ -540,7 +588,7 @@ class CaptureFinalizedPayload:
             "capture_metadata",
             "capture_finalized payload",
         )
-        _validate_capture_metadata(capture_metadata)
+        _validate_capture_metadata_or_summary(capture_metadata)
         return cls(
             status=_required_enum_str(
                 payload,
@@ -603,6 +651,8 @@ def validate_payload_for_type(message_type: str, payload: Mapping[str, object]) 
         CaptureRouteEventPayload.from_dict(payload)
     elif message_type == "segment_flushed":
         SegmentFlushedPayload.from_dict(payload)
+    elif message_type == "segments_flushed":
+        SegmentsFlushedPayload.from_dict(payload)
     elif message_type == "capture_finalized":
         CaptureFinalizedPayload.from_dict(payload)
     elif message_type == "error":
@@ -971,10 +1021,17 @@ def _require_exact_keys(
         raise ProtocolError(f"{context} contains unsupported field '{extra[0]}'.")
 
 
+def _validate_capture_metadata_or_summary(data: dict[str, object]) -> None:
+    if "segments" in data:
+        _validate_capture_metadata(data)
+    else:
+        _validate_capture_metadata_summary(data)
+
+
 def _validate_capture_metadata(data: dict[str, object]) -> None:
-    _require_exact_keys(
+    _validate_capture_metadata_common(
         data,
-        {
+        expected_keys={
             "version",
             "profile",
             "sample_rate",
@@ -984,14 +1041,7 @@ def _validate_capture_metadata(data: dict[str, object]) -> None:
             "segments",
             "sources",
         },
-        "capture_metadata",
     )
-    if _required_int(data, "version") != 1:
-        raise ProtocolError("capture_metadata field 'version' must be 1.")
-    _required_enum_str(data, "profile", CAPTURE_PROFILE_IDS, "capture_metadata")
-    _required_positive_int(data, "sample_rate")
-    _required_positive_int(data, "channels")
-    _required_positive_int(data, "segment_seconds")
     segment_count = _required_non_negative_int(data, "segment_count")
     segments = _required_list(data, "segments", "capture_metadata")
     if segment_count != len(segments):
@@ -1000,6 +1050,36 @@ def _validate_capture_metadata(data: dict[str, object]) -> None:
         if not isinstance(segment, dict):
             raise ProtocolError("capture_metadata segments must contain JSON objects.")
         SegmentFlushedPayload.from_dict(segment)
+
+
+def _validate_capture_metadata_summary(data: dict[str, object]) -> None:
+    _validate_capture_metadata_common(
+        data,
+        expected_keys={
+            "version",
+            "profile",
+            "sample_rate",
+            "channels",
+            "segment_seconds",
+            "segment_count",
+            "sources",
+        },
+    )
+    _required_non_negative_int(data, "segment_count")
+
+
+def _validate_capture_metadata_common(
+    data: dict[str, object],
+    *,
+    expected_keys: set[str],
+) -> None:
+    _require_exact_keys(data, expected_keys, "capture_metadata")
+    if _required_int(data, "version") != 1:
+        raise ProtocolError("capture_metadata field 'version' must be 1.")
+    _required_enum_str(data, "profile", CAPTURE_PROFILE_IDS, "capture_metadata")
+    _required_positive_int(data, "sample_rate")
+    _required_positive_int(data, "channels")
+    _required_positive_int(data, "segment_seconds")
     sources = _required_list(data, "sources", "capture_metadata")
     for source in sources:
         if not isinstance(source, dict):

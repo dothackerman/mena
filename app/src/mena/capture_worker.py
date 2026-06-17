@@ -31,6 +31,8 @@ from mena.protocol import (
     ErrorPayload,
     ProtocolError,
     ProtocolMessage,
+    SegmentFlushedPayload,
+    SegmentsFlushedPayload,
     StartCapturePayload,
     hello_ack_message,
     read_message,
@@ -163,9 +165,13 @@ def run_worker(
                 if flush_loop is not None:
                     flush_loop.stop()
                     flush_loop.join()
-                    if flush_loop.error is not None:
-                        raise ProtocolError(f"Capture failed: {flush_loop.error}")
-                finalized_metadata = capture.finalize()
+                    try:
+                        finalized_metadata = capture.finalize()
+                    finally:
+                        if flush_loop.error is not None:
+                            raise ProtocolError(f"Capture failed: {flush_loop.error}")
+                else:
+                    finalized_metadata = capture.finalize()
             if finalized_metadata is None:
                 raise ProtocolError("Capture did not finalize.")
             write_message(
@@ -178,7 +184,7 @@ def run_worker(
                         stop_reason="user_stop",
                         completed_at=None,
                         error=None,
-                        capture_metadata=finalized_metadata.to_dict(),
+                        capture_metadata=finalized_metadata.to_summary_dict(),
                     ).to_dict(),
                 ),
             )
@@ -432,13 +438,20 @@ def _write_flushed_segments(
         events=_drain_route_events(capture),
     )
     for segment in flushed:
+        SegmentFlushedPayload.from_dict(segment.to_dict())
+    if flushed:
         with write_lock:
             write_message(
                 protocol_out,
                 ProtocolMessage(
-                    type="segment_flushed",
+                    type="segments_flushed",
                     session_id=session_id,
-                    payload=segment.to_dict(),
+                    payload=SegmentsFlushedPayload(
+                        segments=tuple(
+                            SegmentFlushedPayload.from_dict(segment.to_dict())
+                            for segment in flushed
+                        )
+                    ).to_dict(),
                 ),
             )
 

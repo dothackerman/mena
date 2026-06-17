@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 from uuid import uuid4
 
 from mena.artifacts import (
@@ -92,6 +92,7 @@ from mena.protocol import (
     ProtocolError,
     ProtocolMessage,
     SegmentFlushedPayload,
+    SegmentsFlushedPayload,
     StartCapturePayload,
     WorkerExitedError,
     WorkerProcess,
@@ -261,17 +262,19 @@ class _CaptureEventMonitor:
     def _handle_message(self, message: ProtocolMessage) -> bool:
         if message.type == "segment_flushed":
             segment = SegmentFlushedPayload.from_dict(message.payload)
-            self.segments.append(dict(message.payload))
-            # Incremental metadata is intentional: a session can be interrupted
-            # before finalization and still retain processable sealed chunks.
-            update_session_capture_metadata(
-                self.record_path,
-                _capture_metadata_from_segments(
-                    self.start_payload,
-                    self.segments,
-                ),
+            self._persist_segments((dict(message.payload),))
+            self._print_segment(segment)
+            return True
+        if message.type == "segments_flushed":
+            batch = SegmentsFlushedPayload.from_dict(message.payload)
+            raw_segments = message.payload["segments"]
+            if not isinstance(raw_segments, list):
+                raise ProtocolError("segments_flushed payload segments must be a list.")
+            self._persist_segments(
+                tuple(cast(dict[str, object], segment) for segment in raw_segments)
             )
-            print(f"Sealed {segment.source_id} segment {segment.index}.")
+            for segment in batch.segments:
+                self._print_segment(segment)
             return True
         if message.type == "capture_status":
             status = CaptureStatusPayload.from_dict(message.payload)
@@ -296,6 +299,21 @@ class _CaptureEventMonitor:
             return False
         self._terminal_events.put(ProtocolError(f"Unexpected capture event '{message.type}'."))
         return False
+
+    def _persist_segments(self, segments: tuple[dict[str, object], ...]) -> None:
+        self.segments.extend(segments)
+        # Incremental metadata is intentional: a session can be interrupted
+        # before finalization and still retain processable sealed chunks.
+        update_session_capture_metadata(
+            self.record_path,
+            _capture_metadata_from_segments(
+                self.start_payload,
+                self.segments,
+            ),
+        )
+
+    def _print_segment(self, segment: SegmentFlushedPayload) -> None:
+        print(f"Sealed {segment.source_id} segment {segment.index}.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -585,10 +603,12 @@ def main(
         finalized_payload = CaptureFinalizedPayload.from_dict(finalized.payload)
         completed_at = finalized_payload.completed_at or _utc_timestamp(now)
         stop_reason = "interrupted" if interrupted_stop else finalized_payload.stop_reason
-        update_session_capture_metadata(
-            created_session.record_path,
-            finalized_payload.capture_metadata,
+        capture_metadata = (
+            _capture_metadata_from_segments(start_payload, capture_monitor.segments)
+            if capture_monitor is not None
+            else finalized_payload.capture_metadata
         )
+        update_session_capture_metadata(created_session.record_path, capture_metadata)
         update_session_record(
             created_session.record_path,
             updates={
