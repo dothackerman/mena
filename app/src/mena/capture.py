@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import re
+import select
 import struct
 import subprocess
 import threading
-import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -198,7 +198,7 @@ PcmProvider = Callable[[CaptureSourceId], bytes]
 
 
 class PipeWirePcmProvider:
-    """Bounded raw PCM reader backed by pw-record."""
+    """Continuous raw PCM reader backed by long-lived pw-record processes."""
 
     def __init__(
         self,
@@ -206,14 +206,13 @@ class PipeWirePcmProvider:
         sample_rate: int = DEFAULT_SAMPLE_RATE,
         channels: int = 1,
         sample_width_bytes: int = DEFAULT_SAMPLE_WIDTH_BYTES,
-        runner: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
         popen_factory: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
     ) -> None:
         self.sample_rate = sample_rate
         self.channels = channels
         self.sample_width_bytes = sample_width_bytes
-        self._runner = runner
         self._popen_factory = popen_factory
+        self._streams: dict[tuple[CaptureSourceId, str], _RawPcmCaptureStream] = {}
 
     def read_segment(
         self,
@@ -224,47 +223,12 @@ class PipeWirePcmProvider:
         segment_seconds: int,
         stop_event: threading.Event | None = None,
     ) -> bytes:
-        command = self._command_for_source(source_id, plan=plan, sink_name=sink_name)
-        if stop_event is not None:
-            process = self._popen_factory(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                shell=False,
-            )
-            stdout, stderr, returncode, timed_out = _communicate_bounded(
-                process,
-                segment_seconds,
-                stop_event=stop_event,
-            )
-            if returncode and not timed_out:
-                raise subprocess.CalledProcessError(
-                    returncode,
-                    command,
-                    output=stdout,
-                    stderr=stderr,
-                )
-            if not stdout:
-                raise subprocess.CalledProcessError(
-                    returncode,
-                    command,
-                    output=stdout,
-                    stderr=stderr,
-                )
-            return stdout
-        try:
-            completed = self._runner(
-                command, capture_output=True, check=True, timeout=segment_seconds
-            )
-        except subprocess.TimeoutExpired as exc:
-            output = exc.output or b""
-            pcm = output if isinstance(output, bytes) else output.encode("utf-8")
-            if not pcm:
-                raise ValueError(
-                    f"PipeWire capture produced no PCM data for {source_id.value}."
-                ) from exc
-            return pcm
-        return completed.stdout
+        stream = self._stream_for_source(source_id, plan=plan, sink_name=sink_name)
+        return stream.read_chunk(
+            self._segment_pcm_bytes(segment_seconds),
+            frame_width=self.channels * self.sample_width_bytes,
+            stop_event=stop_event,
+        )
 
     def read_aligned_segments(
         self,
@@ -274,56 +238,66 @@ class PipeWirePcmProvider:
         segment_seconds: int,
         stop_event: threading.Event | None = None,
     ) -> dict[CaptureSourceId, bytes]:
-        """Record both sources inside the same bounded segment window."""
+        """Read one aligned chunk from the continuous source streams."""
 
         sources = (CaptureSourceId.LOCAL_MIC, CaptureSourceId.SYSTEM_AUDIO)
-        commands = {
-            source_id: self._command_for_source(source_id, plan=plan, sink_name=sink_name)
-            for source_id in sources
-        }
-        processes: dict[CaptureSourceId, subprocess.Popen[bytes]] = {}
         try:
-            for source_id, command in commands.items():
-                processes[source_id] = self._popen_factory(
-                    command,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    shell=False,
-                )
+            streams = {
+                source_id: self._stream_for_source(source_id, plan=plan, sink_name=sink_name)
+                for source_id in sources
+            }
         except Exception:
-            for process in processes.values():
-                process.kill()
-                process.communicate()
+            self.close()
             raise
-        with ThreadPoolExecutor(max_workers=len(processes)) as executor:
+        expected_bytes = self._segment_pcm_bytes(segment_seconds)
+        frame_width = self.channels * self.sample_width_bytes
+        with ThreadPoolExecutor(max_workers=len(streams)) as executor:
             results = {
                 source_id: executor.submit(
-                    _communicate_bounded,
-                    process,
-                    segment_seconds,
+                    stream.read_chunk,
+                    expected_bytes,
+                    frame_width=frame_width,
                     stop_event=stop_event,
                 )
-                for source_id, process in processes.items()
+                for source_id, stream in streams.items()
             }
         output: dict[CaptureSourceId, bytes] = {}
         for source_id, future in results.items():
-            stdout, stderr, returncode, timed_out = future.result()
-            if returncode and not timed_out:
-                raise subprocess.CalledProcessError(
-                    returncode,
-                    commands[source_id],
-                    output=stdout,
-                    stderr=stderr,
-                )
-            if not stdout:
-                raise subprocess.CalledProcessError(
-                    returncode,
-                    commands[source_id],
-                    output=stdout,
-                    stderr=stderr,
-                )
-            output[source_id] = stdout
+            pcm = future.result()
+            if pcm:
+                output[source_id] = pcm
         return output
+
+    def close(self) -> None:
+        for stream in self._streams.values():
+            stream.close()
+        self._streams.clear()
+
+    def _stream_for_source(
+        self,
+        source_id: CaptureSourceId,
+        *,
+        plan: CaptureRoutePlan,
+        sink_name: str,
+    ) -> _RawPcmCaptureStream:
+        target = self._target_for_source(source_id, plan=plan, sink_name=sink_name)
+        key = (source_id, target)
+        stream = self._streams.get(key)
+        if stream is not None and stream.is_running:
+            return stream
+        command = self._command_for_source(source_id, plan=plan, sink_name=sink_name)
+        process = self._popen_factory(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+        )
+        stream = _RawPcmCaptureStream(source_id=source_id, command=command, process=process)
+        self._streams[key] = stream
+        return stream
+
+    def _segment_pcm_bytes(self, segment_seconds: int) -> int:
+        return segment_seconds * self.sample_rate * self.channels * self.sample_width_bytes
 
     def _command_for_source(
         self,
@@ -361,6 +335,99 @@ class PipeWirePcmProvider:
         if source_id is CaptureSourceId.SYSTEM_AUDIO:
             return f"{sink_name}.monitor"
         raise ValueError(f"Unsupported capture source '{source_id}'.")
+
+
+class _RawPcmCaptureStream:
+    """One long-lived raw PCM capture stream for a logical source."""
+
+    def __init__(
+        self,
+        *,
+        source_id: CaptureSourceId,
+        command: list[str],
+        process: subprocess.Popen[bytes],
+    ) -> None:
+        self.source_id = source_id
+        self.command = command
+        self.process = process
+
+    @property
+    def is_running(self) -> bool:
+        poll = getattr(self.process, "poll", None)
+        if not callable(poll):
+            return True
+        return poll() is None
+
+    def read_chunk(
+        self,
+        expected_bytes: int,
+        *,
+        frame_width: int,
+        stop_event: threading.Event | None = None,
+    ) -> bytes:
+        if expected_bytes < 1:
+            raise ValueError("PCM chunk size must be positive.")
+        if frame_width < 1:
+            raise ValueError("PCM frame width must be positive.")
+        stdout = self.process.stdout
+        if stdout is None:
+            raise subprocess.CalledProcessError(
+                1,
+                self.command,
+                stderr=b"pw-record did not expose stdout",
+            )
+        chunks: list[bytes] = []
+        remaining = expected_bytes
+        while remaining > 0:
+            if stop_event is not None and stop_event.is_set():
+                self.close()
+                break
+            if not _pipe_has_data(stdout, timeout=0.25):
+                if not self.is_running:
+                    break
+                continue
+            chunk = stdout.read(min(remaining, 64 * 1024))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        pcm = b"".join(chunks)
+        aligned_length = len(pcm) - (len(pcm) % frame_width)
+        pcm = pcm[:aligned_length]
+        if pcm:
+            return pcm
+        if stop_event is not None and stop_event.is_set():
+            return b""
+        returncode = getattr(self.process, "returncode", None)
+        if returncode is None:
+            poll = getattr(self.process, "poll", None)
+            if callable(poll):
+                returncode = poll()
+        stderr = _read_process_stderr(self.process)
+        raise subprocess.CalledProcessError(
+            1 if returncode is None else returncode,
+            self.command,
+            output=pcm,
+            stderr=stderr,
+        )
+
+    def close(self) -> None:
+        if not self.is_running:
+            return
+        terminate = getattr(self.process, "terminate", None)
+        kill = getattr(self.process, "kill", None)
+        communicate = getattr(self.process, "communicate", None)
+        if callable(terminate):
+            terminate()
+        elif callable(kill):
+            kill()
+        if callable(communicate):
+            try:
+                communicate(timeout=1)
+            except subprocess.TimeoutExpired:
+                if callable(kill):
+                    kill()
+                communicate()
 
 
 class PipeWireClient:
@@ -481,15 +548,12 @@ class PipeWireCaptureAdapter:
                 segment_seconds=self.segment_seconds,
                 stop_event=stop_event,
             )
-            local = self.segment_writer.write_segment(
-                CaptureSourceId.LOCAL_MIC,
-                pcm_by_source[CaptureSourceId.LOCAL_MIC],
-            )
-            remote = self.segment_writer.write_segment(
-                CaptureSourceId.SYSTEM_AUDIO,
-                pcm_by_source[CaptureSourceId.SYSTEM_AUDIO],
-            )
-            return (local, remote)
+            segments: list[CaptureSegment] = []
+            for source_id in (CaptureSourceId.LOCAL_MIC, CaptureSourceId.SYSTEM_AUDIO):
+                pcm = pcm_by_source.get(source_id)
+                if pcm:
+                    segments.append(self.segment_writer.write_segment(source_id, pcm))
+            return tuple(segments)
         local = self.segment_writer.write_segment(
             CaptureSourceId.LOCAL_MIC,
             self._read_pcm(
@@ -529,6 +593,7 @@ class PipeWireCaptureAdapter:
         )
 
     def _cleanup(self, *, null_sink_module: str | None, loopback_module: str | None) -> None:
+        self.pipewire_pcm_provider.close()
         for module_id in (loopback_module, null_sink_module):
             if module_id:
                 try:
@@ -648,33 +713,28 @@ def _pipewire_node_id(route_id: str) -> str:
     return node_id
 
 
-def _communicate_bounded(
-    process: subprocess.Popen[bytes],
-    timeout: int,
-    *,
-    stop_event: threading.Event | None = None,
-) -> tuple[bytes, bytes, int, bool]:
-    timed_out = False
-    deadline = time.monotonic() + timeout
-    while True:
-        if stop_event is not None and stop_event.is_set():
-            timed_out = True
-            process.kill()
-            stdout, stderr = process.communicate()
-            break
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            timed_out = True
-            process.kill()
-            stdout, stderr = process.communicate()
-            break
-        try:
-            stdout, stderr = process.communicate(timeout=min(remaining, 0.25))
-            break
-        except subprocess.TimeoutExpired:
-            continue
-    returncode = getattr(process, "returncode", 0)
-    return stdout, stderr, returncode, timed_out
+def _pipe_has_data(pipe: object, *, timeout: float) -> bool:
+    fileno = getattr(pipe, "fileno", None)
+    if not callable(fileno):
+        return True
+    try:
+        fd = fileno()
+    except (OSError, ValueError):
+        return True
+    readable, _, _ = select.select([fd], [], [], timeout)
+    return bool(readable)
+
+
+def _read_process_stderr(process: subprocess.Popen[bytes]) -> bytes:
+    stderr = process.stderr
+    if stderr is None:
+        return b""
+    if not _pipe_has_data(stderr, timeout=0):
+        return b""
+    data = stderr.read()
+    if isinstance(data, bytes):
+        return data
+    return b""
 
 
 def _channel_layout(channels: int) -> str:

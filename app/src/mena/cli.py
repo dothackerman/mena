@@ -213,8 +213,17 @@ class CaptureSegmentInput:
 class _CaptureEventMonitor:
     """Drain worker capture events while the foreground prompt waits for stop."""
 
-    def __init__(self, worker: WorkerProcess) -> None:
+    def __init__(
+        self,
+        worker: WorkerProcess,
+        *,
+        record_path: Path,
+        start_payload: StartCapturePayload,
+    ) -> None:
         self.worker = worker
+        self.record_path = record_path
+        self.start_payload = start_payload
+        self.segments: list[dict[str, object]] = []
         self._terminal_events: queue.Queue[ProtocolMessage | BaseException] = queue.Queue()
         self._thread = threading.Thread(
             target=self._run,
@@ -246,6 +255,14 @@ class _CaptureEventMonitor:
     def _handle_message(self, message: ProtocolMessage) -> bool:
         if message.type == "segment_flushed":
             segment = SegmentFlushedPayload.from_dict(message.payload)
+            self.segments.append(dict(message.payload))
+            update_session_capture_metadata(
+                self.record_path,
+                _capture_metadata_from_segments(
+                    self.start_payload,
+                    self.segments,
+                ),
+            )
             print(f"Sealed {segment.source_id} segment {segment.index}.")
             return True
         if message.type == "capture_status":
@@ -500,7 +517,11 @@ def main(
             session_id=created_session.record.id,
             session_dir=created_session.bundle_path,
         ) as worker:
-            capture_monitor = _capture_event_monitor(worker)
+            capture_monitor = _capture_event_monitor(
+                worker,
+                record_path=created_session.record_path,
+                start_payload=start_payload,
+            )
             interrupted_stop = False
             try:
                 worker.handshake()
@@ -739,6 +760,64 @@ def _capture_plan_from_start_payload(
     return plan
 
 
+def _capture_metadata_from_segments(
+    payload: StartCapturePayload,
+    segments: list[dict[str, object]],
+) -> dict[str, object]:
+    sample_rate = _latest_segment_int(segments, "sample_rate", default=48_000)
+    channels = _latest_segment_int(segments, "channels", default=1)
+    return {
+        "version": 1,
+        "profile": payload.profile,
+        "sample_rate": sample_rate,
+        "channels": channels,
+        "segment_seconds": payload.segment_seconds,
+        "segment_count": len(segments),
+        "segments": list(segments),
+        "sources": _capture_source_summaries(payload, segments),
+    }
+
+
+def _capture_source_summaries(
+    payload: StartCapturePayload,
+    segments: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    routes_by_source = {
+        route.source_id: route for route in payload.routes if route.source_id is not None
+    }
+    ordered_sources = tuple(
+        dict.fromkeys(str(segment["source_id"]) for segment in segments if "source_id" in segment)
+    )
+    summaries: list[dict[str, object]] = []
+    for source_id in ordered_sources:
+        source_segments = [segment for segment in segments if segment.get("source_id") == source_id]
+        route = routes_by_source.get(source_id)
+        channel_layout = source_segments[-1].get("channel_layout", "unknown")
+        summaries.append(
+            {
+                "source_id": source_id,
+                "route_id": None if route is None else route.route_id,
+                "route_label": None if route is None else route.label,
+                "channel_layout": channel_layout,
+                "segment_count": len(source_segments),
+            }
+        )
+    return summaries
+
+
+def _latest_segment_int(
+    segments: list[dict[str, object]],
+    key: str,
+    *,
+    default: int,
+) -> int:
+    for segment in reversed(segments):
+        value = segment.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return default
+
+
 def _recording_lifecycle(
     *,
     started_at: str | None,
@@ -799,9 +878,18 @@ def _persist_capture_failure(
     )
 
 
-def _capture_event_monitor(worker: Any) -> _CaptureEventMonitor | None:
+def _capture_event_monitor(
+    worker: Any,
+    *,
+    record_path: Path,
+    start_payload: StartCapturePayload,
+) -> _CaptureEventMonitor | None:
     if isinstance(worker, WorkerProcess):
-        return _CaptureEventMonitor(worker)
+        return _CaptureEventMonitor(
+            worker,
+            record_path=record_path,
+            start_payload=start_payload,
+        )
     return None
 
 

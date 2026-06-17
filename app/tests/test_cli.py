@@ -63,7 +63,13 @@ from mena.processing import (
     ProcessingStageState,
 )
 from mena.profiles import CaptureProfileId, get_capture_profile, parse_capture_profile
-from mena.protocol import ProtocolError, ProtocolMessage, StartCapturePayload, WorkerProcess
+from mena.protocol import (
+    CaptureRouteBindingPayload,
+    ProtocolError,
+    ProtocolMessage,
+    StartCapturePayload,
+    WorkerProcess,
+)
 from mena.review_flagging import (
     REVIEW_QUEUE_SCHEMA_VERSION,
     ConfidenceFlaggingPolicy,
@@ -671,8 +677,15 @@ def test_wait_for_record_stop_rejects_invalid_command() -> None:
 
 
 def test_capture_event_monitor_drains_progress_and_returns_finalization(
+    tmp_path: Path,
     capsys: CaptureFixture[str],
 ) -> None:
+    created_session = create_session(
+        profile=parse_capture_profile("online"),
+        language="en",
+        data_root=tmp_path,
+    )
+    start_payload = _monitor_start_payload()
     worker = _EventWorker(
         [
             ProtocolMessage(
@@ -692,18 +705,26 @@ def test_capture_event_monitor_drains_progress_and_returns_finalization(
             _finalized_capture_message(),
         ]
     )
-    monitor = _CaptureEventMonitor(cast(WorkerProcess, worker))
+    monitor = _CaptureEventMonitor(
+        cast(WorkerProcess, worker),
+        record_path=created_session.record_path,
+        start_payload=start_payload,
+    )
 
     monitor.start()
     finalized = monitor.wait_for_finalized()
 
+    record = json.loads(created_session.record_path.read_text(encoding="utf-8"))
     captured = capsys.readouterr()
     assert finalized.type == "capture_finalized"
+    assert record["capture_metadata"]["segment_count"] == 1
+    assert record["capture_metadata"]["segments"][0]["source_id"] == "local_mic"
+    assert record["capture_metadata"]["sources"][0]["route_label"] == "Studio mic"
     assert "Sealed local_mic segment 1." in captured.out
     assert "Recording: 12s elapsed, 1 sealed segment(s)." in captured.out
 
 
-def test_capture_event_monitor_raises_structured_worker_error() -> None:
+def test_capture_event_monitor_raises_structured_worker_error(tmp_path: Path) -> None:
     worker = _EventWorker(
         [
             ProtocolMessage(
@@ -718,7 +739,16 @@ def test_capture_event_monitor_raises_structured_worker_error() -> None:
             )
         ]
     )
-    monitor = _CaptureEventMonitor(cast(WorkerProcess, worker))
+    created_session = create_session(
+        profile=parse_capture_profile("online"),
+        language="en",
+        data_root=tmp_path,
+    )
+    monitor = _CaptureEventMonitor(
+        cast(WorkerProcess, worker),
+        record_path=created_session.record_path,
+        start_payload=_monitor_start_payload(),
+    )
 
     monitor.start()
 
@@ -726,8 +756,17 @@ def test_capture_event_monitor_raises_structured_worker_error() -> None:
         monitor.wait_for_finalized()
 
 
-def test_capture_event_monitor_propagates_reader_failure() -> None:
-    monitor = _CaptureEventMonitor(cast(WorkerProcess, _EventWorker([])))
+def test_capture_event_monitor_propagates_reader_failure(tmp_path: Path) -> None:
+    created_session = create_session(
+        profile=parse_capture_profile("online"),
+        language="en",
+        data_root=tmp_path,
+    )
+    monitor = _CaptureEventMonitor(
+        cast(WorkerProcess, _EventWorker([])),
+        record_path=created_session.record_path,
+        start_payload=_monitor_start_payload(),
+    )
 
     monitor.start()
 
@@ -735,9 +774,18 @@ def test_capture_event_monitor_propagates_reader_failure() -> None:
         monitor.wait_for_finalized()
 
 
-def test_capture_event_monitor_rejects_unexpected_event_type() -> None:
+def test_capture_event_monitor_rejects_unexpected_event_type(tmp_path: Path) -> None:
     worker = _EventWorker([ProtocolMessage(type="hello_ack", session_id=SESSION_ID)])
-    monitor = _CaptureEventMonitor(cast(WorkerProcess, worker))
+    created_session = create_session(
+        profile=parse_capture_profile("online"),
+        language="en",
+        data_root=tmp_path,
+    )
+    monitor = _CaptureEventMonitor(
+        cast(WorkerProcess, worker),
+        record_path=created_session.record_path,
+        start_payload=_monitor_start_payload(),
+    )
 
     monitor.start()
 
@@ -2705,6 +2753,41 @@ def _segment_payload(*, source_id: str, index: int) -> dict[str, object]:
         "status": "sealed",
         "format": "wav",
     }
+
+
+def _monitor_start_payload() -> StartCapturePayload:
+    return StartCapturePayload(
+        profile="online_dual_stream",
+        language="en",
+        segment_seconds=30,
+        selected_sources=("local_mic", "system_audio"),
+        routes=(
+            CaptureRouteBindingPayload(
+                role="microphone",
+                source_id="local_mic",
+                route_id="pipewire:node:31",
+                label="Studio mic",
+                backend="pipewire",
+                required=True,
+            ),
+            CaptureRouteBindingPayload(
+                role="playback_stream",
+                source_id="system_audio",
+                route_id="pulse:sink-input:51",
+                label="Video call",
+                backend="pipewire",
+                required=True,
+            ),
+            CaptureRouteBindingPayload(
+                role="output_sink",
+                source_id=None,
+                route_id="pipewire:node:42",
+                label="Headphones",
+                backend="pipewire",
+                required=True,
+            ),
+        ),
+    )
 
 
 def _finalized_capture_message() -> ProtocolMessage:
