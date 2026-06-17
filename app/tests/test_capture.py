@@ -351,6 +351,118 @@ def test_pipewire_pcm_provider_starts_sources_before_collecting_continuous_chunk
     }
 
 
+def test_pipewire_pcm_provider_probes_candidate_stream_before_switching() -> None:
+    started_commands: list[list[str]] = []
+    processes: list[object] = []
+
+    class FakeProcess:
+        def __init__(self, args: list[str], **_kwargs: object) -> None:
+            self.args = args
+            self.stdout = io.BytesIO(b"\x01\x02")
+            self.stderr = io.BytesIO()
+            self.returncode: int | None = None
+            self.terminated = False
+            started_commands.append(args)
+            processes.append(self)
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.terminated = True
+            self.returncode = -15
+
+        def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
+            return b"", b""
+
+    provider = PipeWirePcmProvider(sample_rate=1, popen_factory=cast(Any, FakeProcess))
+
+    provider.probe_source(
+        CaptureSourceId.SYSTEM_AUDIO,
+        plan=_route_plan(),
+        sink_name="mena_session_remote",
+        timeout_seconds=1,
+    )
+    provider.close_source(
+        CaptureSourceId.SYSTEM_AUDIO,
+        plan=_route_plan(),
+        sink_name="mena_session_remote",
+    )
+
+    assert started_commands[0][:3] == ["pw-record", "--target", "mena_session_remote.monitor"]
+    assert cast(Any, processes[0]).terminated
+
+
+def test_pipewire_pcm_provider_probe_closes_failed_candidate_stream() -> None:
+    processes: list[object] = []
+
+    class FakeProcess:
+        def __init__(self, args: list[str], **_kwargs: object) -> None:
+            self.args = args
+            self.stdout = io.BytesIO()
+            self.stderr = io.BytesIO(b"no frames")
+            self.returncode: int | None = None
+            self.terminated = False
+            processes.append(self)
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.terminated = True
+            self.returncode = -15
+
+        def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
+            return b"", b""
+
+    provider = PipeWirePcmProvider(sample_rate=1, popen_factory=cast(Any, FakeProcess))
+
+    with pytest.raises(subprocess.CalledProcessError):
+        provider.probe_source(
+            CaptureSourceId.SYSTEM_AUDIO,
+            plan=_route_plan(),
+            sink_name="mena_session_remote",
+            timeout_seconds=1,
+        )
+
+    assert cast(Any, processes[0]).terminated
+
+
+def test_pipewire_pcm_provider_probe_timeout_is_bounded() -> None:
+    processes: list[object] = []
+
+    class FakeProcess:
+        def __init__(self, args: list[str], **_kwargs: object) -> None:
+            self.args = args
+            self.stdout = io.BytesIO(b"\x01\x02")
+            self.stderr = io.BytesIO()
+            self.returncode: int | None = None
+            self.terminated = False
+            processes.append(self)
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.terminated = True
+            self.returncode = -15
+
+        def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
+            return b"", b""
+
+    provider = PipeWirePcmProvider(sample_rate=1, popen_factory=cast(Any, FakeProcess))
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        provider.probe_source(
+            CaptureSourceId.SYSTEM_AUDIO,
+            plan=_route_plan(),
+            sink_name="mena_session_remote",
+            timeout_seconds=0,
+        )
+
+    assert cast(Any, processes[0]).terminated
+
+
 def test_pipewire_pcm_provider_closes_streams_on_stop_event() -> None:
     class FakeProcess:
         def __init__(self, args: list[str], **_kwargs: object) -> None:
@@ -650,6 +762,7 @@ def test_pipewire_capture_adapter_degrades_and_recovers_at_segment_boundary(
         def __init__(self) -> None:
             self.modes: list[str] = []
             self.closed = 0
+            self.closed_sources: list[tuple[CaptureSourceId, str]] = []
 
         def read_aligned_segments(
             self,
@@ -670,8 +783,30 @@ def test_pipewire_capture_adapter_degrades_and_recovers_at_segment_boundary(
                 CaptureSourceId.SYSTEM_AUDIO: b"\x01\x01",
             }
 
+        def probe_source(
+            self,
+            source_id: CaptureSourceId,
+            *,
+            plan: CaptureRoutePlan,
+            sink_name: str,
+            timeout_seconds: float,
+        ) -> None:
+            self.modes.append(f"probe:{plan.system_audio_mode}")
+            assert source_id is CaptureSourceId.SYSTEM_AUDIO
+            assert sink_name == "mena_session_1_remote"
+            assert timeout_seconds > 0
+
         def close(self) -> None:
             self.closed += 1
+
+        def close_source(
+            self,
+            source_id: CaptureSourceId,
+            *,
+            plan: CaptureRoutePlan,
+            sink_name: str,
+        ) -> None:
+            self.closed_sources.append((source_id, plan.system_audio_mode))
 
     provider = FallbackProvider()
     adapter = PipeWireCaptureAdapter(
@@ -700,9 +835,14 @@ def test_pipewire_capture_adapter_degrades_and_recovers_at_segment_boundary(
     assert provider.modes == [
         CAPTURE_MODE_DEDICATED_ROUTE,
         CAPTURE_MODE_SYSTEM_MIX_REMOTE,
+        f"probe:{CAPTURE_MODE_DEDICATED_ROUTE}",
         CAPTURE_MODE_DEDICATED_ROUTE,
     ]
-    assert provider.closed >= 2
+    assert provider.closed == 0
+    assert provider.closed_sources == [
+        (CaptureSourceId.SYSTEM_AUDIO, CAPTURE_MODE_DEDICATED_ROUTE),
+        (CaptureSourceId.SYSTEM_AUDIO, CAPTURE_MODE_SYSTEM_MIX_REMOTE),
+    ]
 
 
 def test_pipewire_capture_adapter_keeps_system_mix_when_recovery_fails(
@@ -719,6 +859,11 @@ def test_pipewire_capture_adapter_keeps_system_mix_when_recovery_fails(
         return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
 
     class FallbackProvider:
+        def __init__(self) -> None:
+            self.closed = 0
+            self.flushes = 0
+            self.probe_attempts = 0
+
         def read_aligned_segments(
             self,
             *,
@@ -728,30 +873,217 @@ def test_pipewire_capture_adapter_keeps_system_mix_when_recovery_fails(
             stop_event: threading.Event | None = None,
         ) -> dict[CaptureSourceId, bytes]:
             assert plan.system_audio_mode == CAPTURE_MODE_SYSTEM_MIX_REMOTE
+            self.flushes += 1
             return {
                 CaptureSourceId.LOCAL_MIC: b"\x00\x00",
                 CaptureSourceId.SYSTEM_AUDIO: b"\x01\x01",
             }
 
-        def close(self) -> None:
-            return None
+        def probe_source(
+            self,
+            source_id: CaptureSourceId,
+            *,
+            plan: CaptureRoutePlan,
+            sink_name: str,
+            timeout_seconds: float,
+        ) -> None:
+            self.probe_attempts += 1
 
+        def close(self) -> None:
+            self.closed += 1
+
+    provider = FallbackProvider()
     adapter = PipeWireCaptureAdapter(
         client=PipeWireClient(runner=runner),
         segment_writer=WavSegmentWriter(segment_dir=tmp_path, sample_rate=1),
     )
-    adapter.pipewire_pcm_provider = cast(Any, FallbackProvider())
+    adapter.pipewire_pcm_provider = cast(Any, provider)
     active = adapter.start(_route_plan())
     setup_events = active.drain_route_events()
 
     first = active.flush_segments()
     second = active.flush_segments()
+    third = active.flush_segments()
     recovery_events = active.drain_route_events()
 
     assert setup_events[0].code == "dedicated_route_unavailable"
     assert first[1].capture_mode == CAPTURE_MODE_SYSTEM_MIX_REMOTE
     assert second[1].capture_mode == CAPTURE_MODE_SYSTEM_MIX_REMOTE
+    assert third[1].capture_mode == CAPTURE_MODE_SYSTEM_MIX_REMOTE
     assert recovery_events == ()
+    assert provider.flushes == 3
+    assert provider.probe_attempts == 0
+    assert provider.closed == 0
+
+
+def test_pipewire_capture_adapter_keeps_system_mix_when_recovery_probe_fails(
+    tmp_path: Path,
+) -> None:
+    module_ids = iter(["101\n", "202\n", "303\n", "404\n", "505\n", "606\n"])
+    calls: list[list[str]] = []
+
+    def runner(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        stdout = next(module_ids, "") if args[:2] == ["pactl", "load-module"] else ""
+        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+    class FallbackProvider:
+        def __init__(self) -> None:
+            self.modes: list[str] = []
+            self.closed = 0
+            self.closed_sources: list[tuple[CaptureSourceId, str]] = []
+            self.probe_attempts = 0
+
+        def read_aligned_segments(
+            self,
+            *,
+            plan: CaptureRoutePlan,
+            sink_name: str,
+            segment_seconds: int,
+            stop_event: threading.Event | None = None,
+        ) -> dict[CaptureSourceId, bytes]:
+            self.modes.append(plan.system_audio_mode)
+            if len(self.modes) == 1:
+                raise CaptureSourceError(
+                    CaptureSourceId.SYSTEM_AUDIO,
+                    RuntimeError("route disappeared"),
+                )
+            return {
+                CaptureSourceId.LOCAL_MIC: b"\x00\x00",
+                CaptureSourceId.SYSTEM_AUDIO: b"\x01\x01",
+            }
+
+        def probe_source(
+            self,
+            source_id: CaptureSourceId,
+            *,
+            plan: CaptureRoutePlan,
+            sink_name: str,
+            timeout_seconds: float,
+        ) -> None:
+            self.probe_attempts += 1
+            raise subprocess.TimeoutExpired(["pw-record"], timeout_seconds)
+
+        def close(self) -> None:
+            self.closed += 1
+
+        def close_source(
+            self,
+            source_id: CaptureSourceId,
+            *,
+            plan: CaptureRoutePlan,
+            sink_name: str,
+        ) -> None:
+            self.closed_sources.append((source_id, plan.system_audio_mode))
+
+    provider = FallbackProvider()
+    adapter = PipeWireCaptureAdapter(
+        client=PipeWireClient(runner=runner),
+        segment_writer=WavSegmentWriter(segment_dir=tmp_path, sample_rate=1),
+    )
+    adapter.pipewire_pcm_provider = cast(Any, provider)
+    active = adapter.start(_route_plan())
+
+    degraded_segments = active.flush_segments()
+    active.drain_route_events()
+    still_degraded_segments = active.flush_segments()
+    recovery_events = active.drain_route_events()
+    backoff_segments = active.flush_segments()
+
+    assert degraded_segments[1].capture_mode == CAPTURE_MODE_SYSTEM_MIX_REMOTE
+    assert still_degraded_segments[1].capture_mode == CAPTURE_MODE_SYSTEM_MIX_REMOTE
+    assert backoff_segments[1].capture_mode == CAPTURE_MODE_SYSTEM_MIX_REMOTE
+    assert recovery_events == ()
+    assert provider.closed == 0
+    assert provider.probe_attempts == 1
+    assert provider.closed_sources == [(CaptureSourceId.SYSTEM_AUDIO, CAPTURE_MODE_DEDICATED_ROUTE)]
+
+
+def test_pipewire_capture_adapter_keeps_system_mix_when_recovered_segment_fails(
+    tmp_path: Path,
+) -> None:
+    module_ids = iter(["101\n", "202\n", "303\n", "404\n", "505\n", "606\n"])
+
+    def runner(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        stdout = next(module_ids, "") if args[:2] == ["pactl", "load-module"] else ""
+        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+    class FallbackProvider:
+        def __init__(self) -> None:
+            self.dedicated_reads = 0
+            self.probe_attempts = 0
+            self.closed = 0
+            self.closed_sources: list[tuple[CaptureSourceId, str]] = []
+
+        def read_aligned_segments(
+            self,
+            *,
+            plan: CaptureRoutePlan,
+            sink_name: str,
+            segment_seconds: int,
+            stop_event: threading.Event | None = None,
+        ) -> dict[CaptureSourceId, bytes]:
+            if plan.system_audio_mode == CAPTURE_MODE_DEDICATED_ROUTE:
+                self.dedicated_reads += 1
+                raise CaptureSourceError(
+                    CaptureSourceId.SYSTEM_AUDIO,
+                    RuntimeError("dedicated stream failed"),
+                )
+            return {
+                CaptureSourceId.LOCAL_MIC: b"\x00\x00",
+                CaptureSourceId.SYSTEM_AUDIO: b"\x01\x01",
+            }
+
+        def probe_source(
+            self,
+            source_id: CaptureSourceId,
+            *,
+            plan: CaptureRoutePlan,
+            sink_name: str,
+            timeout_seconds: float,
+        ) -> None:
+            self.probe_attempts += 1
+
+        def close(self) -> None:
+            self.closed += 1
+
+        def close_source(
+            self,
+            source_id: CaptureSourceId,
+            *,
+            plan: CaptureRoutePlan,
+            sink_name: str,
+        ) -> None:
+            self.closed_sources.append((source_id, plan.system_audio_mode))
+
+    provider = FallbackProvider()
+    adapter = PipeWireCaptureAdapter(
+        client=PipeWireClient(runner=runner),
+        segment_writer=WavSegmentWriter(segment_dir=tmp_path, sample_rate=1),
+    )
+    adapter.pipewire_pcm_provider = cast(Any, provider)
+    active = adapter.start(_route_plan())
+
+    degraded_segments = active.flush_segments()
+    first_events = active.drain_route_events()
+    still_degraded_segments = active.flush_segments()
+    second_events = active.drain_route_events()
+    backoff_segments = active.flush_segments()
+    backoff_events = active.drain_route_events()
+
+    assert degraded_segments[1].capture_mode == CAPTURE_MODE_SYSTEM_MIX_REMOTE
+    assert first_events[0].event == "degraded"
+    assert still_degraded_segments[1].capture_mode == CAPTURE_MODE_SYSTEM_MIX_REMOTE
+    assert [event.event for event in second_events] == ["degraded"]
+    assert backoff_segments[1].capture_mode == CAPTURE_MODE_SYSTEM_MIX_REMOTE
+    assert backoff_events == ()
+    assert provider.probe_attempts == 1
+    assert provider.dedicated_reads == 2
+    assert provider.closed == 0
+    assert provider.closed_sources == [
+        (CaptureSourceId.SYSTEM_AUDIO, CAPTURE_MODE_DEDICATED_ROUTE),
+        (CaptureSourceId.SYSTEM_AUDIO, CAPTURE_MODE_DEDICATED_ROUTE),
+    ]
 
 
 def test_pipewire_capture_adapter_flushes_segments_and_cleans_up(tmp_path: Path) -> None:

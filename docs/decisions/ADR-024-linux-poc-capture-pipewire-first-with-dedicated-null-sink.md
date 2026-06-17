@@ -12,7 +12,7 @@ Capturing system audio on Linux requires routing it through a virtual device. Pi
 
 ## Decision
 
-Linux PoC capture realisation for `online_dual_stream` is **PipeWire-first with a session-scoped dedicated null sink**: explicit user confirmation of the meeting playback stream, move only that stream into the null sink, capture the null-sink monitor as the remote stream, separate loopback to the user's actual playback device, direct microphone capture as the local stream. Tiered fallback: `mic + default_sink_monitor` → `mic_only`, with degradation events written to session metadata.
+Linux PoC capture realisation for `online_dual_stream` is **PipeWire-first with a session-scoped dedicated null sink**: explicit user confirmation of the meeting playback stream, move only that stream into the null sink, capture the null-sink monitor as the remote stream, separate loopback to the user's actual playback device, direct microphone capture as the local stream. The original fallback direction was tiered degraded capture with degradation events written to session metadata; the #83 installed-product slice narrows that fallback ladder in the amendment below and does not treat `mic_only` as successful online capture.
 
 ## Amendment: #83 online fallback narrowing (2026-06-17)
 

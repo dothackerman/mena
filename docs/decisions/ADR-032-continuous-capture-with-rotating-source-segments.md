@@ -27,6 +27,7 @@ Mena's source-capture contract is **continuous capture with rotating persistence
 - the capture adapter emits raw PCM frames to a Mena-owned segment writer;
 - the segment writer seals independently readable WAV chunks at fixed frame-count boundaries;
 - fallback and recovery decisions happen at segment boundaries so a sealed chunk has one effective capture mode;
+- recovery is make-before-break: an active degraded capture path remains recording until a candidate replacement route is established, observed producing PCM frames, and switched at a segment boundary;
 - already sealed chunks are durable and processable;
 - the current unsealed chunk may be sealed on stop when enough aligned PCM exists; otherwise it remains unpersisted and the session-level finalization or failure record carries the partial outcome;
 - processing consumes ordered, verified, sealed source segments, not live capture implementation details.
@@ -43,6 +44,8 @@ Issue #83 implements the amended ADR-024 online fallback semantics:
 - `in_person_single_mic` has no degraded mode in #83; selected microphone loss is a failure or partial recording.
 
 Degradations are typed route/timeline events, not audio artifacts. All sealed audio chunks remain in `capture_metadata.segments`; segment metadata must identify the effective capture mode and route where it matters. Degradation records must be linkable to the meeting timeline by elapsed seconds, segment index, or both, and user-visible messages should be derived from typed codes rather than stored as the only source of truth.
+
+Failed recovery attempts must not tear down or interrupt the active degraded capture stream. Recovery retries should use backoff so Mena does not repeatedly perturb the live audio graph during a permanently degraded recording.
 
 GStreamer/PyGObject is the intended future adapter family when Mena needs stronger media-pipeline ownership, richer bus/error handling, more explicit timing/caps diagnostics, or better multi-source coordination. That future adapter must remain behind the same capture port and session-record contract; it must not leak GStreamer-specific concepts into durable session artifacts.
 
