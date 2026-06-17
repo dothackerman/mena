@@ -1330,6 +1330,47 @@ def test_pipewire_capture_adapter_degrades_on_partial_setup_failure(tmp_path: Pa
     assert route_events[0].capture_mode == CAPTURE_MODE_SYSTEM_MIX_REMOTE
 
 
+def test_pipewire_capture_adapter_restores_playback_when_loopback_setup_fails(
+    tmp_path: Path,
+) -> None:
+    calls: list[list[str]] = []
+
+    def runner(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        if args[:3] == ["pactl", "load-module", "module-loopback"]:
+            raise subprocess.CalledProcessError(1, args, stderr="loopback failed")
+        return subprocess.CompletedProcess(args, 0, stdout="101\n", stderr="")
+
+    adapter = PipeWireCaptureAdapter(
+        client=PipeWireClient(runner=runner),
+        segment_writer=WavSegmentWriter(segment_dir=tmp_path),
+    )
+
+    active = adapter.start(_route_plan())
+    route_events = active.drain_route_events()
+
+    assert calls == [
+        [
+            "pactl",
+            "load-module",
+            "module-null-sink",
+            "sink_name=mena_session_1_remote",
+            "sink_properties=device.description=mena_session_1_remote",
+        ],
+        ["pactl", "move-sink-input", "51", "mena_session_1_remote"],
+        [
+            "pactl",
+            "load-module",
+            "module-loopback",
+            "source=mena_session_1_remote.monitor",
+            "sink=alsa_output.usb_headphones",
+        ],
+        ["pactl", "move-sink-input", "51", "alsa_output.usb_headphones"],
+        ["pactl", "unload-module", "101"],
+    ]
+    assert route_events[0].code == "dedicated_route_unavailable"
+
+
 def test_pipewire_capture_adapter_degrades_when_cleanup_after_setup_failure_fails(
     tmp_path: Path,
 ) -> None:

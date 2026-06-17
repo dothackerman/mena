@@ -827,6 +827,7 @@ class PipeWireCaptureAdapter:
     ) -> tuple[str, str | None]:
         null_sink_module = self.client.create_null_sink(sink_name)
         loopback_module: str | None = None
+        playback_moved = False
         try:
             if plan.playback_stream_route_id is None:
                 raise ValueError("Online capture requires a playback stream route.")
@@ -835,17 +836,31 @@ class PipeWireCaptureAdapter:
             if plan.output_sink_backend_name is None:
                 raise ValueError("Online capture requires an output sink backend name.")
             self.client.move_playback_stream(plan.playback_stream_route_id, sink_name)
+            playback_moved = True
             loopback_module = self.client.create_loopback(
                 sink_name,
                 plan.output_sink_backend_name,
             )
         except Exception:
+            if playback_moved:
+                self._restore_playback_route(plan)
             self._cleanup_routes(
                 null_sink_module=null_sink_module,
                 loopback_module=loopback_module,
             )
             raise
         return null_sink_module, loopback_module
+
+    def _restore_playback_route(self, plan: CaptureRoutePlan) -> None:
+        if plan.playback_stream_route_id is None or plan.output_sink_backend_name is None:
+            return
+        try:
+            self.client.move_playback_stream(
+                plan.playback_stream_route_id,
+                plan.output_sink_backend_name,
+            )
+        except (subprocess.CalledProcessError, OSError, ValueError):
+            return
 
 
 class ActivePipeWireCapture:
