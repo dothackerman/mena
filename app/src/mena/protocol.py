@@ -146,6 +146,7 @@ class CaptureRouteBindingPayload:
     label: str
     backend: str
     required: bool
+    backend_name: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -154,6 +155,7 @@ class CaptureRouteBindingPayload:
             "route_id": self.route_id,
             "label": self.label,
             "backend": self.backend,
+            "backend_name": self.backend_name,
             "required": self.required,
         }
 
@@ -162,7 +164,7 @@ class CaptureRouteBindingPayload:
         payload = _ensure_mapping(data, "capture route binding")
         _require_exact_keys(
             payload,
-            {"role", "source_id", "route_id", "label", "backend", "required"},
+            {"role", "source_id", "route_id", "label", "backend", "backend_name", "required"},
             "capture route binding",
         )
         source_id = _optional_enum_str(
@@ -182,6 +184,7 @@ class CaptureRouteBindingPayload:
             route_id=_required_str(payload, "route_id"),
             label=_required_str(payload, "label"),
             backend=_required_str(payload, "backend"),
+            backend_name=_optional_str(payload, "backend_name", "capture route binding"),
             required=_required_bool(payload, "required"),
         )
 

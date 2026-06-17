@@ -2815,6 +2815,7 @@ def _monitor_start_payload() -> StartCapturePayload:
                 label="Studio mic",
                 backend="pipewire",
                 required=True,
+                backend_name="alsa_input.studio",
             ),
             CaptureRouteBindingPayload(
                 role="playback_stream",
@@ -2823,6 +2824,7 @@ def _monitor_start_payload() -> StartCapturePayload:
                 label="Video call",
                 backend="pipewire",
                 required=True,
+                backend_name="meeting-playback",
             ),
             CaptureRouteBindingPayload(
                 role="output_sink",
@@ -2831,6 +2833,7 @@ def _monitor_start_payload() -> StartCapturePayload:
                 label="Headphones",
                 backend="pipewire",
                 required=True,
+                backend_name="alsa_output.headphones",
             ),
         ),
     )

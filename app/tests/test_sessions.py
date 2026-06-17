@@ -320,6 +320,7 @@ def test_update_session_capture_plan_writes_schema_valid_session_record(tmp_path
                 "route_id": "pipewire:node:31",
                 "label": "Headset Mic",
                 "backend": "pipewire",
+                "backend_name": "alsa_input.headset",
                 "required": True,
             },
             {
@@ -328,6 +329,7 @@ def test_update_session_capture_plan_writes_schema_valid_session_record(tmp_path
                 "route_id": "pulse:sink-input:151",
                 "label": "Meeting Stream",
                 "backend": "pulse",
+                "backend_name": "meeting-playback",
                 "required": True,
             },
             {
@@ -336,6 +338,7 @@ def test_update_session_capture_plan_writes_schema_valid_session_record(tmp_path
                 "route_id": "pipewire:node:42",
                 "label": "Speakers",
                 "backend": "pipewire",
+                "backend_name": "alsa_output.speakers",
                 "required": True,
             },
         ],

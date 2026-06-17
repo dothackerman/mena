@@ -141,6 +141,9 @@
           "minLength": 1,
           "type": "string"
         },
+        "backend_name": {
+          "type": ["string", "null"]
+        },
         "label": {
           "minLength": 1,
           "type": "string"
@@ -161,7 +164,15 @@
           "type": ["string", "null"]
         }
       },
-      "required": ["role", "source_id", "route_id", "label", "backend", "required"],
+      "required": [
+        "role",
+        "source_id",
+        "route_id",
+        "label",
+        "backend",
+        "backend_name",
+        "required"
+      ],
       "type": "object"
     },
     "capture_segment": {

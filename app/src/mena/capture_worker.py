@@ -275,6 +275,7 @@ class WorkerCaptureSession:
                 microphone_route_label=self._route_label("microphone"),
                 playback_stream_route_label=self._route_label("playback_stream"),
                 output_sink_route_label=self._route_label("output_sink"),
+                output_sink_backend_name=self._route_backend_name("output_sink"),
             )
         self.active_capture = self.adapter.start(
             route_plan,
@@ -320,6 +321,12 @@ class WorkerCaptureSession:
         for route in self.start_payload.routes:
             if route.role == role:
                 return route.label
+        raise ProtocolError(f"start_capture payload missing {role} route.")
+
+    def _route_backend_name(self, role: str) -> str | None:
+        for route in self.start_payload.routes:
+            if route.role == role:
+                return route.backend_name
         raise ProtocolError(f"start_capture payload missing {role} route.")
 
     def drain_route_events(self) -> tuple[CaptureRouteEvent, ...]:

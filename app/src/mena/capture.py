@@ -9,7 +9,7 @@ import struct
 import subprocess
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -40,6 +40,7 @@ class CaptureRoutePlan:
     microphone_route_label: str | None = None
     playback_stream_route_label: str | None = None
     output_sink_route_label: str | None = None
+    output_sink_backend_name: str | None = None
     system_audio_mode: str = CAPTURE_MODE_DEDICATED_ROUTE
 
 
@@ -269,9 +270,16 @@ PcmProvider = Callable[[CaptureSourceId], bytes]
 class CaptureSourceError(RuntimeError):
     """A capture source failed while reading aligned source chunks."""
 
-    def __init__(self, source_id: CaptureSourceId, cause: BaseException) -> None:
+    def __init__(
+        self,
+        source_id: CaptureSourceId,
+        cause: BaseException,
+        *,
+        partial_pcm_by_source: Mapping[CaptureSourceId, bytes] | None = None,
+    ) -> None:
         self.source_id = source_id
         self.cause = cause
+        self.partial_pcm_by_source = dict(partial_pcm_by_source or {})
         super().__init__(f"{source_id.value} capture failed: {cause}")
 
 
@@ -340,13 +348,19 @@ class PipeWirePcmProvider:
                 for source_id, stream in streams.items()
             }
         output: dict[CaptureSourceId, bytes] = {}
+        failure: tuple[CaptureSourceId, BaseException] | None = None
         for source_id, future in results.items():
             try:
                 pcm = future.result()
             except BaseException as exc:
-                raise CaptureSourceError(source_id, exc) from exc
+                if failure is None:
+                    failure = (source_id, exc)
+                continue
             if pcm:
                 output[source_id] = pcm
+        if failure is not None:
+            source_id, exc = failure
+            raise CaptureSourceError(source_id, exc, partial_pcm_by_source=output) from exc
         return output
 
     def probe_source(
@@ -524,6 +538,22 @@ class _RawPcmCaptureStream:
         aligned_length = len(pcm) - (len(pcm) % frame_width)
         pcm = pcm[:aligned_length]
         if pcm:
+            if remaining > 0 and not (stop_event is not None and stop_event.is_set()):
+                if deadline is not None and time.monotonic() >= deadline:
+                    assert max_wait_seconds is not None
+                    raise subprocess.TimeoutExpired(self.command, max_wait_seconds, output=pcm)
+                returncode = getattr(self.process, "returncode", None)
+                if returncode is None:
+                    poll = getattr(self.process, "poll", None)
+                    if callable(poll):
+                        returncode = poll()
+                stderr = _read_process_stderr(self.process)
+                raise subprocess.CalledProcessError(
+                    1 if returncode is None else returncode,
+                    self.command,
+                    output=pcm,
+                    stderr=stderr,
+                )
             return pcm
         if stop_event is not None and stop_event.is_set():
             return b""
@@ -586,14 +616,14 @@ class PipeWireClient:
             ["pactl", "move-sink-input", _pulse_sink_input_id(playback_stream_route_id), sink_name]
         )
 
-    def create_loopback(self, sink_name: str, output_sink_route_id: str) -> str:
+    def create_loopback(self, sink_name: str, output_sink_name: str) -> str:
         return self._run(
             [
                 "pactl",
                 "load-module",
                 "module-loopback",
                 f"source={sink_name}.monitor",
-                f"sink={_pipewire_node_id(output_sink_route_id)}",
+                f"sink={output_sink_name}",
             ]
         )
 
@@ -677,6 +707,7 @@ class PipeWireCaptureAdapter:
         plan: CaptureRoutePlan,
         sink_name: str,
         stop_event: threading.Event | None = None,
+        prefilled_pcm_by_source: Mapping[CaptureSourceId, bytes] | None = None,
     ) -> tuple[CaptureSegment, ...]:
         if plan.profile_id is CaptureProfileId.IN_PERSON_SINGLE_MIC:
             room_pcm = self._read_pcm(
@@ -689,12 +720,29 @@ class PipeWireCaptureAdapter:
                 return ()
             return (self._write_segment(CaptureSourceId.ROOM_MIC, room_pcm, plan=plan),)
         if self.pcm_provider is None:
-            pcm_by_source = self.pipewire_pcm_provider.read_aligned_segments(
-                plan=plan,
-                sink_name=sink_name,
-                segment_seconds=self.segment_seconds,
-                stop_event=stop_event,
+            pcm_by_source = dict(prefilled_pcm_by_source or {})
+            missing_sources = tuple(
+                source_id
+                for source_id in (CaptureSourceId.LOCAL_MIC, CaptureSourceId.SYSTEM_AUDIO)
+                if source_id not in pcm_by_source
             )
+            if len(missing_sources) == 2:
+                pcm_by_source = self.pipewire_pcm_provider.read_aligned_segments(
+                    plan=plan,
+                    sink_name=sink_name,
+                    segment_seconds=self.segment_seconds,
+                    stop_event=stop_event,
+                )
+            else:
+                for source_id in missing_sources:
+                    pcm = self._read_pcm(
+                        source_id,
+                        plan=plan,
+                        sink_name=sink_name,
+                        stop_event=stop_event,
+                    )
+                    if pcm:
+                        pcm_by_source[source_id] = pcm
             segments: list[CaptureSegment] = []
             for source_id in (CaptureSourceId.LOCAL_MIC, CaptureSourceId.SYSTEM_AUDIO):
                 pcm = pcm_by_source.get(source_id)
@@ -777,8 +825,13 @@ class PipeWireCaptureAdapter:
                 raise ValueError("Online capture requires a playback stream route.")
             if plan.output_sink_route_id is None:
                 raise ValueError("Online capture requires an output sink route.")
+            if plan.output_sink_backend_name is None:
+                raise ValueError("Online capture requires an output sink backend name.")
             self.client.move_playback_stream(plan.playback_stream_route_id, sink_name)
-            loopback_module = self.client.create_loopback(sink_name, plan.output_sink_route_id)
+            loopback_module = self.client.create_loopback(
+                sink_name,
+                plan.output_sink_backend_name,
+            )
         except Exception:
             self._cleanup_routes(
                 null_sink_module=null_sink_module,
@@ -833,6 +886,7 @@ class ActivePipeWireCapture:
                     plan=self._plan,
                     sink_name=self.sink_name,
                     stop_event=stop_event,
+                    prefilled_pcm_by_source=exc.partial_pcm_by_source,
                 )
             else:
                 raise
@@ -847,15 +901,11 @@ class ActivePipeWireCapture:
 
     def stop(self) -> CaptureMetadata:
         if not self._stopped:
-            try:
-                if not self._segments:
-                    self.flush_segments()
-            finally:
-                self._adapter._cleanup(
-                    null_sink_module=self.null_sink_module,
-                    loopback_module=self.loopback_module,
-                )
-                self._stopped = True
+            self._adapter._cleanup(
+                null_sink_module=self.null_sink_module,
+                loopback_module=self.loopback_module,
+            )
+            self._stopped = True
         return CaptureMetadata(
             version=CAPTURE_METADATA_VERSION,
             profile_id=self._plan.profile_id,

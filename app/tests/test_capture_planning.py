@@ -30,6 +30,7 @@ def test_build_online_start_payload_binds_selected_routes() -> None:
         "pipewire:node:42",
     ]
     assert payload.routes[1].label == "Meet - firefox"
+    assert payload.routes[2].backend_name == "Speakers"
 
 
 def test_build_in_person_start_payload_uses_room_mic_only() -> None:

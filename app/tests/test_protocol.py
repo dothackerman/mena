@@ -1174,6 +1174,7 @@ def _start_payload() -> StartCapturePayload:
                 label="Headset microphone",
                 backend="pipewire",
                 required=True,
+                backend_name="alsa_input.usb-headset",
             ),
             CaptureRouteBindingPayload(
                 role="playback_stream",
@@ -1182,6 +1183,7 @@ def _start_payload() -> StartCapturePayload:
                 label="Meeting playback",
                 backend="pulse",
                 required=True,
+                backend_name="meeting-playback",
             ),
             CaptureRouteBindingPayload(
                 role="output_sink",
@@ -1190,6 +1192,7 @@ def _start_payload() -> StartCapturePayload:
                 label="Headphones",
                 backend="pipewire",
                 required=True,
+                backend_name="alsa_output.usb-headphones",
             ),
         ),
     )
@@ -1209,6 +1212,7 @@ def _in_person_start_payload() -> StartCapturePayload:
                 label="Room microphone",
                 backend="pipewire",
                 required=True,
+                backend_name="alsa_input.room",
             ),
         ),
     )

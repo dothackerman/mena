@@ -62,6 +62,7 @@ def build_start_capture_payload(
                 source_id="room_mic",
                 route_id=microphone.route_id,
                 label=_audio_route_label(microphone),
+                backend_name=microphone.name,
             )
         )
         selected_sources = ("room_mic",)
@@ -92,18 +93,21 @@ def build_start_capture_payload(
                     source_id="local_mic",
                     route_id=microphone.route_id,
                     label=_audio_route_label(microphone),
+                    backend_name=microphone.name,
                 ),
                 _route_binding(
                     role="playback_stream",
                     source_id="system_audio",
                     route_id=playback_stream.route_id,
                     label=_playback_stream_label(playback_stream),
+                    backend_name=playback_stream.name,
                 ),
                 _route_binding(
                     role="output_sink",
                     source_id=None,
                     route_id=output_sink.route_id,
                     label=_audio_route_label(output_sink),
+                    backend_name=output_sink.name,
                 ),
             )
         )
@@ -145,6 +149,7 @@ def _route_binding(
     source_id: str | None,
     route_id: str,
     label: str,
+    backend_name: str | None,
 ) -> CaptureRouteBindingPayload:
     return CaptureRouteBindingPayload(
         role=role,
@@ -152,6 +157,7 @@ def _route_binding(
         route_id=route_id,
         label=label,
         backend=_route_backend(route_id),
+        backend_name=backend_name,
         required=True,
     )
 
