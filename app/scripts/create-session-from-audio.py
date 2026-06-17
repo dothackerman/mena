@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import math
 import shutil
 import sys
 import wave
@@ -38,7 +37,6 @@ EXPECTED_CHANNELS_BY_PROFILE = {
     PROFILE_IN_PERSON: {1, 2},
 }
 COPY_CHUNK_SIZE = 1024 * 1024
-UAT_CHUNK_COUNT = 6
 UAT_CHUNK_SECONDS = 30
 
 
@@ -59,6 +57,13 @@ class WavInfo:
 class SourceInput:
     source_id: str
     source_path: Path
+
+
+@dataclass(frozen=True)
+class WavChunk:
+    payload: bytes
+    frame_count: int
+    duration_seconds: float
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -174,10 +179,9 @@ def _copy_capture_segments(
         info = _read_wav_info(wav_path)
         target_dir = bundle_path / "capture" / source.source_id
         target_dir.mkdir(parents=True, exist_ok=True)
-        for index in range(1, UAT_CHUNK_COUNT + 1):
+        for index, chunk in enumerate(_iter_wav_chunks(info), start=1):
             target_path = target_dir / f"{source.source_id}_{index:06d}.wav"
-            chunk_payload = _chunk_wav_bytes(info=info, chunk_index=index)
-            target_path.write_bytes(chunk_payload)
+            target_path.write_bytes(chunk.payload)
             segments.append(
                 {
                     "source_id": source.source_id,
@@ -187,15 +191,18 @@ def _copy_capture_segments(
                     "channels": info.channels,
                     "channel_layout": _channel_layout(info.channels),
                     "sample_format": f"pcm_s{info.sample_width * 8}le",
-                    "byte_count": len(chunk_payload),
-                    "sha256": hashlib.sha256(chunk_payload).hexdigest(),
-                    "duration_seconds": float(UAT_CHUNK_SECONDS),
+                    "byte_count": len(chunk.payload),
+                    "sha256": hashlib.sha256(chunk.payload).hexdigest(),
+                    "duration_seconds": chunk.duration_seconds,
                     "started_at": None,
                     "ended_at": None,
+                    "route_id": None,
+                    "route_label": None,
+                    "capture_mode": None,
                     "status": "sealed",
                     "format": "wav",
-                    "_frame_count": info.sample_rate * UAT_CHUNK_SECONDS,
-                    "_duration_seconds": float(UAT_CHUNK_SECONDS),
+                    "_frame_count": chunk.frame_count,
+                    "_duration_seconds": chunk.duration_seconds,
                 }
             )
     return segments
@@ -249,28 +256,33 @@ def _read_wav_info(path: Path) -> WavInfo:
     )
 
 
-def _chunk_wav_bytes(*, info: WavInfo, chunk_index: int) -> bytes:
+def _iter_wav_chunks(info: WavInfo) -> tuple[WavChunk, ...]:
     frames_per_chunk = info.sample_rate * UAT_CHUNK_SECONDS
     bytes_per_frame = info.channels * info.sample_width
-    bytes_per_chunk = frames_per_chunk * bytes_per_frame
-    start = (chunk_index - 1) * bytes_per_chunk
-    payload = _repeat_or_slice(info.pcm_payload, start=start, byte_count=bytes_per_chunk)
+    chunks: list[WavChunk] = []
+    for start_frame in range(0, info.frame_count, frames_per_chunk):
+        frame_count = min(frames_per_chunk, info.frame_count - start_frame)
+        start_byte = start_frame * bytes_per_frame
+        byte_count = frame_count * bytes_per_frame
+        pcm_payload = info.pcm_payload[start_byte : start_byte + byte_count]
+        chunks.append(
+            WavChunk(
+                payload=_chunk_wav_bytes(info=info, pcm_payload=pcm_payload),
+                frame_count=frame_count,
+                duration_seconds=frame_count / info.sample_rate,
+            )
+        )
+    return tuple(chunks)
+
+
+def _chunk_wav_bytes(*, info: WavInfo, pcm_payload: bytes) -> bytes:
     output = BytesIO()
     with wave.open(output, "wb") as wav_file:
         wav_file.setnchannels(info.channels)
         wav_file.setsampwidth(info.sample_width)
         wav_file.setframerate(info.sample_rate)
-        wav_file.writeframes(payload)
+        wav_file.writeframes(pcm_payload)
     return output.getvalue()
-
-
-def _repeat_or_slice(payload: bytes, *, start: int, byte_count: int) -> bytes:
-    if not payload:
-        raise UatSessionError("WAV file contains no PCM payload.")
-    if start + byte_count <= len(payload):
-        return payload[start : start + byte_count]
-    repeated = payload * math.ceil((start + byte_count) / len(payload))
-    return repeated[start : start + byte_count]
 
 
 def _validate_audio_shape(*, profile: str, segments: list[dict[str, object]]) -> None:
@@ -290,14 +302,12 @@ def _validate_audio_shape(*, profile: str, segments: list[dict[str, object]]) ->
 
 def _capture_metadata(segments: list[dict[str, object]]) -> dict[str, object]:
     public_segments = []
-    max_duration = 0.0
     for segment in segments:
         segment = dict(segment)
         duration = segment.pop("_duration_seconds")
         segment.pop("_frame_count", None)
         if not isinstance(duration, float):
             raise AssertionError("Internal duration marker should be a float.")
-        max_duration = max(max_duration, duration)
         public_segments.append(segment)
 
     return {
@@ -328,6 +338,7 @@ def _source_summaries(segments: list[dict[str, object]]) -> list[dict[str, objec
                 "source_id": source_id,
                 "route_id": None,
                 "route_label": None,
+                "capture_mode": None,
                 "channel_layout": source_segments[0]["channel_layout"],
                 "segment_count": len(source_segments),
             }

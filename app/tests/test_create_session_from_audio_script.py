@@ -3,7 +3,11 @@ import json
 import subprocess
 import sys
 import wave
+from importlib.resources import files
 from pathlib import Path
+from typing import cast
+
+from jsonschema import Draft202012Validator, FormatChecker
 
 from mena.session_integrity import verify_session_bundle
 
@@ -55,7 +59,8 @@ def test_create_online_uat_session_from_audio(tmp_path: Path) -> None:
     assert record["profile"] == "online_dual_stream"
     assert record["language"] == "en"
     assert record["status"] == "recorded"
-    assert record["capture_metadata"]["segment_count"] == 12
+    _validate_session_record_schema(record)
+    assert record["capture_metadata"]["segment_count"] == 2
     assert {segment["source_id"] for segment in record["capture_metadata"]["segments"]} == {
         "local_mic",
         "system_audio",
@@ -64,7 +69,23 @@ def test_create_online_uat_session_from_audio(tmp_path: Path) -> None:
         segment["index"]
         for segment in record["capture_metadata"]["segments"]
         if segment["source_id"] == "local_mic"
-    } == {1, 2, 3, 4, 5, 6}
+    } == {1}
+    assert {
+        (
+            segment["route_id"],
+            segment["route_label"],
+            segment["capture_mode"],
+        )
+        for segment in record["capture_metadata"]["segments"]
+    } == {(None, None, None)}
+    assert {
+        (
+            source["route_id"],
+            source["route_label"],
+            source["capture_mode"],
+        )
+        for source in record["capture_metadata"]["sources"]
+    } == {(None, None, None)}
     assert verify_session_bundle(record_path).ok
 
     for segment in record["capture_metadata"]["segments"]:
@@ -105,7 +126,8 @@ def test_create_in_person_uat_session_from_room_audio(tmp_path: Path) -> None:
 
     assert record["profile"] == "in_person_single_mic"
     assert record["capture_metadata"]["channels"] == 1
-    assert record["capture_metadata"]["segment_count"] == 6
+    _validate_session_record_schema(record)
+    assert record["capture_metadata"]["segment_count"] == 1
     assert record["capture_metadata"]["segments"][0]["source_id"] == "room_mic"
     assert verify_session_bundle(record_path).ok
 
@@ -166,7 +188,12 @@ def test_create_uat_session_accepts_mismatched_online_input_lengths(tmp_path: Pa
     assert result.returncode == 0
     record_path = next((data_root / "sessions").iterdir()) / "session.json"
     record = json.loads(record_path.read_text(encoding="utf-8"))
-    assert record["capture_metadata"]["segment_count"] == 12
+    assert record["capture_metadata"]["segment_count"] == 2
+    durations = {
+        segment["source_id"]: segment["duration_seconds"]
+        for segment in record["capture_metadata"]["segments"]
+    }
+    assert durations == {"local_mic": 0.1, "system_audio": 0.2}
 
 
 def test_create_uat_session_rejects_online_stereo_sources(tmp_path: Path) -> None:
@@ -222,7 +249,7 @@ def test_create_uat_session_accepts_in_person_stereo_source(tmp_path: Path) -> N
     assert record["capture_metadata"]["channels"] == 2
 
 
-def test_create_uat_session_splits_audio_longer_than_one_capture_segment(
+def test_create_uat_session_splits_audio_by_actual_length(
     tmp_path: Path,
 ) -> None:
     room_wav = tmp_path / "room.wav"
@@ -247,7 +274,11 @@ def test_create_uat_session_splits_audio_longer_than_one_capture_segment(
     assert result.returncode == 0
     record_path = next((data_root / "sessions").iterdir()) / "session.json"
     record = json.loads(record_path.read_text(encoding="utf-8"))
-    assert record["capture_metadata"]["segment_count"] == 6
+    assert record["capture_metadata"]["segment_count"] == 2
+    assert [segment["duration_seconds"] for segment in record["capture_metadata"]["segments"]] == [
+        30.0,
+        1.0,
+    ]
 
 
 def test_create_uat_session_rejects_truncated_wav_payload(tmp_path: Path) -> None:
@@ -335,3 +366,15 @@ def _write_wav(
         wav_file.setsampwidth(2)
         wav_file.setframerate(sample_rate)
         wav_file.writeframes(frame * frame_count)
+
+
+def _validate_session_record_schema(record: dict[str, object]) -> None:
+    Draft202012Validator(
+        _load_session_record_schema(),
+        format_checker=FormatChecker(),
+    ).validate(record)
+
+
+def _load_session_record_schema() -> dict[str, object]:
+    schema_path = files("mena.schemas").joinpath("session-record.v1.schema.json")
+    return cast(dict[str, object], json.loads(schema_path.read_text(encoding="utf-8")))
