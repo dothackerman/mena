@@ -264,6 +264,7 @@ class WorkerCaptureSession:
                 microphone_route_id=self._route_id("microphone"),
                 profile_id=profile_id,
                 microphone_route_label=self._route_label("microphone"),
+                microphone_backend_name=self._route_backend_name("microphone"),
             )
         else:
             route_plan = CaptureRoutePlan(
@@ -275,6 +276,7 @@ class WorkerCaptureSession:
                 microphone_route_label=self._route_label("microphone"),
                 playback_stream_route_label=self._route_label("playback_stream"),
                 output_sink_route_label=self._route_label("output_sink"),
+                microphone_backend_name=self._route_backend_name("microphone"),
                 output_sink_backend_name=self._route_backend_name("output_sink"),
             )
         self.active_capture = self.adapter.start(

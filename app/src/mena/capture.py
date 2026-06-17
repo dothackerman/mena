@@ -40,6 +40,7 @@ class CaptureRoutePlan:
     microphone_route_label: str | None = None
     playback_stream_route_label: str | None = None
     output_sink_route_label: str | None = None
+    microphone_backend_name: str | None = None
     output_sink_backend_name: str | None = None
     system_audio_mode: str = CAPTURE_MODE_DEDICATED_ROUTE
 
@@ -461,14 +462,16 @@ class PipeWirePcmProvider:
         sink_name: str,
     ) -> str:
         if source_id is CaptureSourceId.LOCAL_MIC:
-            return _pipewire_node_id(plan.microphone_route_id)
+            return _required_backend_target(plan.microphone_backend_name, "microphone")
         if source_id is CaptureSourceId.ROOM_MIC:
-            return _pipewire_node_id(plan.microphone_route_id)
+            return _required_backend_target(plan.microphone_backend_name, "microphone")
         if source_id is CaptureSourceId.SYSTEM_AUDIO:
             if plan.system_audio_mode == CAPTURE_MODE_SYSTEM_MIX_REMOTE:
-                if plan.output_sink_route_id is None:
-                    raise ValueError("System-mix fallback requires an output sink route.")
-                return _pipewire_monitor_target(plan.output_sink_route_id)
+                output_sink_target = _required_backend_target(
+                    plan.output_sink_backend_name,
+                    "output sink",
+                )
+                return f"{output_sink_target}.monitor"
             if plan.system_audio_mode != CAPTURE_MODE_DEDICATED_ROUTE:
                 raise ValueError(
                     f"Unsupported system audio capture mode '{plan.system_audio_mode}'."
@@ -1096,18 +1099,10 @@ def make_wav_bytes(
     return header + pcm_bytes
 
 
-def _pipewire_node_id(route_id: str) -> str:
-    prefix = "pipewire:node:"
-    if not route_id.startswith(prefix):
-        raise ValueError(f"Unsupported PipeWire route id '{route_id}'.")
-    node_id = route_id.removeprefix(prefix)
-    if not node_id.isdigit():
-        raise ValueError(f"Unsupported PipeWire route id '{route_id}'.")
-    return node_id
-
-
-def _pipewire_monitor_target(route_id: str) -> str:
-    return f"{_pipewire_node_id(route_id)}.monitor"
+def _required_backend_target(backend_name: str | None, role: str) -> str:
+    if backend_name is None:
+        raise ValueError(f"PipeWire {role} target requires a backend name.")
+    return backend_name
 
 
 def _segment_route_facts(

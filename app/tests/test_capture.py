@@ -165,24 +165,15 @@ def test_capture_route_event_serializes_null_source() -> None:
     assert event.to_dict()["source_id"] is None
 
 
-def test_pipewire_pcm_provider_rejects_invalid_pipewire_node_targets() -> None:
+def test_pipewire_pcm_provider_requires_backend_names_for_source_targets() -> None:
     provider = PipeWirePcmProvider()
 
-    with pytest.raises(ValueError, match="Unsupported PipeWire route id"):
+    with pytest.raises(ValueError, match="microphone target requires a backend name"):
         provider._command_for_source(  # noqa: SLF001
             CaptureSourceId.LOCAL_MIC,
             plan=CaptureRoutePlan(
                 session_id="session-1",
-                microphone_route_id="pulse:source:31",
-            ),
-            sink_name="mena_session_remote",
-        )
-    with pytest.raises(ValueError, match="Unsupported PipeWire route id"):
-        provider._command_for_source(  # noqa: SLF001
-            CaptureSourceId.LOCAL_MIC,
-            plan=CaptureRoutePlan(
-                session_id="session-1",
-                microphone_route_id="pipewire:node:not-a-number",
+                microphone_route_id="pipewire:node:31",
             ),
             sink_name="mena_session_remote",
         )
@@ -225,7 +216,7 @@ def test_pipewire_pcm_provider_reads_local_source_from_continuous_pw_record() ->
         [
             "pw-record",
             "--target",
-            "31",
+            "alsa_input.usb_mic",
             "--raw",
             "--format",
             "s16",
@@ -262,7 +253,7 @@ def test_pipewire_pcm_provider_reads_room_mic_from_selected_microphone() -> None
     )
 
     assert pcm == b"\x01\x02"
-    assert started_commands[0][:3] == ["pw-record", "--target", "31"]
+    assert started_commands[0][:3] == ["pw-record", "--target", "alsa_input.usb_mic"]
 
 
 def test_pipewire_pcm_provider_reuses_continuous_stream_across_segments() -> None:
@@ -745,6 +736,7 @@ def test_pipewire_pcm_provider_uses_output_sink_monitor_for_system_mix_fallback(
         microphone_route_id="pipewire:node:31",
         playback_stream_route_id="pulse:sink-input:51",
         output_sink_route_id="pipewire:node:42",
+        output_sink_backend_name="alsa_output.usb_headphones",
         system_audio_mode=CAPTURE_MODE_SYSTEM_MIX_REMOTE,
     )
 
@@ -754,7 +746,26 @@ def test_pipewire_pcm_provider_uses_output_sink_monitor_for_system_mix_fallback(
         sink_name="mena_session_remote",
     )
 
-    assert command[2] == "42.monitor"
+    assert command[2] == "alsa_output.usb_headphones.monitor"
+
+
+def test_pipewire_pcm_provider_requires_backend_name_for_system_mix_fallback() -> None:
+    provider = PipeWirePcmProvider()
+    plan = CaptureRoutePlan(
+        session_id="session-1",
+        microphone_route_id="pipewire:node:31",
+        microphone_backend_name="alsa_input.usb_mic",
+        playback_stream_route_id="pulse:sink-input:51",
+        output_sink_route_id="pipewire:node:42",
+        system_audio_mode=CAPTURE_MODE_SYSTEM_MIX_REMOTE,
+    )
+
+    with pytest.raises(ValueError, match="output sink target requires a backend name"):
+        provider._command_for_source(  # noqa: SLF001
+            CaptureSourceId.SYSTEM_AUDIO,
+            plan=plan,
+            sink_name="mena_session_remote",
+        )
 
 
 def test_pipewire_pcm_provider_rejects_unknown_system_audio_mode() -> None:
@@ -1385,6 +1396,7 @@ def _route_plan() -> CaptureRoutePlan:
         microphone_route_id="pipewire:node:31",
         playback_stream_route_id="pulse:sink-input:51",
         output_sink_route_id="pipewire:node:42",
+        microphone_backend_name="alsa_input.usb_mic",
         output_sink_backend_name="alsa_output.usb_headphones",
     )
 
@@ -1393,5 +1405,6 @@ def _in_person_route_plan() -> CaptureRoutePlan:
     return CaptureRoutePlan(
         session_id="session-1",
         microphone_route_id="pipewire:node:31",
+        microphone_backend_name="alsa_input.usb_mic",
         profile_id=CaptureProfileId.IN_PERSON_SINGLE_MIC,
     )
