@@ -457,6 +457,7 @@ Meeting language selected or confirmed during `record` is the session-level sour
 Recording is the most critical runtime path.
 The recorder must support continuous capture for the PoC meeting-duration target and write ordered sealed segments while the meeting is in progress.
 The current PoC target is 90 minutes of continuous recording, with 30-second segment flushing unless a measured technical reason justifies a different cadence.
+`ADR-032` pins the implementation boundary: capture streams/processes are long-lived, while file chunks rotate at the persistence layer. The current PoC adapter may use long-lived `pw-record --raw -` subprocesses, but GStreamer/PyGObject remains a future adapter family behind the same capture contract.
 For `online_dual_stream`, the recording subsystem captures:
 
 - local microphone segments
