@@ -254,7 +254,7 @@ def test_segment_flushed_payload_round_trips_through_protocol_validation() -> No
 
 
 def test_segments_flushed_payload_round_trips_aligned_batch() -> None:
-    payload = {
+    payload: dict[str, object] = {
         "segments": [
             _segment_payload(source_id="local_mic"),
             _segment_payload(source_id="system_audio"),

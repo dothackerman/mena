@@ -359,8 +359,12 @@ class PipeWirePcmProvider:
             if pcm:
                 output[source_id] = pcm
         if failure is not None:
-            source_id, exc = failure
-            raise CaptureSourceError(source_id, exc, partial_pcm_by_source=output) from exc
+            source_id, failure_exc = failure
+            raise CaptureSourceError(
+                source_id,
+                failure_exc,
+                partial_pcm_by_source=output,
+            ) from failure_exc
         return output
 
     def probe_source(
@@ -745,9 +749,9 @@ class PipeWireCaptureAdapter:
                         pcm_by_source[source_id] = pcm
             segments: list[CaptureSegment] = []
             for source_id in (CaptureSourceId.LOCAL_MIC, CaptureSourceId.SYSTEM_AUDIO):
-                pcm = pcm_by_source.get(source_id)
-                if pcm:
-                    segments.append(self._write_segment(source_id, pcm, plan=plan))
+                source_pcm = pcm_by_source.get(source_id)
+                if source_pcm:
+                    segments.append(self._write_segment(source_id, source_pcm, plan=plan))
             return tuple(segments)
         segments = []
         for source_id in (CaptureSourceId.LOCAL_MIC, CaptureSourceId.SYSTEM_AUDIO):
