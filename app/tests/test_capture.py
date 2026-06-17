@@ -1025,12 +1025,12 @@ def test_pipewire_capture_adapter_stays_degraded_after_runtime_route_failure(
     ]
 
 
-def test_pipewire_capture_adapter_preserves_mic_chunk_when_system_audio_degrades(
+def test_pipewire_capture_adapter_discards_failed_boundary_when_system_audio_degrades(
     tmp_path: Path,
 ) -> None:
     class FallbackProvider:
         def __init__(self) -> None:
-            self.read_segment_calls: list[CaptureSourceId] = []
+            self.modes: list[str] = []
 
         def read_aligned_segments(
             self,
@@ -1040,25 +1040,17 @@ def test_pipewire_capture_adapter_preserves_mic_chunk_when_system_audio_degrades
             segment_seconds: int,
             stop_event: threading.Event | None = None,
         ) -> dict[CaptureSourceId, bytes]:
-            raise CaptureSourceError(
-                CaptureSourceId.SYSTEM_AUDIO,
-                RuntimeError("route disappeared"),
-                partial_pcm_by_source={CaptureSourceId.LOCAL_MIC: b"\x00\x00"},
-            )
-
-        def read_segment(
-            self,
-            source_id: CaptureSourceId,
-            *,
-            plan: CaptureRoutePlan,
-            sink_name: str,
-            segment_seconds: int,
-            stop_event: threading.Event | None = None,
-        ) -> bytes:
-            self.read_segment_calls.append(source_id)
-            assert source_id is CaptureSourceId.SYSTEM_AUDIO
-            assert plan.system_audio_mode == CAPTURE_MODE_SYSTEM_MIX_REMOTE
-            return b"\x01\x01"
+            self.modes.append(plan.system_audio_mode)
+            if plan.system_audio_mode == CAPTURE_MODE_DEDICATED_ROUTE:
+                raise CaptureSourceError(
+                    CaptureSourceId.SYSTEM_AUDIO,
+                    RuntimeError("route disappeared"),
+                    partial_pcm_by_source={CaptureSourceId.LOCAL_MIC: b"\x00\x00"},
+                )
+            return {
+                CaptureSourceId.LOCAL_MIC: b"\x02\x02",
+                CaptureSourceId.SYSTEM_AUDIO: b"\x03\x03",
+            }
 
         def close(self) -> None:
             return None
@@ -1084,64 +1076,14 @@ def test_pipewire_capture_adapter_preserves_mic_chunk_when_system_audio_degrades
     active = adapter.start(_route_plan())
     segments = active.flush_segments()
 
-    assert [segment.source_id for segment in segments] == [
-        CaptureSourceId.LOCAL_MIC,
-        CaptureSourceId.SYSTEM_AUDIO,
+    assert [(segment.source_id, segment.capture_mode) for segment in segments] == [
+        (CaptureSourceId.LOCAL_MIC, CAPTURE_MODE_SELECTED_MICROPHONE),
+        (CaptureSourceId.SYSTEM_AUDIO, CAPTURE_MODE_SYSTEM_MIX_REMOTE),
     ]
-    assert provider.read_segment_calls == [CaptureSourceId.SYSTEM_AUDIO]
-
-
-def test_pipewire_capture_adapter_drops_mismatched_prefilled_stop_partial(
-    tmp_path: Path,
-) -> None:
-    class FallbackProvider:
-        def __init__(self) -> None:
-            self.read_segment_calls: list[CaptureSourceId] = []
-
-        def read_aligned_segments(
-            self,
-            *,
-            plan: CaptureRoutePlan,
-            sink_name: str,
-            segment_seconds: int,
-            stop_event: threading.Event | None = None,
-        ) -> dict[CaptureSourceId, bytes]:
-            raise AssertionError("prefilled stop partial should not read aligned segments")
-
-        def read_segment(
-            self,
-            source_id: CaptureSourceId,
-            *,
-            plan: CaptureRoutePlan,
-            sink_name: str,
-            segment_seconds: int,
-            stop_event: threading.Event | None = None,
-        ) -> bytes:
-            self.read_segment_calls.append(source_id)
-            assert source_id is CaptureSourceId.SYSTEM_AUDIO
-            assert stop_event is not None and stop_event.is_set()
-            return b"\x01\x01"
-
-    provider = FallbackProvider()
-    adapter = PipeWireCaptureAdapter(
-        client=PipeWireClient(
-            runner=lambda args, **_kwargs: subprocess.CompletedProcess(args, 0, stdout="")
-        ),
-        segment_writer=WavSegmentWriter(segment_dir=tmp_path, sample_rate=2),
-    )
-    adapter.pipewire_pcm_provider = cast(Any, provider)
-    stop_event = threading.Event()
-    stop_event.set()
-
-    segments = adapter._flush_once(  # noqa: SLF001
-        plan=_route_plan(),
-        sink_name="mena_session_remote",
-        stop_event=stop_event,
-        prefilled_pcm_by_source={CaptureSourceId.LOCAL_MIC: b"\x00\x00\x00\x00"},
-    )
-
-    assert segments == ()
-    assert provider.read_segment_calls == [CaptureSourceId.SYSTEM_AUDIO]
+    assert provider.modes == [
+        CAPTURE_MODE_DEDICATED_ROUTE,
+        CAPTURE_MODE_SYSTEM_MIX_REMOTE,
+    ]
 
 
 def test_pipewire_capture_adapter_keeps_system_mix_after_setup_degradation(

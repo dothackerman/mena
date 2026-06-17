@@ -716,7 +716,6 @@ class PipeWireCaptureAdapter:
         plan: CaptureRoutePlan,
         sink_name: str,
         stop_event: threading.Event | None = None,
-        prefilled_pcm_by_source: Mapping[CaptureSourceId, bytes] | None = None,
     ) -> tuple[CaptureSegment, ...]:
         if plan.profile_id is CaptureProfileId.IN_PERSON_SINGLE_MIC:
             room_pcm = self._read_pcm(
@@ -729,29 +728,12 @@ class PipeWireCaptureAdapter:
                 return ()
             return (self._write_segment(CaptureSourceId.ROOM_MIC, room_pcm, plan=plan),)
         if self.pcm_provider is None:
-            pcm_by_source = dict(prefilled_pcm_by_source or {})
-            missing_sources = tuple(
-                source_id
-                for source_id in (CaptureSourceId.LOCAL_MIC, CaptureSourceId.SYSTEM_AUDIO)
-                if source_id not in pcm_by_source
+            pcm_by_source = self.pipewire_pcm_provider.read_aligned_segments(
+                plan=plan,
+                sink_name=sink_name,
+                segment_seconds=self.segment_seconds,
+                stop_event=stop_event,
             )
-            if len(missing_sources) == 2:
-                pcm_by_source = self.pipewire_pcm_provider.read_aligned_segments(
-                    plan=plan,
-                    sink_name=sink_name,
-                    segment_seconds=self.segment_seconds,
-                    stop_event=stop_event,
-                )
-            else:
-                for source_id in missing_sources:
-                    pcm = self._read_pcm(
-                        source_id,
-                        plan=plan,
-                        sink_name=sink_name,
-                        stop_event=stop_event,
-                    )
-                    if pcm:
-                        pcm_by_source[source_id] = pcm
             if stop_event is not None and stop_event.is_set():
                 pcm_by_source = _aligned_stop_pcm_or_empty(
                     pcm_by_source,
@@ -938,7 +920,6 @@ class ActivePipeWireCapture:
                     plan=self._plan,
                     sink_name=self.sink_name,
                     stop_event=stop_event,
-                    prefilled_pcm_by_source=exc.partial_pcm_by_source,
                 )
             else:
                 raise
