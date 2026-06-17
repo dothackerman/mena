@@ -288,10 +288,13 @@ def _chunk_wav_bytes(*, info: WavInfo, pcm_payload: bytes) -> bytes:
 def _validate_audio_shape(*, profile: str, segments: list[dict[str, object]]) -> None:
     sample_rates = {segment["sample_rate"] for segment in segments}
     channels = {segment["channels"] for segment in segments}
+    frame_counts = {segment["_frame_count"] for segment in segments}
     if len(sample_rates) > 1:
         raise UatSessionError("All source WAV files must use the same sample rate.")
     if len(channels) > 1:
         raise UatSessionError("All source WAV files must use the same channel count.")
+    if profile == PROFILE_ONLINE and len(frame_counts) > 1:
+        raise UatSessionError("Online source WAV files must have the same frame count.")
     expected_channels = EXPECTED_CHANNELS_BY_PROFILE[profile]
     if not channels.issubset(expected_channels):
         allowed = ", ".join(str(channel) for channel in sorted(expected_channels))

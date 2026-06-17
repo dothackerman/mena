@@ -161,7 +161,7 @@ def test_create_uat_session_rejects_mismatched_online_audio_shape(tmp_path: Path
     assert not sessions_dir.exists() or list(sessions_dir.iterdir()) == []
 
 
-def test_create_uat_session_accepts_mismatched_online_input_lengths(tmp_path: Path) -> None:
+def test_create_uat_session_rejects_mismatched_online_input_lengths(tmp_path: Path) -> None:
     local_wav = tmp_path / "local.wav"
     system_wav = tmp_path / "system.wav"
     data_root = tmp_path / "uat-data"
@@ -185,15 +185,10 @@ def test_create_uat_session_accepts_mismatched_online_input_lengths(tmp_path: Pa
         text=True,
     )
 
-    assert result.returncode == 0
-    record_path = next((data_root / "sessions").iterdir()) / "session.json"
-    record = json.loads(record_path.read_text(encoding="utf-8"))
-    assert record["capture_metadata"]["segment_count"] == 2
-    durations = {
-        segment["source_id"]: segment["duration_seconds"]
-        for segment in record["capture_metadata"]["segments"]
-    }
-    assert durations == {"local_mic": 0.1, "system_audio": 0.2}
+    assert result.returncode == 2
+    assert "Online source WAV files must have the same frame count." in result.stderr
+    sessions_dir = data_root / "sessions"
+    assert not sessions_dir.exists() or list(sessions_dir.iterdir()) == []
 
 
 def test_create_uat_session_rejects_online_stereo_sources(tmp_path: Path) -> None:
