@@ -1,5 +1,7 @@
 import hashlib
 import json
+import threading
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -671,9 +673,15 @@ def test_resolve_route_selections_rejects_invalid_prompt_choice() -> None:
         )
 
 
-def test_wait_for_record_stop_rejects_invalid_command() -> None:
-    with pytest.raises(ValueError, match="must be q, quit, or stop"):
-        _wait_for_record_stop(lambda _prompt: "later")
+def test_wait_for_record_stop_continues_after_invalid_command(
+    capsys: CaptureFixture[str],
+) -> None:
+    answers = iter(["later", "", "q"])
+
+    _wait_for_record_stop(lambda _prompt: next(answers))
+
+    captured = capsys.readouterr()
+    assert captured.out.count("Recording continues. Type q to stop.") == 2
 
 
 def test_capture_event_monitor_drains_progress_and_returns_finalization(
@@ -797,6 +805,45 @@ def test_capture_event_monitor_raises_structured_worker_error(tmp_path: Path) ->
 
     with pytest.raises(ProtocolError, match="disk full"):
         monitor.wait_for_finalized()
+
+
+def test_wait_for_record_stop_surfaces_background_capture_error(tmp_path: Path) -> None:
+    worker = _EventWorker(
+        [
+            ProtocolMessage(
+                type="error",
+                session_id=SESSION_ID,
+                payload={
+                    "code": "capture_flush_failed",
+                    "message": "disk full",
+                    "recoverable": False,
+                    "details": {},
+                },
+            )
+        ]
+    )
+    created_session = create_session(
+        profile=parse_capture_profile("online"),
+        language="en",
+        data_root=tmp_path,
+    )
+    monitor = _CaptureEventMonitor(
+        cast(WorkerProcess, worker),
+        record_path=created_session.record_path,
+        start_payload=_monitor_start_payload(),
+    )
+    prompt_started = threading.Event()
+
+    def blocking_input(_prompt: str) -> str:
+        prompt_started.set()
+        time.sleep(5)
+        return "q"
+
+    monitor.start()
+
+    with pytest.raises(ProtocolError, match="disk full"):
+        _wait_for_record_stop(blocking_input, capture_monitor=monitor)
+    assert prompt_started.is_set()
 
 
 def test_capture_event_monitor_propagates_reader_failure(tmp_path: Path) -> None:
@@ -1007,6 +1054,31 @@ def test_record_keyboard_interrupt_finalizes_with_interrupted_stop_reason(
     assert record["status"] == "recorded"
     assert record["recording"]["stop_reason"] == "interrupted"
     assert record["recording"]["finalization"]["status"] == "finalized"
+
+
+def test_record_keyboard_interrupt_persists_finalization_failure(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    def _interrupt_stop(_prompt: str) -> str:
+        raise KeyboardInterrupt
+
+    exit_code = main(
+        ["record", "--profile", "online", "--language", "en"],
+        data_root=tmp_path,
+        discoverer=_available_discoverer,
+        worker_factory=FinalizationFailingWorkerProcess,
+        input_fn=_interrupt_stop,
+    )
+
+    captured = capsys.readouterr()
+    record_path = next((tmp_path / "sessions").iterdir()) / "session.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    assert exit_code == 1
+    assert "Capture failed: finalization failed" in captured.out
+    assert record["status"] == "failed"
+    assert record["recording"]["finalization"]["error"] == "finalization failed"
+    assert record["failures"][0]["message"] == "finalization failed"
 
 
 def test_record_uses_configurable_worker_exit_timeout(tmp_path: Path) -> None:
@@ -2928,6 +3000,11 @@ class FailingWorkerProcess(FakeWorkerProcess):
 class NonzeroExitWorkerProcess(FakeWorkerProcess):
     def wait(self, timeout: float | None = None) -> int:
         return 3
+
+
+class FinalizationFailingWorkerProcess(FakeWorkerProcess):
+    def stop_capture(self) -> ProtocolMessage:
+        raise ProtocolError("finalization failed")
 
 
 class TimeoutCapturingWorkerProcess(FakeWorkerProcess):

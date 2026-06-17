@@ -248,6 +248,16 @@ class _CaptureEventMonitor:
             raise event
         return event
 
+    def poll_terminal_event(self) -> ProtocolMessage | None:
+        try:
+            event = self._terminal_events.get_nowait()
+        except queue.Empty:
+            return None
+        self._thread.join()
+        if isinstance(event, BaseException):
+            raise event
+        return event
+
     def _run(self) -> None:
         while True:
             try:
@@ -564,7 +574,7 @@ def main(
                 worker.start_capture(start_payload)
                 if capture_monitor is not None:
                     capture_monitor.start()
-                _wait_for_record_stop(input_fn)
+                _wait_for_record_stop(input_fn, capture_monitor=capture_monitor)
                 finalized = _finalize_recording(worker, capture_monitor)
                 exit_code = worker.wait(timeout=args.worker_exit_timeout)
                 if exit_code != 0:
@@ -572,18 +582,25 @@ def main(
             except (EOFError, KeyboardInterrupt):
                 print("Recording stop requested; finalizing capture.")
                 interrupted_stop = True
-                finalized = _finalize_recording(worker, capture_monitor)
-                exit_code = worker.wait(timeout=args.worker_exit_timeout)
-                if exit_code != 0:
-                    message = f"Worker exited with status {exit_code}."
+                try:
+                    finalized = _finalize_recording(worker, capture_monitor)
+                    exit_code = worker.wait(timeout=args.worker_exit_timeout)
+                    if exit_code != 0:
+                        raise WorkerExitedError(f"Worker exited with status {exit_code}.")
+                except (
+                    ProtocolError,
+                    WorkerExitedError,
+                    subprocess.TimeoutExpired,
+                    ValueError,
+                ) as exc:
                     _persist_capture_failure(
                         record_path=created_session.record_path,
                         start_payload=start_payload,
                         started_at=started_at,
-                        error_message=message,
+                        error_message=str(exc),
                         now=now,
                     )
-                    print(f"Capture failed: {message}")
+                    print(f"Capture failed: {exc}")
                     return 1
             except (
                 ProtocolError,
@@ -1127,14 +1144,51 @@ def _record_input(input_fn: Callable[[str], str] | None) -> Callable[[str], str]
     return None
 
 
-def _wait_for_record_stop(input_fn: Callable[[str], str] | None) -> None:
+def _wait_for_record_stop(
+    input_fn: Callable[[str], str] | None,
+    *,
+    capture_monitor: _CaptureEventMonitor | None = None,
+) -> None:
     reader = _record_input(input_fn)
     if reader is None:
         raise RuntimeError("Recording requires an interactive terminal to stop.")
     print("Recording. Press q to stop.")
-    answer = reader("record> ").strip().lower()
-    if answer not in {"q", "quit", "stop"}:
-        raise ValueError("Recording stop command must be q, quit, or stop.")
+    while True:
+        answer = _read_record_command(reader, capture_monitor=capture_monitor).strip().lower()
+        if answer in {"q", "quit", "stop"}:
+            return
+        print("Recording continues. Type q to stop.")
+
+
+def _read_record_command(
+    reader: Callable[[str], str],
+    *,
+    capture_monitor: _CaptureEventMonitor | None,
+) -> str:
+    if capture_monitor is None:
+        return reader("record> ")
+
+    result_queue: queue.Queue[str | BaseException] = queue.Queue(maxsize=1)
+
+    def read_input() -> None:
+        try:
+            result_queue.put(reader("record> "))
+        except BaseException as exc:
+            result_queue.put(exc)
+
+    input_thread = threading.Thread(target=read_input, name="mena-record-input", daemon=True)
+    input_thread.start()
+    while True:
+        terminal_event = capture_monitor.poll_terminal_event()
+        if terminal_event is not None:
+            return "q"
+        try:
+            result = result_queue.get(timeout=0.1)
+        except queue.Empty:
+            continue
+        if isinstance(result, BaseException):
+            raise result
+        return result
 
 
 def _format_audio_route_choice(route: AudioRoute) -> str:
