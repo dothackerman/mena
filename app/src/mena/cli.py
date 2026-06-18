@@ -692,7 +692,12 @@ def main(
             },
         )
         print("Capture finalized")
-        print(f"To process this recording, run: mena process {created_session.record_path}")
+        if finalized_payload.status == "recorded":
+            print(f"To process this recording, run: mena process {created_session.record_path}")
+        elif finalized_payload.error:
+            print(f"Capture finalized as {finalized_payload.status}: {finalized_payload.error}")
+        else:
+            print(f"Capture finalized as {finalized_payload.status}.")
         return 0
 
     if args.command == "correct":

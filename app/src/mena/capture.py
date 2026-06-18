@@ -12,6 +12,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -538,7 +539,11 @@ class _RawPcmCaptureStream:
                 if not self.is_running:
                     break
                 continue
-            chunk = stdout.read(min(remaining, 64 * 1024))
+            chunk = _read_ready_stream_chunk(stdout, max_bytes=min(remaining, 64 * 1024))
+            if chunk is None:
+                if not self.is_running:
+                    break
+                continue
             if not chunk:
                 break
             chunks.append(chunk)
@@ -1155,6 +1160,48 @@ def _read_available_fd(fd: int, *, max_bytes: int) -> bytes:
         chunks.append(chunk)
         remaining -= len(chunk)
     return b"".join(chunks)
+
+
+def _read_ready_stream_chunk(stream: object, *, max_bytes: int) -> bytes | None:
+    fileno = getattr(stream, "fileno", None)
+    if not callable(fileno):
+        return _read_stream_chunk(stream, max_bytes=max_bytes)
+    try:
+        fd = fileno()
+    except (OSError, ValueError):
+        return _read_stream_chunk(stream, max_bytes=max_bytes)
+    return _read_ready_fd_chunk(fd, max_bytes=max_bytes)
+
+
+def _read_stream_chunk(stream: object, *, max_bytes: int) -> bytes:
+    read = getattr(stream, "read", None)
+    if not callable(read):
+        return b""
+    try:
+        chunk = read(max_bytes)
+    except TypeError:
+        chunk = read()
+    if isinstance(chunk, bytes):
+        return chunk
+    return b""
+
+
+def _read_ready_fd_chunk(fd: int, *, max_bytes: int) -> bytes | None:
+    try:
+        was_blocking = os.get_blocking(fd)
+        os.set_blocking(fd, False)
+    except OSError:
+        was_blocking = None
+    try:
+        return os.read(fd, max_bytes)
+    except BlockingIOError:
+        return None
+    except OSError:
+        return b""
+    finally:
+        if was_blocking is not None:
+            with suppress(OSError):
+                os.set_blocking(fd, was_blocking)
 
 
 def _aligned_stop_pcm_or_empty(

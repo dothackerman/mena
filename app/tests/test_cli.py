@@ -495,7 +495,30 @@ def test_record_creates_session_bundle_and_record(
     assert record["capture_plan"]["routes"][1]["route_id"] == "pulse:sink-input:151"
     assert record["recording"]["stop_reason"] == "user_stop"
     assert record["recording"]["finalization"]["status"] == "finalized"
+    assert record["capture_metadata"]["segment_count"] == 2
+
+
+def test_record_does_not_offer_process_handoff_for_empty_partial_capture(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    exit_code = main(
+        ["record", "--profile", "online", "--language", "en"],
+        data_root=tmp_path,
+        discoverer=_available_discoverer,
+        worker_factory=PartialWorkerProcess,
+        input_fn=lambda _prompt: "q",
+    )
+
+    captured = capsys.readouterr()
+    record_path = next((tmp_path / "sessions").iterdir()) / "session.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert record["status"] == "interrupted_partial"
+    assert record["recording"]["finalization"]["status"] == "interrupted_partial"
     assert record["capture_metadata"]["segment_count"] == 0
+    assert "No processable audio segments were sealed." in captured.out
+    assert "mena process" not in captured.out
 
 
 def test_record_defaults_to_runtime_sessions_dir(
@@ -3018,7 +3041,11 @@ def _monitor_start_payload() -> StartCapturePayload:
     )
 
 
-def _finalized_capture_message() -> ProtocolMessage:
+def _finalized_capture_message(
+    *,
+    profile: str = "online_dual_stream",
+    selected_sources: Sequence[str] = ("local_mic", "system_audio"),
+) -> ProtocolMessage:
     return ProtocolMessage(
         type="capture_finalized",
         session_id=SESSION_ID,
@@ -3029,16 +3056,37 @@ def _finalized_capture_message() -> ProtocolMessage:
             "error": None,
             "capture_metadata": {
                 "version": 1,
-                "profile": "online_dual_stream",
+                "profile": profile,
                 "sample_rate": 48_000,
                 "channels": 1,
                 "segment_seconds": 30,
-                "segment_count": 0,
-                "segments": [],
-                "sources": [],
+                "segment_count": len(selected_sources),
+                "sources": [_source_summary(source_id) for source_id in selected_sources],
             },
         },
     )
+
+
+def _source_summary(source_id: str) -> dict[str, object]:
+    if source_id == "system_audio":
+        return {
+            "source_id": source_id,
+            "route_id": "pulse:sink-input:51",
+            "route_label": "Video call",
+            "capture_mode": "dedicated_route",
+            "channel_layout": "mono",
+            "segment_count": 1,
+        }
+    route_id = "pipewire:node:31"
+    label = "Studio mic" if source_id == "local_mic" else "Room microphone"
+    return {
+        "source_id": source_id,
+        "route_id": route_id,
+        "route_label": label,
+        "capture_mode": "selected_microphone",
+        "channel_layout": "mono",
+        "segment_count": 1,
+    }
 
 
 class FakeWorkerProcess:
@@ -3074,18 +3122,32 @@ class FakeWorkerProcess:
 
     def stop_capture(self) -> ProtocolMessage:
         profile = self.start_payload.profile if self.start_payload else "online_dual_stream"
+        selected_sources = (
+            self.start_payload.selected_sources
+            if self.start_payload is not None
+            else ("local_mic", "system_audio")
+        )
+        return _finalized_capture_message(profile=profile, selected_sources=selected_sources)
+
+    def wait(self, timeout: float | None = None) -> int:
+        return 0
+
+
+class PartialWorkerProcess(FakeWorkerProcess):
+    def stop_capture(self) -> ProtocolMessage:
+        profile = self.start_payload.profile if self.start_payload else "online_dual_stream"
         return ProtocolMessage(
             type="capture_finalized",
             session_id=self.session_id,
             payload={
-                "status": "recorded",
+                "status": "interrupted_partial",
                 "stop_reason": "user_stop",
                 "completed_at": None,
-                "error": None,
+                "error": "No processable audio segments were sealed.",
                 "capture_metadata": {
                     "version": 1,
                     "profile": profile,
-                    "sample_rate": 48000,
+                    "sample_rate": 48_000,
                     "channels": 1,
                     "segment_seconds": 30,
                     "segment_count": 0,
@@ -3094,9 +3156,6 @@ class FakeWorkerProcess:
                 },
             },
         )
-
-    def wait(self, timeout: float | None = None) -> int:
-        return 0
 
 
 class InterruptingStartWorkerProcess(WorkerProcess):
@@ -3172,24 +3231,20 @@ class MonitoredWorkerProcess(WorkerProcess):
         self.__class__.stop_requested = True
         self._messages.put(
             ProtocolMessage(
-                type="capture_finalized",
+                type="segments_flushed",
                 session_id=self.session_id,
                 payload={
-                    "status": "recorded",
-                    "stop_reason": "user_stop",
-                    "completed_at": None,
-                    "error": None,
-                    "capture_metadata": {
-                        "version": 1,
-                        "profile": self.profile,
-                        "sample_rate": 48000,
-                        "channels": 1,
-                        "segment_seconds": 30,
-                        "segment_count": 0,
-                        "segments": [],
-                        "sources": [],
-                    },
+                    "segments": [
+                        _segment_payload(source_id="local_mic", index=1),
+                        _segment_payload(source_id="system_audio", index=1),
+                    ]
                 },
+            )
+        )
+        self._messages.put(
+            _finalized_capture_message(
+                profile=self.profile,
+                selected_sources=("local_mic", "system_audio"),
             )
         )
 

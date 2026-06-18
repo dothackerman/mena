@@ -3,6 +3,7 @@ import os
 import subprocess
 import threading
 import wave
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, cast
 
@@ -21,6 +22,7 @@ from mena.capture import (
     PipeWirePcmProvider,
     SilencePcmProvider,
     WavSegmentWriter,
+    _read_ready_stream_chunk,
     make_wav_bytes,
     session_null_sink_name,
 )
@@ -598,6 +600,76 @@ def test_pipewire_pcm_provider_closes_streams_on_stop_event() -> None:
         )
         == b""
     )
+
+
+def test_pipewire_pcm_provider_reads_ready_fd_without_buffered_read() -> None:
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, b"\x00\x00")
+    os.close(write_fd)
+
+    class ReadyStdout:
+        def fileno(self) -> int:
+            return read_fd
+
+        def read(self, *_args: object) -> bytes:
+            raise AssertionError("buffered read should not be used for file descriptors")
+
+    class FakeProcess:
+        def __init__(self, args: list[str], **_kwargs: object) -> None:
+            self.args = args
+            self.stdout = ReadyStdout()
+            self.stderr = io.BytesIO()
+            self.returncode: int | None = None
+            self.terminated = False
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.terminated = True
+            self.returncode = -15
+
+        def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
+            return b"", b""
+
+    provider = PipeWirePcmProvider(sample_rate=1, popen_factory=cast(Any, FakeProcess))
+
+    try:
+        assert (
+            provider.read_segment(
+                CaptureSourceId.LOCAL_MIC,
+                plan=_route_plan(),
+                sink_name="mena_session_remote",
+                segment_seconds=1,
+            )
+            == b"\x00\x00"
+        )
+    finally:
+        provider.close()
+        with suppress(OSError):
+            os.close(read_fd)
+
+
+def test_read_ready_stream_chunk_falls_back_for_stream_without_usable_fileno() -> None:
+    class LegacyStream:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def read(self, *_args: object) -> bytes:
+            self.calls += 1
+            if self.calls == 1:
+                raise TypeError
+            return b"pcm"
+
+    class BrokenFilenoStream:
+        def fileno(self) -> int:
+            raise OSError("closed")
+
+        def read(self, _max_bytes: int) -> str:
+            return "not bytes"
+
+    assert _read_ready_stream_chunk(LegacyStream(), max_bytes=8) == b"pcm"
+    assert _read_ready_stream_chunk(BrokenFilenoStream(), max_bytes=8) == b""
 
 
 def test_pipewire_pcm_provider_rejects_empty_failed_stream() -> None:

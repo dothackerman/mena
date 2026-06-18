@@ -7,6 +7,7 @@ import sys
 import threading
 import time
 from collections.abc import Sequence
+from contextlib import suppress
 from pathlib import Path
 from typing import IO, TextIO
 
@@ -39,6 +40,8 @@ from mena.protocol import (
     validate_hello,
     write_message,
 )
+
+NO_PROCESSABLE_AUDIO_ERROR = "No processable audio segments were sealed."
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -162,35 +165,25 @@ def run_worker(
             if capture is None:
                 raise ProtocolError("Cannot stop capture before it has started.")
             if capture and finalized_metadata is None:
-                if flush_loop is not None:
-                    flush_loop.stop()
-                    flush_loop.join()
-                    try:
-                        finalized_metadata = capture.finalize()
-                    finally:
-                        if flush_loop.error is not None:
-                            raise ProtocolError(f"Capture failed: {flush_loop.error}")
-                else:
-                    finalized_metadata = capture.finalize()
+                finalized_metadata = _finalize_capture(capture=capture, flush_loop=flush_loop)
             if finalized_metadata is None:
                 raise ProtocolError("Capture did not finalize.")
+            finalized_payload = _capture_finalized_payload(
+                finalized_metadata,
+                stop_reason="user_stop",
+            )
             write_message(
                 protocol_out,
                 ProtocolMessage(
                     type="capture_finalized",
                     session_id=session_id,
-                    payload=CaptureFinalizedPayload(
-                        status="recorded",
-                        stop_reason="user_stop",
-                        completed_at=None,
-                        error=None,
-                        capture_metadata=finalized_metadata.to_summary_dict(),
-                    ).to_dict(),
+                    payload=finalized_payload.to_dict(),
                 ),
             )
             return 0
         elif message.type == "error":
             error = ErrorPayload.from_dict(message.payload)
+            _cleanup_active_capture(capture=capture, flush_loop=flush_loop)
             raise ProtocolError(error.message)
         else:
             raise ProtocolError(f"Unexpected worker command '{message.type}'.")
@@ -312,6 +305,12 @@ class WorkerCaptureSession:
             segments=metadata.segments,
             source_routes=self._source_routes(),
         )
+
+    def abort(self) -> None:
+        if self.active_capture is None:
+            return
+        self.active_capture.stop()
+        self.active_capture = None
 
     def _route_id(self, role: str) -> str:
         for route in self.start_payload.routes:
@@ -470,6 +469,64 @@ def _drain_route_events(capture: WorkerCaptureSession) -> tuple[CaptureRouteEven
     if not callable(drain):
         return ()
     return tuple(drain())
+
+
+def _finalize_capture(
+    *,
+    capture: WorkerCaptureSession,
+    flush_loop: SegmentFlushLoop | None,
+) -> CaptureMetadata:
+    if flush_loop is not None:
+        flush_loop.stop()
+        flush_loop.join()
+        try:
+            metadata = capture.finalize()
+        finally:
+            if flush_loop.error is not None:
+                raise ProtocolError(f"Capture failed: {flush_loop.error}")
+        return metadata
+    return capture.finalize()
+
+
+def _capture_finalized_payload(
+    metadata: CaptureMetadata,
+    *,
+    stop_reason: str,
+) -> CaptureFinalizedPayload:
+    if metadata.segments:
+        return CaptureFinalizedPayload(
+            status="recorded",
+            stop_reason=stop_reason,
+            completed_at=None,
+            error=None,
+            capture_metadata=metadata.to_summary_dict(),
+        )
+    return CaptureFinalizedPayload(
+        status="interrupted_partial",
+        stop_reason=stop_reason,
+        completed_at=None,
+        error=NO_PROCESSABLE_AUDIO_ERROR,
+        capture_metadata=metadata.to_summary_dict(),
+    )
+
+
+def _cleanup_active_capture(
+    *,
+    capture: WorkerCaptureSession | None,
+    flush_loop: SegmentFlushLoop | None,
+) -> None:
+    if flush_loop is not None:
+        flush_loop.stop()
+        flush_loop.join()
+    if capture is None:
+        return
+    abort = getattr(capture, "abort", None)
+    if callable(abort):
+        with suppress(BaseException):
+            abort()
+        return
+    with suppress(BaseException):
+        capture.finalize()
 
 
 def _write_route_events(

@@ -10,7 +10,13 @@ from typing import cast
 import pytest
 
 from mena.capture import CaptureMetadata, CaptureRouteEvent, CaptureSegment
-from mena.capture_worker import SegmentFlushLoop, WorkerCaptureSession, build_parser, run_worker
+from mena.capture_worker import (
+    SegmentFlushLoop,
+    WorkerCaptureSession,
+    _cleanup_active_capture,
+    build_parser,
+    run_worker,
+)
 from mena.profiles import CaptureProfileId, CaptureSourceId
 from mena.protocol import (
     ENVELOPE_VERSION,
@@ -716,11 +722,105 @@ def test_worker_run_loop_stops_product_flush_loop(
     )
 
     frames = [ProtocolMessage.decode(frame) for frame in stdout.getvalue().splitlines(True)]
+    finalized = CaptureFinalizedPayload.from_dict(frames[-1].payload)
     assert exit_code == 0
     assert capture.finalized
     assert frames[0].type == "hello_ack"
     assert frames[1].type == "capture_started"
     assert frames[-1].type == "capture_finalized"
+    assert finalized.status == "interrupted_partial"
+    assert finalized.error == "No processable audio segments were sealed."
+
+
+def test_worker_run_loop_cleans_up_active_capture_on_orchestrator_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class AbortableProductCapture:
+        def __init__(self) -> None:
+            self.segments: list[CaptureSegment] = []
+            self.aborted = False
+
+        def start(self) -> tuple[CaptureSegment, ...]:
+            return ()
+
+        def flush_once(
+            self,
+            *,
+            stop_event: threading.Event | None = None,
+        ) -> tuple[CaptureSegment, ...]:
+            while stop_event is not None and not stop_event.is_set():
+                time.sleep(0.01)
+            return ()
+
+        def abort(self) -> None:
+            self.aborted = True
+
+        def drain_route_events(self) -> tuple[CaptureRouteEvent, ...]:
+            return ()
+
+    capture = AbortableProductCapture()
+    monkeypatch.setattr(
+        WorkerCaptureSession,
+        "create_product",
+        classmethod(lambda *_args, **_kwargs: capture),
+    )
+    stdin = BytesIO(
+        b"".join(
+            [
+                hello_message("session-1").encode(),
+                ProtocolMessage(
+                    type="start_capture",
+                    session_id="session-1",
+                    payload=_start_payload().to_dict(),
+                ).encode(),
+                ProtocolMessage(
+                    type="error",
+                    session_id="session-1",
+                    payload={
+                        "code": "orchestrator_aborted",
+                        "message": "orchestrator aborted",
+                        "recoverable": False,
+                        "details": {},
+                    },
+                ).encode(),
+            ]
+        )
+    )
+
+    with pytest.raises(ProtocolError, match="orchestrator aborted"):
+        run_worker(
+            session_id="session-1",
+            session_dir=tmp_path,
+            stdin=stdin,
+            stdout=BytesIO(),
+        )
+
+    assert capture.aborted
+
+
+def test_worker_cleanup_active_capture_falls_back_to_finalize() -> None:
+    class FinalizeOnlyCapture:
+        def __init__(self) -> None:
+            self.finalized = False
+
+        def finalize(self) -> CaptureMetadata:
+            self.finalized = True
+            return CaptureMetadata(
+                version=1,
+                profile_id=CaptureProfileId.ONLINE_DUAL_STREAM,
+                sample_rate=48_000,
+                channels=1,
+                segment_seconds=30,
+                segments=(),
+            )
+
+    capture = FinalizeOnlyCapture()
+
+    _cleanup_active_capture(capture=None, flush_loop=None)
+    _cleanup_active_capture(capture=cast(WorkerCaptureSession, capture), flush_loop=None)
+
+    assert capture.finalized
 
 
 def test_worker_product_factory_uses_live_pipewire_provider(tmp_path: Path) -> None:
