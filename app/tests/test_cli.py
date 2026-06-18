@@ -4174,6 +4174,7 @@ def test_collect_capture_segments_rejects_missing_segment_for_source() -> None:
                             "source_id": "local_mic",
                             "index": 1,
                             "path": "local_mic_segment.wav",
+                            "status": "sealed",
                         }
                     ]
                 }
@@ -4191,11 +4192,13 @@ def test_collect_capture_segments_orders_multiple_segments_per_source() -> None:
                         "source_id": "local_mic",
                         "index": 2,
                         "path": "local_mic_segment_2.wav",
+                        "status": "sealed",
                     },
                     {
                         "source_id": "local_mic",
                         "index": 1,
                         "path": "local_mic_segment.wav",
+                        "status": "sealed",
                     },
                 ]
             }
@@ -4206,6 +4209,7 @@ def test_collect_capture_segments_orders_multiple_segments_per_source() -> None:
             {
                 "path": "local_mic_segment.wav",
                 "index": 1,
+                "status": "sealed",
                 "sha256": None,
                 "route_id": None,
                 "route_label": None,
@@ -4214,6 +4218,7 @@ def test_collect_capture_segments_orders_multiple_segments_per_source() -> None:
             {
                 "path": "local_mic_segment_2.wav",
                 "index": 2,
+                "status": "sealed",
                 "sha256": None,
                 "route_id": None,
                 "route_label": None,
@@ -4229,12 +4234,72 @@ def test_collect_capture_segments_rejects_duplicate_segment_indexes() -> None:
             {
                 "capture_metadata": {
                     "segments": [
-                        {"source_id": "local_mic", "index": 1, "path": "a.wav"},
-                        {"source_id": "local_mic", "index": 1, "path": "b.wav"},
+                        {
+                            "source_id": "local_mic",
+                            "index": 1,
+                            "path": "a.wav",
+                            "status": "sealed",
+                        },
+                        {
+                            "source_id": "local_mic",
+                            "index": 1,
+                            "path": "b.wav",
+                            "status": "sealed",
+                        },
                     ]
                 }
             },
             ("local_mic",),
+        )
+
+
+def test_collect_capture_segments_rejects_non_sealed_segments() -> None:
+    with pytest.raises(ValueError, match="is partial, not sealed"):
+        _collect_capture_segments(
+            {
+                "capture_metadata": {
+                    "segments": [
+                        {
+                            "source_id": "local_mic",
+                            "index": 1,
+                            "path": "local_mic_segment.wav",
+                            "status": "partial",
+                        }
+                    ]
+                }
+            },
+            ("local_mic",),
+        )
+
+
+def test_collect_capture_segments_rejects_unpaired_online_segment_indexes() -> None:
+    with pytest.raises(ValueError, match="Online capture segment sets must be paired"):
+        _collect_capture_segments(
+            {
+                "capture_metadata": {
+                    "segments": [
+                        {
+                            "source_id": "local_mic",
+                            "index": 1,
+                            "path": "local_mic_1.wav",
+                            "status": "sealed",
+                        },
+                        {
+                            "source_id": "local_mic",
+                            "index": 2,
+                            "path": "local_mic_2.wav",
+                            "status": "sealed",
+                        },
+                        {
+                            "source_id": "system_audio",
+                            "index": 1,
+                            "path": "system_audio_1.wav",
+                            "status": "sealed",
+                        },
+                    ]
+                }
+            },
+            ("local_mic", "system_audio"),
         )
 
 
@@ -4627,6 +4692,44 @@ def test_main_process_rejects_capture_segment_checksum_mismatch(
     captured = capsys.readouterr()
     assert exit_code == 1
     assert "Capture segment checksum mismatch for source 'local_mic'" in captured.out
+
+
+def test_main_process_rejects_non_sealed_capture_segment(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    session = _build_processing_session(tmp_path)
+    record = json.loads(session.record_path.read_text(encoding="utf-8"))
+    record["capture_metadata"]["segments"][0]["status"] = "partial"
+    session.record_path.write_text(json.dumps(record), encoding="utf-8")
+
+    exit_code = main(["process", str(session.record_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "Capture segment for source 'local_mic' index 1 is partial, not sealed." in (
+        captured.out
+    )
+
+
+def test_main_process_rejects_unpaired_online_capture_segments(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    session = _build_multi_segment_processing_session(tmp_path)
+    record = json.loads(session.record_path.read_text(encoding="utf-8"))
+    record["capture_metadata"]["segments"] = [
+        segment
+        for segment in record["capture_metadata"]["segments"]
+        if not (segment["source_id"] == "system_audio" and segment["index"] == 2)
+    ]
+    session.record_path.write_text(json.dumps(record), encoding="utf-8")
+
+    exit_code = main(["process", str(session.record_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "Online capture segment sets must be paired across sources" in captured.out
 
 
 def test_main_process_rejects_missing_session_id(

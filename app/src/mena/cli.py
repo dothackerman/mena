@@ -1841,6 +1841,11 @@ def _collect_capture_segments(
             )
         index = _required_int(raw_segment, "index")
         path = _required_str(raw_segment, "path")
+        status = _required_str(raw_segment, "status")
+        if status != "sealed":
+            raise ValueError(
+                f"Capture segment for source '{source_id}' index {index} is {status}, not sealed."
+            )
         expected_sha = raw_segment.get("sha256")
         if expected_sha is not None and not isinstance(expected_sha, str):
             raise ValueError("Capture segment sha256 must be a string when provided.")
@@ -1857,6 +1862,7 @@ def _collect_capture_segments(
             {
                 "path": path,
                 "index": index,
+                "status": status,
                 "sha256": expected_sha,
                 "route_id": route_id,
                 "route_label": route_label,
@@ -1881,7 +1887,28 @@ def _collect_capture_segments(
             )
         selected[source_id] = ordered
 
+    _validate_capture_segment_alignment(selected, required_sources)
     return selected
+
+
+def _validate_capture_segment_alignment(
+    selected: dict[str, tuple[dict[str, object], ...]],
+    required_sources: tuple[str, ...],
+) -> None:
+    if len(required_sources) <= 1:
+        return
+    reference_source = required_sources[0]
+    reference_indexes = tuple(
+        _segment_metadata_index(segment) for segment in selected[reference_source]
+    )
+    for source_id in required_sources[1:]:
+        indexes = tuple(_segment_metadata_index(segment) for segment in selected[source_id])
+        if indexes != reference_indexes:
+            raise ValueError(
+                "Online capture segment sets must be paired across sources: "
+                f"{reference_source} indexes {list(reference_indexes)}; "
+                f"{source_id} indexes {list(indexes)}."
+            )
 
 
 def _segment_metadata_index(segment: dict[str, object]) -> int:
