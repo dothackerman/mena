@@ -5,7 +5,7 @@ import time
 import wave
 from io import BytesIO, StringIO
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -799,6 +799,72 @@ def test_worker_run_loop_cleans_up_active_capture_on_orchestrator_error(
     assert capture.aborted
 
 
+def test_worker_run_loop_cleans_up_active_capture_on_unexpected_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class AbortableProductCapture:
+        def __init__(self) -> None:
+            self.segments: list[CaptureSegment] = []
+            self.aborted = False
+
+        def start(self) -> tuple[CaptureSegment, ...]:
+            return ()
+
+        def flush_once(
+            self,
+            *,
+            stop_event: threading.Event | None = None,
+        ) -> tuple[CaptureSegment, ...]:
+            while stop_event is not None and not stop_event.is_set():
+                time.sleep(0.01)
+            return ()
+
+        def abort(self) -> None:
+            self.aborted = True
+
+        def drain_route_events(self) -> tuple[CaptureRouteEvent, ...]:
+            return ()
+
+    capture = AbortableProductCapture()
+    monkeypatch.setattr(
+        WorkerCaptureSession,
+        "create_product",
+        classmethod(lambda *_args, **_kwargs: capture),
+    )
+    stdin = BytesIO(
+        b"".join(
+            [
+                hello_message("session-1").encode(),
+                ProtocolMessage(
+                    type="start_capture",
+                    session_id="session-1",
+                    payload=_start_payload().to_dict(),
+                ).encode(),
+                ProtocolMessage(
+                    type="capture_status",
+                    session_id="session-1",
+                    payload=CaptureStatusPayload(
+                        status="recording",
+                        elapsed_seconds=1.0,
+                        sealed_segment_count=0,
+                    ).to_dict(),
+                ).encode(),
+            ]
+        )
+    )
+
+    with pytest.raises(ProtocolError, match="Unexpected worker command 'capture_status'"):
+        run_worker(
+            session_id="session-1",
+            session_dir=tmp_path,
+            stdin=stdin,
+            stdout=BytesIO(),
+        )
+
+    assert capture.aborted
+
+
 def test_worker_cleanup_active_capture_falls_back_to_finalize() -> None:
     class FinalizeOnlyCapture:
         def __init__(self) -> None:
@@ -886,6 +952,7 @@ def test_segment_flush_loop_emits_status_then_structured_error() -> None:
         def __init__(self) -> None:
             self.segments: list[CaptureSegment] = []
             self.calls = 0
+            self.aborted = False
 
         def flush_once(
             self,
@@ -899,9 +966,19 @@ def test_segment_flush_loop_emits_status_then_structured_error() -> None:
                 return (segment,)
             raise RuntimeError("disk full")
 
-    output = BytesIO()
+        def abort(self) -> None:
+            self.aborted = True
+
+    class AbortCheckingOutput(BytesIO):
+        def write(self, data: Any) -> int:
+            if b"capture_flush_failed" in data:
+                assert capture.aborted
+            return super().write(data)
+
+    capture = FlakyCapture()
+    output = AbortCheckingOutput()
     loop = SegmentFlushLoop(
-        capture=cast(WorkerCaptureSession, FlakyCapture()),
+        capture=cast(WorkerCaptureSession, capture),
         session_id="session-1",
         protocol_out=output,
         write_lock=threading.Lock(),
@@ -914,6 +991,7 @@ def test_segment_flush_loop_emits_status_then_structured_error() -> None:
     assert [frame.type for frame in frames] == ["segments_flushed", "capture_status", "error"]
     assert frames[1].payload["sealed_segment_count"] == 1
     assert ErrorPayload.from_dict(frames[2].payload).message == "disk full"
+    assert capture.aborted
     assert isinstance(loop.error, RuntimeError)
 
 

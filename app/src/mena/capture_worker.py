@@ -96,97 +96,101 @@ def run_worker(
     write_lock = threading.Lock()
     flush_loop: SegmentFlushLoop | None = None
 
-    while True:
-        try:
-            message = read_message(protocol_in)
-        except EOFError:
-            if capture and finalized_metadata is None:
-                if flush_loop is not None:
-                    flush_loop.stop()
-                    flush_loop.join()
-                finalized_metadata = capture.finalize()
-            print("orchestrator closed protocol stdin", file=diagnostics)
-            return 0
+    try:
+        while True:
+            try:
+                message = read_message(protocol_in)
+            except EOFError:
+                if capture and finalized_metadata is None:
+                    if flush_loop is not None:
+                        flush_loop.stop()
+                        flush_loop.join()
+                    finalized_metadata = capture.finalize()
+                print("orchestrator closed protocol stdin", file=diagnostics)
+                return 0
 
-        if message.session_id != session_id:
-            raise ProtocolError("Message session_id does not match worker session.")
-        if message.type == "start_capture":
-            if capture is not None:
-                raise ProtocolError("Capture has already started.")
-            start_payload = StartCapturePayload.from_dict(message.payload)
-            if test_deterministic_capture:
-                capture = WorkerCaptureSession.create_deterministic(
-                    session_id=session_id,
-                    session_dir=session_dir,
-                    start_payload=start_payload,
+            if message.session_id != session_id:
+                raise ProtocolError("Message session_id does not match worker session.")
+            if message.type == "start_capture":
+                if capture is not None:
+                    raise ProtocolError("Capture has already started.")
+                start_payload = StartCapturePayload.from_dict(message.payload)
+                if test_deterministic_capture:
+                    capture = WorkerCaptureSession.create_deterministic(
+                        session_id=session_id,
+                        session_dir=session_dir,
+                        start_payload=start_payload,
+                    )
+                else:
+                    capture = WorkerCaptureSession.create_product(
+                        session_id=session_id,
+                        session_dir=session_dir,
+                        start_payload=start_payload,
+                    )
+                capture.start()
+                write_message(
+                    protocol_out,
+                    ProtocolMessage(
+                        type="capture_started",
+                        session_id=session_id,
+                        payload=CaptureStartedPayload(
+                            session_dir=str(session_dir),
+                            profile=start_payload.profile,
+                            segment_seconds=start_payload.segment_seconds,
+                            selected_sources=start_payload.selected_sources,
+                        ).to_dict(),
+                    ),
                 )
-            else:
-                capture = WorkerCaptureSession.create_product(
-                    session_id=session_id,
-                    session_dir=session_dir,
-                    start_payload=start_payload,
-                )
-            capture.start()
-            write_message(
-                protocol_out,
-                ProtocolMessage(
-                    type="capture_started",
-                    session_id=session_id,
-                    payload=CaptureStartedPayload(
-                        session_dir=str(session_dir),
-                        profile=start_payload.profile,
-                        segment_seconds=start_payload.segment_seconds,
-                        selected_sources=start_payload.selected_sources,
-                    ).to_dict(),
-                ),
-            )
-            _write_route_events(
-                protocol_out=protocol_out,
-                write_lock=write_lock,
-                session_id=session_id,
-                events=_drain_route_events(capture),
-            )
-            if test_deterministic_capture:
-                _write_flushed_segments(
+                _write_route_events(
                     protocol_out=protocol_out,
                     write_lock=write_lock,
                     session_id=session_id,
-                    capture=capture,
+                    events=_drain_route_events(capture),
                 )
+                if test_deterministic_capture:
+                    _write_flushed_segments(
+                        protocol_out=protocol_out,
+                        write_lock=write_lock,
+                        session_id=session_id,
+                        capture=capture,
+                    )
+                else:
+                    flush_loop = SegmentFlushLoop(
+                        capture=capture,
+                        session_id=session_id,
+                        protocol_out=protocol_out,
+                        write_lock=write_lock,
+                    )
+                    flush_loop.start()
+            elif message.type == "stop_capture":
+                if capture is None:
+                    raise ProtocolError("Cannot stop capture before it has started.")
+                if capture and finalized_metadata is None:
+                    finalized_metadata = _finalize_capture(capture=capture, flush_loop=flush_loop)
+                if finalized_metadata is None:
+                    raise ProtocolError("Capture did not finalize.")
+                finalized_payload = _capture_finalized_payload(
+                    finalized_metadata,
+                    stop_reason="user_stop",
+                )
+                write_message(
+                    protocol_out,
+                    ProtocolMessage(
+                        type="capture_finalized",
+                        session_id=session_id,
+                        payload=finalized_payload.to_dict(),
+                    ),
+                )
+                return 0
+            elif message.type == "error":
+                error = ErrorPayload.from_dict(message.payload)
+                raise ProtocolError(error.message)
             else:
-                flush_loop = SegmentFlushLoop(
-                    capture=capture,
-                    session_id=session_id,
-                    protocol_out=protocol_out,
-                    write_lock=write_lock,
-                )
-                flush_loop.start()
-        elif message.type == "stop_capture":
-            if capture is None:
-                raise ProtocolError("Cannot stop capture before it has started.")
-            if capture and finalized_metadata is None:
-                finalized_metadata = _finalize_capture(capture=capture, flush_loop=flush_loop)
-            if finalized_metadata is None:
-                raise ProtocolError("Capture did not finalize.")
-            finalized_payload = _capture_finalized_payload(
-                finalized_metadata,
-                stop_reason="user_stop",
-            )
-            write_message(
-                protocol_out,
-                ProtocolMessage(
-                    type="capture_finalized",
-                    session_id=session_id,
-                    payload=finalized_payload.to_dict(),
-                ),
-            )
-            return 0
-        elif message.type == "error":
-            error = ErrorPayload.from_dict(message.payload)
+                raise ProtocolError(f"Unexpected worker command '{message.type}'.")
+    except BaseException:
+        if capture is not None and finalized_metadata is None:
             _cleanup_active_capture(capture=capture, flush_loop=flush_loop)
-            raise ProtocolError(error.message)
-        else:
-            raise ProtocolError(f"Unexpected worker command '{message.type}'.")
+        raise
 
 
 class WorkerCaptureSession:
@@ -408,6 +412,7 @@ class SegmentFlushLoop:
                     )
             except BaseException as exc:
                 self.error = exc
+                _cleanup_active_capture(capture=self.capture, flush_loop=None)
                 with self.write_lock:
                     write_message(
                         self.protocol_out,
