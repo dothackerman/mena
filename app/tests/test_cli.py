@@ -463,7 +463,17 @@ def test_record_creates_session_bundle_and_record(
     tmp_path: Path, capsys: CaptureFixture[str]
 ) -> None:
     exit_code = main(
-        ["record", "--profile", "online", "--language", "en", "--name", "Planning"],
+        [
+            "record",
+            "--profile",
+            "online",
+            "--language",
+            "en",
+            "--playback-stream",
+            "pulse:sink-input:151",
+            "--name",
+            "Planning",
+        ],
         data_root=tmp_path,
         discoverer=_available_discoverer,
         worker_factory=FakeWorkerProcess,
@@ -503,7 +513,15 @@ def test_record_does_not_offer_process_handoff_for_empty_partial_capture(
     capsys: CaptureFixture[str],
 ) -> None:
     exit_code = main(
-        ["record", "--profile", "online", "--language", "en"],
+        [
+            "record",
+            "--profile",
+            "online",
+            "--language",
+            "en",
+            "--playback-stream",
+            "pulse:sink-input:151",
+        ],
         data_root=tmp_path,
         discoverer=_available_discoverer,
         worker_factory=PartialWorkerProcess,
@@ -682,6 +700,81 @@ def test_resolve_route_selections_rejects_missing_playback_streams() -> None:
             playback_stream_route_id=None,
             output_sink_route_id=None,
             input_fn=None,
+        )
+
+
+def test_resolve_route_selections_requires_single_playback_confirmation() -> None:
+    with pytest.raises(ValueError, match="Playback stream confirmation is required"):
+        _resolve_route_selections(
+            profile=CaptureProfileId.ONLINE_DUAL_STREAM,
+            discovery=_available_discoverer(CaptureProfileId.ONLINE_DUAL_STREAM),
+            microphone_route_id=None,
+            playback_stream_route_id=None,
+            output_sink_route_id=None,
+            input_fn=None,
+        )
+
+
+def test_resolve_route_selections_prompts_for_single_playback_stream() -> None:
+    selections = _resolve_route_selections(
+        profile=CaptureProfileId.ONLINE_DUAL_STREAM,
+        discovery=_available_discoverer(CaptureProfileId.ONLINE_DUAL_STREAM),
+        microphone_route_id=None,
+        playback_stream_route_id=None,
+        output_sink_route_id=None,
+        input_fn=lambda _prompt: "1",
+    )
+
+    assert selections.playback_stream_route_id == "pulse:sink-input:151"
+
+
+def test_resolve_route_selections_rejects_inactive_explicit_playback_stream() -> None:
+    discovery = _discovery_with_playback_streams(
+        PlaybackStream(
+            id=51,
+            route_id="pulse:sink-input:151",
+            name="Paused Stream",
+            app_binary_name="firefox",
+            stream_name="WebRTC playback",
+            media_name="Meet",
+            sink_input_id="151",
+            active=False,
+        )
+    )
+
+    with pytest.raises(ValueError, match="Selected playback stream route .* is not active"):
+        _resolve_route_selections(
+            profile=CaptureProfileId.ONLINE_DUAL_STREAM,
+            discovery=discovery,
+            microphone_route_id=None,
+            playback_stream_route_id="pulse:sink-input:151",
+            output_sink_route_id=None,
+            input_fn=None,
+        )
+
+
+def test_resolve_route_selections_rejects_inactive_only_playback_streams() -> None:
+    discovery = _discovery_with_playback_streams(
+        PlaybackStream(
+            id=51,
+            route_id="pulse:sink-input:151",
+            name="Paused Stream",
+            app_binary_name="firefox",
+            stream_name="WebRTC playback",
+            media_name="Meet",
+            sink_input_id="151",
+            active=False,
+        )
+    )
+
+    with pytest.raises(ValueError, match="No active playback streams were discovered"):
+        _resolve_route_selections(
+            profile=CaptureProfileId.ONLINE_DUAL_STREAM,
+            discovery=discovery,
+            microphone_route_id=None,
+            playback_stream_route_id=None,
+            output_sink_route_id=None,
+            input_fn=lambda _prompt: "1",
         )
 
 
@@ -911,7 +1004,15 @@ def test_record_requires_interactive_stop_before_capture_starts(
     tmp_path: Path, capsys: CaptureFixture[str]
 ) -> None:
     exit_code = main(
-        ["record", "--profile", "online", "--language", "en"],
+        [
+            "record",
+            "--profile",
+            "online",
+            "--language",
+            "en",
+            "--playback-stream",
+            "pulse:sink-input:151",
+        ],
         data_root=tmp_path,
         discoverer=_available_discoverer,
         worker_factory=FakeWorkerProcess,
@@ -1041,7 +1142,15 @@ def test_record_reports_worker_failure_without_capture_metadata(
     tmp_path: Path, capsys: CaptureFixture[str]
 ) -> None:
     exit_code = main(
-        ["record", "--profile", "online", "--language", "en"],
+        [
+            "record",
+            "--profile",
+            "online",
+            "--language",
+            "en",
+            "--playback-stream",
+            "pulse:sink-input:151",
+        ],
         data_root=tmp_path,
         discoverer=_available_discoverer,
         worker_factory=FailingWorkerProcess,
@@ -1069,7 +1178,15 @@ def test_record_persists_worker_spawn_failure_without_capture_metadata(
         raise OSError("worker process limit reached")
 
     exit_code = main(
-        ["record", "--profile", "online", "--language", "en"],
+        [
+            "record",
+            "--profile",
+            "online",
+            "--language",
+            "en",
+            "--playback-stream",
+            "pulse:sink-input:151",
+        ],
         data_root=tmp_path,
         discoverer=_available_discoverer,
         worker_factory=_spawn_fails,
@@ -1094,7 +1211,15 @@ def test_record_rejects_nonzero_worker_exit_without_capture_metadata(
     tmp_path: Path, capsys: CaptureFixture[str]
 ) -> None:
     exit_code = main(
-        ["record", "--profile", "online", "--language", "en"],
+        [
+            "record",
+            "--profile",
+            "online",
+            "--language",
+            "en",
+            "--playback-stream",
+            "pulse:sink-input:151",
+        ],
         data_root=tmp_path,
         discoverer=_available_discoverer,
         worker_factory=NonzeroExitWorkerProcess,
@@ -1120,7 +1245,15 @@ def test_record_keyboard_interrupt_finalizes_with_interrupted_stop_reason(
         raise KeyboardInterrupt
 
     exit_code = main(
-        ["record", "--profile", "online", "--language", "en"],
+        [
+            "record",
+            "--profile",
+            "online",
+            "--language",
+            "en",
+            "--playback-stream",
+            "pulse:sink-input:151",
+        ],
         data_root=tmp_path,
         discoverer=_available_discoverer,
         worker_factory=FakeWorkerProcess,
@@ -1143,7 +1276,15 @@ def test_record_real_worker_monitor_path_finalizes(
     MonitoredWorkerProcess.stop_requested = False
 
     exit_code = main(
-        ["record", "--profile", "online", "--language", "en"],
+        [
+            "record",
+            "--profile",
+            "online",
+            "--language",
+            "en",
+            "--playback-stream",
+            "pulse:sink-input:151",
+        ],
         data_root=tmp_path,
         discoverer=_available_discoverer,
         worker_factory=MonitoredWorkerProcess,
@@ -1166,7 +1307,15 @@ def test_record_startup_interrupt_does_not_wait_on_unstarted_monitor(
     InterruptingStartWorkerProcess.exited = False
 
     exit_code = main(
-        ["record", "--profile", "online", "--language", "en"],
+        [
+            "record",
+            "--profile",
+            "online",
+            "--language",
+            "en",
+            "--playback-stream",
+            "pulse:sink-input:151",
+        ],
         data_root=tmp_path,
         discoverer=_available_discoverer,
         worker_factory=InterruptingStartWorkerProcess,
@@ -1194,7 +1343,15 @@ def test_record_keyboard_interrupt_persists_finalization_failure(
         raise KeyboardInterrupt
 
     exit_code = main(
-        ["record", "--profile", "online", "--language", "en"],
+        [
+            "record",
+            "--profile",
+            "online",
+            "--language",
+            "en",
+            "--playback-stream",
+            "pulse:sink-input:151",
+        ],
         data_root=tmp_path,
         discoverer=_available_discoverer,
         worker_factory=FinalizationFailingWorkerProcess,
@@ -1215,7 +1372,17 @@ def test_record_uses_configurable_worker_exit_timeout(tmp_path: Path) -> None:
     TimeoutCapturingWorkerProcess.last_timeout = None
 
     exit_code = main(
-        ["record", "--profile", "online", "--language", "en", "--worker-exit-timeout", "7.5"],
+        [
+            "record",
+            "--profile",
+            "online",
+            "--language",
+            "en",
+            "--playback-stream",
+            "pulse:sink-input:151",
+            "--worker-exit-timeout",
+            "7.5",
+        ],
         data_root=tmp_path,
         discoverer=_available_discoverer,
         worker_factory=TimeoutCapturingWorkerProcess,
@@ -3885,6 +4052,11 @@ def _available_discoverer(profile: CaptureProfileId) -> AudioDiscovery:
             ),
         ),
     )
+
+
+def _discovery_with_playback_streams(*streams: PlaybackStream) -> AudioDiscovery:
+    base = _available_discoverer(CaptureProfileId.ONLINE_DUAL_STREAM)
+    return replace(base, playback_streams=streams)
 
 
 def _ambiguous_discoverer(profile: CaptureProfileId) -> AudioDiscovery:

@@ -1130,18 +1130,19 @@ def _resolve_playback_stream(
     selected_route_id: str | None,
     input_fn: Callable[[str], str] | None,
 ) -> PlaybackStream:
+    active_streams = tuple(stream for stream in streams if stream.active)
     if selected_route_id is not None:
-        return _find_playback_stream(streams, selected_route_id)
-    if len(streams) == 1:
-        return streams[0]
+        return _find_active_playback_stream(streams, selected_route_id)
     if not streams:
         raise ValueError("No playback streams were discovered.")
+    if not active_streams:
+        raise ValueError("No active playback streams were discovered.")
     reader = _record_input(input_fn)
     if reader is None:
-        raise ValueError("Multiple playback streams were discovered; pass --playback-stream.")
+        raise ValueError("Playback stream confirmation is required; pass --playback-stream.")
     return _prompt_choice(
         title="Playback streams",
-        choices=streams,
+        choices=active_streams,
         formatter=_format_playback_stream_choice,
         input_fn=reader,
     )
@@ -1159,6 +1160,16 @@ def _find_playback_stream(streams: tuple[PlaybackStream, ...], route_id: str) ->
         if stream.route_id == route_id:
             return stream
     raise ValueError(f"Selected playback stream route '{route_id}' was not discovered.")
+
+
+def _find_active_playback_stream(
+    streams: tuple[PlaybackStream, ...],
+    route_id: str,
+) -> PlaybackStream:
+    stream = _find_playback_stream(streams, route_id)
+    if not stream.active:
+        raise ValueError(f"Selected playback stream route '{route_id}' is not active.")
+    return stream
 
 
 def _prompt_choice(
