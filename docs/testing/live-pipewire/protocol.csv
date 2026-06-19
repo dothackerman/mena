@@ -1,0 +1,1 @@
+run_id,scenario_id,step_id,phase,action_type,command_or_action,expected,observed,evidence_path,verdict,notes
