@@ -4412,7 +4412,7 @@ def test_run_processing_stages_routes_in_person_room_mic_profile(
     )
 
     assert calls == [
-        "transcription:room_mic:de-CH",
+        "transcription:room_mic:de",
         "diarization:room_mic",
         "room_merge:room_mic-transcript:room_mic-regular:room_mic-exclusive",
         "confidence:merged-room",

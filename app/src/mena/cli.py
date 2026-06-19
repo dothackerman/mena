@@ -1612,7 +1612,7 @@ def _run_processing_stages(
             source_artifact=source_input.artifact,
             source_id=source_id,
             audio_path=source_input.path,
-            language=session_language,
+            language=_asr_language_from_session_language(session_language),
             attempt=attempt,
             now=now,
         )
@@ -2289,6 +2289,13 @@ def _session_language_or_default(
     if isinstance(language, str) and language:
         return language
     return default_language
+
+
+def _asr_language_from_session_language(language: str | None) -> str | None:
+    if language is None:
+        return None
+    normalized = language.replace("_", "-").split("-", 1)[0].lower()
+    return normalized or None
 
 
 def _required_str(payload: dict[str, object] | object, key: str) -> str:
