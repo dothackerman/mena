@@ -25,6 +25,7 @@ from mena.capture import (
 )
 from mena.profiles import CaptureProfileId, CaptureSourceId
 from mena.protocol import (
+    MAX_FRAME_BYTES,
     CaptureFinalizedPayload,
     CaptureRouteEventPayload,
     CaptureStartedPayload,
@@ -42,6 +43,7 @@ from mena.protocol import (
 )
 
 NO_PROCESSABLE_AUDIO_ERROR = "No processable audio segments were sealed."
+CAPTURE_FLUSH_ERROR_MESSAGE_MAX_CHARS = 4096
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -421,7 +423,7 @@ class SegmentFlushLoop:
                             session_id=self.session_id,
                             payload=ErrorPayload(
                                 code="capture_flush_failed",
-                                message=str(exc),
+                                message=_bounded_error_message(exc),
                                 recoverable=False,
                                 details={},
                             ).to_dict(),
@@ -433,6 +435,14 @@ class SegmentFlushLoop:
         if self._started_at is None:
             return 0.0
         return max(0.0, time.monotonic() - self._started_at)
+
+
+def _bounded_error_message(exc: BaseException) -> str:
+    message = str(exc) or exc.__class__.__name__
+    if len(message) <= CAPTURE_FLUSH_ERROR_MESSAGE_MAX_CHARS:
+        return message
+    suffix = f"... [truncated to keep protocol frame below {MAX_FRAME_BYTES} bytes]"
+    return message[:CAPTURE_FLUSH_ERROR_MESSAGE_MAX_CHARS] + suffix
 
 
 def _write_flushed_segments(

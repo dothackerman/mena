@@ -995,6 +995,42 @@ def test_segment_flush_loop_emits_status_then_structured_error() -> None:
     assert isinstance(loop.error, RuntimeError)
 
 
+def test_segment_flush_loop_bounds_large_error_message() -> None:
+    class FlakyCapture:
+        segments: list[CaptureSegment] = []
+        aborted = False
+
+        def flush_once(
+            self,
+            *,
+            stop_event: threading.Event | None = None,
+        ) -> tuple[CaptureSegment, ...]:
+            raise RuntimeError("x" * (MAX_FRAME_BYTES * 2))
+
+        def abort(self) -> None:
+            self.aborted = True
+
+    capture = FlakyCapture()
+    output = BytesIO()
+    loop = SegmentFlushLoop(
+        capture=cast(WorkerCaptureSession, capture),
+        session_id="session-1",
+        protocol_out=output,
+        write_lock=threading.Lock(),
+    )
+
+    loop.start()
+    loop.join()
+
+    frame = ProtocolMessage.decode(output.getvalue())
+    error = ErrorPayload.from_dict(frame.payload)
+    assert frame.type == "error"
+    assert error.code == "capture_flush_failed"
+    assert error.message.endswith("below 65536 bytes]")
+    assert len(output.getvalue()) <= MAX_FRAME_BYTES
+    assert capture.aborted
+
+
 def test_segment_flush_loop_emits_multiple_iterations_until_stopped() -> None:
     class CountingCapture:
         def __init__(self) -> None:
