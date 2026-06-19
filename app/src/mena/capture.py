@@ -970,11 +970,12 @@ class ActivePipeWireCapture:
         )
         close_source = getattr(self._adapter.pipewire_pcm_provider, "close_source", None)
         if callable(close_source):
-            close_source(
-                CaptureSourceId.SYSTEM_AUDIO,
-                plan=dedicated_plan,
-                sink_name=self.sink_name,
-            )
+            for source_id in (CaptureSourceId.LOCAL_MIC, CaptureSourceId.SYSTEM_AUDIO):
+                close_source(
+                    source_id,
+                    plan=dedicated_plan,
+                    sink_name=self.sink_name,
+                )
         self.null_sink_module = None
         self.loopback_module = None
         self._plan = replace(

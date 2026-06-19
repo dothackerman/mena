@@ -1089,7 +1089,10 @@ def test_pipewire_capture_adapter_stays_degraded_after_runtime_route_failure(
     ]
     assert provider.closed == 0
     assert provider.probe_attempts == 0
-    assert provider.closed_sources == [(CaptureSourceId.SYSTEM_AUDIO, CAPTURE_MODE_DEDICATED_ROUTE)]
+    assert provider.closed_sources == [
+        (CaptureSourceId.LOCAL_MIC, CAPTURE_MODE_DEDICATED_ROUTE),
+        (CaptureSourceId.SYSTEM_AUDIO, CAPTURE_MODE_DEDICATED_ROUTE),
+    ]
     assert calls[3:6] == [
         ["pactl", "move-sink-input", "51", "alsa_output.usb_headphones"],
         ["pactl", "unload-module", "202"],
