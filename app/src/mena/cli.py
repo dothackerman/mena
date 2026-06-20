@@ -593,16 +593,17 @@ def main(
                 start_payload=start_payload,
             )
             interrupted_stop = False
-            capture_started = False
+            start_command_sent = False
             monitor_started = False
+            finalized: ProtocolMessage | None = None
             try:
                 worker.handshake()
                 print(
                     "Recording notice: you are responsible for obtaining consent "
                     "from meeting participants."
                 )
+                start_command_sent = True
                 worker.start_capture(start_payload)
-                capture_started = True
                 if capture_monitor is not None:
                     capture_monitor.start()
                     monitor_started = True
@@ -615,7 +616,9 @@ def main(
                 if exit_code != 0:
                     raise WorkerExitedError(f"Worker exited with status {exit_code}.")
             except (EOFError, KeyboardInterrupt):
-                if not capture_started:
+                if finalized is not None:
+                    print("Worker teardown interrupted after capture finalization.")
+                elif not start_command_sent:
                     _persist_capture_failure(
                         record_path=created_session.record_path,
                         start_payload=start_payload,
@@ -625,31 +628,32 @@ def main(
                     )
                     print("Recording setup cancelled.")
                     return 1
-                print("Recording stop requested; finalizing capture.")
-                interrupted_stop = True
-                try:
-                    finalized = _finalize_recording(
-                        worker,
-                        capture_monitor if monitor_started else None,
-                    )
-                    exit_code = worker.wait(timeout=args.worker_exit_timeout)
-                    if exit_code != 0:
-                        raise WorkerExitedError(f"Worker exited with status {exit_code}.")
-                except (
-                    ProtocolError,
-                    WorkerExitedError,
-                    subprocess.TimeoutExpired,
-                    ValueError,
-                ) as exc:
-                    _persist_capture_failure(
-                        record_path=created_session.record_path,
-                        start_payload=start_payload,
-                        started_at=started_at,
-                        error_message=str(exc),
-                        now=now,
-                    )
-                    print(f"Capture failed: {exc}")
-                    return 1
+                else:
+                    print("Recording stop requested; finalizing capture.")
+                    interrupted_stop = True
+                    try:
+                        finalized = _finalize_recording(
+                            worker,
+                            capture_monitor if monitor_started else None,
+                        )
+                        exit_code = worker.wait(timeout=args.worker_exit_timeout)
+                        if exit_code != 0:
+                            raise WorkerExitedError(f"Worker exited with status {exit_code}.")
+                    except (
+                        ProtocolError,
+                        WorkerExitedError,
+                        subprocess.TimeoutExpired,
+                        ValueError,
+                    ) as exc:
+                        _persist_capture_failure(
+                            record_path=created_session.record_path,
+                            start_payload=start_payload,
+                            started_at=started_at,
+                            error_message=str(exc),
+                            now=now,
+                        )
+                        print(f"Capture failed: {exc}")
+                        return 1
             except (
                 ProtocolError,
                 WorkerExitedError,
@@ -675,7 +679,10 @@ def main(
             if capture_monitor is not None
             else finalized_payload.capture_metadata
         )
-        source_independence_error = _source_independence_error(capture_metadata)
+        source_independence_error = _source_independence_error(
+            capture_metadata,
+            session_dir=created_session.bundle_path,
+        )
         final_status = finalized_payload.status
         final_error = finalized_payload.error
         if source_independence_error is not None:
@@ -934,7 +941,11 @@ def _capture_source_summaries(
     return summaries
 
 
-def _source_independence_error(capture_metadata: dict[str, object]) -> str | None:
+def _source_independence_error(
+    capture_metadata: dict[str, object],
+    *,
+    session_dir: Path | None = None,
+) -> str | None:
     if capture_metadata.get("profile") != CaptureProfileId.ONLINE_DUAL_STREAM.value:
         return None
     route_ids = _capture_route_ids_by_source(capture_metadata)
@@ -945,12 +956,21 @@ def _source_independence_error(capture_metadata: dict[str, object]) -> str | Non
     segments = capture_metadata.get("segments")
     if not isinstance(segments, list):
         return None
-    local_hashes = _sealed_hashes_by_index(segments, CaptureSourceId.LOCAL_MIC.value)
-    system_hashes = _sealed_hashes_by_index(segments, CaptureSourceId.SYSTEM_AUDIO.value)
+    local_segments = _sealed_segments_by_index(segments, CaptureSourceId.LOCAL_MIC.value)
+    system_segments = _sealed_segments_by_index(segments, CaptureSourceId.SYSTEM_AUDIO.value)
+    local_hashes = _segment_hashes(local_segments)
+    system_hashes = _segment_hashes(system_segments)
     common_indexes = sorted(set(local_hashes) & set(system_hashes))
     if not common_indexes:
         return None
     if any(local_hashes[index] != system_hashes[index] for index in common_indexes):
+        return None
+    if _all_same_index_pairs_are_silent(
+        local_segments,
+        system_segments,
+        common_indexes,
+        session_dir=session_dir,
+    ):
         return None
     return (
         "Online capture source independence failed: local_mic and system_audio "
@@ -973,18 +993,63 @@ def _capture_route_ids_by_source(capture_metadata: dict[str, object]) -> dict[st
     return route_ids
 
 
-def _sealed_hashes_by_index(segments: list[object], source_id: str) -> dict[int, str]:
-    hashes: dict[int, str] = {}
+def _sealed_segments_by_index(
+    segments: list[object],
+    source_id: str,
+) -> dict[int, dict[str, object]]:
+    indexed: dict[int, dict[str, object]] = {}
     for segment in segments:
         if not isinstance(segment, dict) or segment.get("source_id") != source_id:
             continue
         if segment.get("status") != "sealed":
             continue
         index = segment.get("index")
+        if isinstance(index, int):
+            indexed[index] = segment
+    return indexed
+
+
+def _segment_hashes(segments: dict[int, dict[str, object]]) -> dict[int, str]:
+    hashes: dict[int, str] = {}
+    for index, segment in segments.items():
         sha256 = segment.get("sha256")
-        if isinstance(index, int) and isinstance(sha256, str) and sha256:
+        if isinstance(sha256, str) and sha256:
             hashes[index] = sha256
     return hashes
+
+
+def _all_same_index_pairs_are_silent(
+    local_segments: dict[int, dict[str, object]],
+    system_segments: dict[int, dict[str, object]],
+    indexes: Sequence[int],
+    *,
+    session_dir: Path | None,
+) -> bool:
+    if session_dir is None:
+        return False
+    for index in indexes:
+        local_silent = _segment_wav_is_silent(local_segments[index], session_dir=session_dir)
+        system_silent = _segment_wav_is_silent(system_segments[index], session_dir=session_dir)
+        if local_silent is not True or system_silent is not True:
+            return False
+    return True
+
+
+def _segment_wav_is_silent(segment: dict[str, object], *, session_dir: Path) -> bool | None:
+    raw_path = segment.get("path")
+    if not isinstance(raw_path, str) or not raw_path:
+        return None
+    path = Path(raw_path)
+    if not path.is_absolute():
+        path = session_dir / path
+    try:
+        with wave.open(str(path), "rb") as wav_file:
+            frames = wav_file.readframes(wav_file.getnframes())
+    except (EOFError, OSError, wave.Error):
+        return None
+    if not frames:
+        return True
+    return all(byte == 0 for byte in frames)
 
 
 def _capture_mode_for_route(route: CaptureRouteBindingPayload | None) -> str | None:

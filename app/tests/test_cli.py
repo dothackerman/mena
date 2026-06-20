@@ -544,6 +544,8 @@ def test_record_rejects_identical_online_source_hashes(
     tmp_path: Path,
     capsys: CaptureFixture[str],
 ) -> None:
+    IdenticalHashWorkerProcess.pcm_bytes = b"\x01\x00" * 320
+
     exit_code = main(
         [
             "record",
@@ -569,6 +571,36 @@ def test_record_rejects_identical_online_source_hashes(
     assert "source independence failed" in record["recording"]["finalization"]["error"]
     assert "Capture finalized as failed" in captured.out
     assert "mena process" not in captured.out
+
+
+def test_record_allows_identical_silent_online_source_hashes(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    exit_code = main(
+        [
+            "record",
+            "--profile",
+            "online",
+            "--language",
+            "en",
+            "--playback-stream",
+            "pulse:sink-input:151",
+        ],
+        data_root=tmp_path,
+        discoverer=_available_discoverer,
+        worker_factory=SilentIdenticalHashWorkerProcess,
+        input_fn=lambda _prompt: "q",
+    )
+
+    captured = capsys.readouterr()
+    record_path = next((tmp_path / "sessions").iterdir()) / "session.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert record["status"] == "recorded"
+    assert record["recording"]["finalization"]["status"] == "finalized"
+    assert "source independence failed" not in json.dumps(record)
+    assert "mena process" in captured.out
 
 
 def test_record_defaults_to_runtime_sessions_dir(
@@ -1389,14 +1421,45 @@ def test_record_startup_interrupt_does_not_wait_on_unstarted_monitor(
     captured = capsys.readouterr()
     record_path = next((tmp_path / "sessions").iterdir()) / "session.json"
     record = json.loads(record_path.read_text(encoding="utf-8"))
-    assert exit_code == 1
-    assert "Recording setup cancelled." in captured.out
-    assert not InterruptingStartWorkerProcess.stop_requested
+    assert exit_code == 0
+    assert "Recording stop requested; finalizing capture." in captured.out
+    assert InterruptingStartWorkerProcess.stop_requested
     assert InterruptingStartWorkerProcess.exited
-    assert record["status"] == "failed"
-    assert record["recording"]["finalization"]["error"] == "Recording setup cancelled."
-    assert record["failures"][0]["message"] == "Recording setup cancelled."
-    assert "capture_metadata" not in record
+    assert record["status"] == "recorded"
+    assert record["recording"]["stop_reason"] == "interrupted"
+    assert record["recording"]["finalization"]["status"] == "finalized"
+
+
+def test_record_wait_interrupt_after_finalization_does_not_finalize_again(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    InterruptingWaitAfterFinalizeWorkerProcess.stop_calls = 0
+
+    exit_code = main(
+        [
+            "record",
+            "--profile",
+            "online",
+            "--language",
+            "en",
+            "--playback-stream",
+            "pulse:sink-input:151",
+        ],
+        data_root=tmp_path,
+        discoverer=_available_discoverer,
+        worker_factory=InterruptingWaitAfterFinalizeWorkerProcess,
+        input_fn=lambda _prompt: "q",
+    )
+
+    captured = capsys.readouterr()
+    record_path = next((tmp_path / "sessions").iterdir()) / "session.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert "Worker teardown interrupted after capture finalization." in captured.out
+    assert InterruptingWaitAfterFinalizeWorkerProcess.stop_calls == 1
+    assert record["status"] == "recorded"
+    assert record["recording"]["finalization"]["status"] == "finalized"
 
 
 def test_record_keyboard_interrupt_persists_finalization_failure(
@@ -3216,18 +3279,20 @@ def _segment_payload(
     *,
     source_id: str,
     index: int,
+    path: str | None = None,
     sha256: str | None = None,
+    byte_count: int = 44,
 ) -> dict[str, object]:
     segment_sha256 = sha256 or hashlib.sha256(f"{source_id}:{index}".encode()).hexdigest()
     return {
         "source_id": source_id,
         "index": index,
-        "path": f"artifacts/source/{source_id}/{source_id}_{index:06d}.wav",
+        "path": path or f"artifacts/source/{source_id}/{source_id}_{index:06d}.wav",
         "sample_rate": 48_000,
         "channels": 1,
         "channel_layout": "mono",
         "sample_format": "pcm_s16le",
-        "byte_count": 44,
+        "byte_count": byte_count,
         "duration_seconds": 30.0,
         "started_at": None,
         "ended_at": None,
@@ -3238,6 +3303,27 @@ def _segment_payload(
         "status": "sealed",
         "format": "wav",
     }
+
+
+def _write_segment_payload(
+    session_dir: Path,
+    *,
+    source_id: str,
+    index: int,
+    pcm_bytes: bytes,
+) -> dict[str, object]:
+    relative_path = f"artifacts/source/{source_id}/{source_id}_{index:06d}.wav"
+    path = session_dir / relative_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    wav_bytes = make_wav_bytes(pcm_bytes)
+    path.write_bytes(wav_bytes)
+    return _segment_payload(
+        source_id=source_id,
+        index=index,
+        path=relative_path,
+        sha256=hashlib.sha256(wav_bytes).hexdigest(),
+        byte_count=len(wav_bytes),
+    )
 
 
 def _monitor_start_payload() -> StartCapturePayload:
@@ -3436,7 +3522,11 @@ class InterruptingStartWorkerProcess(WorkerProcess):
         self.__class__.stop_requested = True
 
     def stop_capture(self) -> ProtocolMessage:
-        raise AssertionError("startup cancellation should not finalize capture")
+        self.__class__.stop_requested = True
+        return _finalized_capture_message()
+
+    def wait(self, timeout: float | None = None) -> int:
+        return 0
 
 
 class MonitoredWorkerProcess(WorkerProcess):
@@ -3510,16 +3600,27 @@ class MonitoredWorkerProcess(WorkerProcess):
 
 
 class IdenticalHashWorkerProcess(MonitoredWorkerProcess):
+    pcm_bytes = b"\x01\x00" * 320
+
     def request_stop_capture(self) -> None:
-        shared_sha = "a" * 64
         self._messages.put(
             ProtocolMessage(
                 type="segments_flushed",
                 session_id=self.session_id,
                 payload={
                     "segments": [
-                        _segment_payload(source_id="local_mic", index=1, sha256=shared_sha),
-                        _segment_payload(source_id="system_audio", index=1, sha256=shared_sha),
+                        _write_segment_payload(
+                            self.session_dir,
+                            source_id="local_mic",
+                            index=1,
+                            pcm_bytes=self.pcm_bytes,
+                        ),
+                        _write_segment_payload(
+                            self.session_dir,
+                            source_id="system_audio",
+                            index=1,
+                            pcm_bytes=self.pcm_bytes,
+                        ),
                     ]
                 },
             )
@@ -3532,6 +3633,10 @@ class IdenticalHashWorkerProcess(MonitoredWorkerProcess):
         )
 
 
+class SilentIdenticalHashWorkerProcess(IdenticalHashWorkerProcess):
+    pcm_bytes = b"\x00\x00" * 320
+
+
 class FailingWorkerProcess(FakeWorkerProcess):
     def handshake(self) -> ProtocolMessage:
         raise ProtocolError("worker refused handshake")
@@ -3540,6 +3645,17 @@ class FailingWorkerProcess(FakeWorkerProcess):
 class NonzeroExitWorkerProcess(FakeWorkerProcess):
     def wait(self, timeout: float | None = None) -> int:
         return 3
+
+
+class InterruptingWaitAfterFinalizeWorkerProcess(FakeWorkerProcess):
+    stop_calls = 0
+
+    def stop_capture(self) -> ProtocolMessage:
+        self.__class__.stop_calls += 1
+        return super().stop_capture()
+
+    def wait(self, timeout: float | None = None) -> int:
+        raise KeyboardInterrupt
 
 
 class FinalizationFailingWorkerProcess(FakeWorkerProcess):
