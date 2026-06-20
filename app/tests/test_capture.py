@@ -349,7 +349,14 @@ def test_pipewire_pcm_provider_uses_explicit_backend_targets_not_route_ids() -> 
     )
 
     assert microphone_command[2] == "alsa_input.usb_mic"
-    assert system_mix_command[2] == "alsa_output.usb_headphones.monitor"
+    assert "stream.capture.sink=true" not in microphone_command
+    assert system_mix_command[:5] == [
+        "pw-record",
+        "-P",
+        "stream.capture.sink=true",
+        "--target",
+        "alsa_output.usb_headphones",
+    ]
 
 
 def test_pipewire_pcm_provider_reuses_continuous_stream_across_segments() -> None:
@@ -583,7 +590,13 @@ def test_pipewire_pcm_provider_probes_candidate_stream_before_switching() -> Non
         sink_name="mena_session_remote",
     )
 
-    assert started_commands[0][:3] == ["pw-record", "--target", "mena_session_remote.monitor"]
+    assert started_commands[0][:5] == [
+        "pw-record",
+        "-P",
+        "stream.capture.sink=true",
+        "--target",
+        "mena_session_remote",
+    ]
     assert cast(Any, processes[0]).terminated
 
 
@@ -932,7 +945,7 @@ def test_pipewire_pcm_provider_cleans_up_started_processes_on_spawn_failure() ->
             self.stdout = io.BytesIO(b"\x00\x00")
             self.stderr = io.BytesIO()
             self.returncode: int | None = None
-            if "--target" in args and "mena_session_remote.monitor" in args:
+            if "stream.capture.sink=true" in args and "mena_session_remote" in args:
                 raise FileNotFoundError("pw-record")
 
         def poll(self) -> int | None:
@@ -1035,7 +1048,7 @@ def test_pipewire_capture_adapter_default_flush_uses_aligned_segments(tmp_path: 
     ]
 
 
-def test_pipewire_pcm_provider_uses_output_sink_monitor_for_system_mix_fallback() -> None:
+def test_pipewire_pcm_provider_captures_output_sink_for_system_mix_fallback() -> None:
     provider = PipeWirePcmProvider()
     plan = CaptureRoutePlan(
         session_id="session-1",
@@ -1053,7 +1066,13 @@ def test_pipewire_pcm_provider_uses_output_sink_monitor_for_system_mix_fallback(
         sink_name="mena_session_remote",
     )
 
-    assert command[2] == "alsa_output.usb_headphones.monitor"
+    assert command[:5] == [
+        "pw-record",
+        "-P",
+        "stream.capture.sink=true",
+        "--target",
+        "alsa_output.usb_headphones",
+    ]
 
 
 def test_pipewire_pcm_provider_requires_target_for_system_mix_fallback() -> None:

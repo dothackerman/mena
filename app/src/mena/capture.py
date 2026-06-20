@@ -51,6 +51,12 @@ class CaptureRoutePlan:
 
 
 @dataclass(frozen=True)
+class _PwRecordCommandSpec:
+    target: str
+    capture_sink: bool = False
+
+
+@dataclass(frozen=True)
 class CaptureSegment:
     """A sealed source audio segment."""
 
@@ -472,11 +478,11 @@ class PipeWirePcmProvider:
         plan: CaptureRoutePlan,
         sink_name: str,
     ) -> list[str]:
-        target = self._target_for_source(source_id, plan=plan, sink_name=sink_name)
-        return [
+        spec = self._command_spec_for_source(source_id, plan=plan, sink_name=sink_name)
+        command = [
             "pw-record",
             "--target",
-            target,
+            spec.target,
             "--raw",
             "--format",
             "s16",
@@ -486,6 +492,9 @@ class PipeWirePcmProvider:
             str(self.channels),
             "-",
         ]
+        if spec.capture_sink:
+            command[1:1] = ["-P", "stream.capture.sink=true"]
+        return command
 
     def _target_for_source(
         self,
@@ -494,15 +503,32 @@ class PipeWirePcmProvider:
         plan: CaptureRoutePlan,
         sink_name: str,
     ) -> str:
+        return self._command_spec_for_source(
+            source_id,
+            plan=plan,
+            sink_name=sink_name,
+        ).target
+
+    def _command_spec_for_source(
+        self,
+        source_id: CaptureSourceId,
+        *,
+        plan: CaptureRoutePlan,
+        sink_name: str,
+    ) -> _PwRecordCommandSpec:
         if source_id is CaptureSourceId.LOCAL_MIC:
-            return _required_backend_target(
-                plan.microphone_pw_record_target,
-                "microphone",
+            return _PwRecordCommandSpec(
+                target=_required_backend_target(
+                    plan.microphone_pw_record_target,
+                    "microphone",
+                )
             )
         if source_id is CaptureSourceId.ROOM_MIC:
-            return _required_backend_target(
-                plan.microphone_pw_record_target,
-                "microphone",
+            return _PwRecordCommandSpec(
+                target=_required_backend_target(
+                    plan.microphone_pw_record_target,
+                    "microphone",
+                )
             )
         if source_id is CaptureSourceId.SYSTEM_AUDIO:
             if plan.system_audio_mode == CAPTURE_MODE_SYSTEM_MIX_REMOTE:
@@ -510,12 +536,18 @@ class PipeWirePcmProvider:
                     plan.output_sink_pw_record_target,
                     "output sink",
                 )
-                return f"{output_sink_target}.monitor"
+                return _PwRecordCommandSpec(
+                    target=output_sink_target,
+                    capture_sink=True,
+                )
             if plan.system_audio_mode != CAPTURE_MODE_DEDICATED_ROUTE:
                 raise ValueError(
                     f"Unsupported system audio capture mode '{plan.system_audio_mode}'."
                 )
-            return f"{sink_name}.monitor"
+            return _PwRecordCommandSpec(
+                target=sink_name,
+                capture_sink=True,
+            )
         raise ValueError(f"Unsupported capture source '{source_id}'.")
 
 
