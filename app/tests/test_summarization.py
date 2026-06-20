@@ -27,6 +27,7 @@ from mena.merge_timing import (
     persist_merged_transcript_artifact,
 )
 from mena.processing import ArtifactRef, ProcessingStageLedger
+from mena.runtime_stewardship import RuntimeLease
 from mena.summarization import (
     SUMMARIZATION_STAGE,
     FakeSummarizationProvider,
@@ -835,6 +836,70 @@ def test_summary_schema_rejects_legacy_provider_config_inside_policy() -> None:
 def test_ollama_provider_rejects_remote_secret_or_malformed_endpoints(endpoint: str) -> None:
     with pytest.raises(SummarizationContractError):
         OllamaSummarizationProvider(endpoint=endpoint)
+
+
+def test_ollama_summarization_provider_marks_resource_used_before_failed_chat_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OllamaSummarizationProvider(
+        model="test-model",
+        endpoint="http://localhost:11434",
+    )
+
+    def fake_urlopen(_request: object, *, timeout: float) -> object:
+        _ = timeout
+        raise OSError("connection refused")
+
+    monkeypatch.setattr("mena.local_llm.urllib.request.urlopen", fake_urlopen)
+
+    with pytest.raises(SummarizationProviderUnavailable, match="provider is unavailable"):
+        provider._post_json("/api/chat", {"model": "test-model"})
+
+    assert provider.runtime_resource_used is True
+
+
+def test_ollama_summarization_provider_releases_runtime_resource(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OllamaSummarizationProvider(
+        model="test-model",
+        endpoint="http://localhost:11434",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_unload_ollama_model(
+        *,
+        endpoint: str,
+        model: str,
+        timeout_seconds: float,
+    ) -> str:
+        captured["endpoint"] = endpoint
+        captured["model"] = model
+        captured["timeout_seconds"] = timeout_seconds
+        return "unload"
+
+    monkeypatch.setattr(
+        "mena.summarization.unload_ollama_model",
+        fake_unload_ollama_model,
+    )
+    lease = RuntimeLease(
+        resource_kind="local_llm",
+        stage="summarization",
+        boundary="summarize",
+        provider="ollama",
+        model="test-model",
+    )
+
+    result = provider.release_runtime_resource(lease)
+
+    assert result.status == "released"
+    assert result.lease == lease
+    assert result.detail == "Ollama model release completed: unload."
+    assert captured == {
+        "endpoint": "http://localhost:11434",
+        "model": "test-model",
+        "timeout_seconds": provider.timeout_seconds,
+    }
 
 
 def _persist_merged_transcript(

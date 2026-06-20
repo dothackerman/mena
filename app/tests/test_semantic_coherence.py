@@ -21,6 +21,7 @@ from mena.merge_timing import (
 )
 from mena.processing import ArtifactRef, ProcessingStageLedger
 from mena.review_flagging import REVIEW_QUEUE_ARTIFACT_TYPE
+from mena.runtime_stewardship import RuntimeLease
 from mena.semantic_coherence import (
     SEMANTIC_COHERENCE_STAGE,
     FakeSemanticCoherenceProvider,
@@ -66,17 +67,21 @@ def test_semantic_coherence_stage_persists_review_flags_and_checkpoint(
 
     assert result.skipped is False
     assert result.state.status == "completed"
-    payload = json.loads(store.retrieve(result.review_queue_record.id))
+    review_queue = result.review_queue
+    review_queue_record = result.review_queue_record
+    assert review_queue is not None
+    assert review_queue_record is not None
+    payload = json.loads(store.retrieve(review_queue_record.id))
     Draft202012Validator(
         _load_review_queue_schema(),
         format_checker=FormatChecker(),
     ).validate(payload)
-    assert result.review_queue_record.artifact_type == "review_queue"
-    assert result.review_queue_record.version == 1
-    policy = cast(dict[str, object], result.review_queue.policy)
+    assert review_queue_record.artifact_type == "review_queue"
+    assert review_queue_record.version == 1
+    policy = cast(dict[str, object], review_queue.policy)
     assert policy["provider_config_id"] == provider.metadata.config_id
-    assert len(result.review_queue.flags) == 1
-    flag = result.review_queue.flags[0]
+    assert len(review_queue.flags) == 1
+    flag = review_queue.flags[0]
     assert flag.reason_code == "semantic_incoherence"
     assert flag.segment_id == "merged_segment_000002"
     assert flag.metadata["confidence"] == pytest.approx(0.82)
@@ -156,6 +161,7 @@ def test_semantic_coherence_stage_respects_policy_threshold_and_provider_config(
         now=NOW,
     )
 
+    assert first.review_queue is not None
     assert first.review_queue.flags == ()
     assert second.skipped is False
 
@@ -185,6 +191,37 @@ def test_semantic_coherence_stage_marks_failed_checkpoint_when_provider_unavaila
     assert failed.error is not None
     assert failed.error.retryable is True
     assert failed.error.code == "semantic_coherence_failed"
+
+
+def test_semantic_coherence_stage_skips_provider_unavailable_when_requested() -> None:
+    class UnavailableProvider:
+        metadata = FakeSemanticCoherenceProvider(results={}).metadata
+
+        def check(self, request: object) -> SemanticCoherenceResult:
+            raise SemanticCoherenceProviderUnavailable("provider unavailable")
+
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    merged_record = _persist_merged_transcript(store=store)
+    ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+
+    result = run_semantic_coherence_stage(
+        store=store,
+        ledger=ledger,
+        merged_transcript_record=merged_record,
+        provider=UnavailableProvider(),
+        skip_provider_unavailable=True,
+        now=NOW,
+    )
+
+    states = ledger.states(stage=SEMANTIC_COHERENCE_STAGE)
+    assert result.skipped is True
+    assert result.skip_reason == "provider_unavailable"
+    assert result.review_queue is None
+    assert result.review_queue_record is None
+    assert result.state.status == "skipped"
+    assert states[-1].status == "skipped"
+    assert states[-1].skip_reason == "provider_unavailable"
+    assert all(state.status != "failed" for state in states)
 
 
 def test_semantic_coherence_stage_fails_on_session_mismatch() -> None:
@@ -227,7 +264,9 @@ def test_semantic_coherence_stage_ignores_corrupt_reusable_output(tmp_path: Path
         provider=provider,
         now=NOW,
     )
-    (tmp_path / first.review_queue_record.path).write_bytes(b"corrupt")
+    first_review_queue_record = first.review_queue_record
+    assert first_review_queue_record is not None
+    (tmp_path / first_review_queue_record.path).write_bytes(b"corrupt")
     second = run_semantic_coherence_stage(
         store=store,
         ledger=ledger,
@@ -238,7 +277,8 @@ def test_semantic_coherence_stage_ignores_corrupt_reusable_output(tmp_path: Path
     )
 
     assert second.skipped is False
-    assert second.review_queue_record.id != first.review_queue_record.id
+    assert second.review_queue_record is not None
+    assert second.review_queue_record.id != first_review_queue_record.id
 
 
 def test_semantic_coherence_stage_ignores_contract_invalid_reusable_output() -> None:
@@ -287,6 +327,7 @@ def test_semantic_coherence_stage_ignores_contract_invalid_reusable_output() -> 
     )
 
     assert result.skipped is False
+    assert result.review_queue_record is not None
     assert result.review_queue_record.id != review_record.id
 
 
@@ -609,6 +650,68 @@ def test_ollama_post_json_handles_success_invalid_json_and_unavailable(
     monkeypatch.setattr("mena.local_llm.urllib.request.urlopen", unavailable_urlopen)
     with pytest.raises(SemanticCoherenceProviderUnavailable, match="provider is unavailable"):
         provider._post_json("/api/chat", {"model": "test-model"})
+
+
+def test_ollama_semantic_provider_marks_runtime_resource_used_before_failed_chat_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OllamaSemanticCoherenceProvider(
+        model="test-model", endpoint="http://localhost:11434"
+    )
+
+    def unavailable_urlopen(request: object, *, timeout: float) -> object:
+        raise OSError("connection refused")
+
+    monkeypatch.setattr("mena.local_llm.urllib.request.urlopen", unavailable_urlopen)
+
+    with pytest.raises(SemanticCoherenceProviderUnavailable, match="provider is unavailable"):
+        provider._post_json("/api/chat", {"model": "test-model"})
+
+    assert provider.runtime_resource_used is True
+
+
+def test_ollama_semantic_provider_releases_runtime_resource(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OllamaSemanticCoherenceProvider(
+        model="test-model",
+        endpoint="http://localhost:11434",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_unload_ollama_model(
+        *,
+        endpoint: str,
+        model: str,
+        timeout_seconds: float,
+    ) -> str:
+        captured["endpoint"] = endpoint
+        captured["model"] = model
+        captured["timeout_seconds"] = timeout_seconds
+        return "unload"
+
+    monkeypatch.setattr(
+        "mena.semantic_coherence.unload_ollama_model",
+        fake_unload_ollama_model,
+    )
+    lease = RuntimeLease(
+        resource_kind="local_llm",
+        stage="semantic-review",
+        boundary="process",
+        provider="ollama",
+        model="test-model",
+    )
+
+    result = provider.release_runtime_resource(lease)
+
+    assert result.status == "released"
+    assert result.lease == lease
+    assert result.detail == "Ollama model release completed: unload."
+    assert captured == {
+        "endpoint": "http://localhost:11434",
+        "model": "test-model",
+        "timeout_seconds": provider.timeout_seconds,
+    }
 
 
 @pytest.mark.parametrize(

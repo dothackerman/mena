@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -114,8 +115,13 @@ def test_runtime_profile_state_persists_under_runtime_state_home(tmp_path: Path)
     profile = get_alpha_local_profile()
     state = _state(runtime_paths=_runtime_paths(tmp_path), asr_model_present=True)
     evaluation = evaluate_setup(profile, state)
+    fallback_evaluation = evaluate_setup(default_profile_catalog()[1], state)
 
-    accepted = build_runtime_profile_state(evaluation)
+    accepted = build_runtime_profile_state(
+        evaluation,
+        fallback_evaluation=fallback_evaluation,
+        authorize_local_fallback=True,
+    )
     state_path = persist_runtime_profile_state(accepted, paths=state.runtime_paths)
     loaded = load_runtime_profile_state(state.runtime_paths)
 
@@ -124,6 +130,76 @@ def test_runtime_profile_state_persists_under_runtime_state_home(tmp_path: Path)
     assert loaded.catalog_version == RUNTIME_PROFILE_CATALOG_VERSION
     assert loaded.evidence_digest == accepted.evidence_digest
     assert loaded.selected_asr_profile.id == evaluation.selected_asr_profile.id
+    assert loaded.fallback_authorization.local_status == "authorized"
+    assert loaded.fallback_authorization.local_profile_id == FALLBACK_LOCAL_PROFILE_ID
+    assert loaded.fallback_authorization.automatic_local_fallback_authorized is True
+    assert set(loaded.fallback_authorization.stage_scope) == {"transcription", "diarization"}
+    assert loaded.fallback_authorization.remote_status == "not_configured"
+
+
+def test_runtime_profile_state_requires_explicit_local_fallback_authorization() -> None:
+    profile = get_alpha_local_profile()
+    state = _state(asr_model_present=True, diarization_model_present=True)
+    evaluation = evaluate_setup(profile, state)
+    fallback_evaluation = evaluate_setup(default_profile_catalog()[1], state)
+
+    accepted = build_runtime_profile_state(
+        evaluation,
+        fallback_evaluation=fallback_evaluation,
+    )
+
+    assert accepted.fallback_authorization.local_status == "configured_unauthorized"
+    assert accepted.fallback_authorization.local_profile_id == FALLBACK_LOCAL_PROFILE_ID
+    assert accepted.fallback_authorization.automatic_local_fallback_authorized is False
+    assert (
+        "automatic local fallback was not authorized by setup"
+        in accepted.fallback_authorization.blocking_reasons
+    )
+
+
+def test_runtime_profile_state_does_not_authorize_unevaluated_local_fallback() -> None:
+    profile = get_alpha_local_profile()
+    evaluation = evaluate_setup(profile, _state(asr_model_present=True))
+
+    accepted = build_runtime_profile_state(evaluation)
+
+    assert accepted.fallback_authorization.local_status == "configured_unauthorized"
+    assert accepted.fallback_authorization.local_profile_id == FALLBACK_LOCAL_PROFILE_ID
+    assert accepted.fallback_authorization.automatic_local_fallback_authorized is False
+
+
+def test_runtime_profile_state_records_unavailable_evaluated_local_fallback() -> None:
+    profile = get_alpha_local_profile()
+    fallback_profile = default_profile_catalog()[1]
+    state = _state(
+        asr_model_present=True,
+        diarization_model_present=True,
+        hardware=HardwareFacts(
+            system="Linux",
+            ram_gb=32.0,
+            cuda_available=True,
+            vram_gb=12.0,
+            avx2_available=False,
+        ),
+    )
+    evaluation = evaluate_setup(
+        profile,
+        state,
+    )
+    fallback_evaluation = evaluate_setup(
+        fallback_profile,
+        state,
+    )
+
+    accepted = build_runtime_profile_state(
+        evaluation,
+        fallback_evaluation=fallback_evaluation,
+    )
+
+    assert accepted.fallback_authorization.local_status == "unavailable"
+    assert accepted.fallback_authorization.local_profile_id == FALLBACK_LOCAL_PROFILE_ID
+    assert accepted.fallback_authorization.automatic_local_fallback_authorized is False
+    assert "requires an AVX2-capable CPU" in accepted.fallback_authorization.blocking_reasons[0]
 
 
 def test_runtime_profile_state_rejects_incomplete_setup() -> None:
@@ -490,6 +566,50 @@ def test_detect_local_installation_state_probes_surfaces_with_target_interpreter
         and "importlib.util.find_spec('pyannote.audio')" in call[2]
         for call in runner.run_calls
     )
+
+
+def test_detect_local_installation_state_skips_probes_outside_scoped_profile(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    base_profile = get_alpha_local_profile()
+    scoped_profile = replace(
+        base_profile,
+        stages=tuple(
+            stage
+            for stage in base_profile.stages
+            if stage.stage in {"transcription", "diarization"}
+        ),
+        required_commands=("mena",),
+        playback_commands=(),
+    )
+    runner = FakeRunner()
+
+    state = detect_local_installation_state(
+        settings,
+        runner=runner,
+        command_identity=CommandIdentity(
+            current_executable=Path("/bin/mena"),
+            plain_mena_path=Path("/bin/mena"),
+            version="0.1.0",
+            invocation_mode="installed-product",
+        ),
+        hardware=HardwareFacts(
+            system="Linux",
+            ram_gb=32.0,
+            cuda_available=False,
+            vram_gb=None,
+            avx2_available=True,
+        ),
+        profile=scoped_profile,
+        python_executable=Path("/target/python"),
+    )
+
+    assert ("ollama", "list") not in runner.run_calls
+    assert state.ollama.model_present is False
+    assert state.ollama.detail == "Ollama was not evaluated for this scoped runtime profile."
+    assert state.asr_model_present is True
+    assert state.diarization_model_present is True
 
 
 def test_diarization_cache_probe_clears_ambient_tokens_when_env_has_none(

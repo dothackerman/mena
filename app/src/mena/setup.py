@@ -37,6 +37,11 @@ REQUIRED_COMMANDS = ("mena", "uv", "ollama", "pw-dump", "pw-cli", "wpctl")
 PLAYBACK_COMMANDS = ("ffplay", "pw-play", "paplay", "aplay")
 MINIMUM_RAM_GB = 16.0
 MINIMUM_CUDA_VRAM_GB = 5.0
+LOCAL_FALLBACK_STAGE_SCOPE = ("transcription", "diarization")
+LOCAL_FALLBACK_STATUSES = frozenset(
+    {"not_configured", "configured_unauthorized", "authorized", "unavailable"}
+)
+REMOTE_FALLBACK_STATUSES = frozenset({"not_configured", "configured_unauthorized", "authorized"})
 
 
 @dataclass(frozen=True)
@@ -286,6 +291,7 @@ class RuntimeProfileState:
     readiness_summary: tuple[ReadinessItem, ...]
     evidence_digest: str
     evidence: Mapping[str, object]
+    fallback_authorization: RuntimeFallbackAuthorization
 
     @classmethod
     def from_dict(cls, data: object) -> RuntimeProfileState:
@@ -306,6 +312,9 @@ class RuntimeProfileState:
             readiness_summary=_readiness_items_from_dicts(data.get("readiness_summary")),
             evidence_digest=_required_str(data, "evidence_digest"),
             evidence=_required_mapping(data, "evidence"),
+            fallback_authorization=RuntimeFallbackAuthorization.from_dict(
+                data.get("fallback_authorization")
+            ),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -321,6 +330,73 @@ class RuntimeProfileState:
             "readiness_summary": [_readiness_item_to_dict(item) for item in self.readiness_summary],
             "evidence_digest": self.evidence_digest,
             "evidence": dict(self.evidence),
+            "fallback_authorization": self.fallback_authorization.to_dict(),
+        }
+
+
+@dataclass(frozen=True)
+class RuntimeFallbackAuthorization:
+    """Accepted local/remote fallback authorization persisted by setup."""
+
+    local_status: str
+    local_profile_id: str | None
+    local_profile_version: str | None
+    automatic_local_fallback_authorized: bool
+    stage_scope: tuple[str, ...]
+    placement_change_allowed: bool
+    profile_change_allowed: bool
+    remote_status: str
+    remote_stage_scope: tuple[str, ...] = ()
+    blocking_reasons: tuple[str, ...] = ()
+
+    @classmethod
+    def from_dict(cls, data: object) -> RuntimeFallbackAuthorization:
+        if data is None:
+            return cls.legacy_default()
+        if not isinstance(data, dict):
+            raise ValueError("Runtime fallback authorization must be a JSON object.")
+        authorization = cls(
+            local_status=_required_str(data, "local_status"),
+            local_profile_id=_optional_str(data, "local_profile_id"),
+            local_profile_version=_optional_str(data, "local_profile_version"),
+            automatic_local_fallback_authorized=_required_bool(
+                data, "automatic_local_fallback_authorized"
+            ),
+            stage_scope=_str_tuple(data.get("stage_scope"), "stage_scope"),
+            placement_change_allowed=_required_bool(data, "placement_change_allowed"),
+            profile_change_allowed=_required_bool(data, "profile_change_allowed"),
+            remote_status=_required_str(data, "remote_status"),
+            remote_stage_scope=_str_tuple(data.get("remote_stage_scope"), "remote_stage_scope"),
+            blocking_reasons=_str_tuple(data.get("blocking_reasons"), "blocking_reasons"),
+        )
+        _validate_runtime_fallback_authorization(authorization)
+        return authorization
+
+    @classmethod
+    def legacy_default(cls) -> RuntimeFallbackAuthorization:
+        return cls(
+            local_status="not_configured",
+            local_profile_id=None,
+            local_profile_version=None,
+            automatic_local_fallback_authorized=False,
+            stage_scope=(),
+            placement_change_allowed=False,
+            profile_change_allowed=False,
+            remote_status="not_configured",
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "local_status": self.local_status,
+            "local_profile_id": self.local_profile_id,
+            "local_profile_version": self.local_profile_version,
+            "automatic_local_fallback_authorized": self.automatic_local_fallback_authorized,
+            "stage_scope": list(self.stage_scope),
+            "placement_change_allowed": self.placement_change_allowed,
+            "profile_change_allowed": self.profile_change_allowed,
+            "remote_status": self.remote_status,
+            "remote_stage_scope": list(self.remote_stage_scope),
+            "blocking_reasons": list(self.blocking_reasons),
         }
 
 
@@ -531,24 +607,35 @@ def detect_local_installation_state(
         )
         for requirement in evaluated_profile.python_surfaces
     )
-    ollama = _detect_ollama_state(
-        settings=settings,
-        model=_local_llm_model(evaluated_profile),
-        command=_command_check(commands, "ollama"),
-        runner=command_runner,
+    if _profile_has_any_stage(evaluated_profile, {"summarization", "semantic-review"}):
+        ollama = _detect_ollama_state(
+            settings=settings,
+            model=_local_llm_model(evaluated_profile),
+            command=_command_check(commands, "ollama"),
+            runner=command_runner,
+        )
+    else:
+        ollama = _not_evaluated_ollama_state(settings)
+    asr_model_present = (
+        _detect_asr_model_present(
+            runner=command_runner,
+            python_executable=resolved_python,
+            profile=selected_asr_profile,
+            python_surfaces=surfaces,
+        )
+        if _profile_has_stage(evaluated_profile, "transcription")
+        else None
     )
-    asr_model_present = _detect_asr_model_present(
-        runner=command_runner,
-        python_executable=resolved_python,
-        profile=selected_asr_profile,
-        python_surfaces=surfaces,
-    )
-    diarization_model_present = _detect_diarization_model_present(
-        runner=command_runner,
-        python_executable=resolved_python,
-        python_surfaces=surfaces,
-        env=current_env,
-        device=_stage_device(evaluated_profile, "diarization", selected_asr_profile),
+    diarization_model_present = (
+        _detect_diarization_model_present(
+            runner=command_runner,
+            python_executable=resolved_python,
+            python_surfaces=surfaces,
+            env=current_env,
+            device=_stage_device(evaluated_profile, "diarization", selected_asr_profile),
+        )
+        if _profile_has_stage(evaluated_profile, "diarization")
+        else None
     )
     return LocalInstallationState(
         command_identity=identity,
@@ -693,6 +780,8 @@ def build_runtime_profile_state(
     evaluation: SetupEvaluation,
     *,
     accepted_at: datetime | None = None,
+    fallback_evaluation: SetupEvaluation | None = None,
+    authorize_local_fallback: bool = False,
 ) -> RuntimeProfileState:
     """Build persisted state from an already-ready setup evaluation."""
 
@@ -715,6 +804,11 @@ def build_runtime_profile_state(
         readiness_summary=evaluation.readiness,
         evidence_digest=evidence_digest,
         evidence=evidence,
+        fallback_authorization=_build_runtime_fallback_authorization(
+            evaluation,
+            fallback_evaluation=fallback_evaluation,
+            authorize_local_fallback=authorize_local_fallback,
+        ),
     )
 
 
@@ -1265,6 +1359,17 @@ def _detect_ollama_state(
     )
 
 
+def _not_evaluated_ollama_state(settings: AppSettings) -> OllamaState:
+    return OllamaState(
+        endpoint=settings.local_llm.ollama_endpoint,
+        model=settings.local_llm.ollama_model,
+        command=CommandCheck("ollama", None),
+        reachable=False,
+        model_present=False,
+        detail="Ollama was not evaluated for this scoped runtime profile.",
+    )
+
+
 def _detect_ram_gb() -> float | None:
     try:
         pages = os.sysconf("SC_PHYS_PAGES")
@@ -1431,6 +1536,81 @@ def _resolved_stage_profiles(evaluation: SetupEvaluation) -> tuple[StageProfile,
         else:
             stages.append(stage)
     return tuple(stages)
+
+
+def _build_runtime_fallback_authorization(
+    evaluation: SetupEvaluation,
+    *,
+    fallback_evaluation: SetupEvaluation | None,
+    authorize_local_fallback: bool,
+) -> RuntimeFallbackAuthorization:
+    try:
+        local_llm_model = _local_llm_model(evaluation.profile)
+    except ValueError:
+        return RuntimeFallbackAuthorization.legacy_default()
+    fallback_profile = next(
+        (profile for profile in default_profile_catalog(local_llm_model) if profile.fallback),
+        None,
+    )
+    if fallback_profile is None:
+        return RuntimeFallbackAuthorization.legacy_default()
+
+    stage_scope = tuple(
+        stage.stage
+        for stage in fallback_profile.stages
+        if stage.stage in LOCAL_FALLBACK_STAGE_SCOPE
+    )
+    if fallback_evaluation is None:
+        return RuntimeFallbackAuthorization(
+            local_status="configured_unauthorized",
+            local_profile_id=fallback_profile.id,
+            local_profile_version=fallback_profile.version,
+            automatic_local_fallback_authorized=False,
+            stage_scope=stage_scope,
+            placement_change_allowed=True,
+            profile_change_allowed=True,
+            remote_status="not_configured",
+            blocking_reasons=("fallback profile was not evaluated by setup",),
+        )
+    if (
+        fallback_evaluation.profile.id != fallback_profile.id
+        or fallback_evaluation.profile.version != fallback_profile.version
+    ):
+        raise ValueError("Fallback authorization evaluation must use the bundled fallback profile.")
+    if not fallback_evaluation.ready:
+        return RuntimeFallbackAuthorization(
+            local_status="unavailable",
+            local_profile_id=fallback_profile.id,
+            local_profile_version=fallback_profile.version,
+            automatic_local_fallback_authorized=False,
+            stage_scope=stage_scope,
+            placement_change_allowed=True,
+            profile_change_allowed=True,
+            remote_status="not_configured",
+            blocking_reasons=fallback_evaluation.blocking_reasons,
+        )
+    if not authorize_local_fallback:
+        return RuntimeFallbackAuthorization(
+            local_status="configured_unauthorized",
+            local_profile_id=fallback_profile.id,
+            local_profile_version=fallback_profile.version,
+            automatic_local_fallback_authorized=False,
+            stage_scope=stage_scope,
+            placement_change_allowed=True,
+            profile_change_allowed=True,
+            remote_status="not_configured",
+            blocking_reasons=("automatic local fallback was not authorized by setup",),
+        )
+    return RuntimeFallbackAuthorization(
+        local_status="authorized",
+        local_profile_id=fallback_profile.id,
+        local_profile_version=fallback_profile.version,
+        automatic_local_fallback_authorized=True,
+        stage_scope=stage_scope,
+        placement_change_allowed=True,
+        profile_change_allowed=True,
+        remote_status="not_configured",
+    )
 
 
 def _detect_asr_model_present(
@@ -1650,10 +1830,26 @@ def _required_str(data: Mapping[str, object], key: str) -> str:
     return value
 
 
+def _optional_str(data: Mapping[str, object], key: str) -> str | None:
+    value = data.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"Runtime profile state field '{key}' must be null or a non-empty string.")
+    return value
+
+
 def _required_int(data: Mapping[str, object], key: str) -> int:
     value = data.get(key)
     if type(value) is not int:
         raise ValueError(f"Runtime profile state field '{key}' must be an integer.")
+    return value
+
+
+def _required_bool(data: Mapping[str, object], key: str) -> bool:
+    value = data.get(key)
+    if type(value) is not bool:
+        raise ValueError(f"Runtime profile state field '{key}' must be a boolean.")
     return value
 
 
@@ -1662,6 +1858,48 @@ def _required_mapping(data: Mapping[str, object], key: str) -> Mapping[str, obje
     if not isinstance(value, dict):
         raise ValueError(f"Runtime profile state field '{key}' must be a JSON object.")
     return value
+
+
+def _str_tuple(data: object, key: str) -> tuple[str, ...]:
+    if data is None:
+        return ()
+    if not isinstance(data, list):
+        raise ValueError(f"Runtime profile state field '{key}' must be an array.")
+    values: list[str] = []
+    for item in data:
+        if not isinstance(item, str) or not item:
+            raise ValueError(
+                f"Runtime profile state field '{key}' must contain only non-empty strings."
+            )
+        values.append(item)
+    return tuple(values)
+
+
+def _validate_runtime_fallback_authorization(
+    authorization: RuntimeFallbackAuthorization,
+) -> None:
+    if authorization.local_status not in LOCAL_FALLBACK_STATUSES:
+        valid = ", ".join(sorted(LOCAL_FALLBACK_STATUSES))
+        raise ValueError(f"Runtime local fallback status must be one of: {valid}.")
+    if authorization.remote_status not in REMOTE_FALLBACK_STATUSES:
+        valid = ", ".join(sorted(REMOTE_FALLBACK_STATUSES))
+        raise ValueError(f"Runtime remote fallback status must be one of: {valid}.")
+    if authorization.local_status == "authorized":
+        if not authorization.local_profile_id or not authorization.local_profile_version:
+            raise ValueError("Authorized local fallback must name a fallback profile.")
+        if not authorization.automatic_local_fallback_authorized:
+            raise ValueError("Authorized local fallback must enable automatic local fallback.")
+        if not authorization.stage_scope:
+            raise ValueError("Authorized local fallback must define a stage scope.")
+    if (
+        authorization.local_status in {"not_configured", "configured_unauthorized"}
+        and authorization.automatic_local_fallback_authorized
+    ):
+        raise ValueError(
+            "Automatic local fallback cannot be authorized when local fallback is not authorized."
+        )
+    if authorization.remote_status == "authorized" and not authorization.remote_stage_scope:
+        raise ValueError("Authorized remote fallback must define a remote stage scope.")
 
 
 def _stage_profiles_from_dicts(data: object) -> tuple[StageProfile, ...]:

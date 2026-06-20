@@ -22,6 +22,7 @@ from mena.local_llm import (
     ollama_message_content,
     post_ollama_json,
     strip_json_fence,
+    unload_ollama_model,
 )
 from mena.merge_timing import (
     MergedTranscriptArtifact,
@@ -41,6 +42,7 @@ from mena.review_flagging import (
     ReviewQueueArtifact,
     persist_review_queue_artifact,
 )
+from mena.runtime_stewardship import RuntimeLease, RuntimeReleaseResult
 
 SEMANTIC_COHERENCE_STAGE = "semantic_coherence"
 SEMANTIC_COHERENCE_POLICY_VERSION = 1
@@ -216,6 +218,11 @@ class OllamaSemanticCoherenceProvider:
             endpoint=sanitized_endpoint,
         )
         self.timeout_seconds = timeout_seconds
+        self._runtime_resource_used = False
+
+    @property
+    def runtime_resource_used(self) -> bool:
+        return self._runtime_resource_used
 
     def check(self, request: SemanticCoherenceRequest) -> SemanticCoherenceResult:
         payload = {
@@ -256,6 +263,8 @@ class OllamaSemanticCoherenceProvider:
 
     def _post_json(self, path: str, payload: Mapping[str, object]) -> Mapping[str, object]:
         try:
+            if path == "/api/chat":
+                self._runtime_resource_used = True
             return post_ollama_json(
                 endpoint=str(self.metadata.endpoint),
                 path=path,
@@ -269,14 +278,35 @@ class OllamaSemanticCoherenceProvider:
         except LocalLLMContractError as exc:
             raise SemanticCoherenceContractError(str(exc)) from exc
 
+    def release_runtime_resource(self, lease: RuntimeLease) -> RuntimeReleaseResult:
+        """Release this provider's local Ollama model residency."""
+
+        try:
+            done_reason = unload_ollama_model(
+                endpoint=str(self.metadata.endpoint),
+                model=self.metadata.model,
+                timeout_seconds=self.timeout_seconds,
+            )
+        except LocalLLMProviderUnavailable as exc:
+            raise SemanticCoherenceProviderUnavailable(
+                "Ollama semantic coherence provider is unavailable during release."
+            ) from exc
+        except LocalLLMContractError as exc:
+            raise SemanticCoherenceContractError(str(exc)) from exc
+        return RuntimeReleaseResult(
+            lease=lease,
+            status="released",
+            detail=f"Ollama model release completed: {done_reason}.",
+        )
+
 
 @dataclass(frozen=True)
 class SemanticCoherenceStageResult:
     """Result of running or reusing the semantic coherence stage."""
 
     state: ProcessingStageState
-    review_queue: ReviewQueueArtifact
-    review_queue_record: ArtifactRecord
+    review_queue: ReviewQueueArtifact | None
+    review_queue_record: ArtifactRecord | None
     skipped: bool = False
     skip_reason: str | None = None
 
@@ -291,6 +321,7 @@ def run_semantic_coherence_stage(
     stage: str = SEMANTIC_COHERENCE_STAGE,
     attempt: int = 1,
     skip_completed: bool = True,
+    skip_provider_unavailable: bool = False,
     now: datetime | None = None,
 ) -> SemanticCoherenceStageResult:
     """Generate semantic incoherence review flags from a merged transcript artifact."""
@@ -379,6 +410,31 @@ def run_semantic_coherence_stage(
         json.JSONDecodeError,
         UnicodeDecodeError,
     ) as exc:
+        if isinstance(exc, SemanticCoherenceProviderUnavailable) and skip_provider_unavailable:
+            timestamp = _timestamp(now)
+            skipped = ledger.record(
+                ProcessingStageState(
+                    version=1,
+                    session_id=ledger.session_id,
+                    run_id=ledger.run_id,
+                    stage=stage,
+                    status="skipped",
+                    input_artifacts=(input_ref,),
+                    output_artifacts=(),
+                    started_at=started.started_at,
+                    completed_at=timestamp,
+                    error=None,
+                    attempt=attempt,
+                    skip_reason="provider_unavailable",
+                )
+            )
+            return SemanticCoherenceStageResult(
+                state=skipped,
+                review_queue=None,
+                review_queue_record=None,
+                skipped=True,
+                skip_reason="provider_unavailable",
+            )
         failed = _mark_failed(
             ledger=ledger,
             stage=stage,

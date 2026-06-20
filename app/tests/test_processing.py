@@ -334,6 +334,7 @@ def test_processing_state_schema_accepts_valid_state() -> None:
     )
 
     validator.validate(_state_dict())
+    validator.validate(_state_dict(status="skipped", skip_reason="provider_unavailable"))
 
 
 def test_processing_state_schema_rejects_incomplete_state() -> None:
@@ -357,6 +358,7 @@ def test_processing_state_schema_rejects_semantic_contract_violations() -> None:
             status="failed",
             error={"message": "failed", "retryable": True, "code": ""},
         ),
+        _state_dict(status="completed", skip_reason="completed_output_reused"),
         _state_dict(input_artifacts=[{**_artifact_ref_dict(), "artifact_type": "Transcript"}]),
     ]
     validator = Draft202012Validator(
@@ -384,6 +386,7 @@ def _state_dict(
     completed_at: object | None = None,
     error: dict[str, object] | None = None,
     attempt: int = 1,
+    skip_reason: str | None = None,
 ) -> dict[str, object]:
     if output_artifacts is None:
         output_artifacts = []
@@ -403,6 +406,7 @@ def _state_dict(
         "completed_at": completed_at,
         "error": error,
         "attempt": attempt,
+        "skip_reason": skip_reason,
     }
 
 

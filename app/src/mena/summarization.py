@@ -27,6 +27,7 @@ from mena.local_llm import (
     ollama_message_content,
     post_ollama_json,
     strip_json_fence,
+    unload_ollama_model,
 )
 from mena.merge_timing import MergedTranscriptArtifact, MergeTimingContractError
 from mena.processing import (
@@ -35,6 +36,7 @@ from mena.processing import (
     ProcessingStageLedger,
     ProcessingStageState,
 )
+from mena.runtime_stewardship import RuntimeLease, RuntimeReleaseResult
 
 SUMMARY_ARTIFACT_TYPE = "summary"
 SUMMARY_ARTIFACT_VERSION = 1
@@ -248,6 +250,11 @@ class OllamaSummarizationProvider:
             endpoint=_summarization_local_ollama_endpoint(endpoint),
         )
         self.timeout_seconds = timeout_seconds
+        self._runtime_resource_used = False
+
+    @property
+    def runtime_resource_used(self) -> bool:
+        return self._runtime_resource_used
 
     def summarize(self, request: SummarizationRequest) -> SummaryResult:
         payload = {
@@ -288,6 +295,8 @@ class OllamaSummarizationProvider:
 
     def _post_json(self, path: str, payload: Mapping[str, object]) -> Mapping[str, object]:
         try:
+            if path == "/api/chat":
+                self._runtime_resource_used = True
             return post_ollama_json(
                 endpoint=str(self.metadata.endpoint),
                 path=path,
@@ -300,6 +309,27 @@ class OllamaSummarizationProvider:
             ) from exc
         except LocalLLMContractError as exc:
             raise SummarizationContractError(str(exc)) from exc
+
+    def release_runtime_resource(self, lease: RuntimeLease) -> RuntimeReleaseResult:
+        """Release this provider's local Ollama model residency."""
+
+        try:
+            done_reason = unload_ollama_model(
+                endpoint=str(self.metadata.endpoint),
+                model=self.metadata.model,
+                timeout_seconds=self.timeout_seconds,
+            )
+        except LocalLLMProviderUnavailable as exc:
+            raise SummarizationProviderUnavailable(
+                "Ollama summarization provider is unavailable during release."
+            ) from exc
+        except LocalLLMContractError as exc:
+            raise SummarizationContractError(str(exc)) from exc
+        return RuntimeReleaseResult(
+            lease=lease,
+            status="released",
+            detail=f"Ollama model release completed: {done_reason}.",
+        )
 
 
 @dataclass(frozen=True)
