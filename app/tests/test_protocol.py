@@ -912,6 +912,8 @@ def test_worker_capture_session_flush_starts_lazily(tmp_path: Path) -> None:
     metadata = capture.finalize()
 
     assert [segment.source_id for segment in segments] == [CaptureSourceId.ROOM_MIC]
+    assert segments[0].path == Path("artifacts/source/room_mic/room_mic_000001.wav")
+    assert (tmp_path / segments[0].path).exists()
     assert metadata.profile_id.value == "in_person_single_mic"
     assert metadata.segments == segments
 

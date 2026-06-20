@@ -1870,7 +1870,7 @@ def _prepare_source_audio_inputs(
 
         prep_temp_dir = store.artifact_root / ".provider-prep-tmp"
         prep_temp_dir.mkdir(parents=True, exist_ok=True)
-        prep_path = prep_temp_dir / f"{source_id}.{uuid4()}.wav"
+        prep_path = prep_temp_dir / f".{source_id}.{uuid4()}.wav"
         try:
             prep_metadata = _stitch_provider_prep_audio(
                 source_id=source_id,

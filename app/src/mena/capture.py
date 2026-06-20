@@ -183,11 +183,13 @@ class WavSegmentWriter:
         self,
         *,
         segment_dir: Path,
+        metadata_root: Path | None = None,
         sample_rate: int = DEFAULT_SAMPLE_RATE,
         channels: int = 1,
         sample_width_bytes: int = DEFAULT_SAMPLE_WIDTH_BYTES,
     ) -> None:
         self.segment_dir = segment_dir
+        self.metadata_root = metadata_root
         self.sample_rate = sample_rate
         self.channels = channels
         self.sample_width_bytes = sample_width_bytes
@@ -219,10 +221,11 @@ class WavSegmentWriter:
             raise FileExistsError(f"Capture segment already exists: {path}")
         temp_path.replace(path)
         self._indexes[source_id] = index
+        metadata_path = self._metadata_path(path)
         return CaptureSegment(
             source_id=source_id,
             index=index,
-            path=path,
+            path=metadata_path,
             sample_rate=self.sample_rate,
             channels=self.channels,
             channel_layout=_channel_layout(self.channels),
@@ -253,6 +256,13 @@ class WavSegmentWriter:
             if suffix.isdigit():
                 highest_index = max(highest_index, int(suffix))
         return highest_index + 1
+
+    def _metadata_path(self, path: Path) -> Path:
+        if self.metadata_root is None:
+            return path
+        with suppress(ValueError):
+            return path.relative_to(self.metadata_root)
+        return path
 
 
 class SilencePcmProvider:
@@ -1331,12 +1341,14 @@ def _aligned_stop_pcm_or_empty(
 ) -> dict[CaptureSourceId, bytes]:
     required_sources = (CaptureSourceId.LOCAL_MIC, CaptureSourceId.SYSTEM_AUDIO)
     selected = {source_id: pcm_by_source.get(source_id, b"") for source_id in required_sources}
-    if any(not pcm for pcm in selected.values()):
+    if frame_width <= 0 or any(not pcm for pcm in selected.values()):
         return {}
-    frame_counts = {len(pcm) // frame_width for pcm in selected.values()}
-    if len(frame_counts) != 1:
+    frame_counts = {source_id: len(pcm) // frame_width for source_id, pcm in selected.items()}
+    common_frame_count = min(frame_counts.values())
+    if common_frame_count <= 0:
         return {}
-    return selected
+    common_byte_count = common_frame_count * frame_width
+    return {source_id: pcm[:common_byte_count] for source_id, pcm in selected.items()}
 
 
 def _channel_layout(channels: int) -> str:

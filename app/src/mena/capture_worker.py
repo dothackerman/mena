@@ -237,7 +237,10 @@ class WorkerCaptureSession:
         start_payload: StartCapturePayload,
         diagnostics: CaptureDiagnosticFn | None = None,
     ) -> WorkerCaptureSession:
-        writer = WavSegmentWriter(segment_dir=session_dir / "artifacts" / "source")
+        writer = WavSegmentWriter(
+            segment_dir=session_dir / "artifacts" / "source",
+            metadata_root=session_dir,
+        )
         return cls(
             session_id=session_id,
             start_payload=start_payload,
@@ -257,7 +260,10 @@ class WorkerCaptureSession:
         session_dir: Path,
         start_payload: StartCapturePayload,
     ) -> WorkerCaptureSession:
-        writer = WavSegmentWriter(segment_dir=session_dir / "artifacts" / "source")
+        writer = WavSegmentWriter(
+            segment_dir=session_dir / "artifacts" / "source",
+            metadata_root=session_dir,
+        )
         provider = SilencePcmProvider(seconds=start_payload.segment_seconds).read_segment
         return cls(
             session_id=session_id,

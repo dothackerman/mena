@@ -23,6 +23,15 @@
           "minLength": 1,
           "type": "string"
         },
+        "node_name": {
+          "type": ["string", "null"]
+        },
+        "object_serial": {
+          "type": ["string", "null"]
+        },
+        "pw_record_target": {
+          "type": ["string", "null"]
+        },
         "route_id": {
           "minLength": 1,
           "type": "string"
@@ -144,9 +153,18 @@
         "backend_name": {
           "type": ["string", "null"]
         },
+        "backend_target": {
+          "type": ["string", "null"]
+        },
         "label": {
           "minLength": 1,
           "type": "string"
+        },
+        "node_name": {
+          "type": ["string", "null"]
+        },
+        "object_serial": {
+          "type": ["string", "null"]
         },
         "required": {
           "type": "boolean"
@@ -161,6 +179,9 @@
         },
         "source_id": {
           "enum": ["local_mic", "system_audio", "room_mic", null],
+          "type": ["string", "null"]
+        },
+        "sink_input_id": {
           "type": ["string", "null"]
         }
       },

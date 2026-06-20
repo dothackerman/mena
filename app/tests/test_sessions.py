@@ -223,8 +223,32 @@ def test_update_session_discovery_writes_schema_valid_session_record(tmp_path: P
         "version": 1,
         "profile": "online_dual_stream",
         "status": "available",
-        "sources": [],
-        "sinks": [],
+        "sources": [
+            {
+                "id": 31,
+                "route_id": "pipewire:node:31",
+                "name": "alsa_input.headset",
+                "description": "Headset Mic",
+                "media_class": "Audio/Source",
+                "active": True,
+                "node_name": "alsa_input.headset",
+                "object_serial": "131",
+                "pw_record_target": "alsa_input.headset",
+            }
+        ],
+        "sinks": [
+            {
+                "id": 42,
+                "route_id": "pipewire:node:42",
+                "name": "alsa_output.speakers",
+                "description": "Speakers",
+                "media_class": "Audio/Sink",
+                "active": True,
+                "node_name": "alsa_output.speakers",
+                "object_serial": "142",
+                "pw_record_target": "alsa_output.speakers",
+            }
+        ],
         "playback_streams": [],
         "error": None,
     }
@@ -321,6 +345,10 @@ def test_update_session_capture_plan_writes_schema_valid_session_record(tmp_path
                 "label": "Headset Mic",
                 "backend": "pipewire",
                 "backend_name": "alsa_input.headset",
+                "backend_target": "alsa_input.headset",
+                "node_name": "alsa_input.headset",
+                "object_serial": "131",
+                "sink_input_id": None,
                 "required": True,
             },
             {
@@ -330,6 +358,10 @@ def test_update_session_capture_plan_writes_schema_valid_session_record(tmp_path
                 "label": "Meeting Stream",
                 "backend": "pulse",
                 "backend_name": "meeting-playback",
+                "backend_target": "151",
+                "node_name": None,
+                "object_serial": None,
+                "sink_input_id": "151",
                 "required": True,
             },
             {
@@ -339,6 +371,10 @@ def test_update_session_capture_plan_writes_schema_valid_session_record(tmp_path
                 "label": "Speakers",
                 "backend": "pipewire",
                 "backend_name": "alsa_output.speakers",
+                "backend_target": "alsa_output.speakers",
+                "node_name": "alsa_output.speakers",
+                "object_serial": "142",
+                "sink_input_id": None,
                 "required": True,
             },
         ],

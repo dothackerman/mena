@@ -44,6 +44,19 @@ def test_wav_segment_writer_writes_valid_sealed_wav(tmp_path: Path) -> None:
         assert wav.getnframes() == 800
 
 
+def test_wav_segment_writer_can_persist_bundle_relative_paths(tmp_path: Path) -> None:
+    writer = WavSegmentWriter(
+        segment_dir=tmp_path / "artifacts" / "source",
+        metadata_root=tmp_path,
+        sample_rate=8_000,
+    )
+
+    segment = writer.write_segment(CaptureSourceId.LOCAL_MIC, b"\x00\x00" * 800)
+
+    assert segment.path == Path("artifacts/source/local_mic/local_mic_000001.wav")
+    assert (tmp_path / segment.path).exists()
+
+
 def test_wav_segment_writer_refuses_to_overwrite_existing_segment(tmp_path: Path) -> None:
     writer = WavSegmentWriter(segment_dir=tmp_path, sample_rate=8_000)
     source_dir = tmp_path / CaptureSourceId.LOCAL_MIC.value
@@ -445,7 +458,7 @@ def test_pipewire_pcm_provider_starts_sources_before_collecting_continuous_chunk
     }
 
 
-def test_pipewire_pcm_provider_drops_mismatched_stop_partial_batch(
+def test_pipewire_pcm_provider_trims_mismatched_stop_partial_batch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = PipeWirePcmProvider(sample_rate=2)
@@ -494,7 +507,10 @@ def test_pipewire_pcm_provider_drops_mismatched_stop_partial_batch(
         stop_event=stop_event,
     )
 
-    assert pcm == {}
+    assert pcm == {
+        CaptureSourceId.LOCAL_MIC: b"\x00\x00",
+        CaptureSourceId.SYSTEM_AUDIO: b"\x01\x01",
+    }
 
 
 def test_pipewire_pcm_provider_keeps_matched_stop_partial_batch(
@@ -1590,6 +1606,53 @@ def test_active_pipewire_capture_stop_does_not_start_first_segment(tmp_path: Pat
 
     assert metadata.segments == ()
     assert provider.flushes == 0
+
+
+def test_active_pipewire_capture_trims_uneven_stop_buffers_to_common_frames(
+    tmp_path: Path,
+) -> None:
+    class UnevenStopProvider:
+        def read_aligned_segments(
+            self,
+            *,
+            plan: CaptureRoutePlan,
+            sink_name: str,
+            segment_seconds: int,
+            stop_event: threading.Event | None = None,
+        ) -> dict[CaptureSourceId, bytes]:
+            return {
+                CaptureSourceId.LOCAL_MIC: b"\x11\x00" * 4,
+                CaptureSourceId.SYSTEM_AUDIO: b"\x22\x00" * 3,
+            }
+
+        def close(self) -> None:
+            return None
+
+    def runner(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        stdout = "101\n" if args[:3] == ["pactl", "load-module", "module-null-sink"] else ""
+        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+    adapter = PipeWireCaptureAdapter(
+        client=PipeWireClient(runner=runner),
+        segment_writer=WavSegmentWriter(segment_dir=tmp_path, sample_rate=1),
+    )
+    adapter.pipewire_pcm_provider = cast(Any, UnevenStopProvider())
+    stop_event = threading.Event()
+    stop_event.set()
+    active = adapter.start(_route_plan())
+
+    segments = active.flush_segments(stop_event=stop_event)
+    metadata = active.stop()
+
+    assert [segment.source_id for segment in segments] == [
+        CaptureSourceId.LOCAL_MIC,
+        CaptureSourceId.SYSTEM_AUDIO,
+    ]
+    assert [segment.duration_seconds for segment in segments] == [3.0, 3.0]
+    for segment in segments:
+        with wave.open(str(segment.path), "rb") as wav:
+            assert wav.getnframes() == 3
+    assert metadata.segments == tuple(segments)
 
 
 def _route_plan() -> CaptureRoutePlan:
