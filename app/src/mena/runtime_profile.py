@@ -64,6 +64,7 @@ def select_runtime_profile(
     command_identity: CommandIdentity | None,
     hardware: HardwareFacts | None,
     allow_runtime_fallback: bool,
+    authorize_runtime_fallback: Callable[[str, SetupEvaluation], bool] | None = None,
     required_stages: frozenset[str] | None = None,
 ) -> RuntimeProfileSelection:
     """Select the accepted or explicit fallback runtime profile for derived artifacts."""
@@ -111,16 +112,6 @@ def select_runtime_profile(
         accepted=accepted,
         allow_runtime_fallback=allow_runtime_fallback,
     )
-    fallback_authorized = allow_runtime_fallback or _automatic_local_fallback_authorized(
-        accepted,
-        scope,
-    )
-    if not fallback_authorized:
-        raise ValueError(
-            "Accepted runtime profile is unavailable: "
-            f"{accepted_failure} Re-run setup to authorize local fallback or pass "
-            "--allow-runtime-fallback for an explicit one-run fallback when supported."
-        )
     if fallback_profile is None:
         raise ValueError(
             "Accepted runtime profile is unavailable and no accepted fallback profile "
@@ -145,6 +136,19 @@ def select_runtime_profile(
             "Accepted runtime profile is unavailable and fallback is not currently viable: "
             f"{accepted_failure} Fallback blockers: {reasons}"
         )
+    fallback_authorized = allow_runtime_fallback or _automatic_local_fallback_authorized(
+        accepted,
+        scope,
+    )
+    if not fallback_authorized:
+        if authorize_runtime_fallback is None:
+            raise ValueError(
+                "Accepted runtime profile is unavailable: "
+                f"{accepted_failure} Re-run setup to authorize local fallback or pass "
+                "--allow-runtime-fallback for an explicit one-run fallback when supported."
+            )
+        if not authorize_runtime_fallback(accepted_failure, fallback_evaluation):
+            raise ValueError("Accepted runtime profile is unavailable and fallback was declined.")
     fallback_runtime_state = build_runtime_profile_state(fallback_evaluation)
     return RuntimeProfileSelection(
         accepted=accepted,

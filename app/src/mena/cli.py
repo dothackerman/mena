@@ -126,6 +126,7 @@ from mena.semantic_coherence import (
     OllamaSemanticCoherenceProvider,
     SemanticCoherenceError,
     SemanticCoherenceProvider,
+    SemanticCoherenceStageResult,
     run_semantic_coherence_stage,
 )
 from mena.session_integrity import (
@@ -334,6 +335,11 @@ class _CaptureEventMonitor:
 
     def _print_segment(self, segment: SegmentFlushedPayload) -> None:
         print(f"Sealed {segment.source_id} segment {segment.index}.")
+
+
+@dataclass(frozen=True)
+class ProcessingPipelineResult:
+    semantic_coherence_result: SemanticCoherenceStageResult
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -763,6 +769,7 @@ def main(
                 setup_command_identity=setup_command_identity,
                 setup_hardware=setup_hardware,
                 allow_runtime_fallback=args.allow_runtime_fallback,
+                runtime_fallback_input_fn=input if input_fn is None else input_fn,
             )
         except (
             ArtifactStoreError,
@@ -853,6 +860,7 @@ def main(
                 setup_command_identity=setup_command_identity,
                 setup_hardware=setup_hardware,
                 allow_runtime_fallback=args.allow_runtime_fallback,
+                runtime_fallback_input_fn=input if input_fn is None else input_fn,
             )
         except (
             ArtifactStoreError,
@@ -1455,6 +1463,7 @@ def _run_setup_command(
                 runner=command_runner,
                 command_identity=command_identity,
                 hardware=hardware,
+                execute_actions=authorize_local_fallback,
             )
         except KeyboardInterrupt:
             print("Setup interrupted; local provider readiness is incomplete.")
@@ -1520,6 +1529,7 @@ def _run_setup_command(
                 runner=command_runner,
                 command_identity=command_identity,
                 hardware=hardware,
+                execute_actions=authorize_local_fallback,
             )
         except KeyboardInterrupt:
             print("Setup interrupted; local provider readiness is incomplete.")
@@ -1541,6 +1551,7 @@ def _evaluate_setup_fallback_authorization(
     runner: CommandRunner,
     command_identity: CommandIdentity | None,
     hardware: HardwareFacts | None,
+    execute_actions: bool = False,
 ) -> SetupEvaluation | None:
     fallback_profile = next(
         (
@@ -1559,7 +1570,32 @@ def _evaluate_setup_fallback_authorization(
         hardware=hardware,
         profile=fallback_profile,
     )
-    return evaluate_setup(fallback_profile, fallback_state)
+    fallback_evaluation = evaluate_setup(fallback_profile, fallback_state)
+    if (
+        not execute_actions
+        or fallback_evaluation.ready
+        or not any(action.mode == "automated" for action in fallback_evaluation.plan.actions)
+    ):
+        return fallback_evaluation
+
+    results = execute_setup_plan(fallback_evaluation.plan, runner=runner)
+    refreshed_fallback_state = detect_local_installation_state(
+        settings,
+        runner=runner,
+        command_identity=command_identity,
+        hardware=hardware,
+        profile=fallback_profile,
+    )
+    refreshed_fallback_evaluation = evaluate_setup(fallback_profile, refreshed_fallback_state)
+    print(
+        format_setup_report(
+            refreshed_fallback_evaluation,
+            action_results=results,
+            final_ready=refreshed_fallback_evaluation.ready,
+        ),
+        end="",
+    )
+    return refreshed_fallback_evaluation
 
 
 def _print_runtime_fallback_authorization_notice(state: RuntimeProfileState) -> None:
@@ -1576,6 +1612,31 @@ def _print_runtime_fallback_authorization_notice(state: RuntimeProfileState) -> 
         print("Automatic local runtime fallback is unavailable and remains disabled.")
         for reason in authorization.blocking_reasons:
             print(f"Fallback blocker: {reason}")
+
+
+def _confirm_one_run_runtime_fallback(
+    *,
+    accepted_failure: str,
+    fallback_evaluation: SetupEvaluation,
+    input_fn: Callable[[str], str],
+) -> bool:
+    print(f"Accepted runtime profile is unavailable: {accepted_failure}")
+    print(
+        "One-run local runtime fallback is ready: "
+        f"{fallback_evaluation.profile.id} using "
+        f"{fallback_evaluation.selected_asr_profile.checkpoint}/"
+        f"{fallback_evaluation.selected_asr_profile.device}."
+    )
+    answer = input_fn("Use local runtime fallback for this run? [y/N] ")
+    return answer.strip().lower() in {"y", "yes"}
+
+
+def _print_semantic_review_skip_notice(result: SemanticCoherenceStageResult) -> None:
+    _ = result
+    print(
+        "Semantic review skipped: local semantic LLM provider is unavailable. "
+        "Processing completed without semantic incoherence flags."
+    )
 
 
 def _readiness_item_failed(
@@ -1607,6 +1668,7 @@ def _run_summarize_command(
     setup_command_identity: CommandIdentity | None = None,
     setup_hardware: HardwareFacts | None = None,
     allow_runtime_fallback: bool = False,
+    runtime_fallback_input_fn: Callable[[str], str] | None = None,
 ) -> int:
     session_dir, session_record = _resolve_session(session_path)
     session_id = _extract_session_id(session_record)
@@ -1781,6 +1843,7 @@ def _run_processing_command(
     setup_command_identity: CommandIdentity | None = None,
     setup_hardware: HardwareFacts | None = None,
     allow_runtime_fallback: bool = False,
+    runtime_fallback_input_fn: Callable[[str], str] | None = None,
 ) -> int:
     runtime_selection: RuntimeProfileSelection | None = None
     session_dir, session_record = _resolve_session(session_path)
@@ -1808,6 +1871,15 @@ def _run_processing_command(
             command_identity=setup_command_identity,
             hardware=setup_hardware,
             allow_runtime_fallback=allow_runtime_fallback,
+            authorize_runtime_fallback=(
+                None
+                if runtime_fallback_input_fn is None
+                else lambda failure, fallback: _confirm_one_run_runtime_fallback(
+                    accepted_failure=failure,
+                    fallback_evaluation=fallback,
+                    input_fn=runtime_fallback_input_fn,
+                )
+            ),
             required_stages=PROCESSING_REQUIRED_RUNTIME_STAGES,
         )
         store_runtime_profile_provenance(
@@ -1848,7 +1920,7 @@ def _run_processing_command(
     )
 
     try:
-        _run_processing_stages(
+        pipeline_result = _run_processing_stages(
             session_id=session_id,
             profile=profile,
             source_inputs=source_inputs,
@@ -1878,6 +1950,9 @@ def _run_processing_command(
         else ""
     )
     print(f"Processing completed for run '{run_id}' (attempt {attempt}){fallback}.")
+    semantic_result = getattr(pipeline_result, "semantic_coherence_result", None)
+    if getattr(semantic_result, "skip_reason", None) == "provider_unavailable":
+        _print_semantic_review_skip_notice(cast(SemanticCoherenceStageResult, semantic_result))
     return 0
 
 
@@ -1894,7 +1969,7 @@ def _run_processing_stages(
     diarization_provider: DiarizationProvider,
     semantic_coherence_provider: SemanticCoherenceProvider,
     session_language: str | None = None,
-) -> None:
+) -> ProcessingPipelineResult:
     _validate_processing_profile_support(profile)
 
     transcript_records: dict[str, ArtifactRecord] = {}
@@ -1991,7 +2066,7 @@ def _run_processing_stages(
         now=now,
     )
 
-    run_semantic_coherence_stage(
+    semantic_result = run_semantic_coherence_stage(
         store=store,
         ledger=ledger,
         merged_transcript_record=merge_result.merged_transcript_record,
@@ -2000,6 +2075,7 @@ def _run_processing_stages(
         now=now,
         skip_provider_unavailable=True,
     )
+    return ProcessingPipelineResult(semantic_coherence_result=semantic_result)
 
 
 def _validate_processing_profile_support(profile: CaptureProfile) -> None:
