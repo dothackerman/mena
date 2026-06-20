@@ -123,7 +123,7 @@ def test_pipewire_client_uses_argument_list_commands() -> None:
 
     client = PipeWireClient(runner=runner)
     assert client.create_null_sink("mena_session_remote") == "77"
-    client.move_playback_stream("pulse:sink-input:51", "mena_session_remote")
+    client.move_playback_stream("51", "mena_session_remote")
     assert client.create_loopback("mena_session_remote", "alsa_output.usb_headphones") == "77"
     client.unload_module("77")
 
@@ -174,7 +174,7 @@ def test_pipewire_client_emits_command_diagnostics() -> None:
 def test_pipewire_client_rejects_unsupported_route_id() -> None:
     client = PipeWireClient(runner=lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0))
 
-    with pytest.raises(ValueError, match="Unsupported Pulse sink-input route id"):
+    with pytest.raises(ValueError, match="Playback stream sink input id"):
         client.move_playback_stream("alsa:node:51", "mena_session_remote")
 
 
@@ -243,7 +243,7 @@ def test_pipewire_pcm_provider_reads_local_source_from_continuous_pw_record() ->
         [
             "pw-record",
             "--target",
-            "31",
+            "alsa_input.usb_mic",
             "--raw",
             "--format",
             "s16",
@@ -286,8 +286,12 @@ def test_pipewire_pcm_provider_emits_target_pid_and_pcm_fingerprints() -> None:
         == b"\x01\x02"
     )
 
-    assert diagnostics[0].startswith("pw-record start source=local_mic target=31 pid=1234 command=")
-    assert diagnostics[1].startswith("pcm chunk source=local_mic target=31 bytes=2 sha256=")
+    assert diagnostics[0].startswith(
+        "pw-record start source=local_mic target=alsa_input.usb_mic pid=1234 command="
+    )
+    assert diagnostics[1].startswith(
+        "pcm chunk source=local_mic target=alsa_input.usb_mic bytes=2 sha256="
+    )
     assert "head64=" in diagnostics[1]
     assert "tail64=" in diagnostics[1]
 
@@ -316,10 +320,10 @@ def test_pipewire_pcm_provider_reads_room_mic_from_selected_microphone() -> None
     )
 
     assert pcm == b"\x01\x02"
-    assert started_commands[0][:3] == ["pw-record", "--target", "31"]
+    assert started_commands[0][:3] == ["pw-record", "--target", "alsa_input.usb_mic"]
 
 
-def test_pipewire_pcm_provider_prefers_route_serial_for_capture_targets() -> None:
+def test_pipewire_pcm_provider_uses_explicit_backend_targets_not_route_ids() -> None:
     provider = PipeWirePcmProvider()
     plan = CaptureRoutePlan(
         session_id="session-1",
@@ -328,6 +332,8 @@ def test_pipewire_pcm_provider_prefers_route_serial_for_capture_targets() -> Non
         output_sink_route_id="pipewire:node:42",
         microphone_backend_name="alsa_input.usb_mic",
         output_sink_backend_name="alsa_output.usb_headphones",
+        microphone_pw_record_target="alsa_input.usb_mic",
+        output_sink_pw_record_target="alsa_output.usb_headphones",
         system_audio_mode=CAPTURE_MODE_SYSTEM_MIX_REMOTE,
     )
 
@@ -342,8 +348,8 @@ def test_pipewire_pcm_provider_prefers_route_serial_for_capture_targets() -> Non
         sink_name="mena_session_remote",
     )
 
-    assert microphone_command[2] == "31"
-    assert system_mix_command[2] == "42"
+    assert microphone_command[2] == "alsa_input.usb_mic"
+    assert system_mix_command[2] == "alsa_output.usb_headphones.monitor"
 
 
 def test_pipewire_pcm_provider_reuses_continuous_stream_across_segments() -> None:
@@ -1037,6 +1043,7 @@ def test_pipewire_pcm_provider_uses_output_sink_monitor_for_system_mix_fallback(
         playback_stream_route_id="pulse:sink-input:51",
         output_sink_route_id="pipewire:node:42",
         output_sink_backend_name="alsa_output.usb_headphones",
+        output_sink_pw_record_target="alsa_output.usb_headphones",
         system_audio_mode=CAPTURE_MODE_SYSTEM_MIX_REMOTE,
     )
 
@@ -1046,7 +1053,7 @@ def test_pipewire_pcm_provider_uses_output_sink_monitor_for_system_mix_fallback(
         sink_name="mena_session_remote",
     )
 
-    assert command[2] == "42"
+    assert command[2] == "alsa_output.usb_headphones.monitor"
 
 
 def test_pipewire_pcm_provider_requires_target_for_system_mix_fallback() -> None:
@@ -1574,6 +1581,9 @@ def _route_plan() -> CaptureRoutePlan:
         output_sink_route_id="pipewire:node:42",
         microphone_backend_name="alsa_input.usb_mic",
         output_sink_backend_name="alsa_output.usb_headphones",
+        microphone_pw_record_target="alsa_input.usb_mic",
+        output_sink_pw_record_target="alsa_output.usb_headphones",
+        playback_stream_sink_input_id="51",
     )
 
 
@@ -1582,5 +1592,6 @@ def _in_person_route_plan() -> CaptureRoutePlan:
         session_id="session-1",
         microphone_route_id="pipewire:node:31",
         microphone_backend_name="alsa_input.usb_mic",
+        microphone_pw_record_target="alsa_input.usb_mic",
         profile_id=CaptureProfileId.IN_PERSON_SINGLE_MIC,
     )

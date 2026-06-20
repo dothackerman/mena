@@ -1389,6 +1389,9 @@ def _start_payload() -> StartCapturePayload:
                 backend="pipewire",
                 required=True,
                 backend_name="alsa_input.usb-headset",
+                backend_target="alsa_input.usb-headset",
+                node_name="alsa_input.usb-headset",
+                object_serial="101",
             ),
             CaptureRouteBindingPayload(
                 role="playback_stream",
@@ -1398,6 +1401,8 @@ def _start_payload() -> StartCapturePayload:
                 backend="pulse",
                 required=True,
                 backend_name="meeting-playback",
+                backend_target="2",
+                sink_input_id="2",
             ),
             CaptureRouteBindingPayload(
                 role="output_sink",
@@ -1407,6 +1412,9 @@ def _start_payload() -> StartCapturePayload:
                 backend="pipewire",
                 required=True,
                 backend_name="alsa_output.usb-headphones",
+                backend_target="alsa_output.usb-headphones",
+                node_name="alsa_output.usb-headphones",
+                object_serial="103",
             ),
         ),
     )
@@ -1427,6 +1435,9 @@ def _in_person_start_payload() -> StartCapturePayload:
                 backend="pipewire",
                 required=True,
                 backend_name="alsa_input.room",
+                backend_target="alsa_input.room",
+                node_name="alsa_input.room",
+                object_serial="101",
             ),
         ),
     )

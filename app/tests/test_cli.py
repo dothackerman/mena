@@ -4074,6 +4074,9 @@ def _available_discoverer(profile: CaptureProfileId) -> AudioDiscovery:
                 description=None,
                 media_class="Audio/Source",
                 active=True,
+                node_name="alsa_input.usb_mic",
+                object_serial="131",
+                pw_record_target="alsa_input.usb_mic",
             ),
         ),
         sinks=(
@@ -4084,6 +4087,9 @@ def _available_discoverer(profile: CaptureProfileId) -> AudioDiscovery:
                 description=None,
                 media_class="Audio/Sink",
                 active=True,
+                node_name="alsa_output.speakers",
+                object_serial="142",
+                pw_record_target="alsa_output.speakers",
             ),
         ),
         playback_streams=(
@@ -4119,6 +4125,9 @@ def _ambiguous_discoverer(profile: CaptureProfileId) -> AudioDiscovery:
                 description=None,
                 media_class="Audio/Source",
                 active=True,
+                node_name="alsa_input.laptop_mic",
+                object_serial="131",
+                pw_record_target="alsa_input.laptop_mic",
             ),
             AudioRoute(
                 id=32,
@@ -4127,6 +4136,9 @@ def _ambiguous_discoverer(profile: CaptureProfileId) -> AudioDiscovery:
                 description=None,
                 media_class="Audio/Source",
                 active=True,
+                node_name="alsa_input.headset_mic",
+                object_serial="132",
+                pw_record_target="alsa_input.headset_mic",
             ),
         ),
         sinks=(
@@ -4137,6 +4149,9 @@ def _ambiguous_discoverer(profile: CaptureProfileId) -> AudioDiscovery:
                 description=None,
                 media_class="Audio/Sink",
                 active=True,
+                node_name="alsa_output.speakers",
+                object_serial="142",
+                pw_record_target="alsa_output.speakers",
             ),
             AudioRoute(
                 id=43,
@@ -4145,6 +4160,9 @@ def _ambiguous_discoverer(profile: CaptureProfileId) -> AudioDiscovery:
                 description=None,
                 media_class="Audio/Sink",
                 active=True,
+                node_name="alsa_output.headphones",
+                object_serial="143",
+                pw_record_target="alsa_output.headphones",
             ),
         ),
         playback_streams=(

@@ -282,6 +282,7 @@ class WorkerCaptureSession:
                 profile_id=profile_id,
                 microphone_route_label=self._route_label("microphone"),
                 microphone_backend_name=self._route_backend_name("microphone"),
+                microphone_pw_record_target=self._route_backend_target("microphone"),
             )
         else:
             route_plan = CaptureRoutePlan(
@@ -295,6 +296,9 @@ class WorkerCaptureSession:
                 output_sink_route_label=self._route_label("output_sink"),
                 microphone_backend_name=self._route_backend_name("microphone"),
                 output_sink_backend_name=self._route_backend_name("output_sink"),
+                microphone_pw_record_target=self._route_backend_target("microphone"),
+                output_sink_pw_record_target=self._route_backend_target("output_sink"),
+                playback_stream_sink_input_id=self._route_sink_input_id("playback_stream"),
             )
         self.active_capture = self.adapter.start(
             route_plan,
@@ -352,6 +356,18 @@ class WorkerCaptureSession:
         for route in self.start_payload.routes:
             if route.role == role:
                 return route.backend_name
+        raise ProtocolError(f"start_capture payload missing {role} route.")
+
+    def _route_backend_target(self, role: str) -> str | None:
+        for route in self.start_payload.routes:
+            if route.role == role:
+                return route.backend_target
+        raise ProtocolError(f"start_capture payload missing {role} route.")
+
+    def _route_sink_input_id(self, role: str) -> str | None:
+        for route in self.start_payload.routes:
+            if route.role == role:
+                return route.sink_input_id
         raise ProtocolError(f"start_capture payload missing {role} route.")
 
     def drain_route_events(self) -> tuple[CaptureRouteEvent, ...]:

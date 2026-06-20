@@ -44,6 +44,9 @@ class CaptureRoutePlan:
     output_sink_route_label: str | None = None
     microphone_backend_name: str | None = None
     output_sink_backend_name: str | None = None
+    microphone_pw_record_target: str | None = None
+    output_sink_pw_record_target: str | None = None
+    playback_stream_sink_input_id: str | None = None
     system_audio_mode: str = CAPTURE_MODE_DEDICATED_ROUTE
 
 
@@ -492,22 +495,19 @@ class PipeWirePcmProvider:
         sink_name: str,
     ) -> str:
         if source_id is CaptureSourceId.LOCAL_MIC:
-            return _pipewire_node_serial(plan.microphone_route_id) or _required_backend_target(
-                plan.microphone_backend_name,
+            return _required_backend_target(
+                plan.microphone_pw_record_target,
                 "microphone",
             )
         if source_id is CaptureSourceId.ROOM_MIC:
-            return _pipewire_node_serial(plan.microphone_route_id) or _required_backend_target(
-                plan.microphone_backend_name,
+            return _required_backend_target(
+                plan.microphone_pw_record_target,
                 "microphone",
             )
         if source_id is CaptureSourceId.SYSTEM_AUDIO:
             if plan.system_audio_mode == CAPTURE_MODE_SYSTEM_MIX_REMOTE:
-                output_sink_serial = _pipewire_node_serial(plan.output_sink_route_id)
-                if output_sink_serial is not None:
-                    return output_sink_serial
                 output_sink_target = _required_backend_target(
-                    plan.output_sink_backend_name,
+                    plan.output_sink_pw_record_target,
                     "output sink",
                 )
                 return f"{output_sink_target}.monitor"
@@ -667,10 +667,9 @@ class PipeWireClient:
             ]
         )
 
-    def move_playback_stream(self, playback_stream_route_id: str, sink_name: str) -> None:
-        self._run(
-            ["pactl", "move-sink-input", _pulse_sink_input_id(playback_stream_route_id), sink_name]
-        )
+    def move_playback_stream(self, sink_input_id: str, sink_name: str) -> None:
+        _validate_pulse_sink_input_id(sink_input_id)
+        self._run(["pactl", "move-sink-input", sink_input_id, sink_name])
 
     def create_loopback(self, sink_name: str, output_sink_name: str) -> str:
         return self._run(
@@ -903,13 +902,13 @@ class PipeWireCaptureAdapter:
         loopback_module: str | None = None
         playback_moved = False
         try:
-            if plan.playback_stream_route_id is None:
+            if plan.playback_stream_sink_input_id is None:
                 raise ValueError("Online capture requires a playback stream route.")
             if plan.output_sink_route_id is None:
                 raise ValueError("Online capture requires an output sink route.")
             if plan.output_sink_backend_name is None:
                 raise ValueError("Online capture requires an output sink backend name.")
-            self.client.move_playback_stream(plan.playback_stream_route_id, sink_name)
+            self.client.move_playback_stream(plan.playback_stream_sink_input_id, sink_name)
             playback_moved = True
             loopback_module = self.client.create_loopback(
                 sink_name,
@@ -931,11 +930,11 @@ class PipeWireCaptureAdapter:
         return null_sink_module, loopback_module
 
     def _restore_playback_route(self, plan: CaptureRoutePlan) -> None:
-        if plan.playback_stream_route_id is None or plan.output_sink_backend_name is None:
+        if plan.playback_stream_sink_input_id is None or plan.output_sink_backend_name is None:
             return
         try:
             self.client.move_playback_stream(
-                plan.playback_stream_route_id,
+                plan.playback_stream_sink_input_id,
                 plan.output_sink_backend_name,
             )
         except (subprocess.CalledProcessError, OSError, ValueError):
@@ -1127,6 +1126,9 @@ def _route_plan_diagnostic(plan: CaptureRoutePlan, *, sink_name: str) -> str:
         f"playback_label={plan.playback_stream_route_label!r} "
         f"output_sink_route_id={plan.output_sink_route_id} "
         f"output_sink_backend={plan.output_sink_backend_name!r} "
+        f"mic_pw_record_target={plan.microphone_pw_record_target!r} "
+        f"output_sink_pw_record_target={plan.output_sink_pw_record_target!r} "
+        f"playback_stream_sink_input_id={plan.playback_stream_sink_input_id!r} "
         f"system_audio_mode={plan.system_audio_mode}"
     )
 
@@ -1139,15 +1141,6 @@ def _pcm_fingerprint(pcm: bytes) -> str:
         f"head64={hashlib.sha256(head).hexdigest()} "
         f"tail64={hashlib.sha256(tail).hexdigest()}"
     )
-
-
-def _pipewire_node_serial(route_id: str | None) -> str | None:
-    if route_id is None:
-        return None
-    match = re.fullmatch(r"pipewire:node:(\d+)", route_id)
-    if match is None:
-        return None
-    return match.group(1)
 
 
 def _segment_route_facts(
@@ -1366,11 +1359,6 @@ def _source_summaries(
     return summaries
 
 
-def _pulse_sink_input_id(route_id: str) -> str:
-    prefix = "pulse:sink-input:"
-    if not route_id.startswith(prefix):
-        raise ValueError(f"Unsupported Pulse sink-input route id '{route_id}'.")
-    sink_input_id = route_id.removeprefix(prefix)
+def _validate_pulse_sink_input_id(sink_input_id: str) -> None:
     if not sink_input_id.isdigit():
-        raise ValueError(f"Unsupported Pulse sink-input route id '{route_id}'.")
-    return sink_input_id
+        raise ValueError(f"Playback stream sink input id '{sink_input_id}' is invalid.")

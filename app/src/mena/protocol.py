@@ -147,6 +147,10 @@ class CaptureRouteBindingPayload:
     backend: str
     required: bool
     backend_name: str | None = None
+    backend_target: str | None = None
+    node_name: str | None = None
+    object_serial: str | None = None
+    sink_input_id: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -156,6 +160,10 @@ class CaptureRouteBindingPayload:
             "label": self.label,
             "backend": self.backend,
             "backend_name": self.backend_name,
+            "backend_target": self.backend_target,
+            "node_name": self.node_name,
+            "object_serial": self.object_serial,
+            "sink_input_id": self.sink_input_id,
             "required": self.required,
         }
 
@@ -166,6 +174,7 @@ class CaptureRouteBindingPayload:
             payload,
             {"role", "source_id", "route_id", "label", "backend", "backend_name", "required"},
             "capture route binding",
+            optional_keys={"backend_target", "node_name", "object_serial", "sink_input_id"},
         )
         source_id = _optional_enum_str(
             payload,
@@ -185,6 +194,10 @@ class CaptureRouteBindingPayload:
             label=_required_str(payload, "label"),
             backend=_required_str(payload, "backend"),
             backend_name=_optional_str(payload, "backend_name", "capture route binding"),
+            backend_target=_optional_str(payload, "backend_target", "capture route binding"),
+            node_name=_optional_str(payload, "node_name", "capture route binding"),
+            object_serial=_optional_str(payload, "object_serial", "capture route binding"),
+            sink_input_id=_optional_str(payload, "sink_input_id", "capture route binding"),
             required=_required_bool(payload, "required"),
         )
 
@@ -1017,12 +1030,15 @@ def _require_exact_keys(
     data: Mapping[str, object],
     required_keys: set[str],
     context: str,
+    *,
+    optional_keys: set[str] | None = None,
 ) -> None:
     keys = set(data)
     missing = sorted(required_keys - keys)
     if missing:
         raise ProtocolError(f"{context} is missing required field '{missing[0]}'.")
-    extra = sorted(keys - required_keys)
+    allowed_keys = required_keys | (optional_keys or set())
+    extra = sorted(keys - allowed_keys)
     if extra:
         raise ProtocolError(f"{context} contains unsupported field '{extra[0]}'.")
 

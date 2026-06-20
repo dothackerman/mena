@@ -154,6 +154,9 @@ def _discovery(
                 description=None,
                 media_class="Audio/Source",
                 active=True,
+                node_name="alsa_input.usb_mic",
+                object_serial="131",
+                pw_record_target="alsa_input.usb_mic",
             ),
         ),
         sinks=(
@@ -164,6 +167,9 @@ def _discovery(
                 description=None,
                 media_class="Audio/Sink",
                 active=True,
+                node_name="alsa_output.usb_headphones",
+                object_serial="142",
+                pw_record_target="alsa_output.usb_headphones",
             ),
         ),
         playback_streams=(
