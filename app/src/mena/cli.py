@@ -1463,7 +1463,16 @@ def _run_setup_command(
                 runner=command_runner,
                 command_identity=command_identity,
                 hardware=hardware,
-                execute_actions=authorize_local_fallback,
+            )
+            fallback_evaluation = _maybe_execute_setup_fallback_actions(
+                fallback_evaluation=fallback_evaluation,
+                authorize_local_fallback=authorize_local_fallback,
+                assume_yes=assume_yes,
+                input_fn=input_fn,
+                settings=settings,
+                runner=command_runner,
+                command_identity=command_identity,
+                hardware=hardware,
             )
         except KeyboardInterrupt:
             print("Setup interrupted; local provider readiness is incomplete.")
@@ -1529,7 +1538,16 @@ def _run_setup_command(
                 runner=command_runner,
                 command_identity=command_identity,
                 hardware=hardware,
-                execute_actions=authorize_local_fallback,
+            )
+            fallback_evaluation = _maybe_execute_setup_fallback_actions(
+                fallback_evaluation=fallback_evaluation,
+                authorize_local_fallback=authorize_local_fallback,
+                assume_yes=assume_yes,
+                input_fn=input_fn,
+                settings=settings,
+                runner=command_runner,
+                command_identity=command_identity,
+                hardware=hardware,
             )
         except KeyboardInterrupt:
             print("Setup interrupted; local provider readiness is incomplete.")
@@ -1551,7 +1569,6 @@ def _evaluate_setup_fallback_authorization(
     runner: CommandRunner,
     command_identity: CommandIdentity | None,
     hardware: HardwareFacts | None,
-    execute_actions: bool = False,
 ) -> SetupEvaluation | None:
     fallback_profile = next(
         (
@@ -1570,13 +1587,44 @@ def _evaluate_setup_fallback_authorization(
         hardware=hardware,
         profile=fallback_profile,
     )
-    fallback_evaluation = evaluate_setup(fallback_profile, fallback_state)
+    return evaluate_setup(fallback_profile, fallback_state)
+
+
+def _maybe_execute_setup_fallback_actions(
+    *,
+    fallback_evaluation: SetupEvaluation | None,
+    authorize_local_fallback: bool,
+    assume_yes: bool,
+    input_fn: Callable[[str], str] | None,
+    settings: AppSettings,
+    runner: CommandRunner,
+    command_identity: CommandIdentity | None,
+    hardware: HardwareFacts | None,
+) -> SetupEvaluation | None:
     if (
-        not execute_actions
+        fallback_evaluation is None
+        or not authorize_local_fallback
         or fallback_evaluation.ready
         or not any(action.mode == "automated" for action in fallback_evaluation.plan.actions)
     ):
         return fallback_evaluation
+
+    if not assume_yes:
+        prompt_fn = input if input_fn is None else input_fn
+        try:
+            answer = prompt_fn("Proceed with automated fallback setup actions? [y/N] ")
+        except EOFError:
+            print(
+                "Fallback setup actions declined; automatic local runtime fallback "
+                "remains unavailable."
+            )
+            return fallback_evaluation
+        if answer.strip().lower() not in {"y", "yes"}:
+            print(
+                "Fallback setup actions declined; automatic local runtime fallback "
+                "remains unavailable."
+            )
+            return fallback_evaluation
 
     results = execute_setup_plan(fallback_evaluation.plan, runner=runner)
     refreshed_fallback_state = detect_local_installation_state(
@@ -1584,9 +1632,12 @@ def _evaluate_setup_fallback_authorization(
         runner=runner,
         command_identity=command_identity,
         hardware=hardware,
-        profile=fallback_profile,
+        profile=fallback_evaluation.profile,
     )
-    refreshed_fallback_evaluation = evaluate_setup(fallback_profile, refreshed_fallback_state)
+    refreshed_fallback_evaluation = evaluate_setup(
+        fallback_evaluation.profile,
+        refreshed_fallback_state,
+    )
     print(
         format_setup_report(
             refreshed_fallback_evaluation,

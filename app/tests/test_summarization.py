@@ -838,7 +838,7 @@ def test_ollama_provider_rejects_remote_secret_or_malformed_endpoints(endpoint: 
         OllamaSummarizationProvider(endpoint=endpoint)
 
 
-def test_ollama_summarization_provider_does_not_mark_resource_used_after_failed_call(
+def test_ollama_summarization_provider_marks_resource_used_before_failed_chat_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = OllamaSummarizationProvider(
@@ -855,7 +855,7 @@ def test_ollama_summarization_provider_does_not_mark_resource_used_after_failed_
     with pytest.raises(SummarizationProviderUnavailable, match="provider is unavailable"):
         provider._post_json("/api/chat", {"model": "test-model"})
 
-    assert provider.runtime_resource_used is False
+    assert provider.runtime_resource_used is True
 
 
 def test_ollama_summarization_provider_releases_runtime_resource(

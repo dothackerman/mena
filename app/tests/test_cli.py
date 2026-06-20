@@ -470,6 +470,50 @@ def test_setup_authorize_local_fallback_runs_fallback_actions_before_persisting(
     assert "Setup action results:" in captured.out
 
 
+def test_setup_authorize_local_fallback_prompts_before_running_fallback_actions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    primary_ready = _setup_state(settings=settings, pyannote_token_present=True)
+    fallback_missing_asr = _setup_state(
+        settings=settings,
+        asr_model_present=False,
+        pyannote_token_present=True,
+    )
+    runner = SetupFakeRunner()
+    prompts: list[str] = []
+
+    def _detect_state(_settings: AppSettings, **kwargs: object) -> LocalInstallationState:
+        profile = cast(Any, kwargs.get("profile"))
+        if profile is not None and profile.fallback:
+            return fallback_missing_asr
+        return primary_ready
+
+    def _decline(prompt: str) -> str:
+        prompts.append(prompt)
+        return "n"
+
+    monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
+
+    exit_code = main(
+        ["setup", "--authorize-local-fallback"],
+        settings=settings,
+        input_fn=_decline,
+        setup_runner=runner,
+    )
+    captured = capsys.readouterr()
+
+    accepted = load_runtime_profile_state(settings.paths)
+    assert exit_code == 0
+    assert prompts == ["Proceed with automated fallback setup actions? [y/N] "]
+    assert runner.run_calls == []
+    assert accepted.fallback_authorization.local_status == "unavailable"
+    assert accepted.fallback_authorization.automatic_local_fallback_authorized is False
+    assert "Fallback setup actions declined" in captured.out
+
+
 def test_setup_evaluates_fallback_profile_before_authorizing_it(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

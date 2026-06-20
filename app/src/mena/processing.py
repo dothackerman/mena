@@ -109,6 +109,7 @@ class ProcessingStageState:
     completed_at: str | None
     error: ProcessingErrorInfo | None
     attempt: int
+    skip_reason: str | None = None
 
     @classmethod
     def from_dict(cls, data: object) -> Self:
@@ -127,6 +128,7 @@ class ProcessingStageState:
             completed_at=_optional_str(data, "completed_at"),
             error=None if error_data is None else ProcessingErrorInfo.from_dict(error_data),
             attempt=_required_int(data, "attempt"),
+            skip_reason=_optional_str(data, "skip_reason"),
         )
         _validate_stage_state(state)
         return state
@@ -144,6 +146,7 @@ class ProcessingStageState:
             "completed_at": self.completed_at,
             "error": None if self.error is None else self.error.to_dict(),
             "attempt": self.attempt,
+            "skip_reason": self.skip_reason,
         }
 
 
@@ -331,6 +334,8 @@ def _validate_stage_state(state: ProcessingStageState) -> None:
         raise ProcessingStateError("Failed stages must carry an error.")
     if state.status != "failed" and state.error is not None:
         raise ProcessingStateError("Only failed stages may carry an error.")
+    if state.status != "skipped" and state.skip_reason is not None:
+        raise ProcessingStateError("Only skipped stages may carry a skip_reason.")
 
 
 def _artifact_refs(data: object) -> tuple[ArtifactRef, ...]:

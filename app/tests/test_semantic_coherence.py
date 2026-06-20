@@ -220,6 +220,7 @@ def test_semantic_coherence_stage_skips_provider_unavailable_when_requested() ->
     assert result.review_queue_record is None
     assert result.state.status == "skipped"
     assert states[-1].status == "skipped"
+    assert states[-1].skip_reason == "provider_unavailable"
     assert all(state.status != "failed" for state in states)
 
 
@@ -651,7 +652,7 @@ def test_ollama_post_json_handles_success_invalid_json_and_unavailable(
         provider._post_json("/api/chat", {"model": "test-model"})
 
 
-def test_ollama_semantic_provider_marks_runtime_resource_used_only_after_success(
+def test_ollama_semantic_provider_marks_runtime_resource_used_before_failed_chat_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = OllamaSemanticCoherenceProvider(
@@ -666,7 +667,7 @@ def test_ollama_semantic_provider_marks_runtime_resource_used_only_after_success
     with pytest.raises(SemanticCoherenceProviderUnavailable, match="provider is unavailable"):
         provider._post_json("/api/chat", {"model": "test-model"})
 
-    assert provider.runtime_resource_used is False
+    assert provider.runtime_resource_used is True
 
 
 def test_ollama_semantic_provider_releases_runtime_resource(
