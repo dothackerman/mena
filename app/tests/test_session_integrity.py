@@ -124,6 +124,18 @@ def test_verify_session_bundle_detects_orphaned_artifact_file(tmp_path: Path) ->
     assert "orphaned_artifact_file" in _codes(report)
 
 
+def test_verify_session_bundle_ignores_hidden_provider_prep_temps(tmp_path: Path) -> None:
+    session = _create_recorded_session(tmp_path)
+    temp_file = session.bundle_path / "artifacts" / ".provider-prep-tmp" / ".local_mic.tmp.wav"
+    temp_file.parent.mkdir(parents=True)
+    temp_file.write_bytes(b"interrupted provider prep")
+
+    report = verify_session_bundle(session.bundle_path)
+
+    assert report.ok
+    assert "orphaned_artifact_file" not in _codes(report)
+
+
 def test_verify_session_bundle_reports_invalid_session_record(tmp_path: Path) -> None:
     session_dir = tmp_path / "session"
     session_dir.mkdir()

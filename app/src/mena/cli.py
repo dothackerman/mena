@@ -5,12 +5,18 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import queue
+import shutil
 import subprocess
+import sys
+import threading
+import wave
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar, cast
 from uuid import uuid4
 
 from mena.artifacts import (
@@ -18,6 +24,11 @@ from mena.artifacts import (
     ArtifactStore,
     ArtifactStoreError,
     FileSystemArtifactStore,
+)
+from mena.capture_planning import (
+    CapturePlanningError,
+    RouteSelections,
+    build_start_capture_payload,
 )
 from mena.correction_overlay import (
     CorrectionOverlayContractError,
@@ -36,7 +47,14 @@ from mena.diarization import (
     PyannoteCommunityDiarizationProvider,
     run_diarization_stage,
 )
-from mena.discovery import AudioDiscovery, DiscoveryStatus, discover_audio_routes, format_discovery
+from mena.discovery import (
+    AudioDiscovery,
+    AudioRoute,
+    DiscoveryStatus,
+    PlaybackStream,
+    discover_audio_routes,
+    format_discovery,
+)
 from mena.export import (
     SummaryMarkdownExportError,
     export_summary_markdown,
@@ -59,12 +77,28 @@ from mena.processing import (
 )
 from mena.profiles import (
     CaptureProfile,
+    CaptureProfileId,
+    CaptureProfileSelection,
+    CaptureSourceId,
     DiarisationPolicy,
     capture_profile_choices,
     get_capture_profile,
     parse_capture_profile,
 )
-from mena.protocol import ProtocolError, WorkerExitedError, WorkerProcess
+from mena.protocol import (
+    CaptureFinalizedPayload,
+    CaptureRouteBindingPayload,
+    CaptureRouteEventPayload,
+    CaptureStatusPayload,
+    ErrorPayload,
+    ProtocolError,
+    ProtocolMessage,
+    SegmentFlushedPayload,
+    SegmentsFlushedPayload,
+    StartCapturePayload,
+    WorkerExitedError,
+    WorkerProcess,
+)
 from mena.review_flagging import (
     CONFIDENCE_FLAGGING_STAGE,
     ReviewFlaggingError,
@@ -101,10 +135,14 @@ from mena.session_integrity import (
 )
 from mena.sessions import (
     SESSION_RECORD_FILENAME,
+    append_session_degradation,
+    append_session_failure,
     create_session,
     read_session_record,
     update_session_capture_metadata,
+    update_session_capture_plan,
     update_session_discovery,
+    update_session_record,
 )
 from mena.settings import AppSettings, SettingsError, validate_summary_language
 from mena.setup import (
@@ -162,6 +200,7 @@ PROCESSING_PIPELINE_STAGES = frozenset(
 
 
 ProviderFactory = Callable[[], Any]
+ChoiceT = TypeVar("ChoiceT")
 
 
 class ProviderValidationError(TypeError):
@@ -176,6 +215,127 @@ class SourceAudioInput:
     artifact: ArtifactRecord
 
 
+@dataclass(frozen=True)
+class CaptureSegmentInput:
+    source_id: str
+    index: int
+    path: Path
+    artifact: ArtifactRecord
+    sha256: str
+    route_id: str | None
+    route_label: str | None
+    capture_mode: str | None
+
+
+class _CaptureEventMonitor:
+    """Drain worker capture events while the foreground prompt waits for stop."""
+
+    def __init__(
+        self,
+        worker: WorkerProcess,
+        *,
+        record_path: Path,
+        start_payload: StartCapturePayload,
+    ) -> None:
+        self.worker = worker
+        self.record_path = record_path
+        self.start_payload = start_payload
+        self.segments: list[dict[str, object]] = []
+        self._terminal_events: queue.Queue[ProtocolMessage | BaseException] = queue.Queue()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="mena-capture-events",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def wait_for_finalized(self) -> ProtocolMessage:
+        event = self._terminal_events.get()
+        self._thread.join()
+        if isinstance(event, BaseException):
+            raise event
+        return event
+
+    def poll_terminal_event(self) -> ProtocolMessage | None:
+        try:
+            event = self._terminal_events.get_nowait()
+        except queue.Empty:
+            return None
+        self._thread.join()
+        if isinstance(event, BaseException):
+            raise event
+        return event
+
+    def _run(self) -> None:
+        while True:
+            try:
+                message = self.worker.receive()
+                should_continue = self._handle_message(message)
+            except BaseException as exc:
+                self._terminal_events.put(exc)
+                return
+            if not should_continue:
+                return
+
+    def _handle_message(self, message: ProtocolMessage) -> bool:
+        if message.type == "segment_flushed":
+            segment = SegmentFlushedPayload.from_dict(message.payload)
+            self._persist_segments((dict(message.payload),))
+            self._print_segment(segment)
+            return True
+        if message.type == "segments_flushed":
+            batch = SegmentsFlushedPayload.from_dict(message.payload)
+            raw_segments = message.payload["segments"]
+            if not isinstance(raw_segments, list):
+                raise ProtocolError("segments_flushed payload segments must be a list.")
+            self._persist_segments(
+                tuple(cast(dict[str, object], segment) for segment in raw_segments)
+            )
+            for segment in batch.segments:
+                self._print_segment(segment)
+            return True
+        if message.type == "capture_status":
+            status = CaptureStatusPayload.from_dict(message.payload)
+            print(
+                "Recording: "
+                f"{int(status.elapsed_seconds)}s elapsed, "
+                f"{status.sealed_segment_count} sealed segment(s)."
+            )
+            return True
+        if message.type == "capture_route_event":
+            event = CaptureRouteEventPayload.from_dict(message.payload)
+            append_session_degradation(self.record_path, event.to_dict())
+            label = "Capture recovered" if event.event == "recovered" else "Capture degraded"
+            print(f"{label}: {event.message}")
+            return True
+        if message.type == "capture_finalized":
+            self._terminal_events.put(message)
+            return False
+        if message.type == "error":
+            error = ErrorPayload.from_dict(message.payload)
+            self._terminal_events.put(ProtocolError(error.message))
+            return False
+        self._terminal_events.put(ProtocolError(f"Unexpected capture event '{message.type}'."))
+        return False
+
+    def _persist_segments(self, segments: tuple[dict[str, object], ...]) -> None:
+        self.segments.extend(segments)
+        # Incremental metadata is intentional: a session can be interrupted
+        # before finalization and still retain processable sealed chunks.
+        update_session_capture_metadata(
+            self.record_path,
+            _capture_metadata_from_segments(
+                self.start_payload,
+                self.segments,
+            ),
+        )
+
+    def _print_segment(self, segment: SegmentFlushedPayload) -> None:
+        print(f"Sealed {segment.source_id} segment {segment.index}.")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="mena",
@@ -188,14 +348,34 @@ def build_parser() -> argparse.ArgumentParser:
     record_parser.add_argument(
         "--profile",
         choices=capture_profile_choices(),
-        required=True,
         help="Capture profile for this recording session.",
     )
     record_parser.add_argument("--name", help="Friendly session name for human reference.")
     record_parser.add_argument(
+        "--language",
+        default=None,
+        help="Meeting language to persist as the session language.",
+    )
+    record_parser.add_argument("--mic", default=None, help="Microphone route id to capture.")
+    record_parser.add_argument(
+        "--playback-stream",
+        default=None,
+        help="Playback stream route id to capture for online meetings.",
+    )
+    record_parser.add_argument(
+        "--output-sink",
+        default=None,
+        help="Output sink route id used to keep the meeting audible.",
+    )
+    record_parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Create a session and print read-only audio discovery without starting capture.",
+    )
+    record_parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print route planning details and write worker capture diagnostics to stderr.",
     )
     record_parser.add_argument(
         "--worker-exit-timeout",
@@ -322,8 +502,26 @@ def main(
         )
 
     if args.command == "record":
-        profile = parse_capture_profile(args.profile)
-        created_session = create_session(profile=profile, name=args.name, data_root=data_root)
+        try:
+            profile = _resolve_record_profile(args.profile, input_fn=input_fn)
+            language = _resolve_record_language(
+                args.language,
+                default_language=app_settings.summary.language,
+                input_fn=input_fn,
+                dry_run=args.dry_run,
+            )
+        except ValueError as exc:
+            print(f"Cannot start recording: {exc}")
+            return 1
+        except (EOFError, KeyboardInterrupt):
+            print("Recording setup cancelled.")
+            return 1
+        created_session = create_session(
+            profile=profile,
+            language=language,
+            name=args.name,
+            data_root=data_root,
+        )
         print(f"Created session {created_session.record.id}")
         print(f"Session record: {created_session.record_path}")
         discovery = discoverer(profile.id)
@@ -334,23 +532,205 @@ def main(
         if discovery.status is not DiscoveryStatus.AVAILABLE:
             print("Capture not started: audio discovery is unavailable.")
             return 1
-        with worker_factory(
-            session_id=created_session.record.id,
-            session_dir=created_session.bundle_path,
-        ) as worker:
+        try:
+            route_selections = _resolve_route_selections(
+                profile=profile.id,
+                discovery=discovery,
+                microphone_route_id=args.mic,
+                playback_stream_route_id=args.playback_stream,
+                output_sink_route_id=args.output_sink,
+                input_fn=input_fn,
+            )
+            start_payload = build_start_capture_payload(
+                profile=profile.id,
+                language=language,
+                discovery=discovery,
+                selections=route_selections,
+            )
+            if args.verbose:
+                print(_format_record_diagnostics(start_payload))
+        except (EOFError, KeyboardInterrupt):
+            print("Recording setup cancelled.")
+            return 1
+        except (CapturePlanningError, ValueError) as exc:
+            print(f"Capture not started: {exc}")
+            return 1
+        if _record_input(input_fn) is None:
+            print("Capture not started: recording requires an interactive terminal to stop.")
+            return 1
+        update_session_capture_plan(
+            created_session.record_path,
+            _capture_plan_from_start_payload(start_payload, status="planned"),
+        )
+        started_at = _utc_timestamp(now)
+        update_session_record(
+            created_session.record_path,
+            updates={
+                "status": "recording",
+                "recording": _recording_lifecycle(
+                    started_at=started_at,
+                    stopped_at=None,
+                    stop_reason=None,
+                    finalization_status="pending",
+                    completed_at=None,
+                    error=None,
+                ),
+                "capture_plan": _capture_plan_from_start_payload(
+                    start_payload,
+                    status="active",
+                ),
+            },
+        )
+        try:
+            worker_kwargs: dict[str, object] = {
+                "session_id": created_session.record.id,
+                "session_dir": created_session.bundle_path,
+            }
+            if args.verbose:
+                worker_kwargs["capture_diagnostics"] = True
+            worker_context = worker_factory(**worker_kwargs)
+            worker = worker_context.__enter__()
+        except (OSError, subprocess.SubprocessError) as exc:
+            _persist_capture_failure(
+                record_path=created_session.record_path,
+                start_payload=start_payload,
+                started_at=started_at,
+                error_message=str(exc),
+                now=now,
+            )
+            print(f"Capture failed: {exc}")
+            return 1
+        try:
+            capture_monitor = _capture_event_monitor(
+                worker,
+                record_path=created_session.record_path,
+                start_payload=start_payload,
+            )
+            interrupted_stop = False
+            start_command_sent = False
+            monitor_started = False
+            finalized: ProtocolMessage | None = None
             try:
                 worker.handshake()
-                worker.start_capture({"profile": profile.id.value})
-                finalized = worker.stop_capture()
+                print(
+                    "Recording notice: you are responsible for obtaining consent "
+                    "from meeting participants."
+                )
+                start_command_sent = True
+                worker.start_capture(start_payload)
+                if capture_monitor is not None:
+                    capture_monitor.start()
+                    monitor_started = True
+                _wait_for_record_stop(input_fn, capture_monitor=capture_monitor)
+                finalized = _finalize_recording(
+                    worker,
+                    capture_monitor if monitor_started else None,
+                )
                 exit_code = worker.wait(timeout=args.worker_exit_timeout)
                 if exit_code != 0:
                     raise WorkerExitedError(f"Worker exited with status {exit_code}.")
-            except (ProtocolError, WorkerExitedError, subprocess.TimeoutExpired) as exc:
+            except (EOFError, KeyboardInterrupt):
+                if finalized is not None:
+                    print("Worker teardown interrupted after capture finalization.")
+                elif not start_command_sent:
+                    _persist_capture_failure(
+                        record_path=created_session.record_path,
+                        start_payload=start_payload,
+                        started_at=started_at,
+                        error_message="Recording setup cancelled.",
+                        now=now,
+                    )
+                    print("Recording setup cancelled.")
+                    return 1
+                else:
+                    print("Recording stop requested; finalizing capture.")
+                    interrupted_stop = True
+                    try:
+                        finalized = _finalize_recording(
+                            worker,
+                            capture_monitor if monitor_started else None,
+                        )
+                        exit_code = worker.wait(timeout=args.worker_exit_timeout)
+                        if exit_code != 0:
+                            raise WorkerExitedError(f"Worker exited with status {exit_code}.")
+                    except (
+                        ProtocolError,
+                        WorkerExitedError,
+                        subprocess.TimeoutExpired,
+                        ValueError,
+                    ) as exc:
+                        _persist_capture_failure(
+                            record_path=created_session.record_path,
+                            start_payload=start_payload,
+                            started_at=started_at,
+                            error_message=str(exc),
+                            now=now,
+                        )
+                        print(f"Capture failed: {exc}")
+                        return 1
+            except (
+                ProtocolError,
+                WorkerExitedError,
+                subprocess.TimeoutExpired,
+                ValueError,
+            ) as exc:
+                _persist_capture_failure(
+                    record_path=created_session.record_path,
+                    start_payload=start_payload,
+                    started_at=started_at,
+                    error_message=str(exc),
+                    now=now,
+                )
                 print(f"Capture failed: {exc}")
                 return 1
-        update_session_capture_metadata(created_session.record_path, finalized.payload)
+        finally:
+            worker_context.__exit__(*sys.exc_info())
+        finalized_payload = CaptureFinalizedPayload.from_dict(finalized.payload)
+        completed_at = finalized_payload.completed_at or _utc_timestamp(now)
+        stop_reason = "interrupted" if interrupted_stop else finalized_payload.stop_reason
+        capture_metadata = (
+            _capture_metadata_from_segments(start_payload, capture_monitor.segments)
+            if capture_monitor is not None
+            else finalized_payload.capture_metadata
+        )
+        source_independence_error = _source_independence_error(
+            capture_metadata,
+            session_dir=created_session.bundle_path,
+        )
+        final_status = finalized_payload.status
+        final_error = finalized_payload.error
+        if source_independence_error is not None:
+            final_status = "failed"
+            final_error = source_independence_error
+        update_session_capture_metadata(created_session.record_path, capture_metadata)
+        update_session_record(
+            created_session.record_path,
+            updates={
+                "status": final_status,
+                "recording": _recording_lifecycle(
+                    started_at=started_at,
+                    stopped_at=completed_at,
+                    stop_reason=stop_reason,
+                    finalization_status=(
+                        "finalized" if final_status == "recorded" else final_status
+                    ),
+                    completed_at=completed_at,
+                    error=final_error,
+                ),
+                "capture_plan": _capture_plan_from_start_payload(
+                    start_payload,
+                    status=("finalized" if final_status == "recorded" else final_status),
+                ),
+            },
+        )
         print("Capture finalized")
-        return 0
+        if final_status == "recorded":
+            print(f"To process this recording, run: mena process {created_session.record_path}")
+        elif final_error:
+            print(f"Capture finalized as {final_status}: {final_error}")
+        else:
+            print(f"Capture finalized as {final_status}.")
+        return 1 if final_status == "failed" else 0
 
     if args.command == "correct":
         try:
@@ -374,7 +754,7 @@ def main(
                 session_path=Path(args.session_path),
                 manual_notes=args.manual_notes,
                 language=(
-                    app_settings.summary.language
+                    None
                     if args.language is None
                     else validate_summary_language(args.language, "--language")
                 ),
@@ -494,6 +874,550 @@ def main(
 
     print(f"Command '{args.command}' is not implemented yet.")
     return 0
+
+
+def _capture_plan_from_start_payload(
+    payload: StartCapturePayload,
+    *,
+    status: str,
+) -> dict[str, object]:
+    plan = payload.to_dict()
+    plan["version"] = 1
+    plan["status"] = status
+    return plan
+
+
+def _format_record_diagnostics(payload: StartCapturePayload) -> str:
+    lines = [
+        "Record diagnostics:",
+        f"  profile: {payload.profile}",
+        f"  language: {payload.language}",
+        f"  segment_seconds: {payload.segment_seconds}",
+        f"  selected_sources: {', '.join(payload.selected_sources)}",
+        "  routes:",
+    ]
+    for route in payload.routes:
+        lines.append(
+            "    "
+            f"role={route.role} source={route.source_id or '-'} "
+            f"route_id={route.route_id} backend={route.backend} "
+            f"backend_name={route.backend_name or '-'} label={route.label}"
+        )
+    return "\n".join(lines)
+
+
+def _capture_metadata_from_segments(
+    payload: StartCapturePayload,
+    segments: list[dict[str, object]],
+) -> dict[str, object]:
+    sample_rate = _latest_segment_int(segments, "sample_rate", default=48_000)
+    channels = _latest_segment_int(segments, "channels", default=1)
+    return {
+        "version": 1,
+        "profile": payload.profile,
+        "sample_rate": sample_rate,
+        "channels": channels,
+        "segment_seconds": payload.segment_seconds,
+        "segment_count": len(segments),
+        "segments": list(segments),
+        "sources": _capture_source_summaries(payload, segments),
+    }
+
+
+def _capture_source_summaries(
+    payload: StartCapturePayload,
+    segments: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    routes_by_source = {
+        route.source_id: route for route in payload.routes if route.source_id is not None
+    }
+    ordered_sources = tuple(
+        dict.fromkeys(str(segment["source_id"]) for segment in segments if "source_id" in segment)
+    )
+    summaries: list[dict[str, object]] = []
+    for source_id in ordered_sources:
+        source_segments = [segment for segment in segments if segment.get("source_id") == source_id]
+        route = routes_by_source.get(source_id)
+        channel_layout = source_segments[-1].get("channel_layout", "unknown")
+        latest_route_id = source_segments[-1].get("route_id")
+        latest_route_label = source_segments[-1].get("route_label")
+        latest_capture_mode = source_segments[-1].get("capture_mode")
+        summaries.append(
+            {
+                "source_id": source_id,
+                "route_id": latest_route_id or (None if route is None else route.route_id),
+                "route_label": latest_route_label or (None if route is None else route.label),
+                "capture_mode": latest_capture_mode or _capture_mode_for_route(route),
+                "channel_layout": channel_layout,
+                "segment_count": len(source_segments),
+            }
+        )
+    return summaries
+
+
+def _source_independence_error(
+    capture_metadata: dict[str, object],
+    *,
+    session_dir: Path | None = None,
+) -> str | None:
+    if capture_metadata.get("profile") != CaptureProfileId.ONLINE_DUAL_STREAM.value:
+        return None
+    route_ids = _capture_route_ids_by_source(capture_metadata)
+    local_route_id = route_ids.get(CaptureSourceId.LOCAL_MIC.value)
+    system_route_id = route_ids.get(CaptureSourceId.SYSTEM_AUDIO.value)
+    if local_route_id is None or system_route_id is None or local_route_id == system_route_id:
+        return None
+    segments = capture_metadata.get("segments")
+    if not isinstance(segments, list):
+        return None
+    local_segments = _sealed_segments_by_index(segments, CaptureSourceId.LOCAL_MIC.value)
+    system_segments = _sealed_segments_by_index(segments, CaptureSourceId.SYSTEM_AUDIO.value)
+    local_hashes = _segment_hashes(local_segments)
+    system_hashes = _segment_hashes(system_segments)
+    common_indexes = sorted(set(local_hashes) & set(system_hashes))
+    if not common_indexes:
+        return None
+    if any(local_hashes[index] != system_hashes[index] for index in common_indexes):
+        return None
+    if _all_same_index_pairs_are_silent(
+        local_segments,
+        system_segments,
+        common_indexes,
+        session_dir=session_dir,
+    ):
+        return None
+    return (
+        "Online capture source independence failed: local_mic and system_audio "
+        "produced identical same-index audio hashes for distinct selected routes."
+    )
+
+
+def _capture_route_ids_by_source(capture_metadata: dict[str, object]) -> dict[str, str]:
+    route_ids: dict[str, str] = {}
+    sources = capture_metadata.get("sources")
+    if not isinstance(sources, list):
+        return route_ids
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        source_id = source.get("source_id")
+        route_id = source.get("route_id")
+        if isinstance(source_id, str) and isinstance(route_id, str) and route_id:
+            route_ids[source_id] = route_id
+    return route_ids
+
+
+def _sealed_segments_by_index(
+    segments: list[object],
+    source_id: str,
+) -> dict[int, dict[str, object]]:
+    indexed: dict[int, dict[str, object]] = {}
+    for segment in segments:
+        if not isinstance(segment, dict) or segment.get("source_id") != source_id:
+            continue
+        if segment.get("status") != "sealed":
+            continue
+        index = segment.get("index")
+        if isinstance(index, int):
+            indexed[index] = segment
+    return indexed
+
+
+def _segment_hashes(segments: dict[int, dict[str, object]]) -> dict[int, str]:
+    hashes: dict[int, str] = {}
+    for index, segment in segments.items():
+        sha256 = segment.get("sha256")
+        if isinstance(sha256, str) and sha256:
+            hashes[index] = sha256
+    return hashes
+
+
+def _all_same_index_pairs_are_silent(
+    local_segments: dict[int, dict[str, object]],
+    system_segments: dict[int, dict[str, object]],
+    indexes: Sequence[int],
+    *,
+    session_dir: Path | None,
+) -> bool:
+    if session_dir is None:
+        return False
+    for index in indexes:
+        local_silent = _segment_wav_is_silent(local_segments[index], session_dir=session_dir)
+        system_silent = _segment_wav_is_silent(system_segments[index], session_dir=session_dir)
+        if local_silent is not True or system_silent is not True:
+            return False
+    return True
+
+
+def _segment_wav_is_silent(segment: dict[str, object], *, session_dir: Path) -> bool | None:
+    raw_path = segment.get("path")
+    if not isinstance(raw_path, str) or not raw_path:
+        return None
+    path = Path(raw_path)
+    if not path.is_absolute():
+        path = session_dir / path
+    try:
+        with wave.open(str(path), "rb") as wav_file:
+            frames = wav_file.readframes(wav_file.getnframes())
+    except (EOFError, OSError, wave.Error):
+        return None
+    if not frames:
+        return True
+    return all(byte == 0 for byte in frames)
+
+
+def _capture_mode_for_route(route: CaptureRouteBindingPayload | None) -> str | None:
+    if route is None:
+        return None
+    if route.role == "microphone":
+        return "selected_microphone"
+    if route.role == "playback_stream":
+        return "dedicated_route"
+    return None
+
+
+def _latest_segment_int(
+    segments: list[dict[str, object]],
+    key: str,
+    *,
+    default: int,
+) -> int:
+    for segment in reversed(segments):
+        value = segment.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return default
+
+
+def _recording_lifecycle(
+    *,
+    started_at: str | None,
+    stopped_at: str | None,
+    stop_reason: str | None,
+    finalization_status: str,
+    completed_at: str | None,
+    error: str | None,
+) -> dict[str, object]:
+    return {
+        "started_at": started_at,
+        "stopped_at": stopped_at,
+        "stop_reason": stop_reason,
+        "finalization": {
+            "status": finalization_status,
+            "completed_at": completed_at,
+            "error": error,
+        },
+    }
+
+
+def _persist_capture_failure(
+    *,
+    record_path: Path,
+    start_payload: StartCapturePayload,
+    started_at: str,
+    error_message: str,
+    now: datetime | None,
+) -> None:
+    completed_at = _utc_timestamp(now)
+    append_session_failure(
+        record_path,
+        {
+            "code": "capture_failed",
+            "message": error_message or "Capture failed.",
+            "source_id": None,
+            "occurred_at": completed_at,
+            "recoverable": False,
+        },
+    )
+    update_session_record(
+        record_path,
+        updates={
+            "status": "failed",
+            "recording": _recording_lifecycle(
+                started_at=started_at,
+                stopped_at=completed_at,
+                stop_reason="error",
+                finalization_status="failed",
+                completed_at=completed_at,
+                error=error_message or "Capture failed.",
+            ),
+            "capture_plan": _capture_plan_from_start_payload(
+                start_payload,
+                status="failed",
+            ),
+        },
+    )
+
+
+def _capture_event_monitor(
+    worker: Any,
+    *,
+    record_path: Path,
+    start_payload: StartCapturePayload,
+) -> _CaptureEventMonitor | None:
+    if isinstance(worker, WorkerProcess):
+        return _CaptureEventMonitor(
+            worker,
+            record_path=record_path,
+            start_payload=start_payload,
+        )
+    return None
+
+
+def _finalize_recording(
+    worker: Any,
+    capture_monitor: _CaptureEventMonitor | None,
+) -> ProtocolMessage:
+    if capture_monitor is not None:
+        worker.request_stop_capture()
+        return capture_monitor.wait_for_finalized()
+    finalized = worker.stop_capture()
+    if not isinstance(finalized, ProtocolMessage):
+        raise ProtocolError("Worker stop_capture did not return a protocol message.")
+    return finalized
+
+
+def _utc_timestamp(now: datetime | None) -> str:
+    timestamp = (now or datetime.now(UTC)).astimezone(UTC)
+    return timestamp.isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _resolve_record_profile(
+    raw_profile: str | None,
+    *,
+    input_fn: Callable[[str], str] | None,
+) -> CaptureProfileSelection:
+    if raw_profile is not None:
+        return parse_capture_profile(raw_profile)
+    reader = _record_input(input_fn)
+    if reader is None:
+        raise ValueError("Capture profile is required in non-interactive mode; pass --profile.")
+    print("Capture profiles:")
+    print("  1. online")
+    print("  2. in-person")
+    answer = reader("Select capture profile [online]: ").strip() or "online"
+    if answer == "1":
+        answer = "online"
+    elif answer == "2":
+        answer = "in-person"
+    return parse_capture_profile(answer)
+
+
+def _resolve_record_language(
+    raw_language: str | None,
+    *,
+    default_language: str,
+    input_fn: Callable[[str], str] | None,
+    dry_run: bool,
+) -> str:
+    if raw_language is not None:
+        return validate_summary_language(raw_language, "--language")
+    if dry_run:
+        return default_language
+    reader = _record_input(input_fn)
+    if reader is None:
+        raise ValueError("Meeting language is required before recording; pass --language.")
+    answer = reader(f"Meeting language [{default_language}]: ").strip() or default_language
+    return validate_summary_language(answer, "meeting language")
+
+
+def _resolve_route_selections(
+    *,
+    profile: CaptureProfileId,
+    discovery: AudioDiscovery,
+    microphone_route_id: str | None,
+    playback_stream_route_id: str | None,
+    output_sink_route_id: str | None,
+    input_fn: Callable[[str], str] | None,
+) -> RouteSelections:
+    microphone = _resolve_audio_route(
+        discovery.sources,
+        role="microphone",
+        flag_name="--mic",
+        selected_route_id=microphone_route_id,
+        input_fn=input_fn,
+    )
+    if profile is CaptureProfileId.IN_PERSON_SINGLE_MIC:
+        if playback_stream_route_id is not None or output_sink_route_id is not None:
+            raise ValueError("In-person recording accepts --mic only.")
+        return RouteSelections(microphone_route_id=microphone.route_id)
+
+    playback_stream = _resolve_playback_stream(
+        discovery.playback_streams,
+        selected_route_id=playback_stream_route_id,
+        input_fn=input_fn,
+    )
+    output_sink = _resolve_audio_route(
+        discovery.sinks,
+        role="output sink",
+        flag_name="--output-sink",
+        selected_route_id=output_sink_route_id,
+        input_fn=input_fn,
+    )
+    return RouteSelections(
+        microphone_route_id=microphone.route_id,
+        playback_stream_route_id=playback_stream.route_id,
+        output_sink_route_id=output_sink.route_id,
+    )
+
+
+def _resolve_audio_route(
+    routes: tuple[AudioRoute, ...],
+    *,
+    role: str,
+    flag_name: str,
+    selected_route_id: str | None,
+    input_fn: Callable[[str], str] | None,
+) -> AudioRoute:
+    if selected_route_id is not None:
+        return _find_audio_route(routes, selected_route_id, role)
+    if len(routes) == 1:
+        return routes[0]
+    if not routes:
+        raise ValueError(f"No {role} routes were discovered.")
+    reader = _record_input(input_fn)
+    if reader is None:
+        raise ValueError(f"Multiple {role} routes were discovered; pass {flag_name}.")
+    return _prompt_choice(
+        title=f"{role.title()} routes",
+        choices=routes,
+        formatter=_format_audio_route_choice,
+        input_fn=reader,
+    )
+
+
+def _resolve_playback_stream(
+    streams: tuple[PlaybackStream, ...],
+    *,
+    selected_route_id: str | None,
+    input_fn: Callable[[str], str] | None,
+) -> PlaybackStream:
+    active_streams = tuple(stream for stream in streams if stream.active)
+    if selected_route_id is not None:
+        return _find_active_playback_stream(streams, selected_route_id)
+    if not streams:
+        raise ValueError("No playback streams were discovered.")
+    if not active_streams:
+        raise ValueError("No active playback streams were discovered.")
+    reader = _record_input(input_fn)
+    if reader is None:
+        raise ValueError("Playback stream confirmation is required; pass --playback-stream.")
+    return _prompt_choice(
+        title="Playback streams",
+        choices=active_streams,
+        formatter=_format_playback_stream_choice,
+        input_fn=reader,
+    )
+
+
+def _find_audio_route(routes: tuple[AudioRoute, ...], route_id: str, role: str) -> AudioRoute:
+    for route in routes:
+        if route.route_id == route_id:
+            return route
+    raise ValueError(f"Selected {role} route '{route_id}' was not discovered.")
+
+
+def _find_playback_stream(streams: tuple[PlaybackStream, ...], route_id: str) -> PlaybackStream:
+    for stream in streams:
+        if stream.route_id == route_id:
+            return stream
+    raise ValueError(f"Selected playback stream route '{route_id}' was not discovered.")
+
+
+def _find_active_playback_stream(
+    streams: tuple[PlaybackStream, ...],
+    route_id: str,
+) -> PlaybackStream:
+    stream = _find_playback_stream(streams, route_id)
+    if not stream.active:
+        raise ValueError(f"Selected playback stream route '{route_id}' is not active.")
+    return stream
+
+
+def _prompt_choice(
+    *,
+    title: str,
+    choices: tuple[ChoiceT, ...],
+    formatter: Callable[[ChoiceT], str],
+    input_fn: Callable[[str], str],
+) -> ChoiceT:
+    print(f"{title}:")
+    for index, choice in enumerate(choices, start=1):
+        print(f"  {index}. {formatter(choice)}")
+    answer = input_fn(f"Select {title.lower()} [1]: ").strip() or "1"
+    if not answer.isdigit():
+        raise ValueError(f"Invalid {title.lower()} selection '{answer}'.")
+    selected_index = int(answer)
+    if selected_index < 1 or selected_index > len(choices):
+        raise ValueError(f"Invalid {title.lower()} selection '{answer}'.")
+    return choices[selected_index - 1]
+
+
+def _record_input(input_fn: Callable[[str], str] | None) -> Callable[[str], str] | None:
+    if input_fn is not None:
+        return input_fn
+    if sys.stdin.isatty():
+        return input
+    return None
+
+
+def _wait_for_record_stop(
+    input_fn: Callable[[str], str] | None,
+    *,
+    capture_monitor: _CaptureEventMonitor | None = None,
+) -> None:
+    reader = _record_input(input_fn)
+    if reader is None:
+        raise RuntimeError("Recording requires an interactive terminal to stop.")
+    print("Recording. Press q to stop.")
+    while True:
+        answer = _read_record_command(reader, capture_monitor=capture_monitor).strip().lower()
+        if answer in {"q", "quit", "stop"}:
+            return
+        print("Recording continues. Type q to stop.")
+
+
+def _read_record_command(
+    reader: Callable[[str], str],
+    *,
+    capture_monitor: _CaptureEventMonitor | None,
+) -> str:
+    if capture_monitor is None:
+        return reader("record> ")
+
+    result_queue: queue.Queue[str | BaseException] = queue.Queue(maxsize=1)
+
+    def read_input() -> None:
+        try:
+            result_queue.put(reader("record> "))
+        except BaseException as exc:
+            result_queue.put(exc)
+
+    input_thread = threading.Thread(target=read_input, name="mena-record-input", daemon=True)
+    input_thread.start()
+    while True:
+        terminal_event = capture_monitor.poll_terminal_event()
+        if terminal_event is not None:
+            return "q"
+        try:
+            result = result_queue.get(timeout=0.1)
+        except queue.Empty:
+            continue
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+
+def _format_audio_route_choice(route: AudioRoute) -> str:
+    label = route.description or route.name
+    return f"{label} ({route.route_id})"
+
+
+def _format_playback_stream_choice(stream: PlaybackStream) -> str:
+    label = stream.media_name or stream.stream_name or stream.name
+    if stream.app_binary_name:
+        label = f"{label} - {stream.app_binary_name}"
+    return f"{label} ({stream.route_id})"
 
 
 def _run_setup_command(
@@ -677,7 +1601,7 @@ def _run_summarize_command(
     *,
     session_path: Path,
     manual_notes: str | None,
-    language: str,
+    language: str | None,
     settings: AppSettings,
     setup_runner: CommandRunner | None = None,
     setup_command_identity: CommandIdentity | None = None,
@@ -686,6 +1610,10 @@ def _run_summarize_command(
 ) -> int:
     session_dir, session_record = _resolve_session(session_path)
     session_id = _extract_session_id(session_record)
+    summary_language = language or _session_language_or_default(
+        session_record,
+        settings.summary.language,
+    )
     store = FileSystemArtifactStore(session_id=session_id, session_dir=session_dir)
 
     merged_transcript_record = _resolve_latest_merged_transcript_record(store=store)
@@ -737,7 +1665,7 @@ def _run_summarize_command(
             correction_overlay_record=resolved_overlay[0],
             manual_notes_record=manual_notes_record,
             provider=provider,
-            policy=SummarizationPolicy(language=language),
+            policy=SummarizationPolicy(language=summary_language),
         )
     finally:
         _record_terminal_local_llm_release(
@@ -858,6 +1786,7 @@ def _run_processing_command(
     session_dir, session_record = _resolve_session(session_path)
     session_id = _extract_session_id(session_record)
     profile = get_capture_profile(_required_str(session_record, "profile"))
+    session_language = _session_language_or_default(session_record, "")
     _validate_processing_profile_support(profile)
     store = FileSystemArtifactStore(session_id=session_id, session_dir=session_dir)
     source_inputs = _prepare_source_audio_inputs(
@@ -930,6 +1859,7 @@ def _run_processing_command(
             transcription_provider=transcription_provider,
             diarization_provider=diarization_provider,
             semantic_coherence_provider=semantic_coherence_provider,
+            session_language=session_language or None,
         )
     finally:
         if runtime_selection is not None:
@@ -963,6 +1893,7 @@ def _run_processing_stages(
     transcription_provider: TranscriptionProvider,
     diarization_provider: DiarizationProvider,
     semantic_coherence_provider: SemanticCoherenceProvider,
+    session_language: str | None = None,
 ) -> None:
     _validate_processing_profile_support(profile)
 
@@ -977,6 +1908,7 @@ def _run_processing_stages(
             source_artifact=source_input.artifact,
             source_id=source_id,
             audio_path=source_input.path,
+            language=_asr_language_from_session_language(session_language),
             attempt=attempt,
             now=now,
         )
@@ -1090,40 +2022,92 @@ def _prepare_source_audio_inputs(
 
     inputs: dict[str, SourceAudioInput] = {}
     for source_id in required_sources:
-        segment = capture_segments[source_id]
-        raw_path = segment[0]
-        index = segment[1]
-        expected_sha = segment[2]
+        segment_inputs: list[CaptureSegmentInput] = []
+        for segment_metadata in capture_segments[source_id]:
+            raw_path = _required_str(segment_metadata, "path")
+            index = _required_int(segment_metadata, "index")
+            expected_sha = segment_metadata.get("sha256")
+            if expected_sha is not None and not isinstance(expected_sha, str):
+                raise ValueError("Capture segment sha256 must be a string when provided.")
+            route_id = _optional_metadata_str(segment_metadata, "route_id")
+            route_label = _optional_metadata_str(segment_metadata, "route_label")
+            capture_mode = _optional_metadata_str(segment_metadata, "capture_mode")
+            segment_path = Path(raw_path)
+            if not segment_path.is_absolute():
+                segment_path = session_dir / segment_path
 
-        segment_path = Path(raw_path)
-        if not segment_path.is_absolute():
-            segment_path = session_dir / segment_path
+            if not segment_path.exists():
+                raise ValueError(f"Capture segment file does not exist: {segment_path}")
+            if not segment_path.is_file():
+                raise ValueError(f"Capture segment path is not a file: {segment_path}")
 
-        if not segment_path.exists():
-            raise ValueError(f"Capture segment file does not exist: {segment_path}")
-        if not segment_path.is_file():
-            raise ValueError(f"Capture segment path is not a file: {segment_path}")
+            payload = segment_path.read_bytes()
+            actual_sha = hashlib.sha256(payload).hexdigest()
+            if expected_sha is not None and expected_sha != actual_sha:
+                raise ValueError(
+                    f"Capture segment checksum mismatch for source '{source_id}' at {segment_path}."
+                )
 
-        payload = segment_path.read_bytes()
-        actual_sha = hashlib.sha256(payload).hexdigest()
-        if expected_sha is not None and expected_sha != actual_sha:
-            raise ValueError(
-                f"Capture segment checksum mismatch for source '{source_id}' at {segment_path}."
+            artifact = _ensure_source_audio_artifact(
+                store=store,
+                source_id=source_id,
+                index=index,
+                path=segment_path,
+                artifact_sha=actual_sha,
+                payload=payload,
+                route_id=route_id,
+                route_label=route_label,
+                capture_mode=capture_mode,
+            )
+            segment_inputs.append(
+                CaptureSegmentInput(
+                    source_id=source_id,
+                    index=index,
+                    path=segment_path,
+                    artifact=artifact,
+                    sha256=actual_sha,
+                    route_id=route_id,
+                    route_label=route_label,
+                    capture_mode=capture_mode,
+                )
             )
 
-        artifact = _ensure_source_audio_artifact(
-            store=store,
-            source_id=source_id,
-            index=index,
-            path=segment_path,
-            artifact_sha=actual_sha,
-            payload=payload,
-        )
+        if len(segment_inputs) == 1:
+            only = segment_inputs[0]
+            inputs[source_id] = SourceAudioInput(
+                source_id=source_id,
+                index=only.index,
+                path=only.path,
+                artifact=only.artifact,
+            )
+            continue
+
+        prep_temp_dir = store.artifact_root / ".provider-prep-tmp"
+        prep_temp_dir.mkdir(parents=True, exist_ok=True)
+        prep_path = prep_temp_dir / f".{source_id}.{uuid4()}.wav"
+        try:
+            prep_metadata = _stitch_provider_prep_audio(
+                source_id=source_id,
+                segments=tuple(segment_inputs),
+                output_path=prep_path,
+            )
+            prep_sha = _required_str(prep_metadata, "sha256")
+            prep_artifact = _ensure_provider_prep_audio_artifact(
+                store=store,
+                source_id=source_id,
+                source_path=prep_path,
+                artifact_sha=prep_sha,
+                metadata=prep_metadata,
+            )
+        finally:
+            prep_path.unlink(missing_ok=True)
+            with suppress(OSError):
+                prep_temp_dir.rmdir()
         inputs[source_id] = SourceAudioInput(
             source_id=source_id,
-            index=index,
-            path=segment_path,
-            artifact=artifact,
+            index=1,
+            path=store.session_dir / prep_artifact.path,
+            artifact=prep_artifact,
         )
 
     return inputs
@@ -1132,7 +2116,7 @@ def _prepare_source_audio_inputs(
 def _collect_capture_segments(
     session_record: dict[str, object],
     required_sources: tuple[str, ...],
-) -> dict[str, tuple[str, int, str | None]]:
+) -> dict[str, tuple[dict[str, object], ...]]:
     capture_metadata = session_record.get("capture_metadata")
     if not isinstance(capture_metadata, dict):
         raise ValueError("Session does not include capture metadata.")
@@ -1141,7 +2125,7 @@ def _collect_capture_segments(
     if not isinstance(raw_segments, list):
         raise ValueError("Session capture metadata does not include segments.")
 
-    grouped: dict[str, list[tuple[str, int, str | None]]] = {}
+    grouped: dict[str, list[dict[str, object]]] = {}
     for source in required_sources:
         grouped[source] = []
     for raw_segment in raw_segments:
@@ -1154,25 +2138,81 @@ def _collect_capture_segments(
             )
         index = _required_int(raw_segment, "index")
         path = _required_str(raw_segment, "path")
+        status = _required_str(raw_segment, "status")
+        if status != "sealed":
+            raise ValueError(
+                f"Capture segment for source '{source_id}' index {index} is {status}, not sealed."
+            )
         expected_sha = raw_segment.get("sha256")
         if expected_sha is not None and not isinstance(expected_sha, str):
             raise ValueError("Capture segment sha256 must be a string when provided.")
-        grouped[source_id].append((path, index, expected_sha))
+        route_id = raw_segment.get("route_id")
+        if route_id is not None and not isinstance(route_id, str):
+            raise ValueError("Capture segment route_id must be a string when provided.")
+        route_label = raw_segment.get("route_label")
+        if route_label is not None and not isinstance(route_label, str):
+            raise ValueError("Capture segment route_label must be a string when provided.")
+        capture_mode = raw_segment.get("capture_mode")
+        if capture_mode is not None and not isinstance(capture_mode, str):
+            raise ValueError("Capture segment capture_mode must be a string when provided.")
+        grouped[source_id].append(
+            {
+                "path": path,
+                "index": index,
+                "status": status,
+                "sha256": expected_sha,
+                "route_id": route_id,
+                "route_label": route_label,
+                "capture_mode": capture_mode,
+            }
+        )
 
-    selected: dict[str, tuple[str, int, str | None]] = {}
+    selected: dict[str, tuple[dict[str, object], ...]] = {}
     for source_id in required_sources:
         segments = grouped[source_id]
         if not segments:
             raise ValueError(f"Session is missing a capture segment for source '{source_id}'.")
-        if len(segments) != 1:
+        ordered = tuple(sorted(segments, key=_segment_metadata_index))
+        indexes = [_segment_metadata_index(segment) for segment in ordered]
+        if len(set(indexes)) != len(indexes):
+            raise ValueError(f"Session has duplicate capture segment indexes for '{source_id}'.")
+        expected_indexes = list(range(1, len(indexes) + 1))
+        if indexes != expected_indexes:
             raise ValueError(
-                f"Session has {len(segments)} capture segments for source '{source_id}'. "
-                "Processing currently expects exactly one segment per source."
+                f"Session capture segments for source '{source_id}' must be contiguous "
+                "starting at 1."
             )
-        path, index, expected_sha = segments[0]
-        selected[source_id] = (path, index, expected_sha)
+        selected[source_id] = ordered
 
+    _validate_capture_segment_alignment(selected, required_sources)
     return selected
+
+
+def _validate_capture_segment_alignment(
+    selected: dict[str, tuple[dict[str, object], ...]],
+    required_sources: tuple[str, ...],
+) -> None:
+    if len(required_sources) <= 1:
+        return
+    reference_source = required_sources[0]
+    reference_indexes = tuple(
+        _segment_metadata_index(segment) for segment in selected[reference_source]
+    )
+    for source_id in required_sources[1:]:
+        indexes = tuple(_segment_metadata_index(segment) for segment in selected[source_id])
+        if indexes != reference_indexes:
+            raise ValueError(
+                "Online capture segment sets must be paired across sources: "
+                f"{reference_source} indexes {list(reference_indexes)}; "
+                f"{source_id} indexes {list(indexes)}."
+            )
+
+
+def _segment_metadata_index(segment: dict[str, object]) -> int:
+    value = segment.get("index")
+    if type(value) is not int:
+        raise ValueError("Capture segment index must be an integer.")
+    return value
 
 
 def _ensure_source_audio_artifact(
@@ -1183,6 +2223,9 @@ def _ensure_source_audio_artifact(
     path: Path,
     artifact_sha: str,
     payload: bytes,
+    route_id: str | None,
+    route_label: str | None,
+    capture_mode: str | None,
 ) -> ArtifactRecord:
     normalized_path = str(path.resolve(strict=True))
     metadata_path_key = "source_path"
@@ -1223,7 +2266,151 @@ def _ensure_source_audio_artifact(
             metadata_index_key: index,
             metadata_path_key: normalized_path,
             metadata_sha_key: artifact_sha,
+            "route_id": route_id,
+            "route_label": route_label,
+            "capture_mode": capture_mode,
         },
+    )
+
+
+def _stitch_provider_prep_audio(
+    *,
+    source_id: str,
+    segments: tuple[CaptureSegmentInput, ...],
+    output_path: Path,
+) -> dict[str, object]:
+    if len(segments) < 2:
+        raise ValueError("Provider-prep audio requires at least two source segments.")
+
+    params: tuple[int, int, int] | None = None
+    frame_count = 0
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(output_path), "wb") as out:
+        for segment in segments:
+            with wave.open(str(segment.path), "rb") as wav_file:
+                if wav_file.getcomptype() != "NONE":
+                    raise ValueError(
+                        f"Capture segment for source '{source_id}' must be uncompressed PCM WAV."
+                    )
+                segment_params = (
+                    wav_file.getframerate(),
+                    wav_file.getnchannels(),
+                    wav_file.getsampwidth(),
+                )
+                if params is None:
+                    params = segment_params
+                    sample_rate, channels, sample_width = params
+                    out.setnchannels(channels)
+                    out.setsampwidth(sample_width)
+                    out.setframerate(sample_rate)
+                elif segment_params != params:
+                    raise ValueError(
+                        f"Capture segments for source '{source_id}' have incompatible WAV format."
+                    )
+                frame_count += wav_file.getnframes()
+                while frames := wav_file.readframes(32_768):
+                    out.writeframesraw(frames)
+
+    if params is None:
+        raise ValueError(f"Session is missing provider-prep segments for source '{source_id}'.")
+    sample_rate, channels, sample_width = params
+    prep_sha = _sha256_file(output_path)
+    metadata: dict[str, object] = {
+        "source_id": source_id,
+        "derived_from_segments": [
+            {
+                "source_id": segment.source_id,
+                "index": segment.index,
+                "path": str(segment.path),
+                "artifact_id": segment.artifact.id,
+                "sha256": segment.sha256,
+                "route_id": segment.route_id,
+                "route_label": segment.route_label,
+                "capture_mode": segment.capture_mode,
+            }
+            for segment in segments
+        ],
+        "transformations": ["lossless_wav_stitch"],
+        "provider_requirement": "single_audio_path",
+        "sample_rate": sample_rate,
+        "channels": channels,
+        "sample_format": f"pcm_s{sample_width * 8}le",
+        "duration_seconds": frame_count / sample_rate,
+    }
+    metadata["sha256"] = prep_sha
+    return metadata
+
+
+def _ensure_provider_prep_audio_artifact(
+    *,
+    store: FileSystemArtifactStore,
+    source_id: str,
+    source_path: Path,
+    artifact_sha: str,
+    metadata: dict[str, object],
+) -> ArtifactRecord:
+    for existing in store.list(artifact_type="provider_prep_audio"):
+        if existing.metadata.get("source_id") != source_id:
+            continue
+        if existing.sha256 != artifact_sha:
+            raise ValueError(
+                f"Provider-prep artifact collision for source '{source_id}': "
+                "prepared audio bytes changed since a prior processing attempt."
+            )
+        verification = store.verify(existing.id)
+        if not verification.ok or verification.expected_sha256 != artifact_sha:
+            artifact_path = store.session_dir / existing.path
+            artifact_path.parent.mkdir(parents=True, exist_ok=True)
+            _replace_file_from_path(source_path=source_path, destination_path=artifact_path)
+            verification = store.verify(existing.id)
+            if not verification.ok or verification.expected_sha256 != artifact_sha:
+                raise ValueError(
+                    f"Provider-prep artifact verification failed for source '{source_id}'."
+                )
+        return existing
+
+    stored = _store_provider_prep_audio_artifact(
+        store=store,
+        source_id=source_id,
+        source_path=source_path,
+        metadata=metadata,
+    )
+    if stored.sha256 != artifact_sha:
+        raise ValueError(f"Provider-prep artifact checksum drifted for source '{source_id}'.")
+    return stored
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _replace_file_from_path(*, source_path: Path, destination_path: Path) -> None:
+    temp_path = destination_path.with_name(f".{destination_path.name}.{uuid4()}.tmp")
+    try:
+        with source_path.open("rb") as source, temp_path.open("xb") as destination:
+            shutil.copyfileobj(source, destination, length=1024 * 1024)
+        temp_path.replace(destination_path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def _store_provider_prep_audio_artifact(
+    *,
+    store: FileSystemArtifactStore,
+    source_id: str,
+    source_path: Path,
+    metadata: dict[str, object],
+) -> ArtifactRecord:
+    return store.store_file(
+        artifact_type="provider_prep_audio",
+        name=f"provider-prep/{source_id}.wav",
+        source_path=source_path,
+        status="sealed",
+        metadata=metadata,
     )
 
 
@@ -1391,6 +2578,23 @@ def _extract_session_id(session_record: dict[str, object]) -> str:
     return _required_str(session_record, "id")
 
 
+def _session_language_or_default(
+    session_record: dict[str, object],
+    default_language: str,
+) -> str:
+    language = session_record.get("language")
+    if isinstance(language, str) and language:
+        return language
+    return default_language
+
+
+def _asr_language_from_session_language(language: str | None) -> str | None:
+    if language is None:
+        return None
+    normalized = language.replace("_", "-").split("-", 1)[0].lower()
+    return normalized or None
+
+
 def _required_str(payload: dict[str, object] | object, key: str) -> str:
     value = payload.get(key) if isinstance(payload, dict) else None
     if not isinstance(value, str) or not value:
@@ -1402,6 +2606,15 @@ def _required_int(payload: dict[str, object], key: str) -> int:
     value = payload.get(key)
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"Session field '{key}' must be a positive integer.")
+    return value
+
+
+def _optional_metadata_str(payload: dict[str, object], key: str) -> str | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"Session field '{key}' must be a non-empty string or null.")
     return value
 
 

@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -131,6 +132,18 @@ class ArtifactStore(Protocol):
     ) -> ArtifactRecord:
         """Store one complete artifact and return its metadata record."""
 
+    def store_file(
+        self,
+        *,
+        artifact_type: str,
+        name: str | Path,
+        source_path: Path,
+        version: int = ARTIFACT_RECORD_VERSION,
+        status: str = "sealed",
+        metadata: Mapping[str, object] | None = None,
+    ) -> ArtifactRecord:
+        """Store one complete artifact from an existing file path."""
+
     def retrieve(self, artifact_id: str) -> bytes:
         """Return artifact bytes by artifact id."""
 
@@ -194,6 +207,46 @@ class FileSystemArtifactStore:
             raise
         return record
 
+    def store_file(
+        self,
+        *,
+        artifact_type: str,
+        name: str | Path,
+        source_path: Path,
+        version: int = ARTIFACT_RECORD_VERSION,
+        status: str = "sealed",
+        metadata: Mapping[str, object] | None = None,
+    ) -> ArtifactRecord:
+        relative_path = _artifact_relative_path(artifact_type=artifact_type, name=name)
+        artifact_id = _artifact_id(self.session_id, relative_path)
+        records = self._load_records()
+        if artifact_id in records:
+            raise FileExistsError(f"Artifact already exists: {artifact_id}")
+        if not source_path.is_file():
+            raise ArtifactStoreError("Artifact source path must be a file.")
+
+        record = _record_for_file(
+            session_id=self.session_id,
+            artifact_type=artifact_type,
+            relative_path=relative_path,
+            source_path=source_path,
+            version=version,
+            status=status,
+            metadata=metadata,
+        )
+        next_records = {**records, record.id: record}
+        self._manifest_bytes(next_records)
+
+        path = self.session_dir / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _copy_file_exclusive(source_path, path)
+        try:
+            self._write_records(next_records)
+        except Exception:
+            path.unlink(missing_ok=True)
+            raise
+        return record
+
     def retrieve(self, artifact_id: str) -> bytes:
         record = self._record_by_id(artifact_id)
         return (self.session_dir / record.path).read_bytes()
@@ -224,9 +277,15 @@ class FileSystemArtifactStore:
                 actual_byte_count=None,
                 error="artifact file is missing",
             )
-        data = path.read_bytes()
-        actual_sha256 = _sha256(data)
-        actual_byte_count = len(data)
+        if not path.is_file():
+            return _verification(
+                record,
+                ok=False,
+                actual_sha256=None,
+                actual_byte_count=None,
+                error="artifact path is not a file",
+            )
+        actual_sha256, actual_byte_count = _sha256_file(path)
         ok = actual_sha256 == record.sha256 and actual_byte_count == record.byte_count
         return _verification(
             record,
@@ -319,6 +378,25 @@ class InMemoryArtifactStore:
         self._data[record.id] = data
         return record
 
+    def store_file(
+        self,
+        *,
+        artifact_type: str,
+        name: str | Path,
+        source_path: Path,
+        version: int = ARTIFACT_RECORD_VERSION,
+        status: str = "sealed",
+        metadata: Mapping[str, object] | None = None,
+    ) -> ArtifactRecord:
+        return self.store(
+            artifact_type=artifact_type,
+            name=name,
+            data=source_path.read_bytes(),
+            version=version,
+            status=status,
+            metadata=metadata,
+        )
+
     def retrieve(self, artifact_id: str) -> bytes:
         return self._data[artifact_id]
 
@@ -388,6 +466,36 @@ def _record_for_bytes(
     )
 
 
+def _record_for_file(
+    *,
+    session_id: str,
+    artifact_type: str,
+    relative_path: Path,
+    source_path: Path,
+    version: int,
+    status: str,
+    metadata: Mapping[str, object] | None,
+) -> ArtifactRecord:
+    _validate_artifact_type(artifact_type)
+    _validate_status(status)
+    if type(version) is not int or version < 1:
+        raise ArtifactStoreError("Artifact version must be positive.")
+    metadata_dict = _metadata_dict({} if metadata is None else metadata)
+    sha256, byte_count = _sha256_file(source_path)
+    path = relative_path.as_posix()
+    return ArtifactRecord(
+        id=_artifact_id(session_id, relative_path),
+        session_id=session_id,
+        artifact_type=artifact_type,
+        version=version,
+        path=path,
+        byte_count=byte_count,
+        sha256=sha256,
+        status=status,
+        metadata=metadata_dict,
+    )
+
+
 def _artifact_relative_path(*, artifact_type: str, name: str | Path) -> Path:
     _validate_artifact_type(artifact_type)
     artifact_name = Path(name)
@@ -430,10 +538,33 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _sha256_file(path: Path) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    byte_count = 0
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+            byte_count += len(chunk)
+    return digest.hexdigest(), byte_count
+
+
 def _write_bytes_exclusive(path: Path, data: bytes) -> None:
     temp_path = path.with_name(f".{path.name}.{uuid4()}.tmp")
     try:
         temp_path.write_bytes(data)
+        try:
+            os.link(temp_path, path)
+        except FileExistsError as exc:
+            raise FileExistsError(f"Artifact path already exists: {path}") from exc
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def _copy_file_exclusive(source_path: Path, path: Path) -> None:
+    temp_path = path.with_name(f".{path.name}.{uuid4()}.tmp")
+    try:
+        with source_path.open("rb") as source, temp_path.open("xb") as destination:
+            shutil.copyfileobj(source, destination, length=1024 * 1024)
         try:
             os.link(temp_path, path)
         except FileExistsError as exc:

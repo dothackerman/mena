@@ -216,7 +216,7 @@ _PROFILE_DEFINITIONS_BY_ID = {
             CaptureSource(
                 logical_id=CaptureSourceId.ROOM_MIC,
                 semantic_role=CaptureSemanticRole.ROOM_MIC,
-                channel_layout=ChannelLayout.STEREO,
+                channel_layout=ChannelLayout.MONO,
                 diarisation_policy=DiarisationPolicy.WHOLE_STREAM,
             ),
         ),

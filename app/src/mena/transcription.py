@@ -594,12 +594,15 @@ def run_transcription_stage(
             output_ref = completed.output_artifacts[0]
             record = _record_for_ref(store=store, artifact_ref=output_ref)
             transcript = TranscriptArtifact.from_dict(json.loads(store.retrieve(record.id)))
-            return TranscriptionStageResult(
-                state=completed,
-                transcript=transcript,
-                transcript_record=record,
-                skipped=True,
-            )
+            if transcript.language.requested != language:
+                completed = None
+            else:
+                return TranscriptionStageResult(
+                    state=completed,
+                    transcript=transcript,
+                    transcript_record=record,
+                    skipped=True,
+                )
 
     started = ledger.mark_running(
         stage=stage,
@@ -642,6 +645,7 @@ def run_transcription_stage(
                 run_id=ledger.run_id,
                 source_id=source_id,
                 source_sha256=source_artifact.sha256,
+                language=language,
                 attempt=attempt,
             ),
         )
@@ -757,11 +761,25 @@ def _transcript_artifact_name(
     run_id: str,
     source_id: str | None,
     source_sha256: str,
+    language: str | None,
     attempt: int,
 ) -> Path:
     source_label = source_id or "source"
     _validate_stable_id(source_label, "Transcript source_id")
-    return Path(run_id) / source_label / source_sha256[:12] / f"attempt-{attempt:03d}.json"
+    language_label = _transcript_language_label(language)
+    path = Path(run_id) / source_label / source_sha256[:12]
+    if language_label is not None:
+        path /= language_label
+    return path / f"attempt-{attempt:03d}.json"
+
+
+def _transcript_language_label(language: str | None) -> str | None:
+    if language is None:
+        return None
+    normalized = re.sub(r"[^a-z0-9_:-]+", "-", language.lower()).strip("-")
+    if not normalized:
+        return None
+    return f"language-{normalized}"
 
 
 def _segment_from_faster_whisper(segment: object, *, index: int) -> TranscriptSegment:

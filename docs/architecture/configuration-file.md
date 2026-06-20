@@ -24,6 +24,24 @@ Settings are resolved in this deterministic order:
 built-in defaults < config file < environment overrides < explicit CLI arguments
 ```
 
+This order resolves defaults before a session fact exists. Once `mena record`
+persists a session-level fact, the Session Record becomes authoritative for
+that session. Later commands must not silently override persisted session
+facts with config-file or environment defaults.
+
+Examples:
+
+- `[summary].language` can prefill the record-time language prompt or provide a
+  default for a non-interactive command that is explicitly allowed to use
+  defaults.
+- The language selected or confirmed during `record` is persisted in the
+  Session Record and is the default language for processing and summarization.
+- `process` uses the persisted session language for ASR language configuration
+  and lexicon or prompt-biasing when the provider supports it.
+- `summarize` uses the persisted session language for prompt and output policy
+  by default. A deliberate summary-language override creates a distinct derived
+  artifact with provenance; it does not rewrite the session language.
+
 ## Supported Keys
 
 ```toml

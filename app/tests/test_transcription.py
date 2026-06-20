@@ -112,6 +112,41 @@ def test_transcription_stage_reuses_verified_completed_output(tmp_path: Path) ->
     assert second_provider.calls == []
 
 
+def test_transcription_stage_does_not_reuse_completed_output_for_changed_language(
+    tmp_path: Path,
+) -> None:
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    source = store.store(artifact_type="source_audio", name="local_mic.wav", data=b"audio")
+    ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+
+    first = run_transcription_stage(
+        store=store,
+        ledger=ledger,
+        provider=FakeTranscriptionProvider(),
+        source_artifact=source,
+        source_id="local_mic",
+        language="en",
+        now=NOW,
+    )
+    second_provider = FakeTranscriptionProvider()
+    second = run_transcription_stage(
+        store=store,
+        ledger=ledger,
+        provider=second_provider,
+        source_artifact=source,
+        source_id="local_mic",
+        language="de-CH",
+        now=NOW,
+    )
+
+    assert first.transcript.language.requested == "en"
+    assert second.skipped is False
+    assert second.transcript_record != first.transcript_record
+    assert "/language-de-ch/" in second.transcript_record.path
+    assert second.transcript.language.requested == "de-CH"
+    assert second_provider.calls[0].language == "de-CH"
+
+
 def test_transcription_stage_reuse_is_scoped_to_matching_input_artifact(
     tmp_path: Path,
 ) -> None:
