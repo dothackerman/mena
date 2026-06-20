@@ -6,6 +6,7 @@ import hashlib
 import os
 import re
 import select
+import shlex
 import struct
 import subprocess
 import threading
@@ -267,6 +268,7 @@ class SilencePcmProvider:
 
 
 PcmProvider = Callable[[CaptureSourceId], bytes]
+CaptureDiagnosticFn = Callable[[str], None]
 
 
 class CaptureSourceError(RuntimeError):
@@ -295,12 +297,14 @@ class PipeWirePcmProvider:
         channels: int = 1,
         sample_width_bytes: int = DEFAULT_SAMPLE_WIDTH_BYTES,
         popen_factory: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
+        diagnostics: CaptureDiagnosticFn | None = None,
     ) -> None:
         self.sample_rate = sample_rate
         self.channels = channels
         self.sample_width_bytes = sample_width_bytes
         self._popen_factory = popen_factory
         self._streams: dict[tuple[CaptureSourceId, str], _RawPcmCaptureStream] = {}
+        self._diagnostics = diagnostics
 
     def read_segment(
         self,
@@ -312,11 +316,15 @@ class PipeWirePcmProvider:
         stop_event: threading.Event | None = None,
     ) -> bytes:
         stream = self._stream_for_source(source_id, plan=plan, sink_name=sink_name)
-        return stream.read_chunk(
+        pcm = stream.read_chunk(
             self._segment_pcm_bytes(segment_seconds),
             frame_width=self.channels * self.sample_width_bytes,
             stop_event=stop_event,
         )
+        self._diagnose(
+            f"pcm chunk source={source_id.value} target={stream.target} {_pcm_fingerprint(pcm)}"
+        )
+        return pcm
 
     def read_aligned_segments(
         self,
@@ -360,6 +368,11 @@ class PipeWirePcmProvider:
                 continue
             if pcm:
                 output[source_id] = pcm
+                stream = streams[source_id]
+                target = getattr(stream, "target", "<unknown>")
+                self._diagnose(
+                    f"pcm chunk source={source_id.value} target={target} {_pcm_fingerprint(pcm)}"
+                )
         if failure is not None:
             source_id, failure_exc = failure
             raise CaptureSourceError(
@@ -428,9 +441,23 @@ class PipeWirePcmProvider:
             stderr=subprocess.PIPE,
             shell=False,
         )
-        stream = _RawPcmCaptureStream(source_id=source_id, command=command, process=process)
+        self._diagnose(
+            "pw-record start "
+            f"source={source_id.value} target={target} pid={getattr(process, 'pid', None)} "
+            f"command={_shell_join(command)}"
+        )
+        stream = _RawPcmCaptureStream(
+            source_id=source_id,
+            command=command,
+            process=process,
+            target=target,
+        )
         self._streams[key] = stream
         return stream
+
+    def _diagnose(self, message: str) -> None:
+        if self._diagnostics is not None:
+            self._diagnostics(message)
 
     def _segment_pcm_bytes(self, segment_seconds: int) -> int:
         return segment_seconds * self.sample_rate * self.channels * self.sample_width_bytes
@@ -465,11 +492,20 @@ class PipeWirePcmProvider:
         sink_name: str,
     ) -> str:
         if source_id is CaptureSourceId.LOCAL_MIC:
-            return _required_backend_target(plan.microphone_backend_name, "microphone")
+            return _pipewire_node_serial(plan.microphone_route_id) or _required_backend_target(
+                plan.microphone_backend_name,
+                "microphone",
+            )
         if source_id is CaptureSourceId.ROOM_MIC:
-            return _required_backend_target(plan.microphone_backend_name, "microphone")
+            return _pipewire_node_serial(plan.microphone_route_id) or _required_backend_target(
+                plan.microphone_backend_name,
+                "microphone",
+            )
         if source_id is CaptureSourceId.SYSTEM_AUDIO:
             if plan.system_audio_mode == CAPTURE_MODE_SYSTEM_MIX_REMOTE:
+                output_sink_serial = _pipewire_node_serial(plan.output_sink_route_id)
+                if output_sink_serial is not None:
+                    return output_sink_serial
                 output_sink_target = _required_backend_target(
                     plan.output_sink_backend_name,
                     "output sink",
@@ -492,10 +528,12 @@ class _RawPcmCaptureStream:
         source_id: CaptureSourceId,
         command: list[str],
         process: subprocess.Popen[bytes],
+        target: str,
     ) -> None:
         self.source_id = source_id
         self.command = command
         self.process = process
+        self.target = target
 
     @property
     def is_running(self) -> bool:
@@ -610,9 +648,13 @@ class PipeWireClient:
     """Narrow command wrapper for PipeWire/Pulse-compatible routing commands."""
 
     def __init__(
-        self, *, runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run
+        self,
+        *,
+        runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+        diagnostics: CaptureDiagnosticFn | None = None,
     ) -> None:
         self._runner = runner
+        self._diagnostics = diagnostics
 
     def create_null_sink(self, sink_name: str) -> str:
         return self._run(
@@ -645,8 +687,15 @@ class PipeWireClient:
         self._run(["pactl", "unload-module", module_id])
 
     def _run(self, args: list[str]) -> str:
+        self._diagnose(f"pactl command={_shell_join(args)}")
         completed = self._runner(args, capture_output=True, text=True, check=True)
-        return completed.stdout.strip()
+        stdout = completed.stdout.strip()
+        self._diagnose(f"pactl result command={_shell_join(args)} stdout={stdout!r}")
+        return stdout
+
+    def _diagnose(self, message: str) -> None:
+        if self._diagnostics is not None:
+            self._diagnostics(message)
 
 
 class PipeWireCaptureAdapter:
@@ -659,6 +708,7 @@ class PipeWireCaptureAdapter:
         segment_writer: WavSegmentWriter,
         pcm_provider: PcmProvider | None = None,
         segment_seconds: int = DEFAULT_SEGMENT_SECONDS,
+        diagnostics: CaptureDiagnosticFn | None = None,
     ) -> None:
         self.client = client
         self.segment_writer = segment_writer
@@ -666,11 +716,14 @@ class PipeWireCaptureAdapter:
         self.pipewire_pcm_provider = PipeWirePcmProvider(
             sample_rate=segment_writer.sample_rate,
             channels=segment_writer.channels,
+            diagnostics=diagnostics,
         )
         self.segment_seconds = segment_seconds
+        self._diagnostics = diagnostics
 
     def start(self, plan: CaptureRoutePlan) -> ActivePipeWireCapture:
         sink_name = session_null_sink_name(plan.session_id)
+        self._diagnose(_route_plan_diagnostic(plan, sink_name=sink_name))
         if plan.profile_id is CaptureProfileId.IN_PERSON_SINGLE_MIC:
             return ActivePipeWireCapture(
                 adapter=self,
@@ -714,6 +767,10 @@ class PipeWireCaptureAdapter:
             loopback_module=loopback_module,
             route_events=route_events,
         )
+
+    def _diagnose(self, message: str) -> None:
+        if self._diagnostics is not None:
+            self._diagnostics(message)
 
     def _flush_once(
         self,
@@ -1054,6 +1111,43 @@ def _required_backend_target(backend_name: str | None, role: str) -> str:
     if backend_name is None:
         raise ValueError(f"PipeWire {role} target requires a backend name.")
     return backend_name
+
+
+def _shell_join(command: list[str]) -> str:
+    return shlex.join(command)
+
+
+def _route_plan_diagnostic(plan: CaptureRoutePlan, *, sink_name: str) -> str:
+    return (
+        "route plan "
+        f"profile={plan.profile_id.value} sink_name={sink_name} "
+        f"mic_route_id={plan.microphone_route_id} "
+        f"mic_backend={plan.microphone_backend_name!r} "
+        f"playback_stream_route_id={plan.playback_stream_route_id} "
+        f"playback_label={plan.playback_stream_route_label!r} "
+        f"output_sink_route_id={plan.output_sink_route_id} "
+        f"output_sink_backend={plan.output_sink_backend_name!r} "
+        f"system_audio_mode={plan.system_audio_mode}"
+    )
+
+
+def _pcm_fingerprint(pcm: bytes) -> str:
+    head = pcm[:64]
+    tail = pcm[-64:] if len(pcm) >= 64 else pcm
+    return (
+        f"bytes={len(pcm)} sha256={hashlib.sha256(pcm).hexdigest()} "
+        f"head64={hashlib.sha256(head).hexdigest()} "
+        f"tail64={hashlib.sha256(tail).hexdigest()}"
+    )
+
+
+def _pipewire_node_serial(route_id: str | None) -> str | None:
+    if route_id is None:
+        return None
+    match = re.fullmatch(r"pipewire:node:(\d+)", route_id)
+    if match is None:
+        return None
+    return match.group(1)
 
 
 def _segment_route_facts(

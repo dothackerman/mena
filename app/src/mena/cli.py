@@ -364,6 +364,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Create a session and print read-only audio discovery without starting capture.",
     )
     record_parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print route planning details and write worker capture diagnostics to stderr.",
+    )
+    record_parser.add_argument(
         "--worker-exit-timeout",
         type=float,
         default=WORKER_EXIT_TIMEOUT_SECONDS,
@@ -527,6 +532,8 @@ def main(
                 discovery=discovery,
                 selections=route_selections,
             )
+            if args.verbose:
+                print(_format_record_diagnostics(start_payload))
         except (EOFError, KeyboardInterrupt):
             print("Recording setup cancelled.")
             return 1
@@ -560,10 +567,13 @@ def main(
             },
         )
         try:
-            worker_context = worker_factory(
-                session_id=created_session.record.id,
-                session_dir=created_session.bundle_path,
-            )
+            worker_kwargs: dict[str, object] = {
+                "session_id": created_session.record.id,
+                "session_dir": created_session.bundle_path,
+            }
+            if args.verbose:
+                worker_kwargs["capture_diagnostics"] = True
+            worker_context = worker_factory(**worker_kwargs)
             worker = worker_context.__enter__()
         except (OSError, subprocess.SubprocessError) as exc:
             _persist_capture_failure(
@@ -853,6 +863,25 @@ def _capture_plan_from_start_payload(
     plan["version"] = 1
     plan["status"] = status
     return plan
+
+
+def _format_record_diagnostics(payload: StartCapturePayload) -> str:
+    lines = [
+        "Record diagnostics:",
+        f"  profile: {payload.profile}",
+        f"  language: {payload.language}",
+        f"  segment_seconds: {payload.segment_seconds}",
+        f"  selected_sources: {', '.join(payload.selected_sources)}",
+        "  routes:",
+    ]
+    for route in payload.routes:
+        lines.append(
+            "    "
+            f"role={route.role} source={route.source_id or '-'} "
+            f"route_id={route.route_id} backend={route.backend} "
+            f"backend_name={route.backend_name or '-'} label={route.label}"
+        )
+    return "\n".join(lines)
 
 
 def _capture_metadata_from_segments(

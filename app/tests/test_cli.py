@@ -457,6 +457,7 @@ def test_record_help_lists_profile_options(capsys: CaptureFixture[str]) -> None:
     assert "--profile {online,in-person}" in captured.out
     assert "--name NAME" in captured.out
     assert "--dry-run" in captured.out
+    assert "--verbose" in captured.out
 
 
 def test_record_creates_session_bundle_and_record(
@@ -1097,6 +1098,38 @@ def test_record_uses_explicit_noninteractive_route_flags(tmp_path: Path) -> None
     assert FakeWorkerProcess.last_start_payload is not None
     route_ids = [route.route_id for route in FakeWorkerProcess.last_start_payload.routes]
     assert route_ids == ["pipewire:node:32", "pulse:sink-input:152", "pipewire:node:43"]
+
+
+def test_record_verbose_prints_route_plan_and_enables_worker_diagnostics(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    VerboseCapturingWorkerProcess.last_capture_diagnostics = None
+
+    exit_code = main(
+        [
+            "record",
+            "--profile",
+            "online",
+            "--language",
+            "en",
+            "--playback-stream",
+            "pulse:sink-input:151",
+            "--verbose",
+        ],
+        data_root=tmp_path,
+        discoverer=_available_discoverer,
+        worker_factory=VerboseCapturingWorkerProcess,
+        input_fn=lambda _prompt: "q",
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "Record diagnostics:" in captured.out
+    assert "profile: online_dual_stream" in captured.out
+    assert "route_id=pipewire:node:31" in captured.out
+    assert "route_id=pulse:sink-input:151" in captured.out
+    assert VerboseCapturingWorkerProcess.last_capture_diagnostics is True
 
 
 def test_record_dry_run_persists_discovery_and_prints_routes(
@@ -3298,6 +3331,20 @@ class FakeWorkerProcess:
 
     def wait(self, timeout: float | None = None) -> int:
         return 0
+
+
+class VerboseCapturingWorkerProcess(FakeWorkerProcess):
+    last_capture_diagnostics: bool | None = None
+
+    def __init__(
+        self,
+        *,
+        session_id: str,
+        session_dir: Path,
+        capture_diagnostics: bool = False,
+    ) -> None:
+        super().__init__(session_id=session_id, session_dir=session_dir)
+        self.__class__.last_capture_diagnostics = capture_diagnostics
 
 
 class PartialWorkerProcess(FakeWorkerProcess):

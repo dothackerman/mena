@@ -721,6 +721,7 @@ class WorkerProcess:
         session_id: str,
         session_dir: Path,
         argv: list[str] | None = None,
+        capture_diagnostics: bool = False,
     ) -> None:
         self.session_id = session_id
         session_dir.mkdir(parents=True, exist_ok=True)
@@ -735,6 +736,8 @@ class WorkerProcess:
             "--session-dir",
             str(session_dir),
         ]
+        if argv is None and capture_diagnostics:
+            command.append("--verbose")
         try:
             self.process = subprocess.Popen(
                 command,

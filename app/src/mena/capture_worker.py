@@ -13,6 +13,7 @@ from typing import IO, TextIO
 
 from mena.capture import (
     ActivePipeWireCapture,
+    CaptureDiagnosticFn,
     CaptureMetadata,
     CaptureRouteEvent,
     CaptureRoutePlan,
@@ -55,6 +56,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Write capture diagnostics to stderr.",
+    )
     return parser
 
 
@@ -65,6 +71,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             session_id=args.session_id,
             session_dir=args.session_dir,
             test_deterministic_capture=args.test_deterministic_capture,
+            capture_diagnostics=args.verbose,
         )
     except ProtocolError as exc:
         print(f"protocol error: {exc}", file=sys.stderr)
@@ -79,6 +86,7 @@ def run_worker(
     stdout: IO[bytes] | None = None,
     stderr: TextIO | None = None,
     test_deterministic_capture: bool = False,
+    capture_diagnostics: bool = False,
 ) -> int:
     protocol_in = stdin or sys.stdin.buffer
     protocol_out = stdout or sys.stdout.buffer
@@ -128,6 +136,14 @@ def run_worker(
                         session_id=session_id,
                         session_dir=session_dir,
                         start_payload=start_payload,
+                        diagnostics=(
+                            lambda message: print(
+                                f"[capture-diagnostics] {message}",
+                                file=diagnostics,
+                            )
+                        )
+                        if capture_diagnostics
+                        else None,
                     )
                 capture.start()
                 write_message(
@@ -219,15 +235,17 @@ class WorkerCaptureSession:
         session_id: str,
         session_dir: Path,
         start_payload: StartCapturePayload,
+        diagnostics: CaptureDiagnosticFn | None = None,
     ) -> WorkerCaptureSession:
         writer = WavSegmentWriter(segment_dir=session_dir / "artifacts" / "source")
         return cls(
             session_id=session_id,
             start_payload=start_payload,
             adapter=PipeWireCaptureAdapter(
-                client=PipeWireClient(),
+                client=PipeWireClient(diagnostics=diagnostics),
                 segment_writer=writer,
                 segment_seconds=start_payload.segment_seconds,
+                diagnostics=diagnostics,
             ),
         )
 

@@ -19,7 +19,9 @@ These scenarios verify behavior that unit tests and fake PipeWire clients cannot
 - Do not mention played content in committed docs, protocol rows, evidence summaries, or PR comments.
 - Use a scratch data root such as `/tmp/mena-live-smoke-data/<run-id>/`.
 - Store run evidence outside the repository, for example under the operator workspace.
-- Before and after every mutating scenario, capture PipeWire/Pulse graph snapshots.
+- Before, during, and after every mutating live UAT run, capture sanitized PipeWire/Pulse graph snapshots.
+- A during snapshot means after Mena reports capture has started and before stop/finalization.
+- Graph evidence must prove the selected playback stream, Mena temporary route objects, and cleanup state without recording content details.
 - A scenario that leaves Mena-owned sinks, loopbacks, capture workers, or `pw-record` processes behind fails cleanup.
 
 ## Scenario S1: Environment Readiness
@@ -80,8 +82,10 @@ Pass criteria:
 
 - session finalizes as a valid online recording when paired segments were sealed
 - `local_mic` and `system_audio` sealed segment indexes match exactly
+- `local_mic` and `system_audio` same-index hashes are not identical when controlled sources are intentionally distinct
 - paired source segment durations and byte counts are plausible
 - segment metadata records the effective online capture route
+- before/during/after snapshots show the selected playback stream moved during capture and restored after stop
 - playback is restored to the selected output sink
 - no Mena-owned null sink, loopback module, capture worker, or `pw-record` process remains after stop
 

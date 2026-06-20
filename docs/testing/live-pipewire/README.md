@@ -29,9 +29,24 @@ Run evidence that is useful for review but not part of the product repository sh
 
 Evidence may include logs, PipeWire/Pulse snapshots, segment inventories, hashes, and notes, but should still avoid human-readable audio content.
 
+## Run Evidence Layout
+
+Create a run-scoped data root and evidence directory before each live UAT run:
+
+```sh
+RUN_ID="$(date -u +%Y%m%d-%H%M%S)-kai-uat"
+DATA_ROOT="/tmp/mena-live-smoke-data/$RUN_ID"
+EVIDENCE_DIR="/home/oriol/.openclaw/workspace/architect/artifacts/mena-live-pipewire-smoke/runs/$RUN_ID"
+
+mkdir -p "$DATA_ROOT" "$EVIDENCE_DIR"/{graph-before,graph-during,graph-after,logs,session}
+```
+
+Run evidence must remain outside the repository. Do not store raw audio, transcripts, summaries, raw session bundles, screenshots, browser titles, meeting names, URLs, lyrics, spoken phrases, or notification text in committed files or PR comments. Minimize or sanitize `pw-dump` output before sharing it; raw graph dumps, when needed for debugging, stay local-only under the evidence directory.
+
 ## Files
 
 - `SCENARIOS.md` describes the reusable live test scenarios, risks, and pass criteria.
+- `RUNBOOK.md` gives repeatable commands for graph snapshots, online smoke runs, and evidence collection.
 - `protocol.csv` is the CSV template for recording per-run steps and verdicts.
 
 ## Execution Rule

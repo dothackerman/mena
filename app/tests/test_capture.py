@@ -147,6 +147,30 @@ def test_pipewire_client_uses_argument_list_commands() -> None:
     ]
 
 
+def test_pipewire_client_emits_command_diagnostics() -> None:
+    diagnostics: list[str] = []
+
+    def runner(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, stdout="77\n", stderr="")
+
+    client = PipeWireClient(runner=runner, diagnostics=diagnostics.append)
+
+    assert client.create_null_sink("mena_session_remote") == "77"
+
+    assert diagnostics == [
+        (
+            "pactl command=pactl load-module module-null-sink "
+            "sink_name=mena_session_remote "
+            "sink_properties=device.description=mena_session_remote"
+        ),
+        (
+            "pactl result command=pactl load-module module-null-sink "
+            "sink_name=mena_session_remote "
+            "sink_properties=device.description=mena_session_remote stdout='77'"
+        ),
+    ]
+
+
 def test_pipewire_client_rejects_unsupported_route_id() -> None:
     client = PipeWireClient(runner=lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0))
 
@@ -176,7 +200,7 @@ def test_pipewire_pcm_provider_requires_backend_names_for_source_targets() -> No
             CaptureSourceId.LOCAL_MIC,
             plan=CaptureRoutePlan(
                 session_id="session-1",
-                microphone_route_id="pipewire:node:31",
+                microphone_route_id="pulse:source:31",
             ),
             sink_name="mena_session_remote",
         )
@@ -219,7 +243,7 @@ def test_pipewire_pcm_provider_reads_local_source_from_continuous_pw_record() ->
         [
             "pw-record",
             "--target",
-            "alsa_input.usb_mic",
+            "31",
             "--raw",
             "--format",
             "s16",
@@ -230,6 +254,42 @@ def test_pipewire_pcm_provider_reads_local_source_from_continuous_pw_record() ->
             "-",
         ]
     ]
+
+
+def test_pipewire_pcm_provider_emits_target_pid_and_pcm_fingerprints() -> None:
+    diagnostics: list[str] = []
+
+    class FakeProcess:
+        pid = 1234
+
+        def __init__(self, _args: list[str], **_kwargs: object) -> None:
+            self.stdout = io.BytesIO(b"\x01\x02")
+            self.stderr = io.BytesIO()
+            self.returncode: int | None = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+    provider = PipeWirePcmProvider(
+        sample_rate=1,
+        popen_factory=cast(Any, FakeProcess),
+        diagnostics=diagnostics.append,
+    )
+
+    assert (
+        provider.read_segment(
+            CaptureSourceId.LOCAL_MIC,
+            plan=_route_plan(),
+            sink_name="mena_session_remote",
+            segment_seconds=1,
+        )
+        == b"\x01\x02"
+    )
+
+    assert diagnostics[0].startswith("pw-record start source=local_mic target=31 pid=1234 command=")
+    assert diagnostics[1].startswith("pcm chunk source=local_mic target=31 bytes=2 sha256=")
+    assert "head64=" in diagnostics[1]
+    assert "tail64=" in diagnostics[1]
 
 
 def test_pipewire_pcm_provider_reads_room_mic_from_selected_microphone() -> None:
@@ -256,7 +316,34 @@ def test_pipewire_pcm_provider_reads_room_mic_from_selected_microphone() -> None
     )
 
     assert pcm == b"\x01\x02"
-    assert started_commands[0][:3] == ["pw-record", "--target", "alsa_input.usb_mic"]
+    assert started_commands[0][:3] == ["pw-record", "--target", "31"]
+
+
+def test_pipewire_pcm_provider_prefers_route_serial_for_capture_targets() -> None:
+    provider = PipeWirePcmProvider()
+    plan = CaptureRoutePlan(
+        session_id="session-1",
+        microphone_route_id="pipewire:node:31",
+        playback_stream_route_id="pulse:sink-input:51",
+        output_sink_route_id="pipewire:node:42",
+        microphone_backend_name="alsa_input.usb_mic",
+        output_sink_backend_name="alsa_output.usb_headphones",
+        system_audio_mode=CAPTURE_MODE_SYSTEM_MIX_REMOTE,
+    )
+
+    microphone_command = provider._command_for_source(  # noqa: SLF001
+        CaptureSourceId.LOCAL_MIC,
+        plan=plan,
+        sink_name="mena_session_remote",
+    )
+    system_mix_command = provider._command_for_source(  # noqa: SLF001
+        CaptureSourceId.SYSTEM_AUDIO,
+        plan=plan,
+        sink_name="mena_session_remote",
+    )
+
+    assert microphone_command[2] == "31"
+    assert system_mix_command[2] == "42"
 
 
 def test_pipewire_pcm_provider_reuses_continuous_stream_across_segments() -> None:
@@ -959,17 +1046,16 @@ def test_pipewire_pcm_provider_uses_output_sink_monitor_for_system_mix_fallback(
         sink_name="mena_session_remote",
     )
 
-    assert command[2] == "alsa_output.usb_headphones.monitor"
+    assert command[2] == "42"
 
 
-def test_pipewire_pcm_provider_requires_backend_name_for_system_mix_fallback() -> None:
+def test_pipewire_pcm_provider_requires_target_for_system_mix_fallback() -> None:
     provider = PipeWirePcmProvider()
     plan = CaptureRoutePlan(
         session_id="session-1",
         microphone_route_id="pipewire:node:31",
         microphone_backend_name="alsa_input.usb_mic",
         playback_stream_route_id="pulse:sink-input:51",
-        output_sink_route_id="pipewire:node:42",
         system_audio_mode=CAPTURE_MODE_SYSTEM_MIX_REMOTE,
     )
 
