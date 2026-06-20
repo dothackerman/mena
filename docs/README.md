@@ -22,6 +22,11 @@ This repository separates documentation by role so agents do not have to guess w
 
 - pending research tasks derived from architecture work
 
+### `testing/`
+
+- repeatable manual or live-environment test protocols
+- privacy-preserving scenario definitions and evidence expectations
+
 ### `ideas/`
 
 - deferred ideas and future directions
@@ -33,6 +38,7 @@ This repository separates documentation by role so agents do not have to guess w
 - `architecture/` = working synthesis
 - `research/notes/` = evidence outputs
 - `research/backlog/` = pending investigation
+- `testing/` = reusable test method, not captured runtime data
 - `ideas/` = deferred, non-binding, do not use for normal coding scope
 
 ## Primary Documents
@@ -43,4 +49,5 @@ This repository separates documentation by role so agents do not have to guess w
 - [Architecture Research Backlog](research/backlog/architecture-research-backlog.md)
 - [PoC Requirements](requirements/poc-requirements.md)
 - [Discovery Meeting Report](requirements/discovery-meeting-report.md)
+- [Live PipeWire Test Protocol](testing/live-pipewire/README.md)
 - [Ideas Index](ideas/README.md)

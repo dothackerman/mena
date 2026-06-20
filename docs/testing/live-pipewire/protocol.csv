@@ -1,0 +1,6 @@
+run_id,scenario_id,step_id,phase,action_type,command_or_action,expected,observed,evidence_path,privacy_checked,verdict,notes
+<run>,S3,01,before,snapshot,capture_graph_snapshot before,clean baseline graph captured,,graph-before/,yes,,
+<run>,S3,02,run,command,mena record ... explicit routes --verbose,recording starts with selected routes,,logs/record-online.log,yes,,
+<run>,S3,03,during,snapshot,capture_graph_snapshot during,temporary route visible while recording,,graph-during/,yes,,
+<run>,S3,04,after,snapshot,capture_graph_snapshot after,playback restored and temp objects gone,,graph-after/,yes,,
+<run>,S3,05,after,inventory,segment inventory/hash commands,paired segments aligned and independent,,session/,yes,,
