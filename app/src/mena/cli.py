@@ -79,6 +79,7 @@ from mena.profiles import (
     CaptureProfile,
     CaptureProfileId,
     CaptureProfileSelection,
+    CaptureSourceId,
     DiarisationPolicy,
     capture_profile_choices,
     get_capture_profile,
@@ -674,41 +675,41 @@ def main(
             if capture_monitor is not None
             else finalized_payload.capture_metadata
         )
+        source_independence_error = _source_independence_error(capture_metadata)
+        final_status = finalized_payload.status
+        final_error = finalized_payload.error
+        if source_independence_error is not None:
+            final_status = "failed"
+            final_error = source_independence_error
         update_session_capture_metadata(created_session.record_path, capture_metadata)
         update_session_record(
             created_session.record_path,
             updates={
-                "status": finalized_payload.status,
+                "status": final_status,
                 "recording": _recording_lifecycle(
                     started_at=started_at,
                     stopped_at=completed_at,
                     stop_reason=stop_reason,
                     finalization_status=(
-                        "finalized"
-                        if finalized_payload.status == "recorded"
-                        else finalized_payload.status
+                        "finalized" if final_status == "recorded" else final_status
                     ),
                     completed_at=completed_at,
-                    error=finalized_payload.error,
+                    error=final_error,
                 ),
                 "capture_plan": _capture_plan_from_start_payload(
                     start_payload,
-                    status=(
-                        "finalized"
-                        if finalized_payload.status == "recorded"
-                        else finalized_payload.status
-                    ),
+                    status=("finalized" if final_status == "recorded" else final_status),
                 ),
             },
         )
         print("Capture finalized")
-        if finalized_payload.status == "recorded":
+        if final_status == "recorded":
             print(f"To process this recording, run: mena process {created_session.record_path}")
-        elif finalized_payload.error:
-            print(f"Capture finalized as {finalized_payload.status}: {finalized_payload.error}")
+        elif final_error:
+            print(f"Capture finalized as {final_status}: {final_error}")
         else:
-            print(f"Capture finalized as {finalized_payload.status}.")
-        return 0
+            print(f"Capture finalized as {final_status}.")
+        return 1 if final_status == "failed" else 0
 
     if args.command == "correct":
         try:
@@ -931,6 +932,59 @@ def _capture_source_summaries(
             }
         )
     return summaries
+
+
+def _source_independence_error(capture_metadata: dict[str, object]) -> str | None:
+    if capture_metadata.get("profile") != CaptureProfileId.ONLINE_DUAL_STREAM.value:
+        return None
+    route_ids = _capture_route_ids_by_source(capture_metadata)
+    local_route_id = route_ids.get(CaptureSourceId.LOCAL_MIC.value)
+    system_route_id = route_ids.get(CaptureSourceId.SYSTEM_AUDIO.value)
+    if local_route_id is None or system_route_id is None or local_route_id == system_route_id:
+        return None
+    segments = capture_metadata.get("segments")
+    if not isinstance(segments, list):
+        return None
+    local_hashes = _sealed_hashes_by_index(segments, CaptureSourceId.LOCAL_MIC.value)
+    system_hashes = _sealed_hashes_by_index(segments, CaptureSourceId.SYSTEM_AUDIO.value)
+    common_indexes = sorted(set(local_hashes) & set(system_hashes))
+    if not common_indexes:
+        return None
+    if any(local_hashes[index] != system_hashes[index] for index in common_indexes):
+        return None
+    return (
+        "Online capture source independence failed: local_mic and system_audio "
+        "produced identical same-index audio hashes for distinct selected routes."
+    )
+
+
+def _capture_route_ids_by_source(capture_metadata: dict[str, object]) -> dict[str, str]:
+    route_ids: dict[str, str] = {}
+    sources = capture_metadata.get("sources")
+    if not isinstance(sources, list):
+        return route_ids
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        source_id = source.get("source_id")
+        route_id = source.get("route_id")
+        if isinstance(source_id, str) and isinstance(route_id, str) and route_id:
+            route_ids[source_id] = route_id
+    return route_ids
+
+
+def _sealed_hashes_by_index(segments: list[object], source_id: str) -> dict[int, str]:
+    hashes: dict[int, str] = {}
+    for segment in segments:
+        if not isinstance(segment, dict) or segment.get("source_id") != source_id:
+            continue
+        if segment.get("status") != "sealed":
+            continue
+        index = segment.get("index")
+        sha256 = segment.get("sha256")
+        if isinstance(index, int) and isinstance(sha256, str) and sha256:
+            hashes[index] = sha256
+    return hashes
 
 
 def _capture_mode_for_route(route: CaptureRouteBindingPayload | None) -> str | None:

@@ -540,6 +540,37 @@ def test_record_does_not_offer_process_handoff_for_empty_partial_capture(
     assert "mena process" not in captured.out
 
 
+def test_record_rejects_identical_online_source_hashes(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    exit_code = main(
+        [
+            "record",
+            "--profile",
+            "online",
+            "--language",
+            "en",
+            "--playback-stream",
+            "pulse:sink-input:151",
+        ],
+        data_root=tmp_path,
+        discoverer=_available_discoverer,
+        worker_factory=IdenticalHashWorkerProcess,
+        input_fn=lambda _prompt: "q",
+    )
+
+    captured = capsys.readouterr()
+    record_path = next((tmp_path / "sessions").iterdir()) / "session.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    assert exit_code == 1
+    assert record["status"] == "failed"
+    assert record["recording"]["finalization"]["status"] == "failed"
+    assert "source independence failed" in record["recording"]["finalization"]["error"]
+    assert "Capture finalized as failed" in captured.out
+    assert "mena process" not in captured.out
+
+
 def test_record_defaults_to_runtime_sessions_dir(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3181,7 +3212,13 @@ class _EventWorker:
         return next(self._messages)
 
 
-def _segment_payload(*, source_id: str, index: int) -> dict[str, object]:
+def _segment_payload(
+    *,
+    source_id: str,
+    index: int,
+    sha256: str | None = None,
+) -> dict[str, object]:
+    segment_sha256 = sha256 or hashlib.sha256(f"{source_id}:{index}".encode()).hexdigest()
     return {
         "source_id": source_id,
         "index": index,
@@ -3194,7 +3231,7 @@ def _segment_payload(*, source_id: str, index: int) -> dict[str, object]:
         "duration_seconds": 30.0,
         "started_at": None,
         "ended_at": None,
-        "sha256": "0" * 64,
+        "sha256": segment_sha256,
         "route_id": None,
         "route_label": None,
         "capture_mode": None,
@@ -3470,6 +3507,29 @@ class MonitoredWorkerProcess(WorkerProcess):
 
     def wait(self, timeout: float | None = None) -> int:
         return 0
+
+
+class IdenticalHashWorkerProcess(MonitoredWorkerProcess):
+    def request_stop_capture(self) -> None:
+        shared_sha = "a" * 64
+        self._messages.put(
+            ProtocolMessage(
+                type="segments_flushed",
+                session_id=self.session_id,
+                payload={
+                    "segments": [
+                        _segment_payload(source_id="local_mic", index=1, sha256=shared_sha),
+                        _segment_payload(source_id="system_audio", index=1, sha256=shared_sha),
+                    ]
+                },
+            )
+        )
+        self._messages.put(
+            _finalized_capture_message(
+                profile=self.profile,
+                selected_sources=("local_mic", "system_audio"),
+            )
+        )
 
 
 class FailingWorkerProcess(FakeWorkerProcess):
