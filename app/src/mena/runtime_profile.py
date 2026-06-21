@@ -103,9 +103,13 @@ def select_runtime_profile(
     )
     accepted_failure = _runtime_profile_failure(accepted, accepted_evaluation, scope)
     if accepted_failure is None:
+        actual = build_runtime_profile_state(accepted_evaluation)
         return RuntimeProfileSelection(
             accepted=accepted,
-            actual=build_runtime_profile_state(accepted_evaluation),
+            actual=_with_resolved_profile_stage_policies(
+                actual,
+                profile=accepted_profile,
+            ),
             fallback_used=False,
             current_command_identity=accepted_evaluation.state.command_identity,
             revalidation=accepted_evaluation,
@@ -153,7 +157,10 @@ def select_runtime_profile(
             )
         if not authorize_runtime_fallback(accepted_failure, fallback_evaluation):
             raise ValueError("Accepted runtime profile is unavailable and fallback was declined.")
-    fallback_runtime_state = build_runtime_profile_state(fallback_evaluation)
+    fallback_runtime_state = _with_resolved_profile_stage_policies(
+        build_runtime_profile_state(fallback_evaluation),
+        profile=fallback_profile,
+    )
     return RuntimeProfileSelection(
         accepted=accepted,
         actual=fallback_runtime_state,
@@ -240,7 +247,10 @@ def select_runtime_profile_after_stage_failure(
     else:
         raise ValueError(f"Runtime stage '{failed_stage}' failed and fallback was declined.")
 
-    fallback_runtime_state = build_runtime_profile_state(fallback_evaluation)
+    fallback_runtime_state = _with_resolved_profile_stage_policies(
+        build_runtime_profile_state(fallback_evaluation),
+        profile=fallback_profile,
+    )
     return RuntimeProfileSelection(
         accepted=accepted,
         actual=fallback_runtime_state,
@@ -496,6 +506,39 @@ def stage_provider_options(runtime_state: RuntimeProfileState, stage: str) -> di
         if policy.stage == stage:
             return dict(policy.provider_options)
     return {}
+
+
+def _with_resolved_profile_stage_policies(
+    runtime_state: RuntimeProfileState,
+    *,
+    profile: SetupProfile,
+) -> RuntimeProfileState:
+    return replace(
+        runtime_state,
+        stage_policies=tuple(
+            _resolved_runtime_stage_policy(
+                stage=stage,
+                runtime_state=runtime_state,
+            )
+            for stage in profile.stages
+        ),
+    )
+
+
+def _resolved_runtime_stage_policy(
+    *,
+    stage: Any,
+    runtime_state: RuntimeProfileState,
+) -> Any:
+    if stage.stage == "transcription":
+        return replace(
+            stage,
+            model=runtime_state.selected_asr_profile.checkpoint,
+            device=runtime_state.selected_asr_profile.device,
+        )
+    if stage.stage == "diarization" and stage.device == "hardware-selected":
+        return replace(stage, device=runtime_state.selected_asr_profile.device)
+    return stage
 
 
 def _stage_model(runtime_state: RuntimeProfileState, stage: str) -> str:
