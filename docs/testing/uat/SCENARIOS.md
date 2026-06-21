@@ -57,6 +57,7 @@ Purpose: prove `in_person_single_mic` records selected room microphone audio.
 Pass criteria:
 
 - recording finalizes as a valid session
+- pre-capture CLI output includes the recording consent notice
 - sealed `room_mic` segments are present, ordered, and plausible
 - record-time language and route choices are persisted
 - cleanup leaves no Mena-owned capture process or unexpected audio graph state
@@ -69,6 +70,7 @@ selected playback/system audio while playback remains audible.
 Pass criteria:
 
 - recording finalizes as a valid online session
+- pre-capture CLI output includes the recording consent notice
 - `local_mic` and `system_audio` sealed segment indexes match exactly
 - same-index source hashes differ when controlled sources are intentionally
   different
@@ -87,6 +89,10 @@ Prerequisite: UAT-B3 passed in the same environment with the same route shape.
 Pass criteria:
 
 - typed degradation event is persisted
+- at least one paired primary dedicated-route segment was sealed before the
+  controlled runtime failure
+- subsequent paired segments transitioned to the degraded selected-output-monitor
+  path
 - degraded `system_audio` segments record the effective degraded capture mode
 - online source index sets still match
 - Mena does not attempt unsafe recovery back to the dedicated route
@@ -116,6 +122,7 @@ Pass criteria:
 - local microphone and system audio facts are not collapsed or swapped
 - transcript, timeline, summary, and action items are judged against expected
   facts and non-facts
+- correction/review behavior is visible when flags exist
 
 ## Scenario UAT-D1: In-Person End-To-End Baseline
 

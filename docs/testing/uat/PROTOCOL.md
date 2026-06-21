@@ -103,11 +103,13 @@ Run scenarios in this order unless a blocker forces a narrower diagnostic run:
 
 ## Failure Triage
 
-When a scenario is `fail` or `blocked`:
+When a scenario is `fail`, `blocked`, or `pass_with_findings`:
 
 - keep the scenario verdict in the run file
 - create a slim bug issue when product behavior failed or needs implementation
   follow-up
+- for `pass_with_findings`, either link the follow-up issue or record the
+  explicit triage disposition in the run file
 - include observed result, expected result, release, scenario ID, and evidence
   pointers
 - leave root-cause analysis and implementation design to the implementation or
