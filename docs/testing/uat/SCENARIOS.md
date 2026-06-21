@@ -73,12 +73,16 @@ Pass criteria:
 - same-index source hashes differ when controlled sources are intentionally
   different
 - graph snapshots show playback moved during capture and restored after stop
+- during-capture evidence shows the selected playback remained audible through
+  loopback to the user's selected output sink
 - cleanup leaves no Mena-owned route object or capture process
 
 ## Scenario UAT-B4: Runtime System-Audio Degradation
 
 Purpose: prove a runtime dedicated-route capture failure degrades only to a
 supported selected-output-monitor path and records that degradation.
+
+Prerequisite: UAT-B3 passed in the same environment with the same route shape.
 
 Pass criteria:
 
@@ -162,13 +166,17 @@ Pass criteria:
 
 ## Scenario UAT-E1: Failure And Resume
 
-Purpose: prove interruptions preserve sealed data and make recovery state clear.
+Purpose: prove recording interruptions preserve sealed data and processing
+failures resume from the failed checkpoint.
 
 Pass criteria:
 
 - already sealed segments remain present after interruption
 - final session state is explicit
-- resume or retry behavior does not destroy prior user data
+- after a simulated processing failure, processing resumes from the failed
+  checkpoint without reprocessing already completed segments
+- resumed processing completes successfully
+- retry behavior does not destroy prior user data
 
 ## Scenario UAT-F1: Stress And Duration
 
@@ -176,7 +184,10 @@ Purpose: check meeting-length behavior after smoke and baseline scenarios pass.
 
 Pass criteria:
 
-- the selected duration run completes without missing or duplicated source
-  indexes
+- the stress run records for at least 60 minutes
+- the stress run completes without missing or duplicated source indexes
 - finalization and cleanup pass
 - recorded output remains processable
+- a shorter run cannot be recorded as a clean stress pass
+- a 90-minute run is required to claim full REQ-P02 coverage; otherwise the
+  untested 90-minute boundary remains explicit residual risk
