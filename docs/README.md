@@ -49,5 +49,7 @@ This repository separates documentation by role so agents do not have to guess w
 - [Architecture Research Backlog](research/backlog/architecture-research-backlog.md)
 - [PoC Requirements](requirements/poc-requirements.md)
 - [Discovery Meeting Report](requirements/discovery-meeting-report.md)
+- [UAT Scenarios](testing/uat/SCENARIOS.md)
+- [UAT Protocol](testing/uat/PROTOCOL.md)
 - [Live PipeWire Test Protocol](testing/live-pipewire/README.md)
 - [Ideas Index](ideas/README.md)
