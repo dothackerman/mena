@@ -1687,7 +1687,7 @@ def _confirm_one_run_runtime_fallback(
     return answer.strip().lower() in {"y", "yes"}
 
 
-def _print_semantic_review_skip_notice(result: SemanticCoherenceStageResult) -> None:
+def _print_semantic_review_skip_notice(result: object) -> None:
     _ = result
     print(
         "Semantic review skipped: local semantic LLM provider is unavailable. "
@@ -2197,9 +2197,9 @@ def _run_processing_command(
         else ""
     )
     print(f"Processing completed for run '{run_id}' (attempt {attempt}){fallback}.")
-    semantic_result = getattr(pipeline_result, "semantic_coherence_result", None)
-    if getattr(semantic_result, "skip_reason", None) == "provider_unavailable":
-        _print_semantic_review_skip_notice(cast(SemanticCoherenceStageResult, semantic_result))
+    final_semantic_result = getattr(pipeline_result, "semantic_coherence_result", None)
+    if getattr(final_semantic_result, "skip_reason", None) == "provider_unavailable":
+        _print_semantic_review_skip_notice(final_semantic_result)
     return 0
 
 
