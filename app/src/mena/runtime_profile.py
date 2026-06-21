@@ -70,6 +70,7 @@ def select_runtime_profile(
     allow_runtime_fallback: bool,
     authorize_runtime_fallback: Callable[[str, SetupEvaluation], bool] | None = None,
     required_stages: frozenset[str] | None = None,
+    include_all_stage_policies: bool = False,
 ) -> RuntimeProfileSelection:
     """Select the accepted or explicit fallback runtime profile for derived artifacts."""
 
@@ -106,9 +107,10 @@ def select_runtime_profile(
         actual = build_runtime_profile_state(accepted_evaluation)
         return RuntimeProfileSelection(
             accepted=accepted,
-            actual=_with_resolved_profile_stage_policies(
+            actual=_runtime_state_for_selection(
                 actual,
                 profile=accepted_profile,
+                include_all_stage_policies=include_all_stage_policies,
             ),
             fallback_used=False,
             current_command_identity=accepted_evaluation.state.command_identity,
@@ -157,9 +159,10 @@ def select_runtime_profile(
             )
         if not authorize_runtime_fallback(accepted_failure, fallback_evaluation):
             raise ValueError("Accepted runtime profile is unavailable and fallback was declined.")
-    fallback_runtime_state = _with_resolved_profile_stage_policies(
+    fallback_runtime_state = _runtime_state_for_selection(
         build_runtime_profile_state(fallback_evaluation),
         profile=fallback_profile,
+        include_all_stage_policies=include_all_stage_policies,
     )
     return RuntimeProfileSelection(
         accepted=accepted,
@@ -192,6 +195,7 @@ def select_runtime_profile_after_stage_failure(
     failed_input_artifacts: tuple[str, ...],
     allow_runtime_fallback: bool,
     authorize_runtime_fallback: Callable[[str, SetupEvaluation], bool] | None = None,
+    include_all_stage_policies: bool = False,
 ) -> RuntimeProfileSelection:
     """Select the accepted fallback profile after a provider-time stage failure."""
 
@@ -247,9 +251,10 @@ def select_runtime_profile_after_stage_failure(
     else:
         raise ValueError(f"Runtime stage '{failed_stage}' failed and fallback was declined.")
 
-    fallback_runtime_state = _with_resolved_profile_stage_policies(
+    fallback_runtime_state = _runtime_state_for_selection(
         build_runtime_profile_state(fallback_evaluation),
         profile=fallback_profile,
+        include_all_stage_policies=include_all_stage_policies,
     )
     return RuntimeProfileSelection(
         accepted=accepted,
@@ -506,6 +511,17 @@ def stage_provider_options(runtime_state: RuntimeProfileState, stage: str) -> di
         if policy.stage == stage:
             return dict(policy.provider_options)
     return {}
+
+
+def _runtime_state_for_selection(
+    runtime_state: RuntimeProfileState,
+    *,
+    profile: SetupProfile,
+    include_all_stage_policies: bool,
+) -> RuntimeProfileState:
+    if not include_all_stage_policies:
+        return runtime_state
+    return _with_resolved_profile_stage_policies(runtime_state, profile=profile)
 
 
 def _with_resolved_profile_stage_policies(

@@ -2312,6 +2312,7 @@ def test_main_summarize_revalidates_only_summarization_runtime_dependencies(
             "model": settings.local_llm.ollama_model,
             "policy": "local-preferred, no setup-time remote fallback",
             "provider": "Ollama",
+            "provider_options": {},
             "stage": "summarization",
         }
     ]

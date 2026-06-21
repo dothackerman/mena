@@ -1993,6 +1993,7 @@ def _run_processing_command(
             allow_runtime_fallback=allow_runtime_fallback,
             authorize_runtime_fallback=runtime_fallback_authorizer,
             required_stages=PROCESSING_REQUIRED_RUNTIME_STAGES,
+            include_all_stage_policies=True,
         )
         store_runtime_profile_provenance(
             store=store,
@@ -2070,6 +2071,7 @@ def _run_processing_command(
                 ),
                 allow_runtime_fallback=allow_runtime_fallback,
                 authorize_runtime_fallback=runtime_fallback_authorizer,
+                include_all_stage_policies=True,
             )
             store_runtime_profile_provenance(
                 store=store,

@@ -827,6 +827,7 @@ def _provider_from_dict(data: object) -> SummarizationProviderMetadata:
         model=_required_str(item, "model", "Summary provider"),
         endpoint=_optional_str(item, "endpoint", "Summary provider"),
         prompt_policy=_required_str(item, "prompt_policy", "Summary provider"),
+        provider_options=_optional_json_object(item, "provider_options", "Summary provider"),
     )
     if provider.prompt_policy not in SUPPORTED_PROMPT_POLICIES:
         raise SummarizationContractError("Unsupported summary provider prompt policy.")
@@ -899,6 +900,19 @@ def _optional_str(data: Mapping[str, object], field_name: str, label: str) -> st
         raise SummarizationContractError(
             f"Field '{field_name}' in {label} must be null or a non-empty string."
         )
+    return value
+
+
+def _optional_json_object(
+    data: Mapping[str, object],
+    field_name: str,
+    label: str,
+) -> Mapping[str, object]:
+    value = data.get(field_name)
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise SummarizationContractError(f"Field '{field_name}' in {label} must be a JSON object.")
     return value
 
 
