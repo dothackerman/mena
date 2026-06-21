@@ -101,6 +101,10 @@ Run scenarios in this order unless a blocker forces a narrower diagnostic run:
 9. Stress/duration gate.
 10. Compare-notes and issue triage.
 
+At least one end-to-end baseline in a formal full UAT run must be designated as
+the manual-notes baseline. If no end-to-end baseline covers manual notes, record
+REQ-F12 as untested residual risk in the run summary.
+
 ## Failure Triage
 
 When a scenario is `fail`, `blocked`, or `pass_with_findings`:

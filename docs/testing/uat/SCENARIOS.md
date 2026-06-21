@@ -74,6 +74,8 @@ Pass criteria:
 - `local_mic` and `system_audio` sealed segment indexes match exactly
 - same-index source hashes differ when controlled sources are intentionally
   different
+- sealed WAV chunks are independently readable, frame counts are contiguous, and
+  local/system offsets stay stable across segment boundaries
 - graph snapshots show playback moved during capture and restored after stop
 - during-capture evidence shows the selected playback remained audible through
   loopback to the user's selected output sink
@@ -107,9 +109,16 @@ Pass criteria:
 
 - transcript, diarization, merged transcript, review/correction, summary, action
   items, timeline, and export artifacts are inspectable
+- processing provenance records accepted profile, actual profile,
+  provider/model/device posture, fallback status, and whether fallback was used
 - important expected facts are present
 - expected non-facts are absent
 - correction/review behavior is visible when flags exist
+- corrections are stored as a separate overlay while raw ASR and merged
+  transcript artifacts remain unchanged
+- corrected or confirmed speaker labels persist speaker-anchor artifacts with
+  embedding references, or the session explicitly records that embeddings were
+  unavailable
 
 ## Scenario UAT-C2: Online Known-Fact Processing
 
@@ -119,10 +128,14 @@ Purpose: test processing and output quality against controlled `local_mic` plus
 Pass criteria:
 
 - online source handling remains channel-aware
+- processing provenance records accepted profile, actual profile,
+  provider/model/device posture, fallback status, and whether fallback was used
 - local microphone and system audio facts are not collapsed or swapped
 - transcript, timeline, summary, and action items are judged against expected
   facts and non-facts
 - correction/review behavior is visible when flags exist
+- corrections are stored as a separate overlay while raw ASR and merged
+  transcript artifacts remain unchanged
 
 ## Scenario UAT-D1: In-Person End-To-End Baseline
 
@@ -132,6 +145,8 @@ recording to exported notes.
 Pass criteria:
 
 - live in-person recording produces processable segments
+- if this is the run's manual-notes baseline, summarization uses a sealed
+  versioned manual-notes artifact and preserves the original notes unmodified
 - processing, correction, summarization, and export complete
 - artifacts preserve provenance and are useful enough for human review
 
@@ -143,6 +158,8 @@ stream recording to exported notes.
 Pass criteria:
 
 - live online recording produces processable paired segments
+- if this is the run's manual-notes baseline, summarization uses a sealed
+  versioned manual-notes artifact and preserves the original notes unmodified
 - processing, correction, summarization, and export complete
 - local/system source separation remains inspectable through processing output
 
