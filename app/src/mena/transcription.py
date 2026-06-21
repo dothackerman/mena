@@ -400,11 +400,18 @@ class FasterWhisperTranscriptionProvider:
             raise TranscriptionInputError("faster-whisper transcription requires an audio_path.")
         model = self._load_model()
         decode_parameters = self.decode_options.to_parameters(request)
-        segments_iter, info = model.transcribe(str(request.audio_path), **decode_parameters)
-        segments = tuple(
-            _segment_from_faster_whisper(item, index=index)
-            for index, item in enumerate(cast(Iterable[object], segments_iter), start=1)
-        )
+        try:
+            segments_iter, info = model.transcribe(str(request.audio_path), **decode_parameters)
+            segments = tuple(
+                _segment_from_faster_whisper(item, index=index)
+                for index, item in enumerate(cast(Iterable[object], segments_iter), start=1)
+            )
+        except Exception as exc:
+            if _is_cuda_resource_error(exc):
+                raise TranscriptionProviderUnavailable(
+                    f"faster-whisper CUDA resource failure: {exc}"
+                ) from exc
+            raise
         if not segments:
             raise TranscriptionError("faster-whisper returned no transcript segments.")
         text = " ".join(segment.text for segment in segments).strip()
@@ -445,13 +452,27 @@ class FasterWhisperTranscriptionProvider:
                     "faster-whisper is not installed in this environment."
                 ) from exc
             self._model_factory = cast(ModelFactory, module.WhisperModel)
-        self._model = self._model_factory(
-            self.profile.checkpoint,
-            device=self.profile.device,
-            compute_type=self.profile.compute_type,
-            local_files_only=self.local_files_only,
-        )
+        try:
+            self._model = self._model_factory(
+                self.profile.checkpoint,
+                device=self.profile.device,
+                compute_type=self.profile.compute_type,
+                local_files_only=self.local_files_only,
+            )
+        except Exception as exc:
+            if _is_cuda_resource_error(exc):
+                raise TranscriptionProviderUnavailable(
+                    f"faster-whisper CUDA resource failure: {exc}"
+                ) from exc
+            raise
         return self._model
+
+
+def _is_cuda_resource_error(exc: Exception) -> bool:
+    message = f"{exc.__class__.__name__}: {exc}".lower()
+    return "cuda" in message and (
+        "out of memory" in message or "alloc" in message or "cublas_status_alloc_failed" in message
+    )
 
 
 class FakeTranscriptionProvider:

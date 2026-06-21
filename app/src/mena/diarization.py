@@ -523,7 +523,14 @@ class PyannoteCommunityDiarizationProvider:
         if request.audio_path is None:
             raise DiarizationInputError("pyannote diarization requires an audio_path.")
         pipeline = self._load_pipeline()
-        output = pipeline(str(request.audio_path))
+        try:
+            output = pipeline(str(request.audio_path))
+        except Exception as exc:
+            if _is_cuda_resource_error(exc):
+                raise DiarizationProviderUnavailable(
+                    f"pyannote CUDA resource failure: {exc}"
+                ) from exc
+            raise
         regular_output, exclusive_output = _pyannote_diarization_outputs(output)
         regular_segments = tuple(_segments_from_pyannote(regular_output, id_prefix="turn"))
         if not regular_segments:
@@ -634,6 +641,13 @@ class PyannoteCommunityDiarizationProvider:
             raise DiarizationProviderUnavailable(
                 f"torch could not construct device '{self.device}': {exc}"
             ) from exc
+
+
+def _is_cuda_resource_error(exc: Exception) -> bool:
+    message = f"{exc.__class__.__name__}: {exc}".lower()
+    return "cuda" in message and (
+        "out of memory" in message or "alloc" in message or "cublas_status_alloc_failed" in message
+    )
 
 
 @dataclass(frozen=True)

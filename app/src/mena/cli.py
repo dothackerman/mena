@@ -44,6 +44,7 @@ from mena.diarization import (
     DiarizationContext,
     DiarizationError,
     DiarizationProvider,
+    DiarizationProviderUnavailable,
     PyannoteCommunityDiarizationProvider,
     run_diarization_stage,
 )
@@ -114,6 +115,7 @@ from mena.runtime_profile import (
     runtime_summarization_provider,
     runtime_transcription_factory,
     select_runtime_profile,
+    select_runtime_profile_after_stage_failure,
     store_runtime_profile_provenance,
 )
 from mena.runtime_stewardship import (
@@ -173,6 +175,7 @@ from mena.transcription import (
     FasterWhisperTranscriptionProvider,
     TranscriptionError,
     TranscriptionProvider,
+    TranscriptionProviderUnavailable,
     run_transcription_stage,
 )
 
@@ -1897,6 +1900,11 @@ def _run_processing_command(
     runtime_fallback_input_fn: Callable[[str], str] | None = None,
 ) -> int:
     runtime_selection: RuntimeProfileSelection | None = None
+    effective_settings: AppSettings | None = None
+    runtime_fallback_authorizer: Callable[[str, SetupEvaluation], bool] | None = None
+    base_transcription_provider_factory = transcription_provider_factory
+    base_diarization_provider_factory = diarization_provider_factory
+    base_semantic_coherence_provider_factory = semantic_coherence_provider_factory
     session_dir, session_record = _resolve_session(session_path)
     session_id = _extract_session_id(session_record)
     profile = get_capture_profile(_required_str(session_record, "profile"))
@@ -1916,21 +1924,22 @@ def _run_processing_command(
         semantic_coherence_provider_factory,
     ):
         effective_settings = settings or AppSettings.from_env()
+        runtime_fallback_authorizer = (
+            None
+            if runtime_fallback_input_fn is None
+            else lambda failure, fallback: _confirm_one_run_runtime_fallback(
+                accepted_failure=failure,
+                fallback_evaluation=fallback,
+                input_fn=runtime_fallback_input_fn,
+            )
+        )
         runtime_selection = select_runtime_profile(
             settings=effective_settings,
             runner=setup_runner,
             command_identity=setup_command_identity,
             hardware=setup_hardware,
             allow_runtime_fallback=allow_runtime_fallback,
-            authorize_runtime_fallback=(
-                None
-                if runtime_fallback_input_fn is None
-                else lambda failure, fallback: _confirm_one_run_runtime_fallback(
-                    accepted_failure=failure,
-                    fallback_evaluation=fallback,
-                    input_fn=runtime_fallback_input_fn,
-                )
-            ),
+            authorize_runtime_fallback=runtime_fallback_authorizer,
             required_stages=PROCESSING_REQUIRED_RUNTIME_STAGES,
         )
         store_runtime_profile_provenance(
@@ -1940,20 +1949,21 @@ def _run_processing_command(
             selection=runtime_selection,
         )
         transcription_provider_factory = runtime_transcription_factory(
-            transcription_provider_factory,
+            base_transcription_provider_factory,
             runtime_selection.actual,
         )
         diarization_provider_factory = runtime_diarization_factory(
-            diarization_provider_factory,
+            base_diarization_provider_factory,
             runtime_selection.actual,
         )
         semantic_coherence_provider_factory = runtime_semantic_factory(
-            semantic_coherence_provider_factory,
+            base_semantic_coherence_provider_factory,
             settings=effective_settings,
             runtime_state=runtime_selection.accepted,
         )
 
     pipeline_timestamp = now if now is not None else datetime.now(UTC)
+    ledger = ProcessingStageLedger(store=store, session_id=session_id, run_id=run_id)
     transcription_provider = _require_provider(
         transcription_provider_factory,
         TranscriptionProvider,
@@ -1971,19 +1981,90 @@ def _run_processing_command(
     )
 
     try:
-        pipeline_result = _run_processing_stages(
-            session_id=session_id,
-            profile=profile,
-            source_inputs=source_inputs,
-            store=store,
-            ledger=ProcessingStageLedger(store=store, session_id=session_id, run_id=run_id),
-            attempt=attempt,
-            now=pipeline_timestamp,
-            transcription_provider=transcription_provider,
-            diarization_provider=diarization_provider,
-            semantic_coherence_provider=semantic_coherence_provider,
-            session_language=session_language or None,
-        )
+        try:
+            pipeline_result = _run_processing_stages(
+                session_id=session_id,
+                profile=profile,
+                source_inputs=source_inputs,
+                store=store,
+                ledger=ledger,
+                attempt=attempt,
+                now=pipeline_timestamp,
+                transcription_provider=transcription_provider,
+                diarization_provider=diarization_provider,
+                semantic_coherence_provider=semantic_coherence_provider,
+                session_language=session_language or None,
+            )
+        except (TranscriptionProviderUnavailable, DiarizationProviderUnavailable) as exc:
+            if (
+                runtime_selection is None
+                or runtime_selection.fallback_used
+                or effective_settings is None
+            ):
+                raise
+            failed_stage = _runtime_fallback_stage_for_provider_failure(exc)
+            fallback_selection = select_runtime_profile_after_stage_failure(
+                settings=effective_settings,
+                runner=setup_runner,
+                command_identity=setup_command_identity,
+                hardware=setup_hardware,
+                accepted=runtime_selection.accepted,
+                failed_stage=failed_stage,
+                failure_reason=str(exc),
+                failure_class=exc.__class__.__name__,
+                failed_input_artifacts=_latest_failed_stage_input_artifacts(
+                    ledger=ledger,
+                    stage=failed_stage,
+                ),
+                allow_runtime_fallback=allow_runtime_fallback,
+                authorize_runtime_fallback=runtime_fallback_authorizer,
+            )
+            store_runtime_profile_provenance(
+                store=store,
+                run_id=run_id,
+                attempt=attempt,
+                selection=fallback_selection,
+                name_suffix="stage-fallback",
+            )
+            runtime_selection = fallback_selection
+            transcription_provider = _require_provider(
+                runtime_transcription_factory(
+                    base_transcription_provider_factory,
+                    fallback_selection.actual,
+                ),
+                TranscriptionProvider,
+                "transcription",
+            )
+            diarization_provider = _require_provider(
+                runtime_diarization_factory(
+                    base_diarization_provider_factory,
+                    fallback_selection.actual,
+                ),
+                DiarizationProvider,
+                "diarization",
+            )
+            semantic_coherence_provider = _require_provider(
+                runtime_semantic_factory(
+                    base_semantic_coherence_provider_factory,
+                    settings=effective_settings,
+                    runtime_state=fallback_selection.accepted,
+                ),
+                SemanticCoherenceProvider,
+                "semantic_coherence",
+            )
+            pipeline_result = _run_processing_stages(
+                session_id=session_id,
+                profile=profile,
+                source_inputs=source_inputs,
+                store=store,
+                ledger=ledger,
+                attempt=attempt,
+                now=pipeline_timestamp,
+                transcription_provider=transcription_provider,
+                diarization_provider=diarization_provider,
+                semantic_coherence_provider=semantic_coherence_provider,
+                session_language=session_language or None,
+            )
     finally:
         if runtime_selection is not None:
             _record_terminal_local_llm_release(
@@ -2005,6 +2086,25 @@ def _run_processing_command(
     if getattr(semantic_result, "skip_reason", None) == "provider_unavailable":
         _print_semantic_review_skip_notice(cast(SemanticCoherenceStageResult, semantic_result))
     return 0
+
+
+def _runtime_fallback_stage_for_provider_failure(
+    exc: TranscriptionProviderUnavailable | DiarizationProviderUnavailable,
+) -> str:
+    if isinstance(exc, TranscriptionProviderUnavailable):
+        return TRANSCRIPTION_STAGE
+    return DIARIZATION_STAGE
+
+
+def _latest_failed_stage_input_artifacts(
+    *,
+    ledger: ProcessingStageLedger,
+    stage: str,
+) -> tuple[str, ...]:
+    state = ledger.latest(stage)
+    if state is None or state.status != "failed":
+        return ()
+    return tuple(artifact.id for artifact in state.input_artifacts)
 
 
 def _run_processing_stages(
