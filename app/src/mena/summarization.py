@@ -242,12 +242,14 @@ class OllamaSummarizationProvider:
         *,
         model: str = OLLAMA_DEFAULT_MODEL,
         endpoint: str = OLLAMA_DEFAULT_ENDPOINT,
+        provider_options: Mapping[str, object] | None = None,
         timeout_seconds: float = 60.0,
     ) -> None:
         self.metadata = SummarizationProviderMetadata(
             name="ollama",
             model=model,
             endpoint=_summarization_local_ollama_endpoint(endpoint),
+            provider_options={} if provider_options is None else dict(provider_options),
         )
         self.timeout_seconds = timeout_seconds
         self._runtime_resource_used = False
@@ -261,7 +263,10 @@ class OllamaSummarizationProvider:
             "model": self.metadata.model,
             "stream": False,
             "format": SUMMARY_RESPONSE_SCHEMA,
-            "options": OLLAMA_DETERMINISTIC_OPTIONS,
+            "options": {
+                **OLLAMA_DETERMINISTIC_OPTIONS,
+                **self.metadata.provider_options,
+            },
             "messages": [
                 {
                     "role": "system",

@@ -24,6 +24,7 @@ from mena.setup import (
     OllamaState,
     PythonSurfaceCheck,
     ReadinessItem,
+    RuntimeProfileState,
     SetupAction,
     SetupActionResult,
     SetupEvaluation,
@@ -77,6 +78,11 @@ def test_profile_catalog_exposes_supported_cpu_fallback_profile() -> None:
     assert fallback.catalog_version == RUNTIME_PROFILE_CATALOG_VERSION
     assert fallback.minimum_cuda_vram_gb == 0.0
     assert _stage_model(fallback, "transcription") == "small"
+    assert {
+        stage.stage for stage in fallback.stages if stage.provider_options == {"num_gpu": 0}
+    } == {"summarization", "semantic-review"}
+    assert _stage_device(fallback, "summarization") == "cpu"
+    assert _stage_device(fallback, "semantic-review") == "cpu"
 
 
 def test_cpu_fallback_profile_requires_cpu_capable_hardware() -> None:
@@ -133,8 +139,27 @@ def test_runtime_profile_state_persists_under_runtime_state_home(tmp_path: Path)
     assert loaded.fallback_authorization.local_status == "authorized"
     assert loaded.fallback_authorization.local_profile_id == FALLBACK_LOCAL_PROFILE_ID
     assert loaded.fallback_authorization.automatic_local_fallback_authorized is True
-    assert set(loaded.fallback_authorization.stage_scope) == {"transcription", "diarization"}
+    assert set(loaded.fallback_authorization.stage_scope) == {
+        "transcription",
+        "diarization",
+        "summarization",
+        "semantic-review",
+    }
+    assert _runtime_stage_options(loaded, "summarization") == {}
+    assert _runtime_stage_options(loaded, "semantic-review") == {}
     assert loaded.fallback_authorization.remote_status == "not_configured"
+
+
+def test_runtime_profile_state_round_trips_fallback_provider_options() -> None:
+    fallback_profile = default_profile_catalog("llama3.2:3b")[1]
+    state = _state(asr_model_present=True, diarization_model_present=True)
+    fallback_evaluation = evaluate_setup(fallback_profile, state)
+
+    accepted = build_runtime_profile_state(fallback_evaluation)
+    loaded = RuntimeProfileState.from_dict(accepted.to_dict())
+
+    assert _runtime_stage_options(loaded, "summarization") == {"num_gpu": 0}
+    assert _runtime_stage_options(loaded, "semantic-review") == {"num_gpu": 0}
 
 
 def test_runtime_profile_state_requires_explicit_local_fallback_authorization() -> None:
@@ -1014,6 +1039,20 @@ def _stage_model(profile: SetupProfile, stage: str) -> str:
     for item in profile.stages:
         if item.stage == stage:
             return item.model
+    raise AssertionError(f"missing stage {stage}")
+
+
+def _stage_device(profile: SetupProfile, stage: str) -> str:
+    for item in profile.stages:
+        if item.stage == stage:
+            return item.device
+    raise AssertionError(f"missing stage {stage}")
+
+
+def _runtime_stage_options(profile: RuntimeProfileState, stage: str) -> Mapping[str, object]:
+    for item in profile.stage_policies:
+        if item.stage == stage:
+            return item.provider_options
     raise AssertionError(f"missing stage {stage}")
 
 

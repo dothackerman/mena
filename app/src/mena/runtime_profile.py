@@ -311,6 +311,7 @@ def runtime_semantic_factory(
         return OllamaSemanticCoherenceProvider(
             model=model,
             endpoint=settings.local_llm.ollama_endpoint,
+            provider_options=stage_provider_options(runtime_state, "semantic-review"),
         )
 
     return _factory
@@ -324,6 +325,7 @@ def runtime_summarization_provider(
     return OllamaSummarizationProvider(
         model=_stage_model(runtime_state, "summarization"),
         endpoint=settings.local_llm.ollama_endpoint,
+        provider_options=stage_provider_options(runtime_state, "summarization"),
     )
 
 
@@ -402,7 +404,7 @@ def store_runtime_profile_provenance(
     )
 
 
-def runtime_stage_policy_payload(runtime_state: RuntimeProfileState) -> list[dict[str, str]]:
+def runtime_stage_policy_payload(runtime_state: RuntimeProfileState) -> list[dict[str, object]]:
     return [
         {
             "stage": policy.stage,
@@ -410,6 +412,7 @@ def runtime_stage_policy_payload(runtime_state: RuntimeProfileState) -> list[dic
             "model": policy.model,
             "device": policy.device,
             "policy": policy.policy,
+            "provider_options": dict(policy.provider_options),
         }
         for policy in runtime_state.stage_policies
     ]
@@ -486,6 +489,13 @@ def stage_device(runtime_state: RuntimeProfileState, stage: str) -> str | None:
         if policy.stage == stage:
             return policy.device
     return None
+
+
+def stage_provider_options(runtime_state: RuntimeProfileState, stage: str) -> dict[str, object]:
+    for policy in runtime_state.stage_policies:
+        if policy.stage == stage:
+            return dict(policy.provider_options)
+    return {}
 
 
 def _stage_model(runtime_state: RuntimeProfileState, stage: str) -> str:

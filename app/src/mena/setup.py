@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
@@ -29,15 +29,20 @@ ALPHA_LOCAL_PROFILE_ID = "linux-alpha-local-v1"
 ALPHA_LOCAL_PROFILE_VERSION = "2026.05"
 FALLBACK_LOCAL_PROFILE_ID = "linux-alpha-cpu-fallback-v1"
 FALLBACK_LOCAL_PROFILE_VERSION = "2026.06"
-RUNTIME_PROFILE_CATALOG_VERSION = "2026.06-poc-v1"
-RUNTIME_PROFILE_STATE_SCHEMA_VERSION = 1
+RUNTIME_PROFILE_CATALOG_VERSION = "2026.06-poc-v2"
+RUNTIME_PROFILE_STATE_SCHEMA_VERSION = 2
 SETUP_STATE_FILENAME = "setup-state.json"
 PYANNOTE_COMMUNITY_CHECKPOINT = "pyannote/speaker-diarization-community-1"
 REQUIRED_COMMANDS = ("mena", "uv", "ollama", "pw-dump", "pw-cli", "wpctl")
 PLAYBACK_COMMANDS = ("ffplay", "pw-play", "paplay", "aplay")
 MINIMUM_RAM_GB = 16.0
 MINIMUM_CUDA_VRAM_GB = 5.0
-LOCAL_FALLBACK_STAGE_SCOPE = ("transcription", "diarization")
+LOCAL_FALLBACK_STAGE_SCOPE = (
+    "transcription",
+    "diarization",
+    "summarization",
+    "semantic-review",
+)
 LOCAL_FALLBACK_STATUSES = frozenset(
     {"not_configured", "configured_unauthorized", "authorized", "unavailable"}
 )
@@ -124,6 +129,7 @@ class StageProfile:
     model: str
     device: str
     policy: str
+    provider_options: Mapping[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -491,15 +497,17 @@ def default_profile_catalog(ollama_model: str = OLLAMA_DEFAULT_MODEL) -> tuple[S
                     stage="summarization",
                     provider="Ollama",
                     model=ollama_model,
-                    device="local-service",
-                    policy="local-preferred, no setup-time remote fallback",
+                    device="cpu",
+                    policy="local-only CPU fallback via Ollama placement options",
+                    provider_options={"num_gpu": 0},
                 ),
                 StageProfile(
                     stage="semantic-review",
                     provider="Ollama",
                     model=ollama_model,
-                    device="local-service",
-                    policy="local-preferred, remote fallback not configured by setup",
+                    device="cpu",
+                    policy="local-only CPU fallback via Ollama placement options",
+                    provider_options={"num_gpu": 0},
                 ),
             ),
             python_surfaces=(
@@ -1516,6 +1524,7 @@ def _resolved_stage_profiles(evaluation: SetupEvaluation) -> tuple[StageProfile,
                     model=evaluation.selected_asr_profile.checkpoint,
                     device=evaluation.selected_asr_profile.device,
                     policy=stage.policy,
+                    provider_options=stage.provider_options,
                 )
             )
         elif stage.stage == "diarization":
@@ -1531,6 +1540,7 @@ def _resolved_stage_profiles(evaluation: SetupEvaluation) -> tuple[StageProfile,
                     model=stage.model,
                     device=device,
                     policy=stage.policy,
+                    provider_options=stage.provider_options,
                 )
             )
         else:
@@ -1860,6 +1870,22 @@ def _required_mapping(data: Mapping[str, object], key: str) -> Mapping[str, obje
     return value
 
 
+def _json_object(data: object, key: str) -> Mapping[str, object]:
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise ValueError(f"Runtime profile state field '{key}' must be a JSON object.")
+    for item_key, item_value in data.items():
+        if not isinstance(item_key, str) or not item_key:
+            raise ValueError(f"Runtime profile state field '{key}' must contain string keys.")
+        if item_value is not None and not isinstance(
+            item_value,
+            (str, int, float, bool),
+        ):
+            raise ValueError(f"Runtime profile state field '{key}' contains unsupported values.")
+    return data
+
+
 def _str_tuple(data: object, key: str) -> tuple[str, ...]:
     if data is None:
         return ()
@@ -1916,6 +1942,7 @@ def _stage_profiles_from_dicts(data: object) -> tuple[StageProfile, ...]:
                 model=_required_str(item, "model"),
                 device=_required_str(item, "device"),
                 policy=_required_str(item, "policy"),
+                provider_options=_json_object(item.get("provider_options"), "provider_options"),
             )
         )
     return tuple(stages)
@@ -1961,6 +1988,7 @@ def _stage_profile_to_dict(stage: StageProfile) -> dict[str, object]:
         "model": stage.model,
         "device": stage.device,
         "policy": stage.policy,
+        "provider_options": dict(stage.provider_options),
     }
 
 

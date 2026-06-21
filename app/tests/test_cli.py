@@ -87,6 +87,7 @@ from mena.runtime_profile import (
     SUMMARIZATION_RUNTIME_STAGES,
     runtime_diarization_factory,
     runtime_semantic_factory,
+    runtime_summarization_provider,
     runtime_transcription_factory,
     select_runtime_profile,
     select_runtime_profile_after_stage_failure,
@@ -3030,6 +3031,9 @@ def test_runtime_provider_factories_use_selected_profile_state(tmp_path: Path) -
     setup_state = _setup_state(settings=settings, pyannote_token_present=True)
     evaluation = evaluate_setup(get_alpha_local_profile(), setup_state)
     runtime_state = build_runtime_profile_state(evaluation)
+    fallback_runtime_state = build_runtime_profile_state(
+        evaluate_setup(default_profile_catalog(settings.local_llm.ollama_model)[1], setup_state)
+    )
 
     transcription_provider = runtime_transcription_factory(
         FasterWhisperTranscriptionProvider,
@@ -3044,6 +3048,15 @@ def test_runtime_provider_factories_use_selected_profile_state(tmp_path: Path) -
         settings=settings,
         runtime_state=runtime_state,
     )()
+    fallback_semantic_provider = runtime_semantic_factory(
+        OllamaSemanticCoherenceProvider,
+        settings=settings,
+        runtime_state=fallback_runtime_state,
+    )()
+    fallback_summary_provider = runtime_summarization_provider(
+        settings=settings,
+        runtime_state=fallback_runtime_state,
+    )
 
     assert transcription_provider.profile.id == evaluation.selected_asr_profile.id
     assert transcription_provider.profile.device == "cuda"
@@ -3051,6 +3064,8 @@ def test_runtime_provider_factories_use_selected_profile_state(tmp_path: Path) -
     assert diarization_provider.device == "cuda"
     assert semantic_provider.metadata.model == settings.local_llm.ollama_model
     assert semantic_provider.metadata.endpoint == settings.local_llm.ollama_endpoint
+    assert fallback_semantic_provider.metadata.provider_options == {"num_gpu": 0}
+    assert fallback_summary_provider.metadata.provider_options == {"num_gpu": 0}
 
 
 def test_runtime_profile_selection_uses_accepted_state(
@@ -3433,6 +3448,7 @@ def test_runtime_profile_provenance_records_accepted_actual_and_fallback(
     assert payload["accepted_profile"]["id"] == accepted.accepted_profile_id
     assert payload["actual_profile"]["id"] == accepted.accepted_profile_id
     assert payload["actual_profile"]["stages"][0]["device"] == "cuda"
+    assert payload["actual_profile"]["stages"][2]["provider_options"] == {}
     assert payload["fallback"]["used"] is False
     assert payload["fallback"]["status"] == "not_needed"
     assert payload["fallback"]["authorization"]["local_status"] == "authorized"
