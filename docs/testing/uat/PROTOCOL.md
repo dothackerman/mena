@@ -48,6 +48,8 @@ Do not commit:
 ## Verdict Vocabulary
 
 - `pass`: scenario met pass criteria with usable evidence.
+- `pass_with_constraint`: scenario met pass criteria, but the evidence has a
+  stated test-environment or fixture limitation.
 - `pass_with_findings`: user path completed, but product quality or UX findings
   need follow-up.
 - `blocked`: scenario could not reach the behavior under test because of a
