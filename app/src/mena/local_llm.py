@@ -6,7 +6,7 @@ import json
 import urllib.parse
 import urllib.request
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 OLLAMA_DEFAULT_ENDPOINT = "http://localhost:11434"
 OLLAMA_DEFAULT_MODEL = "llama3.2:3b"
@@ -32,7 +32,6 @@ class LocalLLMProviderMetadata:
     model: str
     endpoint: str | None
     prompt_policy: str
-    provider_options: Mapping[str, object] = field(default_factory=dict)
 
     @property
     def config_id(self) -> str:
@@ -44,7 +43,6 @@ class LocalLLMProviderMetadata:
             "model": self.model,
             "endpoint": self.endpoint,
             "prompt_policy": self.prompt_policy,
-            "provider_options": dict(self.provider_options),
         }
 
 

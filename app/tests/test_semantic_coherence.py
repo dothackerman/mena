@@ -421,41 +421,6 @@ def test_ollama_semantic_provider_parses_strict_json_response(
     assert result.reason == "context mismatch"
 
 
-def test_ollama_semantic_provider_merges_runtime_provider_options(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    provider = OllamaSemanticCoherenceProvider(
-        model="test-model",
-        provider_options={"num_gpu": 0},
-    )
-    observed_options: dict[str, object] = {}
-
-    def fake_post_json(path: str, payload: object) -> dict[str, object]:
-        assert path == "/api/chat"
-        assert isinstance(payload, dict)
-        observed_options.update(cast(dict[str, object], payload["options"]))
-        return {
-            "message": {
-                "content": json.dumps(
-                    {
-                        "coherent": True,
-                        "confidence": 0.9,
-                        "reason": "consistent",
-                        "evidence": {},
-                    }
-                )
-            }
-        }
-
-    monkeypatch.setattr(provider, "_post_json", fake_post_json)
-
-    provider.check(_semantic_request())
-
-    assert observed_options == {"temperature": 0, "num_gpu": 0}
-    assert provider.metadata.provider_options == {"num_gpu": 0}
-    assert '"provider_options":{"num_gpu":0}' in provider.metadata.config_id
-
-
 def test_ollama_semantic_provider_normalizes_numeric_string_confidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -50,14 +50,13 @@ Fallback granularity for #78 is per source/artifact, not per arbitrary audio chu
 For the PoC, local fallback is constrained:
 
 - ASR and diarization may use an accepted local CPU fallback profile when authorized
-- Ollama-backed summarization and semantic review may use an accepted local CPU fallback profile when Mena controls placement through explicit provider options, such as `num_gpu=0`
 - placement fallback using the same model/checkpoint is preferred when feasible
 - profile fallback that changes model size or checkpoint is allowed only when the accepted fallback profile says so and provenance records the actual provider/model/device
-- if a local LLM stage still cannot run after the accepted fallback is unavailable or fails, that stage follows its stage policy
+- Ollama has no controlled CPU fallback in the PoC; Mena may release owned resources and retry, but if the local LLM stage still cannot run and no supported fallback exists, that stage follows its stage policy
 
 Semantic review is a quality-enhancement stage for correction, not the sole path to correction. If local semantic review cannot run after resource release and no supported fallback exists, processing may complete with semantic review explicitly skipped or degraded, provided confidence-based review flags and machine-readable diagnostics remain available.
 
-Summarization is different: if local summarization cannot run and no approved summarization fallback is available, or the approved fallback also fails, summarization fails with an actionable resource error.
+Summarization is different: if local summarization cannot run and no approved summarization fallback is available, summarization fails with an actionable resource error.
 
 All fallback, skip, degradation, and resource-release outcomes must be provenance-backed. The user-facing message should explain what Mena tried, what blocked completion on the primary path, what fallback or degradation was used, and what choices remain.
 
@@ -80,5 +79,6 @@ Tradeoffs:
 Deferred:
 
 - Mixed-provider provenance inside one transcript or diarization artifact.
+- A controlled local LLM CPU fallback profile.
 - Remote fallback for ASR, diarization, or semantic review.
 - Desktop UX for resource leases and automatic fallback explanation.

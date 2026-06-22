@@ -112,13 +112,9 @@
         "prompt_policy": {
           "enum": ["meeting-summary-json-v1", "meeting-summary-json-schema-v1"],
           "type": "string"
-        },
-        "provider_options": {
-          "additionalProperties": true,
-          "type": "object"
         }
       },
-      "required": ["name", "model", "endpoint", "prompt_policy", "provider_options"],
+      "required": ["name", "model", "endpoint", "prompt_policy"],
       "type": "object"
     }
   },

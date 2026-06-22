@@ -128,7 +128,6 @@ from mena.semantic_coherence import (
     OllamaSemanticCoherenceProvider,
     SemanticCoherenceError,
     SemanticCoherenceProvider,
-    SemanticCoherenceProviderUnavailable,
     SemanticCoherenceStageResult,
     run_semantic_coherence_stage,
 )
@@ -169,7 +168,6 @@ from mena.setup import (
 from mena.summarization import (
     SummarizationError,
     SummarizationPolicy,
-    SummarizationProviderUnavailable,
     run_summarization_stage,
 )
 from mena.transcription import (
@@ -1687,7 +1685,7 @@ def _confirm_one_run_runtime_fallback(
     return answer.strip().lower() in {"y", "yes"}
 
 
-def _print_semantic_review_skip_notice(result: object) -> None:
+def _print_semantic_review_skip_notice(result: SemanticCoherenceStageResult) -> None:
     _ = result
     print(
         "Semantic review skipped: local semantic LLM provider is unavailable. "
@@ -1770,71 +1768,20 @@ def _run_summarize_command(
         settings=settings,
         runtime_state=runtime_selection.actual,
     )
-    ledger = ProcessingStageLedger(
-        store=store,
-        session_id=session_id,
-        run_id=run_id,
-    )
-
     try:
-        try:
-            result = run_summarization_stage(
+        result = run_summarization_stage(
+            store=store,
+            ledger=ProcessingStageLedger(
                 store=store,
-                ledger=ledger,
-                merged_transcript_record=merged_transcript_record,
-                correction_overlay_record=resolved_overlay[0],
-                manual_notes_record=manual_notes_record,
-                provider=provider,
-                policy=SummarizationPolicy(language=summary_language),
-            )
-        except SummarizationProviderUnavailable as exc:
-            if runtime_selection.fallback_used:
-                raise
-            fallback_selection = select_runtime_profile_after_stage_failure(
-                settings=settings,
-                runner=setup_runner,
-                command_identity=setup_command_identity,
-                hardware=setup_hardware,
-                accepted=runtime_selection.accepted,
-                failed_stage="summarization",
-                failure_reason=str(exc),
-                failure_class=exc.__class__.__name__,
-                failed_input_artifacts=_latest_stage_input_artifacts(
-                    ledger=ledger,
-                    stage="summarization",
-                ),
-                allow_runtime_fallback=allow_runtime_fallback,
-                authorize_runtime_fallback=(
-                    None
-                    if runtime_fallback_input_fn is None
-                    else lambda failure, fallback: _confirm_one_run_runtime_fallback(
-                        accepted_failure=failure,
-                        fallback_evaluation=fallback,
-                        input_fn=runtime_fallback_input_fn,
-                    )
-                ),
-            )
-            store_runtime_profile_provenance(
-                store=store,
+                session_id=session_id,
                 run_id=run_id,
-                attempt=1,
-                selection=fallback_selection,
-                name_suffix="stage-fallback",
-            )
-            runtime_selection = fallback_selection
-            provider = runtime_summarization_provider(
-                settings=settings,
-                runtime_state=fallback_selection.actual,
-            )
-            result = run_summarization_stage(
-                store=store,
-                ledger=ledger,
-                merged_transcript_record=merged_transcript_record,
-                correction_overlay_record=resolved_overlay[0],
-                manual_notes_record=manual_notes_record,
-                provider=provider,
-                policy=SummarizationPolicy(language=summary_language),
-            )
+            ),
+            merged_transcript_record=merged_transcript_record,
+            correction_overlay_record=resolved_overlay[0],
+            manual_notes_record=manual_notes_record,
+            provider=provider,
+            policy=SummarizationPolicy(language=summary_language),
+        )
     finally:
         _record_terminal_local_llm_release(
             store=store,
@@ -1993,7 +1940,6 @@ def _run_processing_command(
             allow_runtime_fallback=allow_runtime_fallback,
             authorize_runtime_fallback=runtime_fallback_authorizer,
             required_stages=PROCESSING_REQUIRED_RUNTIME_STAGES,
-            include_all_stage_policies=True,
         )
         store_runtime_profile_provenance(
             store=store,
@@ -2012,7 +1958,7 @@ def _run_processing_command(
         semantic_coherence_provider_factory = runtime_semantic_factory(
             base_semantic_coherence_provider_factory,
             settings=effective_settings,
-            runtime_state=runtime_selection.actual,
+            runtime_state=runtime_selection.accepted,
         )
 
     pipeline_timestamp = now if now is not None else datetime.now(UTC)
@@ -2071,7 +2017,6 @@ def _run_processing_command(
                 ),
                 allow_runtime_fallback=allow_runtime_fallback,
                 authorize_runtime_fallback=runtime_fallback_authorizer,
-                include_all_stage_policies=True,
             )
             store_runtime_profile_provenance(
                 store=store,
@@ -2097,15 +2042,10 @@ def _run_processing_command(
                 DiarizationProvider,
                 "diarization",
             )
-            semantic_coherence_provider = _require_provider(
-                runtime_semantic_factory(
-                    base_semantic_coherence_provider_factory,
-                    settings=effective_settings,
-                    runtime_state=fallback_selection.actual,
-                ),
-                SemanticCoherenceProvider,
-                "semantic_coherence",
-            )
+            # Runtime fallback only changes ASR/diarization placement; the Ollama
+            # semantic provider is unaffected, so reuse the provider already built
+            # from the accepted profile rather than rebuilding from the
+            # failure-scoped fallback state (which omits the semantic-review stage).
             pipeline_result = _run_processing_stages(
                 session_id=session_id,
                 profile=profile,
@@ -2118,67 +2058,6 @@ def _run_processing_command(
                 diarization_provider=diarization_provider,
                 semantic_coherence_provider=semantic_coherence_provider,
                 session_language=session_language or None,
-            )
-        if (
-            runtime_selection is not None
-            and not runtime_selection.fallback_used
-            and effective_settings is not None
-            and getattr(
-                getattr(pipeline_result, "semantic_coherence_result", None),
-                "skip_reason",
-                None,
-            )
-            == "provider_unavailable"
-        ):
-            fallback_selection = select_runtime_profile_after_stage_failure(
-                settings=effective_settings,
-                runner=setup_runner,
-                command_identity=setup_command_identity,
-                hardware=setup_hardware,
-                accepted=runtime_selection.accepted,
-                failed_stage="semantic-review",
-                failure_reason="Semantic review provider unavailable.",
-                failure_class=SemanticCoherenceProviderUnavailable.__name__,
-                failed_input_artifacts=_latest_stage_input_artifacts(
-                    ledger=ledger,
-                    stage=SEMANTIC_COHERENCE_STAGE,
-                ),
-                allow_runtime_fallback=allow_runtime_fallback,
-                authorize_runtime_fallback=runtime_fallback_authorizer,
-            )
-            store_runtime_profile_provenance(
-                store=store,
-                run_id=run_id,
-                attempt=attempt,
-                selection=fallback_selection,
-                name_suffix="stage-fallback",
-            )
-            runtime_selection = fallback_selection
-            semantic_coherence_provider = _require_provider(
-                runtime_semantic_factory(
-                    base_semantic_coherence_provider_factory,
-                    settings=effective_settings,
-                    runtime_state=fallback_selection.actual,
-                ),
-                SemanticCoherenceProvider,
-                "semantic_coherence",
-            )
-            merged_transcript_record = _resolve_latest_merged_transcript_record(store=store)
-            if merged_transcript_record is None:
-                raise SemanticCoherenceError(
-                    "Cannot retry semantic review fallback without a merged transcript artifact."
-                )
-            semantic_result = run_semantic_coherence_stage(
-                store=store,
-                ledger=ledger,
-                merged_transcript_record=merged_transcript_record,
-                provider=semantic_coherence_provider,
-                attempt=attempt,
-                now=pipeline_timestamp,
-                skip_provider_unavailable=True,
-            )
-            pipeline_result = ProcessingPipelineResult(
-                semantic_coherence_result=semantic_result,
             )
     finally:
         if runtime_selection is not None:
@@ -2197,9 +2076,9 @@ def _run_processing_command(
         else ""
     )
     print(f"Processing completed for run '{run_id}' (attempt {attempt}){fallback}.")
-    final_semantic_result = getattr(pipeline_result, "semantic_coherence_result", None)
-    if getattr(final_semantic_result, "skip_reason", None) == "provider_unavailable":
-        _print_semantic_review_skip_notice(final_semantic_result)
+    semantic_result = getattr(pipeline_result, "semantic_coherence_result", None)
+    if getattr(semantic_result, "skip_reason", None) == "provider_unavailable":
+        _print_semantic_review_skip_notice(cast(SemanticCoherenceStageResult, semantic_result))
     return 0
 
 
@@ -2218,17 +2097,6 @@ def _latest_failed_stage_input_artifacts(
 ) -> tuple[str, ...]:
     state = ledger.latest(stage)
     if state is None or state.status != "failed":
-        return ()
-    return tuple(artifact.id for artifact in state.input_artifacts)
-
-
-def _latest_stage_input_artifacts(
-    *,
-    ledger: ProcessingStageLedger,
-    stage: str,
-) -> tuple[str, ...]:
-    state = ledger.latest(stage)
-    if state is None:
         return ()
     return tuple(artifact.id for artifact in state.input_artifacts)
 

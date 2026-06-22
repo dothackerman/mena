@@ -209,7 +209,6 @@ class OllamaSemanticCoherenceProvider:
         *,
         model: str = OLLAMA_DEFAULT_MODEL,
         endpoint: str = OLLAMA_DEFAULT_ENDPOINT,
-        provider_options: Mapping[str, object] | None = None,
         timeout_seconds: float = 30.0,
     ) -> None:
         sanitized_endpoint = _semantic_local_ollama_endpoint(endpoint)
@@ -217,7 +216,6 @@ class OllamaSemanticCoherenceProvider:
             name="ollama",
             model=model,
             endpoint=sanitized_endpoint,
-            provider_options={} if provider_options is None else dict(provider_options),
         )
         self.timeout_seconds = timeout_seconds
         self._runtime_resource_used = False
@@ -231,10 +229,7 @@ class OllamaSemanticCoherenceProvider:
             "model": self.metadata.model,
             "stream": False,
             "format": SEMANTIC_COHERENCE_RESPONSE_SCHEMA,
-            "options": {
-                **OLLAMA_DETERMINISTIC_OPTIONS,
-                **self.metadata.provider_options,
-            },
+            "options": OLLAMA_DETERMINISTIC_OPTIONS,
             "messages": [
                 {
                     "role": "system",

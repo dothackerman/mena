@@ -640,30 +640,6 @@ def test_ollama_summarization_provider_parses_strict_json_response(
     assert result.general_summary == "The meeting focused on database migration risk."
 
 
-def test_ollama_summarization_provider_merges_runtime_provider_options(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    provider = OllamaSummarizationProvider(
-        model="test-model",
-        provider_options={"num_gpu": 0},
-    )
-    observed_options: dict[str, object] = {}
-
-    def fake_post_json(path: str, payload: object) -> dict[str, object]:
-        assert path == "/api/chat"
-        assert isinstance(payload, dict)
-        observed_options.update(cast(dict[str, object], payload["options"]))
-        return {"message": {"content": json.dumps(_summary_result().to_dict())}}
-
-    monkeypatch.setattr(provider, "_post_json", fake_post_json)
-
-    provider.summarize(_summary_request())
-
-    assert observed_options == {"temperature": 0, "num_gpu": 0}
-    assert provider.metadata.provider_options == {"num_gpu": 0}
-    assert '"provider_options":{"num_gpu":0}' in provider.metadata.config_id
-
-
 def test_ollama_summarization_provider_rejects_invalid_json_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

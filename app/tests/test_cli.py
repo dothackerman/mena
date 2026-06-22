@@ -26,6 +26,7 @@ from mena.cli import (
     SourceAudioInput,
     _CaptureEventMonitor,
     _collect_capture_segments,
+    _latest_failed_stage_input_artifacts,
     _record_terminal_local_llm_release,
     _require_provider,
     _resolve_latest_merged_transcript_record,
@@ -34,6 +35,7 @@ from mena.cli import (
     _resolve_route_selections,
     _run_processing_command,
     _run_processing_stages,
+    _runtime_fallback_stage_for_provider_failure,
     _wait_for_record_stop,
     main,
 )
@@ -44,6 +46,7 @@ from mena.correction_overlay import (
 )
 from mena.correction_workflow import PlaybackRequest
 from mena.diarization import (
+    DIARIZATION_STAGE,
     DiarizationProvider,
     DiarizationProviderUnavailable,
     FakeDiarizationProvider,
@@ -87,7 +90,6 @@ from mena.runtime_profile import (
     SUMMARIZATION_RUNTIME_STAGES,
     runtime_diarization_factory,
     runtime_semantic_factory,
-    runtime_summarization_provider,
     runtime_transcription_factory,
     select_runtime_profile,
     select_runtime_profile_after_stage_failure,
@@ -126,17 +128,18 @@ from mena.summarization import (
     FakeSummarizationProvider,
     SummarizationError,
     SummarizationPolicy,
-    SummarizationProviderUnavailable,
     SummaryArtifact,
     SummaryResult,
     persist_summary_artifact,
 )
 from mena.transcription import (
     TRANSCRIPT_SCHEMA_VERSION,
+    TRANSCRIPTION_STAGE,
     FakeTranscriptionProvider,
     FasterWhisperTranscriptionProvider,
     TranscriptArtifact,
     TranscriptionProvider,
+    TranscriptionProviderUnavailable,
     TranscriptionRequest,
     TranscriptLanguage,
     TranscriptProviderMetadata,
@@ -1935,53 +1938,6 @@ def test_main_summarize_records_terminal_runtime_stewardship_release(
     assert payload["releases"][0]["lease"]["provider"] == "ollama"
 
 
-def test_main_summarize_retries_authorized_cpu_fallback_after_provider_failure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: CaptureFixture[str],
-) -> None:
-    session_dir, store, _, _ = _build_summarize_session_bundle(tmp_path)
-    settings = AppSettings.from_env(env={}, home=tmp_path)
-    _persist_ready_runtime_profile_state(settings, monkeypatch)
-    provider_options_by_call: list[dict[str, object]] = []
-
-    def _fake_run_summarization_stage(
-        *,
-        store: ArtifactStore,
-        provider: object,
-        **_kwargs: object,
-    ) -> object:
-        provider_options_by_call.append(dict(cast(Any, provider).metadata.provider_options))
-        if len(provider_options_by_call) == 1:
-            raise SummarizationProviderUnavailable("Ollama summarization provider is unavailable.")
-        return SimpleNamespace(
-            summary_record=store.store(
-                artifact_type="summary",
-                name="summary/fallback.json",
-                data=b"{}",
-                version=1,
-            )
-        )
-
-    monkeypatch.setattr("mena.cli.run_summarization_stage", _fake_run_summarization_stage)
-
-    exit_code = main(["summarize", str(session_dir)], settings=settings)
-    captured = capsys.readouterr()
-    provenance_records = store.list(artifact_type="runtime_profile_provenance")
-    fallback_payloads = [
-        json.loads(store.retrieve(record.id))
-        for record in provenance_records
-        if json.loads(store.retrieve(record.id))["fallback"]["used"]
-    ]
-
-    assert exit_code == 0
-    assert provider_options_by_call == [{}, {"num_gpu": 0}]
-    assert len(provenance_records) == 2
-    assert fallback_payloads[0]["fallback"]["failed_stage"] == "summarization"
-    assert fallback_payloads[0]["actual_profile"]["id"] == "linux-alpha-cpu-fallback-v1"
-    assert "Summary written to:" in captured.out
-
-
 def test_main_summarize_uses_session_language_before_config_default(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2312,7 +2268,6 @@ def test_main_summarize_revalidates_only_summarization_runtime_dependencies(
             "model": settings.local_llm.ollama_model,
             "policy": "local-preferred, no setup-time remote fallback",
             "provider": "Ollama",
-            "provider_options": {},
             "stage": "summarization",
         }
     ]
@@ -2932,141 +2887,6 @@ def test_run_processing_command_skips_semantic_stage_when_provider_unavailable(
     assert "Semantic review skipped: local semantic LLM provider is unavailable." in captured.out
 
 
-def test_run_processing_command_retries_semantic_review_on_authorized_cpu_fallback(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: CaptureFixture[str],
-) -> None:
-    session = _build_processing_session(tmp_path)
-    settings = AppSettings.from_env(env={}, home=tmp_path)
-    _persist_ready_runtime_profile_state(settings, monkeypatch)
-    provider_options_by_call: list[dict[str, object]] = []
-
-    def _fake_run_transcription_stage(
-        *,
-        store: FileSystemArtifactStore,
-        source_id: str | None = None,
-        **_kwargs: object,
-    ) -> object:
-        transcript_record = store.store(
-            artifact_type="transcript",
-            name=f"transcript-{source_id}.json",
-            data=b"{}",
-            version=1,
-            metadata={},
-        )
-        return SimpleNamespace(transcript_record=transcript_record)
-
-    def _fake_run_diarization_stage(**_kwargs: object) -> object:
-        return SimpleNamespace(artifacts=(), artifact_records=(), skipped=True)
-
-    def _fake_run_merge_timing_stage(
-        *,
-        store: FileSystemArtifactStore,
-        **_kwargs: object,
-    ) -> object:
-        return SimpleNamespace(merged_transcript_record=_persist_merged_transcript(store=store))
-
-    def _fake_run_confidence_flagging_stage(**_kwargs: object) -> object:
-        return SimpleNamespace(review_queue_record=None, skipped=False)
-
-    def _fake_run_semantic_coherence_stage(
-        *,
-        store: FileSystemArtifactStore,
-        ledger: ProcessingStageLedger,
-        merged_transcript_record: ArtifactRecord,
-        provider: object,
-        attempt: int,
-        now: datetime,
-        **_kwargs: object,
-    ) -> object:
-        provider_options_by_call.append(dict(cast(Any, provider).metadata.provider_options))
-        timestamp = now.isoformat(timespec="seconds").replace("+00:00", "Z")
-        input_artifacts = (ArtifactRef.from_record(merged_transcript_record),)
-        if len(provider_options_by_call) == 1:
-            state = ledger.record(
-                ProcessingStageState(
-                    version=1,
-                    session_id=ledger.session_id,
-                    run_id=ledger.run_id,
-                    stage="semantic_coherence",
-                    status="skipped",
-                    input_artifacts=input_artifacts,
-                    output_artifacts=(),
-                    started_at=timestamp,
-                    completed_at=timestamp,
-                    error=None,
-                    attempt=attempt,
-                    skip_reason="provider_unavailable",
-                )
-            )
-            return SimpleNamespace(
-                state=state,
-                review_queue_record=None,
-                skipped=True,
-                skip_reason="provider_unavailable",
-            )
-        review_record = store.store(
-            artifact_type="review_queue",
-            name="review-queue/semantic-fallback.json",
-            data=b"{}",
-            version=1,
-        )
-        state = ledger.mark_completed(
-            stage="semantic_coherence",
-            input_artifacts=input_artifacts,
-            output_artifacts=(ArtifactRef.from_record(review_record),),
-            attempt=attempt,
-            now=now,
-        )
-        return SimpleNamespace(
-            state=state,
-            review_queue_record=review_record,
-            skipped=False,
-            skip_reason=None,
-        )
-
-    monkeypatch.setattr("mena.cli.run_transcription_stage", _fake_run_transcription_stage)
-    monkeypatch.setattr("mena.cli.run_diarization_stage", _fake_run_diarization_stage)
-    monkeypatch.setattr("mena.cli.run_merge_timing_stage", _fake_run_merge_timing_stage)
-    monkeypatch.setattr(
-        "mena.cli.run_confidence_flagging_stage", _fake_run_confidence_flagging_stage
-    )
-    monkeypatch.setattr("mena.cli.run_semantic_coherence_stage", _fake_run_semantic_coherence_stage)
-
-    exit_code = _run_processing_command(
-        session_path=session.record_path,
-        run_id="semantic-fallback",
-        attempt=1,
-        now=datetime(2026, 5, 8, 6, 0, 0, tzinfo=UTC),
-        transcription_provider_factory=FakeTranscriptionProvider,
-        diarization_provider_factory=FakeDiarizationProvider,
-        semantic_coherence_provider_factory=OllamaSemanticCoherenceProvider,
-        settings=settings,
-    )
-    captured = capsys.readouterr()
-
-    store = FileSystemArtifactStore(session_id=session.record.id, session_dir=session.bundle_path)
-    ledger = ProcessingStageLedger(
-        store=store, session_id=session.record.id, run_id="semantic-fallback"
-    )
-    semantic_states = ledger.states(stage="semantic_coherence")
-    provenance_records = store.list(artifact_type="runtime_profile_provenance")
-    fallback_payloads = [
-        json.loads(store.retrieve(record.id))
-        for record in provenance_records
-        if json.loads(store.retrieve(record.id))["fallback"]["used"]
-    ]
-
-    assert exit_code == 0
-    assert provider_options_by_call == [{}, {"num_gpu": 0}]
-    assert [state.status for state in semantic_states] == ["skipped", "completed"]
-    assert len(provenance_records) == 2
-    assert fallback_payloads[0]["fallback"]["failed_stage"] == "semantic-review"
-    assert fallback_payloads[0]["actual_profile"]["id"] == "linux-alpha-cpu-fallback-v1"
-    assert "with explicit runtime fallback" in captured.out
-
-
 def test_main_process_requires_accepted_runtime_profile_state(
     tmp_path: Path,
     capsys: CaptureFixture[str],
@@ -3215,9 +3035,6 @@ def test_runtime_provider_factories_use_selected_profile_state(tmp_path: Path) -
     setup_state = _setup_state(settings=settings, pyannote_token_present=True)
     evaluation = evaluate_setup(get_alpha_local_profile(), setup_state)
     runtime_state = build_runtime_profile_state(evaluation)
-    fallback_runtime_state = build_runtime_profile_state(
-        evaluate_setup(default_profile_catalog(settings.local_llm.ollama_model)[1], setup_state)
-    )
 
     transcription_provider = runtime_transcription_factory(
         FasterWhisperTranscriptionProvider,
@@ -3232,15 +3049,6 @@ def test_runtime_provider_factories_use_selected_profile_state(tmp_path: Path) -
         settings=settings,
         runtime_state=runtime_state,
     )()
-    fallback_semantic_provider = runtime_semantic_factory(
-        OllamaSemanticCoherenceProvider,
-        settings=settings,
-        runtime_state=fallback_runtime_state,
-    )()
-    fallback_summary_provider = runtime_summarization_provider(
-        settings=settings,
-        runtime_state=fallback_runtime_state,
-    )
 
     assert transcription_provider.profile.id == evaluation.selected_asr_profile.id
     assert transcription_provider.profile.device == "cuda"
@@ -3248,8 +3056,6 @@ def test_runtime_provider_factories_use_selected_profile_state(tmp_path: Path) -
     assert diarization_provider.device == "cuda"
     assert semantic_provider.metadata.model == settings.local_llm.ollama_model
     assert semantic_provider.metadata.endpoint == settings.local_llm.ollama_endpoint
-    assert fallback_semantic_provider.metadata.provider_options == {"num_gpu": 0}
-    assert fallback_summary_provider.metadata.provider_options == {"num_gpu": 0}
 
 
 def test_runtime_profile_selection_uses_accepted_state(
@@ -3632,7 +3438,6 @@ def test_runtime_profile_provenance_records_accepted_actual_and_fallback(
     assert payload["accepted_profile"]["id"] == accepted.accepted_profile_id
     assert payload["actual_profile"]["id"] == accepted.accepted_profile_id
     assert payload["actual_profile"]["stages"][0]["device"] == "cuda"
-    assert payload["actual_profile"]["stages"][2]["provider_options"] == {}
     assert payload["fallback"]["used"] is False
     assert payload["fallback"]["status"] == "not_needed"
     assert payload["fallback"]["authorization"]["local_status"] == "authorized"
@@ -3789,7 +3594,11 @@ def test_main_process_retries_authorized_fallback_after_primary_diarization_oom(
         run_id="process-diarization-fallback",
         transcription_provider_factory=FasterWhisperTranscriptionProvider,
         diarization_provider_factory=PyannoteCommunityDiarizationProvider,
-        semantic_coherence_provider_factory=lambda: FakeSemanticCoherenceProvider(results={}),
+        # Use the real Ollama semantic provider type so the fallback path exercises
+        # runtime_semantic_factory(): the failure-scoped fallback state omits the
+        # semantic-review stage, so a rebuild here would raise. The provider must be
+        # reused from the accepted profile instead.
+        semantic_coherence_provider_factory=OllamaSemanticCoherenceProvider,
     )
     captured = capsys.readouterr()
 
@@ -3818,6 +3627,29 @@ def test_main_process_retries_authorized_fallback_after_primary_diarization_oom(
         "Processing completed for run 'process-diarization-fallback' (attempt 1)"
         " with explicit runtime fallback."
     ) in captured.out
+
+
+def test_runtime_fallback_stage_for_provider_failure_maps_exceptions() -> None:
+    assert (
+        _runtime_fallback_stage_for_provider_failure(
+            TranscriptionProviderUnavailable("faster-whisper CUDA resource failure")
+        )
+        == TRANSCRIPTION_STAGE
+    )
+    assert (
+        _runtime_fallback_stage_for_provider_failure(
+            DiarizationProviderUnavailable("pyannote CUDA resource failure")
+        )
+        == DIARIZATION_STAGE
+    )
+
+
+def test_latest_failed_stage_input_artifacts_returns_empty_without_failed_state(
+    tmp_path: Path,
+) -> None:
+    store = FileSystemArtifactStore(session_id="session-x", session_dir=tmp_path)
+    ledger = ProcessingStageLedger(store=store, session_id="session-x", run_id="run-x")
+    assert _latest_failed_stage_input_artifacts(ledger=ledger, stage="transcription") == ()
 
 
 def test_main_process_records_terminal_runtime_stewardship_release(
