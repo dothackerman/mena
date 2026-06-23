@@ -354,6 +354,42 @@ def test_faster_whisper_provider_classifies_cuda_oom_as_unavailable(
         )
 
 
+def test_faster_whisper_provider_classifies_cublas_alloc_failure_without_cuda_token(
+    tmp_path: Path,
+) -> None:
+    source_ref = ArtifactRef(
+        id=f"{SESSION_ID}:artifacts/source_audio/local.wav",
+        artifact_type="source_audio",
+        version=1,
+        sha256="0" * 64,
+    )
+
+    class CublasModel:
+        def transcribe(self, _audio_path: str, **_kwargs: object) -> object:
+            # CTranslate2/cuBLAS messages frequently omit the word "cuda".
+            raise RuntimeError("cuBLAS failed with status CUBLAS_STATUS_ALLOC_FAILED")
+
+    provider = FasterWhisperTranscriptionProvider(
+        profile=FasterWhisperModelProfile(
+            id="cuda_test",
+            checkpoint="large-v3-turbo",
+            device="cuda",
+            compute_type="float16",
+            reason="test CUDA profile",
+        ),
+        model_factory=lambda *_args, **_kwargs: CublasModel(),
+    )
+
+    with pytest.raises(TranscriptionProviderUnavailable, match="CUBLAS_STATUS_ALLOC_FAILED"):
+        provider.transcribe(
+            TranscriptionRequest(
+                session_id=SESSION_ID,
+                source_artifact=source_ref,
+                audio_path=tmp_path / "local.wav",
+            )
+        )
+
+
 def test_faster_whisper_provider_classifies_cuda_oom_while_loading_model(
     tmp_path: Path,
 ) -> None:

@@ -771,6 +771,56 @@ def test_pyannote_provider_classifies_cuda_oom_as_unavailable(tmp_path: Path) ->
         )
 
 
+def test_pyannote_provider_classifies_cublas_alloc_failure_without_cuda_token(
+    tmp_path: Path,
+) -> None:
+    source_ref = ArtifactRef(
+        id=f"{SESSION_ID}:artifacts/source_audio/system.wav",
+        artifact_type="source_audio",
+        version=1,
+        sha256="0" * 64,
+    )
+
+    class FakeTorchDevice:
+        def __init__(self, device: str) -> None:
+            self.type = device
+
+    class FakeTorch:
+        device = FakeTorchDevice
+
+    class CublasPipeline:
+        def to(self, _device: object) -> object:
+            return self
+
+        def __call__(self, _audio_path: str) -> object:
+            raise RuntimeError("cuBLAS failed with status CUBLAS_STATUS_ALLOC_FAILED")
+
+    def module_loader(name: str) -> object:
+        if name == "torch":
+            return FakeTorch()
+        raise AssertionError(f"unexpected module import: {name}")
+
+    provider = PyannoteCommunityDiarizationProvider(
+        device="cuda",
+        pipeline_factory=lambda *_args, **_kwargs: CublasPipeline(),
+        module_loader=module_loader,
+    )
+
+    with pytest.raises(DiarizationProviderUnavailable, match="CUBLAS_STATUS_ALLOC_FAILED"):
+        provider.diarize(
+            DiarizationRequest(
+                session_id=SESSION_ID,
+                source_artifact=source_ref,
+                source_id="system_audio",
+                context=DiarizationContext(
+                    capture_profile="online_dual_stream",
+                    source_id="system_audio",
+                ),
+                audio_path=tmp_path / "system.wav",
+            )
+        )
+
+
 def test_pyannote_provider_reports_incompatible_optional_dependency(tmp_path: Path) -> None:
     source_ref = ArtifactRef(
         id=f"{SESSION_ID}:artifacts/source_audio/system.wav",

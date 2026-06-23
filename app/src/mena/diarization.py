@@ -645,9 +645,12 @@ class PyannoteCommunityDiarizationProvider:
 
 def _is_cuda_resource_error(exc: Exception) -> bool:
     message = f"{exc.__class__.__name__}: {exc}".lower()
-    return "cuda" in message and (
-        "out of memory" in message or "alloc" in message or "cublas_status_alloc_failed" in message
-    )
+    # cuBLAS allocation failures are GPU-only and often omit the word "cuda",
+    # so the token is sufficient on its own. Generic allocation/OOM tokens stay
+    # gated by "cuda" to avoid misclassifying CPU exhaustion as a GPU failure.
+    if "cublas_status_alloc_failed" in message:
+        return True
+    return "cuda" in message and ("out of memory" in message or "alloc" in message)
 
 
 @dataclass(frozen=True)
