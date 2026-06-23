@@ -17,6 +17,40 @@ _ARTIFACT_TYPE_PATTERN = re.compile(r"^[a-z][a-z0-9_:-]*$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _STAGE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 
+# GPU faults that are NOT resource exhaustion: falling back to CPU cannot help,
+# so these must never be classified as a recoverable GPU-resource failure.
+_GPU_NON_RESOURCE_MARKERS = (
+    "no kernel image",
+    "invalid device function",
+    "device-side assert",
+    "illegal memory access",
+    "misaligned address",
+)
+# cuBLAS/cuDNN status tokens are GPU-only and commonly surface GPU exhaustion
+# (including downstream NOT_INITIALIZED cascades) without the word "cuda".
+_GPU_RESOURCE_TOKENS = (
+    "cublas_status_alloc_failed",
+    "cublas_status_not_initialized",
+    "cudnn_status_not_initialized",
+)
+
+
+def is_gpu_resource_error(exc: Exception) -> bool:
+    """Return True when an exception looks like a recoverable GPU-resource failure.
+
+    Shared by the transcription and diarization providers so the heuristic cannot
+    drift between stages. A CPU fallback only helps for resource exhaustion, so
+    non-resource GPU faults (deny-list) are excluded, and generic alloc/OOM tokens
+    stay gated by "cuda" to avoid misclassifying CPU exhaustion as a GPU failure.
+    """
+
+    message = f"{exc.__class__.__name__}: {exc}".lower()
+    if any(marker in message for marker in _GPU_NON_RESOURCE_MARKERS):
+        return False
+    if any(token in message for token in _GPU_RESOURCE_TOKENS):
+        return True
+    return "cuda" in message and ("out of memory" in message or "alloc" in message)
+
 
 class ProcessingStateError(RuntimeError):
     """Raised when processing checkpoint state violates the v1 contract."""

@@ -60,6 +60,10 @@ Summarization is different: if local summarization cannot run and no approved su
 
 All fallback, skip, degradation, and resource-release outcomes must be provenance-backed. The user-facing message should explain what Mena tried, what blocked completion on the primary path, what fallback or degradation was used, and what choices remain.
 
+A runtime stage-failure fallback is recorded in a dedicated `runtime-profile-provenance-stage-fallback.json` artifact alongside the primary `runtime-profile-provenance.json`, under the same `runtime-profile-provenance.v1` contract. It adds `fallback.failed_stage`, `fallback.failed_input_artifacts`, `fallback.failure_class`, and `fallback.authorization_source` (one of `explicit_one_run`, `setup_authorized`, `interactive`). Because a GPU-resource failure in one ASR-coupled stage moves both transcription and diarization to the CPU fallback together, the stage-fallback artifact's `actual_profile.stages` describes the fallback profile applied to those GPU-coupled stages; the per-artifact provenance each stage records remains the authoritative source for the device a given artifact was actually produced on (a stage reused from the primary run keeps its original device there).
+
+When a runtime stage fails and a CPU fallback exists but is not authorized — no setup authorization, no `--allow-runtime-fallback`, and no interactive confirmation (including a non-interactive stdin) — processing exits with code `3` and an actionable message naming `--allow-runtime-fallback`, distinct from the generic failure exit code `1`, so an automated caller can re-invoke with authorization.
+
 ## Consequences
 
 Positive:

@@ -108,6 +108,7 @@ from mena.review_flagging import (
 from mena.runtime_profile import (
     PROCESSING_REQUIRED_RUNTIME_STAGES,
     SUMMARIZATION_RUNTIME_STAGES,
+    RuntimeFallbackUnavailable,
     RuntimeProfileSelection,
     production_runtime_required,
     runtime_diarization_factory,
@@ -772,7 +773,7 @@ def main(
                 setup_command_identity=setup_command_identity,
                 setup_hardware=setup_hardware,
                 allow_runtime_fallback=args.allow_runtime_fallback,
-                runtime_fallback_input_fn=input if input_fn is None else input_fn,
+                runtime_fallback_input_fn=_resolve_runtime_fallback_input(input_fn),
             )
         except (
             ArtifactStoreError,
@@ -863,8 +864,14 @@ def main(
                 setup_command_identity=setup_command_identity,
                 setup_hardware=setup_hardware,
                 allow_runtime_fallback=args.allow_runtime_fallback,
-                runtime_fallback_input_fn=input if input_fn is None else input_fn,
+                runtime_fallback_input_fn=_resolve_runtime_fallback_input(input_fn),
             )
+        except RuntimeFallbackUnavailable as exc:
+            # Recoverable: a GPU stage failed and a CPU fallback exists but is not
+            # authorized. Distinct exit code 3 lets an automated caller re-invoke
+            # with --allow-runtime-fallback instead of treating it as a hard error.
+            print(f"Cannot run processing workflow: {exc}")
+            return 3
         except (
             ArtifactStoreError,
             ProcessingStateError,
@@ -1668,6 +1675,23 @@ def _print_runtime_fallback_authorization_notice(state: RuntimeProfileState) -> 
             print(f"Fallback blocker: {reason}")
 
 
+def _resolve_runtime_fallback_input(
+    input_fn: Callable[[str], str] | None,
+) -> Callable[[str], str] | None:
+    """Choose the interactive runtime-fallback prompt, guarded by a TTY check.
+
+    An explicit ``input_fn`` (tests, embedding) is honored as-is. Otherwise the
+    real ``input`` builtin is used only when stdin is a TTY; on a non-TTY stdin we
+    return ``None`` so an unauthorized runtime fallback raises the actionable
+    ``RuntimeFallbackUnavailable`` ("pass --allow-runtime-fallback") instead of
+    ``input()`` raising an opaque ``EOFError``.
+    """
+
+    if input_fn is not None:
+        return input_fn
+    return input if sys.stdin.isatty() else None
+
+
 def _confirm_one_run_runtime_fallback(
     *,
     accepted_failure: str,
@@ -1979,20 +2003,32 @@ def _run_processing_command(
         "semantic_coherence",
     )
 
+    def _run_stages(
+        *,
+        transcription_provider: TranscriptionProvider,
+        diarization_provider: DiarizationProvider,
+        semantic_coherence_provider: SemanticCoherenceProvider,
+    ) -> ProcessingPipelineResult:
+        return _run_processing_stages(
+            session_id=session_id,
+            profile=profile,
+            source_inputs=source_inputs,
+            store=store,
+            ledger=ledger,
+            attempt=attempt,
+            now=pipeline_timestamp,
+            transcription_provider=transcription_provider,
+            diarization_provider=diarization_provider,
+            semantic_coherence_provider=semantic_coherence_provider,
+            session_language=session_language or None,
+        )
+
     try:
         try:
-            pipeline_result = _run_processing_stages(
-                session_id=session_id,
-                profile=profile,
-                source_inputs=source_inputs,
-                store=store,
-                ledger=ledger,
-                attempt=attempt,
-                now=pipeline_timestamp,
+            pipeline_result = _run_stages(
                 transcription_provider=transcription_provider,
                 diarization_provider=diarization_provider,
                 semantic_coherence_provider=semantic_coherence_provider,
-                session_language=session_language or None,
             )
         except (TranscriptionProviderUnavailable, DiarizationProviderUnavailable) as exc:
             if (
@@ -2017,6 +2053,13 @@ def _run_processing_command(
                 ),
                 allow_runtime_fallback=allow_runtime_fallback,
                 authorize_runtime_fallback=runtime_fallback_authorizer,
+                # A CUDA failure in either GPU stage means the shared GPU is
+                # unreliable, so re-probe and carry both GPU-coupled stages into
+                # the fallback state. This keeps the rebuilt diarization provider
+                # (and, on a transcription failure, the diarization stage that
+                # has not run yet) configured from the fallback profile rather
+                # than falling through to a hardcoded "cpu" device default.
+                revalidation_stages=PROCESSING_REQUIRED_RUNTIME_STAGES,
             )
             store_runtime_profile_provenance(
                 store=store,
@@ -2046,18 +2089,10 @@ def _run_processing_command(
             # semantic provider is unaffected, so reuse the provider already built
             # from the accepted profile rather than rebuilding from the
             # failure-scoped fallback state (which omits the semantic-review stage).
-            pipeline_result = _run_processing_stages(
-                session_id=session_id,
-                profile=profile,
-                source_inputs=source_inputs,
-                store=store,
-                ledger=ledger,
-                attempt=attempt,
-                now=pipeline_timestamp,
+            pipeline_result = _run_stages(
                 transcription_provider=transcription_provider,
                 diarization_provider=diarization_provider,
                 semantic_coherence_provider=semantic_coherence_provider,
-                session_language=session_language or None,
             )
     finally:
         if runtime_selection is not None:

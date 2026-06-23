@@ -21,6 +21,7 @@ from mena.processing import (
     ProcessingErrorInfo,
     ProcessingStageLedger,
     ProcessingStageState,
+    is_gpu_resource_error,
 )
 
 DIARIZATION_ARTIFACT_TYPE = "diarization"
@@ -526,7 +527,7 @@ class PyannoteCommunityDiarizationProvider:
         try:
             output = pipeline(str(request.audio_path))
         except Exception as exc:
-            if _is_cuda_resource_error(exc):
+            if is_gpu_resource_error(exc):
                 raise DiarizationProviderUnavailable(
                     f"pyannote CUDA resource failure: {exc}"
                 ) from exc
@@ -641,16 +642,6 @@ class PyannoteCommunityDiarizationProvider:
             raise DiarizationProviderUnavailable(
                 f"torch could not construct device '{self.device}': {exc}"
             ) from exc
-
-
-def _is_cuda_resource_error(exc: Exception) -> bool:
-    message = f"{exc.__class__.__name__}: {exc}".lower()
-    # cuBLAS allocation failures are GPU-only and often omit the word "cuda",
-    # so the token is sufficient on its own. Generic allocation/OOM tokens stay
-    # gated by "cuda" to avoid misclassifying CPU exhaustion as a GPU failure.
-    if "cublas_status_alloc_failed" in message:
-        return True
-    return "cuda" in message and ("out of memory" in message or "alloc" in message)
 
 
 @dataclass(frozen=True)

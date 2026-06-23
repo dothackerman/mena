@@ -33,6 +33,7 @@ from mena.cli import (
     _resolve_record_language,
     _resolve_record_profile,
     _resolve_route_selections,
+    _resolve_runtime_fallback_input,
     _run_processing_command,
     _run_processing_stages,
     _runtime_fallback_stage_for_provider_failure,
@@ -88,6 +89,7 @@ from mena.review_flagging import (
 from mena.runtime_profile import (
     PROCESSING_REQUIRED_RUNTIME_STAGES,
     SUMMARIZATION_RUNTIME_STAGES,
+    RuntimeFallbackUnavailable,
     runtime_diarization_factory,
     runtime_semantic_factory,
     runtime_transcription_factory,
@@ -3336,6 +3338,141 @@ def test_runtime_profile_stage_failure_selection_rejects_unready_fallback(
         )
 
 
+def _stage_failure_accepted_state(
+    *,
+    settings: AppSettings,
+    setup_state: LocalInstallationState,
+    authorize_local_fallback: bool,
+) -> RuntimeProfileState:
+    primary_profile, fallback_profile = default_profile_catalog(settings.local_llm.ollama_model)
+    return build_runtime_profile_state(
+        evaluate_setup(primary_profile, setup_state),
+        fallback_evaluation=evaluate_setup(fallback_profile, setup_state),
+        authorize_local_fallback=authorize_local_fallback,
+    )
+
+
+def test_runtime_profile_stage_failure_selection_uses_setup_authorized_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    setup_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = _stage_failure_accepted_state(
+        settings=settings, setup_state=setup_state, authorize_local_fallback=True
+    )
+    monkeypatch.setattr(
+        "mena.runtime_profile.detect_local_installation_state",
+        lambda *_args, **_kwargs: setup_state,
+    )
+
+    selection = select_runtime_profile_after_stage_failure(
+        settings=settings,
+        runner=None,
+        command_identity=None,
+        hardware=None,
+        accepted=accepted,
+        failed_stage="diarization",
+        failure_reason="CUDA out of memory during pyannote diarization",
+        failure_class="DiarizationProviderUnavailable",
+        failed_input_artifacts=(),
+        allow_runtime_fallback=False,
+    )
+
+    assert selection.fallback_authorization_source == "setup_authorized"
+    assert selection.actual.accepted_profile_id == "linux-alpha-cpu-fallback-v1"
+
+
+def test_runtime_profile_stage_failure_selection_accepts_interactive_authorization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    setup_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = _stage_failure_accepted_state(
+        settings=settings, setup_state=setup_state, authorize_local_fallback=False
+    )
+    monkeypatch.setattr(
+        "mena.runtime_profile.detect_local_installation_state",
+        lambda *_args, **_kwargs: setup_state,
+    )
+
+    selection = select_runtime_profile_after_stage_failure(
+        settings=settings,
+        runner=None,
+        command_identity=None,
+        hardware=None,
+        accepted=accepted,
+        failed_stage="diarization",
+        failure_reason="CUDA out of memory during pyannote diarization",
+        failure_class="DiarizationProviderUnavailable",
+        failed_input_artifacts=(),
+        allow_runtime_fallback=False,
+        authorize_runtime_fallback=lambda *_args: True,
+    )
+
+    assert selection.fallback_authorization_source == "interactive"
+
+
+def test_runtime_profile_stage_failure_selection_raises_when_fallback_declined(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    setup_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = _stage_failure_accepted_state(
+        settings=settings, setup_state=setup_state, authorize_local_fallback=False
+    )
+    monkeypatch.setattr(
+        "mena.runtime_profile.detect_local_installation_state",
+        lambda *_args, **_kwargs: setup_state,
+    )
+
+    with pytest.raises(RuntimeFallbackUnavailable, match="fallback was declined"):
+        select_runtime_profile_after_stage_failure(
+            settings=settings,
+            runner=None,
+            command_identity=None,
+            hardware=None,
+            accepted=accepted,
+            failed_stage="diarization",
+            failure_reason="CUDA out of memory during pyannote diarization",
+            failure_class="DiarizationProviderUnavailable",
+            failed_input_artifacts=(),
+            allow_runtime_fallback=False,
+            authorize_runtime_fallback=lambda *_args: False,
+        )
+
+
+def test_runtime_profile_stage_failure_selection_raises_when_authorizer_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    setup_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = _stage_failure_accepted_state(
+        settings=settings, setup_state=setup_state, authorize_local_fallback=False
+    )
+    monkeypatch.setattr(
+        "mena.runtime_profile.detect_local_installation_state",
+        lambda *_args, **_kwargs: setup_state,
+    )
+
+    with pytest.raises(RuntimeFallbackUnavailable, match="Re-run setup"):
+        select_runtime_profile_after_stage_failure(
+            settings=settings,
+            runner=None,
+            command_identity=None,
+            hardware=None,
+            accepted=accepted,
+            failed_stage="diarization",
+            failure_reason="CUDA out of memory during pyannote diarization",
+            failure_class="DiarizationProviderUnavailable",
+            failed_input_artifacts=(),
+            allow_runtime_fallback=False,
+        )
+
+
 def test_runtime_profile_selection_revalidates_fallback_against_fallback_profile(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3650,6 +3787,175 @@ def test_latest_failed_stage_input_artifacts_returns_empty_without_failed_state(
     store = FileSystemArtifactStore(session_id="session-x", session_dir=tmp_path)
     ledger = ProcessingStageLedger(store=store, session_id="session-x", run_id="run-x")
     assert _latest_failed_stage_input_artifacts(ledger=ledger, stage="transcription") == ()
+
+
+def test_main_process_retries_authorized_fallback_after_primary_transcription_oom(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    session = _build_processing_session(tmp_path)
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    _persist_ready_runtime_profile_state(settings, monkeypatch)
+    transcription_calls: list[tuple[str, str | None]] = []
+    diarization_calls: list[tuple[str, str | None]] = []
+
+    class RuntimeTaggedTranscriptionProvider:
+        name = "runtime-tagged-transcription"
+
+        def __init__(self, profile_id: str) -> None:
+            self.profile_id = profile_id
+            self._provider = FakeTranscriptionProvider()
+
+        def transcribe(self, request: TranscriptionRequest) -> TranscriptArtifact:
+            transcription_calls.append((self.profile_id, request.source_id))
+            if self.profile_id == "linux-alpha-local-v1":
+                raise TranscriptionProviderUnavailable(
+                    "CUDA out of memory during faster-whisper transcription"
+                )
+            return self._provider.transcribe(request)
+
+    class RuntimeTaggedDiarizationProvider:
+        name = "runtime-tagged-diarization"
+
+        def __init__(self, profile_id: str) -> None:
+            self.profile_id = profile_id
+            self._provider = FakeDiarizationProvider(checkpoint=profile_id)
+
+        @property
+        def config_id(self) -> str:
+            return self._provider.config_id
+
+        def diarize(self, request: object) -> object:
+            source_id = getattr(request, "source_id", None)
+            diarization_calls.append((self.profile_id, source_id))
+            return self._provider.diarize(cast(Any, request))
+
+    def _runtime_transcription_factory(
+        _factory: object,
+        runtime_state: RuntimeProfileState,
+    ) -> object:
+        return lambda: RuntimeTaggedTranscriptionProvider(runtime_state.accepted_profile_id)
+
+    def _runtime_diarization_factory(
+        _factory: object,
+        runtime_state: RuntimeProfileState,
+    ) -> object:
+        return lambda: RuntimeTaggedDiarizationProvider(runtime_state.accepted_profile_id)
+
+    def _fake_run_merge_timing_stage(
+        *,
+        store: FileSystemArtifactStore,
+        remote_regular_diarization_record: ArtifactRecord | None,
+        remote_exclusive_diarization_record: ArtifactRecord | None,
+        **_kwargs: object,
+    ) -> object:
+        merged_record = store.store(
+            artifact_type="merged_transcript",
+            name="merged/fallback-merged.json",
+            data=b"{}",
+            version=1,
+            metadata={
+                "policy_config_id": "cfg",
+                "local_source_id": "local_mic",
+                "remote_source_id": "system_audio",
+                "remote_diarization_status": "used",
+                "remote_diarization_reason": None,
+            },
+        )
+        return SimpleNamespace(merged_transcript_record=merged_record)
+
+    def _fake_run_confidence_flagging_stage(**_kwargs: object) -> object:
+        return SimpleNamespace(review_queue_record=None, skipped=False)
+
+    def _fake_run_semantic_coherence_stage(**_kwargs: object) -> object:
+        return SimpleNamespace(review_queue_record=None, skipped=False, skip_reason=None)
+
+    monkeypatch.setattr("mena.cli.runtime_transcription_factory", _runtime_transcription_factory)
+    monkeypatch.setattr("mena.cli.runtime_diarization_factory", _runtime_diarization_factory)
+    monkeypatch.setattr("mena.cli.run_merge_timing_stage", _fake_run_merge_timing_stage)
+    monkeypatch.setattr(
+        "mena.cli.run_confidence_flagging_stage", _fake_run_confidence_flagging_stage
+    )
+    monkeypatch.setattr("mena.cli.run_semantic_coherence_stage", _fake_run_semantic_coherence_stage)
+
+    exit_code = main(
+        ["process", str(session.record_path)],
+        settings=settings,
+        run_id="process-transcription-fallback",
+        transcription_provider_factory=FasterWhisperTranscriptionProvider,
+        diarization_provider_factory=PyannoteCommunityDiarizationProvider,
+        semantic_coherence_provider_factory=OllamaSemanticCoherenceProvider,
+    )
+    captured = capsys.readouterr()
+
+    store = FileSystemArtifactStore(session_id=session.record.id, session_dir=session.bundle_path)
+    fallback_provenance = [
+        json.loads(store.retrieve(record.id))
+        for record in store.list(artifact_type="runtime_profile_provenance")
+        if json.loads(store.retrieve(record.id))["fallback"]["used"]
+    ]
+
+    assert exit_code == 0
+    # Primary transcription OOMs on the first source, then the whole pipeline
+    # reruns on the CPU fallback for both transcription and diarization.
+    assert transcription_calls == [
+        ("linux-alpha-local-v1", "local_mic"),
+        ("linux-alpha-cpu-fallback-v1", "local_mic"),
+        ("linux-alpha-cpu-fallback-v1", "system_audio"),
+    ]
+    # Diarization never ran on the primary profile (transcription failed first) and
+    # is configured from the fallback profile -- not a hardcoded "cpu" default.
+    assert diarization_calls == [("linux-alpha-cpu-fallback-v1", "system_audio")]
+    assert fallback_provenance[0]["fallback"]["failed_stage"] == "transcription"
+    assert fallback_provenance[0]["actual_profile"]["id"] == "linux-alpha-cpu-fallback-v1"
+    assert (
+        "Processing completed for run 'process-transcription-fallback' (attempt 1)"
+        " with explicit runtime fallback."
+    ) in captured.out
+
+
+def test_resolve_runtime_fallback_input_guards_non_tty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def explicit(_prompt: str) -> str:
+        return "y"
+
+    # An explicit input function is always honored verbatim.
+    assert _resolve_runtime_fallback_input(explicit) is explicit
+    # On a real TTY, the builtin input prompt is used.
+    monkeypatch.setattr("mena.cli.sys.stdin", SimpleNamespace(isatty=lambda: True))
+    assert _resolve_runtime_fallback_input(None) is input
+    # On a non-TTY stdin, no prompt is wired so the fallback raises an actionable
+    # error instead of input() raising EOFError.
+    monkeypatch.setattr("mena.cli.sys.stdin", SimpleNamespace(isatty=lambda: False))
+    assert _resolve_runtime_fallback_input(None) is None
+
+
+def test_main_process_maps_unauthorized_runtime_fallback_to_exit_3(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    session = _build_processing_session(tmp_path)
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    _persist_ready_runtime_profile_state(settings, monkeypatch)
+
+    def _raise_unavailable(**_kwargs: object) -> int:
+        raise RuntimeFallbackUnavailable(
+            "Runtime stage 'diarization' failed: CUDA out of memory. Re-run setup to "
+            "authorize local fallback or pass --allow-runtime-fallback for an explicit "
+            "one-run fallback when supported."
+        )
+
+    monkeypatch.setattr("mena.cli._run_processing_command", _raise_unavailable)
+
+    exit_code = main(["process", str(session.record_path)], settings=settings)
+    captured = capsys.readouterr()
+
+    assert exit_code == 3
+    assert "Cannot run processing workflow" in captured.out
+    assert "--allow-runtime-fallback" in captured.out
 
 
 def test_main_process_records_terminal_runtime_stewardship_release(
