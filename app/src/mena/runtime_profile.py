@@ -55,6 +55,20 @@ class RuntimeProfileSelection:
     revalidation: SetupEvaluation
     fallback_reason: str | None = None
     fallback_status: str = "not_needed"
+    fallback_failed_stage: str | None = None
+    fallback_failed_input_artifacts: tuple[str, ...] = ()
+    fallback_failure_class: str | None = None
+    fallback_authorization_source: str | None = None
+
+
+class RuntimeFallbackUnavailable(ValueError):
+    """Raised when a runtime stage failed and no authorized fallback can run.
+
+    A ``ValueError`` subclass so existing ``except ValueError`` handlers keep
+    catching it, while command handlers can catch it specifically to signal a
+    recoverable "authorize the fallback and retry" outcome with a distinct exit
+    code.
+    """
 
 
 def select_runtime_profile(
@@ -107,17 +121,156 @@ def select_runtime_profile(
             revalidation=accepted_evaluation,
         )
 
+    fallback_runtime_state, fallback_evaluation, authorization_source = (
+        _resolve_authorized_fallback(
+            settings=settings,
+            runner=command_runner,
+            command_identity=command_identity,
+            hardware=hardware,
+            accepted=accepted,
+            scope=scope,
+            catalog=catalog,
+            allow_runtime_fallback=allow_runtime_fallback,
+            authorize_runtime_fallback=authorize_runtime_fallback,
+            authorize_argument=accepted_failure,
+            error_type=ValueError,
+            no_profile_message=(
+                "Accepted runtime profile is unavailable and no accepted fallback profile "
+                f"is configured: {accepted_failure}"
+            ),
+            not_viable_prefix=(
+                "Accepted runtime profile is unavailable and fallback is not currently "
+                f"viable: {accepted_failure}"
+            ),
+            unauthorized_message=(
+                "Accepted runtime profile is unavailable: "
+                f"{accepted_failure} Re-run setup to authorize local fallback or pass "
+                "--allow-runtime-fallback for an explicit one-run fallback when supported."
+            ),
+            declined_message=("Accepted runtime profile is unavailable and fallback was declined."),
+        )
+    )
+    return RuntimeProfileSelection(
+        accepted=accepted,
+        actual=fallback_runtime_state,
+        fallback_used=True,
+        current_command_identity=fallback_evaluation.state.command_identity,
+        revalidation=fallback_evaluation,
+        fallback_reason=accepted_failure,
+        fallback_status="used",
+        fallback_authorization_source=authorization_source,
+    )
+
+
+def select_runtime_profile_after_stage_failure(
+    *,
+    settings: AppSettings,
+    runner: CommandRunner | None,
+    command_identity: CommandIdentity | None,
+    hardware: HardwareFacts | None,
+    accepted: RuntimeProfileState,
+    failed_stage: str,
+    failure_reason: str,
+    failure_class: str,
+    failed_input_artifacts: tuple[str, ...],
+    allow_runtime_fallback: bool,
+    authorize_runtime_fallback: Callable[[str, SetupEvaluation], bool] | None = None,
+    revalidation_stages: frozenset[str] | None = None,
+) -> RuntimeProfileSelection:
+    """Select the accepted fallback profile after a provider-time stage failure.
+
+    ``revalidation_stages`` controls which stages are re-probed and carried into
+    the resulting runtime state. A CUDA resource failure in one GPU stage means
+    the shared GPU is unreliable, so callers pass every GPU-coupled stage (not
+    just ``failed_stage``) to keep all rebuilt providers configured from the
+    fallback profile rather than from a default. Defaults to the failed stage.
+    """
+
+    scope = _runtime_revalidation_scope(revalidation_stages or frozenset({failed_stage}))
+    catalog = {
+        (profile.id, profile.version): profile
+        for profile in default_profile_catalog(_stage_model(accepted, "summarization"))
+    }
+    fallback_runtime_state, fallback_evaluation, authorization_source = (
+        _resolve_authorized_fallback(
+            settings=settings,
+            runner=runner,
+            command_identity=command_identity,
+            hardware=hardware,
+            accepted=accepted,
+            scope=scope,
+            catalog=catalog,
+            allow_runtime_fallback=allow_runtime_fallback,
+            authorize_runtime_fallback=authorize_runtime_fallback,
+            authorize_argument=failure_reason,
+            error_type=RuntimeFallbackUnavailable,
+            no_profile_message=(
+                f"Runtime stage '{failed_stage}' failed and no accepted fallback profile "
+                f"is configured: {failure_reason}"
+            ),
+            not_viable_prefix=(
+                f"Runtime stage '{failed_stage}' failed and fallback is not currently viable: "
+                f"{failure_reason}"
+            ),
+            unauthorized_message=(
+                f"Runtime stage '{failed_stage}' failed: {failure_reason} Re-run setup to "
+                "authorize local fallback or pass --allow-runtime-fallback for an explicit "
+                "one-run fallback when supported."
+            ),
+            declined_message=(f"Runtime stage '{failed_stage}' failed and fallback was declined."),
+        )
+    )
+    return RuntimeProfileSelection(
+        accepted=accepted,
+        actual=fallback_runtime_state,
+        fallback_used=True,
+        current_command_identity=fallback_evaluation.state.command_identity,
+        revalidation=fallback_evaluation,
+        fallback_reason=failure_reason,
+        fallback_status="used_after_stage_failure",
+        fallback_failed_stage=failed_stage,
+        fallback_failed_input_artifacts=failed_input_artifacts,
+        fallback_failure_class=failure_class,
+        fallback_authorization_source=authorization_source,
+    )
+
+
+def _resolve_authorized_fallback(
+    *,
+    settings: AppSettings,
+    runner: CommandRunner | None,
+    command_identity: CommandIdentity | None,
+    hardware: HardwareFacts | None,
+    accepted: RuntimeProfileState,
+    scope: RuntimeRevalidationScope | None,
+    catalog: dict[tuple[str, str], SetupProfile],
+    allow_runtime_fallback: bool,
+    authorize_runtime_fallback: Callable[[str, SetupEvaluation], bool] | None,
+    authorize_argument: str,
+    error_type: type[ValueError],
+    no_profile_message: str,
+    not_viable_prefix: str,
+    unauthorized_message: str,
+    declined_message: str,
+) -> tuple[RuntimeProfileState, SetupEvaluation, str]:
+    """Resolve, viability-check, and authorize a scoped CPU fallback profile.
+
+    Shared by ``select_runtime_profile`` and ``select_runtime_profile_after_stage_failure``
+    so the resolution and authorization ladder cannot drift between them. Raises
+    ``error_type`` with the caller's message when no fallback is configured, the
+    fallback is not currently viable, or authorization is missing/declined.
+    Returns ``(fallback_runtime_state, fallback_evaluation, authorization_source)``.
+    """
+
     fallback_profile = _fallback_profile(
         catalog=catalog,
         accepted=accepted,
         allow_runtime_fallback=allow_runtime_fallback,
     )
     if fallback_profile is None:
-        raise ValueError(
-            "Accepted runtime profile is unavailable and no accepted fallback profile "
-            f"is configured: {accepted_failure}"
-        )
+        raise error_type(no_profile_message)
 
+    command_runner = runner or SubprocessCommandRunner()
     fallback_detection_profile = _profile_for_scope(fallback_profile, scope)
     fallback_state = detect_local_installation_state(
         settings,
@@ -132,33 +285,21 @@ def select_runtime_profile(
     )
     if not fallback_evaluation.ready:
         reasons = "; ".join(fallback_evaluation.blocking_reasons)
-        raise ValueError(
-            "Accepted runtime profile is unavailable and fallback is not currently viable: "
-            f"{accepted_failure} Fallback blockers: {reasons}"
-        )
-    fallback_authorized = allow_runtime_fallback or _automatic_local_fallback_authorized(
-        accepted,
-        scope,
-    )
-    if not fallback_authorized:
-        if authorize_runtime_fallback is None:
-            raise ValueError(
-                "Accepted runtime profile is unavailable: "
-                f"{accepted_failure} Re-run setup to authorize local fallback or pass "
-                "--allow-runtime-fallback for an explicit one-run fallback when supported."
-            )
-        if not authorize_runtime_fallback(accepted_failure, fallback_evaluation):
-            raise ValueError("Accepted runtime profile is unavailable and fallback was declined.")
+        raise error_type(f"{not_viable_prefix} Fallback blockers: {reasons}")
+
+    if allow_runtime_fallback:
+        authorization_source = "explicit_one_run"
+    elif _automatic_local_fallback_authorized(accepted, scope):
+        authorization_source = "setup_authorized"
+    elif authorize_runtime_fallback is None:
+        raise error_type(unauthorized_message)
+    elif authorize_runtime_fallback(authorize_argument, fallback_evaluation):
+        authorization_source = "interactive"
+    else:
+        raise error_type(declined_message)
+
     fallback_runtime_state = build_runtime_profile_state(fallback_evaluation)
-    return RuntimeProfileSelection(
-        accepted=accepted,
-        actual=fallback_runtime_state,
-        fallback_used=True,
-        current_command_identity=fallback_evaluation.state.command_identity,
-        revalidation=fallback_evaluation,
-        fallback_reason=accepted_failure,
-        fallback_status="used",
-    )
+    return fallback_runtime_state, fallback_evaluation, authorization_source
 
 
 def production_runtime_required(
@@ -238,7 +379,9 @@ def store_runtime_profile_provenance(
     run_id: str,
     attempt: int = 1,
     selection: RuntimeProfileSelection,
+    name_suffix: str = "",
 ) -> ArtifactRecord:
+    suffix = "" if not name_suffix else f"-{name_suffix}"
     payload = {
         "contract": RUNTIME_PROFILE_PROVENANCE_CONTRACT,
         "run_id": run_id,
@@ -272,6 +415,16 @@ def store_runtime_profile_provenance(
             "used": selection.fallback_used,
             "status": selection.fallback_status,
             "reason": selection.fallback_reason,
+            "failed_stage": getattr(selection, "fallback_failed_stage", None),
+            "failed_input_artifacts": list(
+                getattr(selection, "fallback_failed_input_artifacts", ())
+            ),
+            "failure_class": getattr(selection, "fallback_failure_class", None),
+            "authorization_source": getattr(
+                selection,
+                "fallback_authorization_source",
+                None,
+            ),
             "authorization": selection.accepted.fallback_authorization.to_dict(),
         },
         "revalidation": {
@@ -281,7 +434,7 @@ def store_runtime_profile_provenance(
     }
     return store.store(
         artifact_type="runtime_profile_provenance",
-        name=f"{run_id}/attempt-{attempt}/runtime-profile-provenance.json",
+        name=f"{run_id}/attempt-{attempt}/runtime-profile-provenance{suffix}.json",
         data=(json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8"),
         version=1,
         metadata={

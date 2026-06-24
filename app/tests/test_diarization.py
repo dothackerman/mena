@@ -723,6 +723,207 @@ def test_pyannote_provider_reports_missing_optional_dependency(tmp_path: Path) -
         )
 
 
+def test_pyannote_provider_classifies_cuda_oom_as_unavailable(tmp_path: Path) -> None:
+    source_ref = ArtifactRef(
+        id=f"{SESSION_ID}:artifacts/source_audio/system.wav",
+        artifact_type="source_audio",
+        version=1,
+        sha256="0" * 64,
+    )
+
+    class FakeTorchDevice:
+        def __init__(self, device: str) -> None:
+            self.type = device
+
+    class FakeTorch:
+        device = FakeTorchDevice
+
+    class OomPipeline:
+        def to(self, _device: object) -> object:
+            return self
+
+        def __call__(self, _audio_path: str) -> object:
+            raise RuntimeError("CUDA out of memory while allocating pyannote tensors")
+
+    def module_loader(name: str) -> object:
+        if name == "torch":
+            return FakeTorch()
+        raise AssertionError(f"unexpected module import: {name}")
+
+    provider = PyannoteCommunityDiarizationProvider(
+        device="cuda",
+        pipeline_factory=lambda *_args, **_kwargs: OomPipeline(),
+        module_loader=module_loader,
+    )
+
+    with pytest.raises(DiarizationProviderUnavailable, match="CUDA out of memory"):
+        provider.diarize(
+            DiarizationRequest(
+                session_id=SESSION_ID,
+                source_artifact=source_ref,
+                source_id="system_audio",
+                context=DiarizationContext(
+                    capture_profile="online_dual_stream",
+                    source_id="system_audio",
+                ),
+                audio_path=tmp_path / "system.wav",
+            )
+        )
+
+
+def test_pyannote_provider_classifies_cublas_alloc_failure_without_cuda_token(
+    tmp_path: Path,
+) -> None:
+    source_ref = ArtifactRef(
+        id=f"{SESSION_ID}:artifacts/source_audio/system.wav",
+        artifact_type="source_audio",
+        version=1,
+        sha256="0" * 64,
+    )
+
+    class FakeTorchDevice:
+        def __init__(self, device: str) -> None:
+            self.type = device
+
+    class FakeTorch:
+        device = FakeTorchDevice
+
+    class CublasPipeline:
+        def to(self, _device: object) -> object:
+            return self
+
+        def __call__(self, _audio_path: str) -> object:
+            raise RuntimeError("cuBLAS failed with status CUBLAS_STATUS_ALLOC_FAILED")
+
+    def module_loader(name: str) -> object:
+        if name == "torch":
+            return FakeTorch()
+        raise AssertionError(f"unexpected module import: {name}")
+
+    provider = PyannoteCommunityDiarizationProvider(
+        device="cuda",
+        pipeline_factory=lambda *_args, **_kwargs: CublasPipeline(),
+        module_loader=module_loader,
+    )
+
+    with pytest.raises(DiarizationProviderUnavailable, match="CUBLAS_STATUS_ALLOC_FAILED"):
+        provider.diarize(
+            DiarizationRequest(
+                session_id=SESSION_ID,
+                source_artifact=source_ref,
+                source_id="system_audio",
+                context=DiarizationContext(
+                    capture_profile="online_dual_stream",
+                    source_id="system_audio",
+                ),
+                audio_path=tmp_path / "system.wav",
+            )
+        )
+
+
+def test_pyannote_provider_classifies_cudnn_not_initialized_as_unavailable(
+    tmp_path: Path,
+) -> None:
+    source_ref = ArtifactRef(
+        id=f"{SESSION_ID}:artifacts/source_audio/system.wav",
+        artifact_type="source_audio",
+        version=1,
+        sha256="0" * 64,
+    )
+
+    class FakeTorchDevice:
+        def __init__(self, device: str) -> None:
+            self.type = device
+
+    class FakeTorch:
+        device = FakeTorchDevice
+
+    class CudnnInitPipeline:
+        def to(self, _device: object) -> object:
+            return self
+
+        def __call__(self, _audio_path: str) -> object:
+            raise RuntimeError("cuDNN error: CUDNN_STATUS_NOT_INITIALIZED")
+
+    def module_loader(name: str) -> object:
+        if name == "torch":
+            return FakeTorch()
+        raise AssertionError(f"unexpected module import: {name}")
+
+    provider = PyannoteCommunityDiarizationProvider(
+        device="cuda",
+        pipeline_factory=lambda *_args, **_kwargs: CudnnInitPipeline(),
+        module_loader=module_loader,
+    )
+
+    with pytest.raises(DiarizationProviderUnavailable, match="CUDNN_STATUS_NOT_INITIALIZED"):
+        provider.diarize(
+            DiarizationRequest(
+                session_id=SESSION_ID,
+                source_artifact=source_ref,
+                source_id="system_audio",
+                context=DiarizationContext(
+                    capture_profile="online_dual_stream",
+                    source_id="system_audio",
+                ),
+                audio_path=tmp_path / "system.wav",
+            )
+        )
+
+
+def test_pyannote_provider_does_not_classify_cpu_oom_as_gpu_failure(
+    tmp_path: Path,
+) -> None:
+    source_ref = ArtifactRef(
+        id=f"{SESSION_ID}:artifacts/source_audio/system.wav",
+        artifact_type="source_audio",
+        version=1,
+        sha256="0" * 64,
+    )
+
+    class FakeTorchDevice:
+        def __init__(self, device: str) -> None:
+            self.type = device
+
+    class FakeTorch:
+        device = FakeTorchDevice
+
+    class CpuOomPipeline:
+        def to(self, _device: object) -> object:
+            return self
+
+        def __call__(self, _audio_path: str) -> object:
+            raise RuntimeError(
+                "DefaultCPUAllocator: not enough memory: you tried to allocate 1073741824 bytes"
+            )
+
+    def module_loader(name: str) -> object:
+        if name == "torch":
+            return FakeTorch()
+        raise AssertionError(f"unexpected module import: {name}")
+
+    provider = PyannoteCommunityDiarizationProvider(
+        device="cpu",
+        pipeline_factory=lambda *_args, **_kwargs: CpuOomPipeline(),
+        module_loader=module_loader,
+    )
+
+    with pytest.raises(RuntimeError, match="DefaultCPUAllocator") as excinfo:
+        provider.diarize(
+            DiarizationRequest(
+                session_id=SESSION_ID,
+                source_artifact=source_ref,
+                source_id="system_audio",
+                context=DiarizationContext(
+                    capture_profile="online_dual_stream",
+                    source_id="system_audio",
+                ),
+                audio_path=tmp_path / "system.wav",
+            )
+        )
+    assert not isinstance(excinfo.value, DiarizationProviderUnavailable)
+
+
 def test_pyannote_provider_reports_incompatible_optional_dependency(tmp_path: Path) -> None:
     source_ref = ArtifactRef(
         id=f"{SESSION_ID}:artifacts/source_audio/system.wav",

@@ -21,6 +21,7 @@ from mena.processing import (
     ProcessingErrorInfo,
     ProcessingStageLedger,
     ProcessingStageState,
+    is_gpu_resource_error,
 )
 
 DIARIZATION_ARTIFACT_TYPE = "diarization"
@@ -523,7 +524,14 @@ class PyannoteCommunityDiarizationProvider:
         if request.audio_path is None:
             raise DiarizationInputError("pyannote diarization requires an audio_path.")
         pipeline = self._load_pipeline()
-        output = pipeline(str(request.audio_path))
+        try:
+            output = pipeline(str(request.audio_path))
+        except Exception as exc:
+            if is_gpu_resource_error(exc):
+                raise DiarizationProviderUnavailable(
+                    f"pyannote CUDA resource failure: {exc}"
+                ) from exc
+            raise
         regular_output, exclusive_output = _pyannote_diarization_outputs(output)
         regular_segments = tuple(_segments_from_pyannote(regular_output, id_prefix="turn"))
         if not regular_segments:

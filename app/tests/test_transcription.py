@@ -319,6 +319,231 @@ def test_faster_whisper_provider_reports_missing_optional_dependency(tmp_path: P
         )
 
 
+def test_faster_whisper_provider_classifies_cuda_oom_as_unavailable(
+    tmp_path: Path,
+) -> None:
+    source_ref = ArtifactRef(
+        id=f"{SESSION_ID}:artifacts/source_audio/local.wav",
+        artifact_type="source_audio",
+        version=1,
+        sha256="0" * 64,
+    )
+
+    class OomModel:
+        def transcribe(self, _audio_path: str, **_kwargs: object) -> object:
+            raise RuntimeError("CUDA out of memory. Tried to allocate 512.00 MiB.")
+
+    provider = FasterWhisperTranscriptionProvider(
+        profile=FasterWhisperModelProfile(
+            id="cuda_test",
+            checkpoint="large-v3-turbo",
+            device="cuda",
+            compute_type="float16",
+            reason="test CUDA profile",
+        ),
+        model_factory=lambda *_args, **_kwargs: OomModel(),
+    )
+
+    with pytest.raises(TranscriptionProviderUnavailable, match="CUDA out of memory"):
+        provider.transcribe(
+            TranscriptionRequest(
+                session_id=SESSION_ID,
+                source_artifact=source_ref,
+                audio_path=tmp_path / "local.wav",
+            )
+        )
+
+
+def test_faster_whisper_provider_classifies_cublas_alloc_failure_without_cuda_token(
+    tmp_path: Path,
+) -> None:
+    source_ref = ArtifactRef(
+        id=f"{SESSION_ID}:artifacts/source_audio/local.wav",
+        artifact_type="source_audio",
+        version=1,
+        sha256="0" * 64,
+    )
+
+    class CublasModel:
+        def transcribe(self, _audio_path: str, **_kwargs: object) -> object:
+            # CTranslate2/cuBLAS messages frequently omit the word "cuda".
+            raise RuntimeError("cuBLAS failed with status CUBLAS_STATUS_ALLOC_FAILED")
+
+    provider = FasterWhisperTranscriptionProvider(
+        profile=FasterWhisperModelProfile(
+            id="cuda_test",
+            checkpoint="large-v3-turbo",
+            device="cuda",
+            compute_type="float16",
+            reason="test CUDA profile",
+        ),
+        model_factory=lambda *_args, **_kwargs: CublasModel(),
+    )
+
+    with pytest.raises(TranscriptionProviderUnavailable, match="CUBLAS_STATUS_ALLOC_FAILED"):
+        provider.transcribe(
+            TranscriptionRequest(
+                session_id=SESSION_ID,
+                source_artifact=source_ref,
+                audio_path=tmp_path / "local.wav",
+            )
+        )
+
+
+def test_faster_whisper_provider_classifies_cublas_not_initialized_as_unavailable(
+    tmp_path: Path,
+) -> None:
+    source_ref = ArtifactRef(
+        id=f"{SESSION_ID}:artifacts/source_audio/local.wav",
+        artifact_type="source_audio",
+        version=1,
+        sha256="0" * 64,
+    )
+
+    class CublasInitModel:
+        def transcribe(self, _audio_path: str, **_kwargs: object) -> object:
+            # Downstream cascade of GPU exhaustion; no 'cuda'/'alloc'/'oom' token.
+            raise RuntimeError("cuBLAS failed with status CUBLAS_STATUS_NOT_INITIALIZED")
+
+    provider = FasterWhisperTranscriptionProvider(
+        profile=FasterWhisperModelProfile(
+            id="cuda_test",
+            checkpoint="large-v3-turbo",
+            device="cuda",
+            compute_type="float16",
+            reason="test CUDA profile",
+        ),
+        model_factory=lambda *_args, **_kwargs: CublasInitModel(),
+    )
+
+    with pytest.raises(TranscriptionProviderUnavailable, match="CUBLAS_STATUS_NOT_INITIALIZED"):
+        provider.transcribe(
+            TranscriptionRequest(
+                session_id=SESSION_ID,
+                source_artifact=source_ref,
+                audio_path=tmp_path / "local.wav",
+            )
+        )
+
+
+def test_faster_whisper_provider_does_not_classify_cpu_oom_as_gpu_failure(
+    tmp_path: Path,
+) -> None:
+    source_ref = ArtifactRef(
+        id=f"{SESSION_ID}:artifacts/source_audio/local.wav",
+        artifact_type="source_audio",
+        version=1,
+        sha256="0" * 64,
+    )
+
+    class CpuOomModel:
+        def transcribe(self, _audio_path: str, **_kwargs: object) -> object:
+            # Resource-shaped (alloc/memory) but NOT a GPU failure: no 'cuda'/cuBLAS token.
+            raise RuntimeError(
+                "DefaultCPUAllocator: not enough memory: you tried to allocate 2147483648 bytes"
+            )
+
+    provider = FasterWhisperTranscriptionProvider(
+        profile=FasterWhisperModelProfile(
+            id="cpu_test",
+            checkpoint="tiny",
+            device="cpu",
+            compute_type="int8",
+            reason="test CPU profile",
+        ),
+        model_factory=lambda *_args, **_kwargs: CpuOomModel(),
+    )
+
+    # Must propagate unwrapped (NOT TranscriptionProviderUnavailable) so the CPU
+    # fallback is not pointlessly attempted for a CPU-side exhaustion.
+    with pytest.raises(RuntimeError, match="DefaultCPUAllocator") as excinfo:
+        provider.transcribe(
+            TranscriptionRequest(
+                session_id=SESSION_ID,
+                source_artifact=source_ref,
+                audio_path=tmp_path / "local.wav",
+            )
+        )
+    assert not isinstance(excinfo.value, TranscriptionProviderUnavailable)
+
+
+def test_faster_whisper_provider_classifies_cuda_oom_while_loading_model(
+    tmp_path: Path,
+) -> None:
+    source_ref = ArtifactRef(
+        id=f"{SESSION_ID}:artifacts/source_audio/local.wav",
+        artifact_type="source_audio",
+        version=1,
+        sha256="0" * 64,
+    )
+
+    def model_factory(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("CUDA out of memory while loading faster-whisper model")
+
+    provider = FasterWhisperTranscriptionProvider(
+        profile=FasterWhisperModelProfile(
+            id="cuda_test",
+            checkpoint="large-v3-turbo",
+            device="cuda",
+            compute_type="float16",
+            reason="test CUDA profile",
+        ),
+        model_factory=model_factory,
+    )
+
+    with pytest.raises(TranscriptionProviderUnavailable, match="CUDA out of memory"):
+        provider.transcribe(
+            TranscriptionRequest(
+                session_id=SESSION_ID,
+                source_artifact=source_ref,
+                audio_path=tmp_path / "local.wav",
+            )
+        )
+
+
+def test_faster_whisper_provider_classifies_cuda_oom_while_iterating_segments(
+    tmp_path: Path,
+) -> None:
+    source_ref = ArtifactRef(
+        id=f"{SESSION_ID}:artifacts/source_audio/local.wav",
+        artifact_type="source_audio",
+        version=1,
+        sha256="0" * 64,
+    )
+
+    class OomSegments:
+        def __iter__(self) -> object:
+            raise RuntimeError("CUDA out of memory while decoding faster-whisper segments")
+
+    class FakeInfo:
+        language = "en"
+        language_probability = 0.99
+
+    class OomModel:
+        def transcribe(self, _audio_path: str, **_kwargs: object) -> tuple[OomSegments, FakeInfo]:
+            return OomSegments(), FakeInfo()
+
+    provider = FasterWhisperTranscriptionProvider(
+        profile=FasterWhisperModelProfile(
+            id="cuda_test",
+            checkpoint="large-v3-turbo",
+            device="cuda",
+            compute_type="float16",
+            reason="test CUDA profile",
+        ),
+        model_factory=lambda *_args, **_kwargs: OomModel(),
+    )
+
+    with pytest.raises(TranscriptionProviderUnavailable, match="CUDA out of memory"):
+        provider.transcribe(
+            TranscriptionRequest(
+                session_id=SESSION_ID,
+                source_artifact=source_ref,
+                audio_path=tmp_path / "local.wav",
+            )
+        )
+
+
 def test_faster_whisper_provider_maps_segments_and_persists_decode_parameters(
     tmp_path: Path,
 ) -> None:
@@ -385,6 +610,15 @@ def test_faster_whisper_provider_maps_segments_and_persists_decode_parameters(
             created_at="2026-05-14T18:00:00Z",
         )
     )
+    cached_transcript = provider.transcribe(
+        TranscriptionRequest(
+            session_id=SESSION_ID,
+            source_artifact=source_ref,
+            source_id="local_mic",
+            audio_path=tmp_path / "local.wav",
+            language="en",
+        )
+    )
 
     assert calls[0] == {
         "model_args": ["tiny"],
@@ -401,6 +635,41 @@ def test_faster_whisper_provider_maps_segments_and_persists_decode_parameters(
     assert transcript.provider.decode_parameters["hotwords"] == ["Oriol"]
     assert transcript.language.detected == "en"
     assert transcript.segments[0].words[0].text == "hello"
+    assert cached_transcript.text == "hello"
+    assert [call for call in calls if "model_args" in call] == [calls[0]]
+
+
+def test_faster_whisper_provider_does_not_mask_non_cuda_errors(tmp_path: Path) -> None:
+    source_ref = ArtifactRef(
+        id=f"{SESSION_ID}:artifacts/source_audio/local.wav",
+        artifact_type="source_audio",
+        version=1,
+        sha256="0" * 64,
+    )
+
+    class BrokenModel:
+        def transcribe(self, _audio_path: str, **_kwargs: object) -> object:
+            raise RuntimeError("decoder crashed")
+
+    provider = FasterWhisperTranscriptionProvider(
+        profile=FasterWhisperModelProfile(
+            id="cpu_test",
+            checkpoint="tiny",
+            device="cpu",
+            compute_type="int8",
+            reason="test CPU profile",
+        ),
+        model_factory=lambda *_args, **_kwargs: BrokenModel(),
+    )
+
+    with pytest.raises(RuntimeError, match="decoder crashed"):
+        provider.transcribe(
+            TranscriptionRequest(
+                session_id=SESSION_ID,
+                source_artifact=source_ref,
+                audio_path=tmp_path / "local.wav",
+            )
+        )
 
 
 def _transcript(
