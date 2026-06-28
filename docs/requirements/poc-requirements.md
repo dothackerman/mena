@@ -36,7 +36,7 @@ Traceability references use the format `[DISC §n.n]` for the discovery document
 
 ## 1. Purpose
 
-mena is a personal, privacy-first meeting notes product. It records meetings, transcribes and diarizes the audio, supports interactive human correction, and produces structured meeting notes enhanced by optional manual user notes. mena runs entirely on the user's local machine. No audio, transcript, speaker data, or derived content leaves the user's hardware.
+mena is a personal, privacy-first meeting notes product. It records meetings, transcribes and diarizes the audio, supports interactive human correction, and produces structured meeting notes enhanced by optional manual user notes. mena runs locally by default. Recording, transcription, diarization, audio, speaker data, and speaker-sensitive artifacts remain local-only; LLM-dependent text stages may use an approved direct ZDR Mistral route only under the accepted setup/runtime policy.
 
 The PoC validates that this pipeline works end-to-end for online meetings on Linux, producing meeting notes that the user considers useful and trustworthy.
 
@@ -181,7 +181,7 @@ All three artifacts are transparently accessible. The generated summary is the p
 
 ### 4.3 Postcondition
 
-The user has the meeting notes on their local machine. No data has left the machine at any point during the process.
+The user has the meeting notes on their local machine. Recording, transcription, diarization, audio, speaker data, and speaker-sensitive artifacts have remained local-only. If an approved direct ZDR Mistral route was used for LLM-dependent text stages, the resulting artifacts record that route use for provenance.
 
 ### 4.4 Alternative Flows
 
@@ -261,7 +261,7 @@ The system crashes, the laptop loses power, or the audio device disconnects duri
 
 `[REQ-P02]` **Meeting duration.** mena shall support continuous recording of meetings up to 90 minutes without degradation.
 
-`[REQ-P03]` **Processing time.** No formal latency requirement for the PoC. Post-meeting processing takes as long as it takes. The requirement is that processing completes without manual intervention between automated steps (transcription, diarization, merging, summarization). The correction step is the only interactive pause.
+`[REQ-P03]` **Processing time.** No formal latency requirement for the PoC. Post-meeting processing takes as long as it takes. The requirement is that processing completes without manual intervention between automated steps (transcription, diarization, merging, summarization), except when the accepted setup/runtime policy requires explicit fallback authorization. The correction step remains the expected interactive review pause.
 
 ### 6.4 Supportability
 
