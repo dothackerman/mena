@@ -1394,8 +1394,9 @@ Current remote LLM route decision:
 
 Per `ADR-033`, ZDR is treated as an **operator-attested contractual predicate**, not as a runtime-verifiable signal. Direct Mistral provider profiles are unavailable unless accepted setup/runtime policy and user/operator account-posture acknowledgement allow them for the stage. The provider owns endpoint selection, request shape, fixed Mena-selected model use, and API error mapping. The user/operator owns the Mistral account, subscription, workspace, ZDR posture, and funds/quota. The full allow-conditions are:
 
-- user/operator-attested commercial Mistral AI Studio account posture
-- user/operator-attested ZDR activation for the specific account/workspace
+- user/operator-attested organisation-controlled commercial Mistral AI Studio account posture for business use
+- user/operator-attested Scale-tier or stronger commercial subscription; Experiment/default-retention account posture is excluded
+- user/operator-attested written ZDR approval for the specific account/workspace
 - user/operator-attested dedicated workspace and workspace-scoped API key for `mena`, with rotation and expiry owned by the operator
 - provider-owned default direct Mistral API path for text summarization only; no user endpoint configuration and no explicit US endpoint
 - plain-text chat-completions only (no audio, files, OCR, Agents, Fine-Tuning, Batch, Connectors, Libraries, Web Search)
