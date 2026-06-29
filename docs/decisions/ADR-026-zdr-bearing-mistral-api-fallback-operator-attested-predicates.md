@@ -1,9 +1,9 @@
 # ADR-026: ZDR-bearing Mistral API fallback: operator-attested predicates
 
 - **Type:** Architecture
-- **Status:** Accepted
+- **Status:** Superseded
 - **Date:** 2026-05-01
-- **Superseded by:** —
+- **Superseded by:** ADR-033
 - **Related:** ADR-009, ADR-010
 
 ## Context
