@@ -36,7 +36,7 @@ Traceability references use the format `[DISC §n.n]` for the discovery document
 
 ## 1. Purpose
 
-mena is a personal, privacy-first meeting notes product. It records meetings, transcribes and diarizes the audio, supports interactive human correction, and produces structured meeting notes enhanced by optional manual user notes. mena runs locally by default. Recording, transcription, diarization, audio, speaker data, and speaker-sensitive artifacts remain local-only; summarization may use an approved direct Mistral provider only under the accepted setup/runtime policy. Semantic coherence flagging remains optional and local for #29 pending follow-up product validation.
+mena is a personal, privacy-first meeting notes product. It records meetings, transcribes and diarizes the audio, supports interactive human correction, and produces structured meeting notes enhanced by optional manual user notes. mena runs entirely on the user's local machine. No audio, transcript, speaker data, or derived content leaves the user's hardware.
 
 The PoC validates that this pipeline works end-to-end for online meetings on Linux, producing meeting notes that the user considers useful and trustworthy.
 
@@ -60,7 +60,7 @@ The PoC validates that this pipeline works end-to-end for online meetings on Lin
 - The video call platform (Zoom, kMeet, Google Meet, or any other). mena captures audio at the OS level; it has no integration with any call platform.
 - Consent for recording. The user is responsible for obtaining participant consent before recording. mena displays a disclaimer but does not manage consent.
 - Manual notes. The user creates and maintains these independently. mena reads them as input to the summarization step if provided.
-- Any non-European external service or cloud infrastructure. The approved direct Mistral summarization provider is within the system boundary only when allowed by CON-01/CON-03 and the accepted setup/runtime policy.
+- Any non-European external service or cloud infrastructure. A European-jurisdiction ZDR API for LLM tasks is within the system boundary as a fallback per CON-01.
 
 ### 2.3 Actors
 
@@ -181,7 +181,7 @@ All three artifacts are transparently accessible. The generated summary is the p
 
 ### 4.3 Postcondition
 
-The user has the meeting notes on their local machine. Recording, transcription, diarization, audio, speaker data, and speaker-sensitive artifacts have remained local-only. If an approved direct Mistral provider was used for summarization, the resulting artifacts record that provider use for provenance.
+The user has the meeting notes on their local machine. No data has left the machine at any point during the process.
 
 ### 4.4 Alternative Flows
 
@@ -257,11 +257,11 @@ The system crashes, the laptop loses power, or the audio device disconnects duri
 
 ### 6.3 Performance
 
-`[REQ-P01]` **Local acceleration and accepted runtime provider.** For local processing, mena shall use GPU acceleration when a compatible GPU is available. CPU may serve as an accepted local fallback when GPU is unavailable or has insufficient resources. For summarization only in #29, the accepted setup/runtime policy may instead choose or fall back to an approved direct Mistral provider profile per CON-01 and CON-03. Processing shall use accepted stage-specific runtime profiles and fallback authorization, not ad hoc provider selection during processing. Semantic coherence flagging remains optional and outside the #29 fallback mechanism.
+`[REQ-P01]` **GPU acceleration.** mena shall use GPU acceleration for processing when a compatible GPU is available. CPU shall serve as a fallback when GPU is unavailable or has insufficient resources. This is a runtime decision, not a user configuration.
 
 `[REQ-P02]` **Meeting duration.** mena shall support continuous recording of meetings up to 90 minutes without degradation.
 
-`[REQ-P03]` **Processing time.** No formal latency requirement for the PoC. Post-meeting processing takes as long as it takes. The requirement is that processing completes without manual intervention between automated steps (transcription, diarization, merging, summarization), except when the accepted setup/runtime policy requires explicit fallback authorization. The correction step remains the expected interactive review pause.
+`[REQ-P03]` **Processing time.** No formal latency requirement for the PoC. Post-meeting processing takes as long as it takes. The requirement is that processing completes without manual intervention between automated steps (transcription, diarization, merging, summarization). The correction step is the only interactive pause.
 
 ### 6.4 Supportability
 
@@ -271,11 +271,11 @@ The system crashes, the laptop loses power, or the audio device disconnects duri
 
 ## 7. Constraints
 
-`[CON-01]` **Data sovereignty.** All processing shall occur locally on the user's machine by default. No audio, transcript, speaker embedding, or derived data shall be processed on infrastructure outside European jurisdiction or under non-European legal authority (e.g., US CLOUD Act, FISA). For summarization, direct ZDR Mistral is an acceptable approved route when the provider, account/workspace posture, and infrastructure satisfy the European-jurisdiction and Zero Data Retention constraints. The route may be accepted as primary, as part of an ordered fallback chain, or as the only viable route when no local summarization profile is viable. A future semantic coherence route requires separate product validation because semantic review remains optional in #29. A US company operating European data centers does not satisfy this constraint unless the contractual and legal structure genuinely isolates the European operation from non-European legal reach. The recording, transcription, and diarization pipeline remains strictly local regardless. *Traces to [DISC §8].*
+`[CON-01]` **Data sovereignty.** All processing shall occur locally on the user's machine by default. No audio, transcript, speaker embedding, or derived data shall be processed on infrastructure outside European jurisdiction or under non-European legal authority (e.g., US CLOUD Act, FISA). If the local GPU is insufficient for LLM-dependent tasks (semantic coherence flagging and summarization), a European-jurisdiction API with Zero Data Retention is an acceptable fallback, provided the API provider and its infrastructure are not subject to non-European government data requests. A US company operating European data centers does not satisfy this constraint unless the contractual and legal structure genuinely isolates the European operation from non-European legal reach. The recording, transcription, and diarization pipeline remains strictly local regardless. *Traces to [DISC §8].*
 
 `[CON-02]` **Target platform.** PoC targets Linux only. *Cross-platform support is [SCOPE-OUT 9] / [POST-POC D].*
 
-`[CON-03]` **No non-European service dependencies at runtime.** Recording, transcription, and diarization shall not require internet connectivity or external API calls. Summarization prefers local processing by default but may use the approved direct Mistral provider per CON-01 when the accepted stage-specific runtime profile and authorization policy allow it. Semantic coherence flagging remains optional and local for #29. Model weights and dependencies are downloaded at install time, not at runtime.
+`[CON-03]` **No non-European service dependencies at runtime.** Recording, transcription, and diarization shall not require internet connectivity or external API calls. Semantic flagging and summarization prefer local processing but may use a European-jurisdiction ZDR API as fallback per CON-01. Model weights and dependencies are downloaded at install time, not at runtime.
 
 `[CON-04]` **Meeting-tool agnostic.** mena captures audio at the operating system level. It shall not depend on any specific video call platform.
 
@@ -306,7 +306,7 @@ This section records how scope decisions evolved between the discovery meeting (
 | PoC starting path | Path 1: Meetily + OpenClaw [DISC §9.2] | Custom pipeline; no dependency on Meetily | Follows from product standing on its own |
 | Diarization approach | Full diarization on mixed audio | Split-channel: diarization only on remote stream | Dual-stream capture means local speaker is known; only remote stream needs diarization [AUDIO] |
 | Correction UI | Three candidates: terminal, web UI, OpenClaw chat [DISC §5.4] | CLI (terminal) | Fastest path to working product; same surface as recording trigger |
-| Data sovereignty | Strictly local, no data leaves hardware [DISC §8] | Local default; approved direct Mistral provider acceptable for summarization | Some users may lack a viable local summarization profile or may accept remote summarization; semantic coherence flagging remains optional and local in #29 pending product validation |
+| Data sovereignty | Strictly local, no data leaves hardware [DISC §8] | Local preferred; European-jurisdiction ZDR API acceptable for LLM tasks | Local GPU may be insufficient for semantic flagging and summarization; sovereignty is about jurisdiction, not physical location |
 
 ---
 
@@ -322,15 +322,13 @@ This section records how scope decisions evolved between the discovery meeting (
 | RS-D6 | CLI for all interaction (trigger, correction, output) | Fastest path; correction and trigger in same surface |
 | RS-D7 | 90-minute meeting duration cap for PoC | Realistic meeting length; longer meetings have natural break points |
 | RS-D8 | No formal processing time requirement | Takes as long as it takes; benchmarking will establish actuals |
-| RS-D9 | Local GPU preferred; CPU may be an accepted local fallback; summarization may use an accepted direct Mistral provider | Preserve local acceleration for capable machines while allowing stage-specific accepted runtime providers and ordered fallback chains |
-| RS-D9a | #29 must not add placeholder local LLM CPU fallback | Local LLM CPU fallback belongs to #89 and may appear in setup choices only after CPU placement is implemented and testable |
-| RS-D9b | #29 supports ordered fallback-list shape with at most one summarization fallback | Direct ZDR Mistral is the only #29 fallback route; multi-step local -> CPU -> remote chains are future-valid after #89 |
+| RS-D9 | GPU preferred, CPU fallback, runtime decision | Use available acceleration; no user configuration needed |
 | RS-D10 | Recording robustness is the single non-negotiable quality attribute | No downstream failure may affect the recording |
 | RS-D11 | Linux only for PoC | Cross-platform is a commercial product decision |
 | RS-D12 | Diarization only on remote channel; local speaker is known | Dual-stream architecture gives structural speaker separation |
 | RS-D13 | Streaming transcription is post-PoC, serves as recording health signal | Important for trust but not required to validate the core pipeline |
 | RS-D14 | Semantic coherence flagging is language-agnostic, not Swiss German-specific | The mechanism applies to any language; error frequency varies by dialect distance from the transcription model's training data |
-| RS-D15 | Sovereignty constraint refined: local default; approved direct Mistral provider acceptable for summarization | Mistral may be accepted as primary, fallback, or only viable provider for summarization; semantic coherence flagging remains optional and local in #29; local fallback authorization never authorizes a later remote provider transition; US providers with EU data centers do not satisfy the constraint unless jurisdictionally isolated |
+| RS-D15 | Sovereignty constraint refined: local preferred, European-jurisdiction ZDR API acceptable for LLM tasks | Local GPU may be insufficient for capable models; European API under European jurisdiction is an acceptable fallback; US providers with EU data centers do not satisfy the constraint unless jurisdictionally isolated |
 
 ---
 
@@ -356,7 +354,7 @@ companion_documents:
 poc_scope:
   meeting_type: online
   audio_capture: dual_stream_local_mic_and_system_audio
-  processing: local_default_post_meeting
+  processing: fully_local_post_meeting
   diarization: opt_in_remote_channel_only
   speaker_limit: 4_total_including_local_user
   max_duration_minutes: 90
@@ -364,7 +362,7 @@ poc_scope:
   interface: cli
   target_platform: linux
   primary_output: structured_markdown
-sovereignty: local_default_direct_zdr_mistral_route_for_llm_dependent_text_stages_when_accepted
+sovereignty: local_preferred_european_jurisdiction_zdr_api_fallback_for_llm_tasks
 functional_requirements_count: 18
 non_functional_requirements_count: 7
 constraints_count: 4

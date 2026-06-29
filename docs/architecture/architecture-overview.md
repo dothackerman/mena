@@ -97,7 +97,7 @@ Status: Confirmed for PoC, Provisional for Product
 Status: Confirmed
 
 - Audio recording, transcription, and diarization are local-only stages. `mena` must not send audio to a remote service.
-- Summarization is local by default, stage-focused, and may use a direct Mistral provider for the PoC when the accepted setup/runtime policy allows it. Semantic review remains optional and outside the #29 remote-provider/fallback mechanism pending follow-up product validation.
+- Summarization is local by default, stage-focused, and may use a direct Mistral provider for the PoC when the accepted setup/runtime policy allows it. Semantic review remains optional and outside the direct Mistral provider mechanism pending follow-up product validation.
 - The direct Mistral provider is architecture-allowed only when the user's account posture and accepted policy satisfy `CON-01`; default-retention API access is not architecture-compliant.
 - Zero Data Retention is treated as an **operator-attested contractual predicate**, not as a runtime-verifiable signal. The application cannot programmatically verify ZDR scope, plan tier, training opt-out, subprocessor posture, or account funds, and must not pretend that it can. Per `ADR-033`, the direct Mistral provider is disabled unless accepted setup/runtime policy, provider-owned API constraints, and user/operator account-posture acknowledgement allow it for the stage. See [R-06 synthesis](../research/synthesis-research-phase-1.md#35-r-06--fallback-provider-policy) for the full allow-conditions and the residual risk list.
 - Remote provider authorization remains stage-specific. A local fallback authorization never authorizes a later direct Mistral provider transition.
@@ -163,7 +163,7 @@ flowchart LR
     Call[Video Call Platform\nZoom / Meet / kMeet / etc.]
     Store[Local Artifact Store]
     Notes[Manual Notes File]
-    Mistral[Optional ZDR Direct Mistral API\nLLM-Dependent Text Stages]
+    Mistral[Optional ZDR Direct Mistral API\nSummarization Only]
     OpenClaw[OpenClaw\nFuture Adapter Only]
 
     subgraph M[mena system boundary]
@@ -179,7 +179,7 @@ flowchart LR
     Audio --> Ports
     Notes --> Core
     Ports <--> Store
-    Ports -. stage policy permits .-> Mistral
+    Ports -. summarization policy permits .-> Mistral
     Core -. future integration .-> OpenClaw
     Watch -. no runtime dependency .- M
 ```
@@ -1374,9 +1374,9 @@ Provider selection must consider:
 
 - local by default
 - no controlled CPU fallback for Ollama in the PoC
-- remains optional for #29
+- remains optional for the current PoC
 - may degrade or skip when the local semantic provider is unavailable
-- no direct Mistral provider or fallback in #29; follow-up product analysis must first validate whether semantic review is valuable enough to become mandatory or otherwise route-bearing
+- no direct Mistral provider or fallback in the current PoC; follow-up product analysis must first validate whether semantic review is valuable enough to become mandatory or otherwise route-bearing
 
 `summarization`:
 
@@ -1392,18 +1392,18 @@ Current remote LLM route decision:
 - OpenRouter or similar brokers are not part of the PoC provider path
 - choosing a model family does not by itself decide sovereignty; the access path, jurisdiction, routing, retention, and contractual guarantees matter
 
-Per `ADR-033`, ZDR is treated as an **operator-attested contractual predicate**, not as a runtime-verifiable signal. Direct Mistral provider profiles are unavailable unless accepted setup/runtime policy and user/operator account-posture acknowledgement allow them for the stage. The provider owns endpoint selection, request shape, fixed #92 model use, and API error mapping. The user/operator owns the Mistral account, subscription, workspace, ZDR posture, and funds/quota. The full allow-conditions are:
+Per `ADR-033`, ZDR is treated as an **operator-attested contractual predicate**, not as a runtime-verifiable signal. Direct Mistral provider profiles are unavailable unless accepted setup/runtime policy and user/operator account-posture acknowledgement allow them for the stage. The provider owns endpoint selection, request shape, fixed Mena-selected model use, and API error mapping. The user/operator owns the Mistral account, subscription, workspace, ZDR posture, and funds/quota. The full allow-conditions are:
 
 - user/operator-attested commercial Mistral AI Studio account posture
 - user/operator-attested ZDR activation for the specific account/workspace
 - user/operator-attested dedicated workspace and workspace-scoped API key for `mena`, with rotation and expiry owned by the operator
-- provider-owned direct Mistral API path for text summarization only; no user endpoint configuration in #29
+- provider-owned default direct Mistral API path for text summarization only; no user endpoint configuration and no explicit US endpoint
 - plain-text chat-completions only (no audio, files, OCR, Agents, Fine-Tuning, Batch, Connectors, Libraries, Web Search)
-- fixed standard non-Labs text model selected by #92; arbitrary configured Mistral model IDs and `labs/*` model IDs are rejected automatically
+- fixed standard non-Labs text model selected by Mena; arbitrary configured Mistral model IDs and `labs/*` model IDs are rejected automatically
 - direct Mistral API only; no brokered access (OpenRouter and equivalents)
 - explicit user/admin authorization according to the accepted setup/runtime policy — never a silent background remote transition
 
-When provider readiness or user/operator acknowledgement is missing, the product behaviour is **"Mistral summarization provider unavailable"**, not best-effort remote calls. Residual risks (metadata retention beyond ZDR, training/handling carve-outs for feedback/Labs/order-form overrides, account/workspace posture controlled outside Mena, endpoint/routing terms controlled by Mistral, funds/quota outside Mena) must be documented in product copy. Full reasoning lives in `ADR-033` and the [R-06 synthesis](../research/synthesis-research-phase-1.md#35-r-06--fallback-provider-policy).
+When provider readiness or user/operator acknowledgement is missing, the product behaviour is **"Mistral summarization provider unavailable"**, not best-effort remote calls. Residual risks (metadata retention beyond ZDR, training/handling carve-outs for feedback/Labs/order-form overrides, account/workspace posture controlled outside Mena, endpoint/routing terms controlled by Mistral, funds/quota outside Mena, and special-category personal data risk in arbitrary meeting transcripts) must be documented in product copy per `PDR-004`. Full reasoning lives in `ADR-033` and the [R-06 synthesis](../research/synthesis-research-phase-1.md#35-r-06--fallback-provider-policy).
 
 #### PoC Provider Adapter Decisions
 
@@ -1446,15 +1446,15 @@ Unsupported setups may be explained, but cannot be selected.
 
 For the Linux CLI PoC, issue #68 implements only the first fixed local profile.
 That profile is a structural seed for the catalog boundary, not a general multi-profile recommendation system.
-Remote fallback setup, profile updates, telemetry-informed recommendations, doctor, and re-setup UX are deferred.
+General remote fallback setup, profile updates, telemetry-informed recommendations, doctor, and re-setup UX are deferred. The current exception is direct Mistral summarization setup, which may be represented as an accepted summarization provider profile when `ADR-033` policy predicates and `PDR-004` user/operator acknowledgements are present. This exception does not enable remote semantic review or any other remote stage.
 
 Issue #72 adds accepted runtime profile state. Successful setup persists the accepted profile under `RuntimePaths.state_home` as product state, not repository state or user-authored configuration. Processing loads that accepted state, revalidates current runtime evidence before constructing providers, and uses the accepted or explicitly selected fallback profile instead of provider defaults.
 
 Processing fallback is explicit per run. If the accepted profile is stale or unavailable, non-interactive processing fails unless the command carries an explicit fallback policy. When fallback is used, run-level provenance records the accepted profile, actual profile, and fallback reason; stage artifacts continue to record provider/model/device metadata through their provider contracts.
 
-Issue #78 extends this into setup-time fallback authorization, and issue #29 extends the model to ordered fallback profile lists for summarization. The accepted primary summarization provider remains in the existing stage policy shape. Setup should persist a separate ordered list of accepted summarization fallback provider profiles, plus which fallback transitions may be used automatically. Runtime commands consume only those accepted choices; they do not invent new fallback profiles during processing. An accepted primary Mistral summarization profile uses the same accepted-primary runtime behavior as any other accepted primary profile: processing may run it without asking again after revalidating current evidence. If a fallback transition is not authorized, interactive commands ask before fallback and non-interactive commands fail unless a one-run fallback authorization is present.
+`ADR-031` extends this into setup-time fallback authorization, and `ADR-033` extends the model to ordered fallback profile lists for summarization. The accepted primary summarization provider remains in the existing stage policy shape. Setup should persist a separate ordered list of accepted summarization fallback provider profiles, plus which fallback transitions may be used automatically. Runtime commands consume only those accepted choices; they do not invent new fallback profiles during processing. An accepted primary Mistral summarization profile uses the same accepted-primary runtime behavior as any other accepted primary profile: processing may run it without asking again after revalidating current evidence. If a fallback transition is not authorized, interactive commands ask before fallback and non-interactive commands fail unless a one-run fallback authorization is present.
 
-For #29, Mistral is a normal summarization provider behind the existing summarization port. It sits at the same provider abstraction level as Ollama:
+Per `ADR-033`, Mistral is a normal summarization provider behind the existing summarization port. It sits at the same provider abstraction level as Ollama:
 
 - the summarization request content is the same provider-independent Mena input;
 - the output contract is the same Mena-owned `summary.v1` / `SummaryResult` schema;
@@ -1462,7 +1462,7 @@ For #29, Mistral is a normal summarization provider behind the existing summariz
 - summary reuse is already scoped by provider configuration;
 - runtime profile provenance already records stage provider/model/device/policy.
 
-Therefore #29 should reuse the existing provider metadata, provider config identity, summary artifact, and runtime provenance shapes. It must not create Mistral-specific payload selection, artifact schemas, or provenance subsystems.
+Therefore the direct Mistral summarization provider should reuse the existing provider metadata, provider config identity, summary artifact, and runtime provenance shapes. It must not create Mistral-specific payload selection, artifact schemas, or provenance subsystems.
 
 The Mistral provider owns Mistral-specific details:
 
@@ -1471,25 +1471,25 @@ The Mistral provider owns Mistral-specific details:
 - API-key validation/readiness checks;
 - Mistral API error classification;
 - retry behavior where Mistral response semantics make retry safe;
-- the fixed model selected by #92.
+- the fixed model selected by Mena.
 
-#29 must not expose user-configurable Mistral endpoints or arbitrary Mistral model IDs. Research spike #92 selects the fixed model; #29 consumes that result. The implementation must read current Mistral API docs during the slice to choose the readiness probe, structured-output path, retry classification, and error mapping.
+The implementation must not expose user-configurable Mistral endpoints or arbitrary Mistral model IDs. The implementation must read current Mistral API docs during the slice to choose the readiness probe, structured-output path, retry classification, and error mapping.
 
 The ordered fallback-list state shape should stay close to the current setup profile model: an ordered list of accepted summarization fallback provider/profile entries with provider, model, device, policy, authorization status, automatic-transition authorization, authorization source where relevant, and blocking/unavailable reasons. Fallback direction comes only from the accepted ordered list for that stage, not from provider identity.
 
-For #29 specifically, the implemented shapes are:
+For direct Mistral summarization specifically, the implemented shapes are:
 
 - Mistral as accepted primary in `stage_policies`, with an empty fallback list;
 - local summarization primary in `stage_policies`, with Mistral as the first accepted fallback provider;
 - local summarization primary in `stage_policies`, with an empty fallback list.
 
-Do not add a placeholder local LLM CPU fallback for summarization; #89 owns controlled local Ollama CPU fallback and should reuse the ordered fallback-provider list by adding an accepted local CPU Ollama provider/profile entry when that capability exists. Multi-step chains such as local GPU -> local CPU -> Mistral are future-valid only after #89 supplies that local CPU profile.
+Do not add a placeholder local LLM CPU fallback for summarization. Controlled local Ollama CPU fallback should reuse the ordered fallback-provider list by adding an accepted local CPU Ollama provider/profile entry when that capability exists. Multi-step chains such as local GPU -> local CPU -> Mistral are future-valid only after that local CPU profile exists.
 
 For the PoC, the Mistral API key follows the same pattern as the pyannote/Hugging Face token: it is supplied through `MENA_MISTRAL_API_KEY` in the operator's environment or another runtime configuration source available to the process. Mena must not automatically consume generic `MISTRAL_API_KEY`, and must not write the key into `setup-state.json`, `config.toml`, logs, provenance artifacts, or error messages.
 
-Mena can enforce only its technical perimeter: direct Mistral provider, Mena-owned request content and summary schema, fixed #92 model, Mena-scoped credential source, and no secret persistence. The user/operator owns the Mistral account, workspace, API key, subscription, ZDR activation, legal terms, funds/quota, and commercial posture. Mena may present a setup acknowledgement for that account posture, but must not claim it verified those account facts.
+Mena can enforce only its technical perimeter: direct Mistral provider, Mena-owned request content and summary schema, fixed Mena-selected model, Mena-scoped credential source, and no secret persistence. The user/operator owns the Mistral account, workspace, API key, subscription, ZDR activation, legal terms, funds/quota, and commercial posture. Mena may present a setup acknowledgement for that account posture, but must not claim it verified those account facts.
 
-Setup disclosure for #29 must be minimal and direct: selecting Mistral sends summarization text to the user's configured Mistral account, may incur Mistral API charges, depends on the user's account/ZDR posture, and will be recorded in provenance when used.
+Setup disclosure is governed by `PDR-004`: selecting Mistral sends summarization text to the user's configured Mistral account, may incur Mistral API charges, depends on the user's account/ZDR posture, may be inappropriate for special-category or similarly sensitive meeting content unless the operator has confirmed the account and legal posture, and will be recorded in provenance when used.
 
 #### Local Runtime Resource Stewardship
 
@@ -1521,7 +1521,7 @@ Direct Mistral provider configuration must be narrow:
 - for the PoC, the API key is provided through `MENA_MISTRAL_API_KEY` or another explicit Mena-scoped runtime configuration source; setup persists only presence and scope evidence
 - the user must not be able to arbitrarily choose disallowed remote providers or models
 - allowed remote provider options must be constrained by policy
-- for the PoC, direct Mistral provider use requires valid credentials, explicit stage-scoped authorization/consent, the fixed #92 model, provider-owned endpoint/request constraints, and user/operator account-posture acknowledgement
+- for the PoC, direct Mistral provider use requires valid credentials, explicit stage-scoped authorization/consent, the fixed Mena-selected model, provider-owned endpoint/request constraints, and user/operator account-posture acknowledgement
 - a later product may support an installation-level setting, but it must remain user-facing and changeable
 
 #### Scaffold Implication
@@ -1555,7 +1555,7 @@ provider adapter
 
 - recording, transcription, and diarization are local-only
 - summarization remains stage-focused and may support direct ZDR Mistral as an accepted primary, fallback, or only viable route in the PoC
-- semantic review remains optional and outside the #29 fallback mechanism
+- semantic review remains optional and outside the direct Mistral fallback mechanism
 - provider selection must be centralized behind a policy-aware resolver
 - workflow code must not directly call concrete providers
 - remote provider/model choice is policy-constrained
@@ -2173,7 +2173,7 @@ The goal is to prevent early implementation convenience from hard-coding the PoC
 | ASR provider | `faster-whisper` with hardware-selected profile | Yes | Must remain behind `Transcription Port`; accepted local CPU fallback is setup-governed |
 | Diarization provider | `pyannote/community-1`, scenario-aware | Yes | Must remain behind `Diarization Port`; accepted local CPU fallback is setup-governed |
 | Summarization provider | Stage-focused provider: local default, direct Mistral where accepted | Yes | Direct Mistral may be primary, fallback, or only viable provider when policy allows |
-| Semantic flagging provider | Local optional semantic review | Yes | Remains outside the #29 fallback mechanism; may degrade/skip when the local provider is unavailable |
+| Semantic flagging provider | Local optional semantic review | Yes | Remains outside the direct Mistral fallback mechanism; may degrade/skip when the local provider is unavailable |
 | Artifact persistence pattern | Local artifact store | Partly | First-class subsystem; exact implementation still open |
 | Metadata/index store | Not fixed yet | Yes | May begin minimal and grow later |
 | Process topology | Orchestrator plus capture worker | Partly | Additional worker processes beyond this pair are not fixed |

@@ -12,7 +12,7 @@ Local LLM may be insufficient for summarization. A remote fallback is needed but
 
 ## Decision
 
-ZDR-bearing direct Mistral API summarisation fallback is gated by **operator-attested contractual predicates** (commercial account posture, ZDR activation, dedicated workspace, text-only direct API use, non-Labs model posture, direct API only) plus explicit user/admin authorization. The application verifies only the narrow technical perimeter; ZDR is not programmatically verifiable. Fallback is **disabled by default**; missing operator acknowledgement yields "fallback unavailable", not best-effort remote calls. ADR-033 supersedes this fallback-specific shape with Mistral as a normal summarization provider that can be primary or fallback under accepted setup/runtime policy.
+ZDR-bearing direct Mistral API summarisation fallback is gated by **operator-attested contractual predicates** (commercial Scale-or-stronger account, written ZDR approval, dedicated workspace, EU-served default endpoint, plain-text chat-completions only, non-Labs allow-listed models, direct API only) **plus per-session user consent**. The application verifies only the narrow technical perimeter; ZDR is not programmatically verifiable. Fallback is **disabled by default**; missing operator evidence yields "fallback unavailable", not best-effort remote calls.
 
 ## Consequences
 

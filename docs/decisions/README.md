@@ -90,3 +90,4 @@ Proposed → Accepted → [Superseded | Deprecated | Rejected]
 | ADR-032 | Architecture | Continuous capture with rotating source segments | Accepted | 2026-06-17 |
 | ADR-033 | Architecture | Mistral summarization provider and ordered fallback | Accepted | 2026-06-28 |
 | PDR-001 | Product | Automatic correction overlay selection | Accepted | 2026-05-20 |
+| PDR-004 | Product | Mistral summarization disclosure and consent | Accepted | 2026-06-29 |

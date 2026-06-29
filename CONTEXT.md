@@ -9,7 +9,7 @@ A stage that consumes meeting-derived text and uses an LLM to produce text-only 
 _Avoid_: LLM task, remote task, AI step
 
 **Route-bearing LLM text stage**:
-An LLM-dependent text stage whose primary route and fallback profile list are governed by accepted runtime setup policy. For issue #29, summarization is the only route-bearing LLM text stage; semantic review remains optional and outside the new fallback mechanism.
+An LLM-dependent text stage whose primary route and fallback profile list are governed by accepted runtime setup policy. For the current PoC, summarization is the only route-bearing LLM text stage; semantic review remains optional and outside the new fallback mechanism.
 _Avoid_: all LLM stages, remote semantic review
 
 **Stage-focused runtime profile**:
@@ -29,5 +29,5 @@ The accepted fallback provider profiles for a stage in priority order. Runtime t
 _Avoid_: fallback depth, fallback boolean
 
 **Direct Mistral summarization provider**:
-The Mistral summarization provider behind Mena's existing summarization port. The provider owns Mistral API endpoint/request details and the fixed #92 model; Mena owns the summarization input/output contract and setup/runtime authorization policy.
+The Mistral summarization provider behind Mena's existing summarization port. The provider owns Mistral API endpoint/request details and the fixed Mena-selected model; Mena owns the summarization input/output contract and setup/runtime authorization policy.
 _Avoid_: Mistral route subsystem, OpenRouter route, user-configured Mistral endpoint
