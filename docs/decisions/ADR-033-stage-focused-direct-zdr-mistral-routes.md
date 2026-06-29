@@ -4,7 +4,7 @@
 - **Status:** Accepted
 - **Date:** 2026-06-28
 - **Superseded by:** -
-- **Related:** ADR-021, ADR-026, ADR-029, ADR-031, PDR-004
+- **Related:** ADR-021, ADR-026, ADR-028, ADR-029, ADR-031, PDR-004
 
 ## Context
 
@@ -53,6 +53,12 @@ Local LLM CPU fallback is not added by this decision. Controlled local Ollama CP
 
 Using the accepted primary provider does not require a runtime prompt. This is existing accepted-primary behavior, not Mistral-specific prompting logic. Runtime prompts apply only when Mena needs to use a fallback transition that was not pre-authorized. Local fallback authorization never authorizes a later remote fallback.
 
+This decision narrows earlier setup/runtime clauses for the summarization stage:
+
+- `ADR-028` remains active for local setup-state and preflight separation, but its "no remote fallback configuration" PoC clause no longer applies to direct Mistral summarization when the `ADR-033` and `PDR-004` predicates are accepted.
+- `ADR-031` remains active for runtime fallback authorization and setup state, but its deferral of remote fallback authorization is superseded only for the direct Mistral summarization route described here.
+- The exception is stage-specific. It does not authorize remote ASR, diarization, semantic review, or any non-summarization provider route.
+
 ## Provider Readiness And Errors
 
 The Mistral provider owns readiness checks. The implementation must explicitly inspect Mistral's current API capabilities and choose the narrowest useful readiness check, such as key presence plus an API-supported authentication/model/readiness probe, or a minimal completion smoke test if no safer check exists.
@@ -85,6 +91,7 @@ Setup disclosure is a product responsibility governed by `PDR-004`. At minimum, 
 ## Consequences
 
 - ADR-026 is superseded as the active implementation shape, but its operator-attested ZDR reasoning still carries forward as product/policy context.
+- ADR-028 and ADR-031 remain accepted, with their remote-fallback deferrals superseded only for direct Mistral summarization under this decision.
 - The Mistral provider reuses the existing summarization port, `summary.v1` artifact, provider metadata, provider config identity, and runtime profile provenance.
 - The implementation must not introduce Mistral-specific payload selection, artifact schemas, or provenance subsystems.
 - The implementation must extend fallback ordering only as far as needed for accepted summarization provider/profile lists.

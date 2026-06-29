@@ -8,7 +8,7 @@
 
 ## Context
 
-`ADR-033` allows direct Mistral as a summarization provider under accepted setup/runtime policy. Unlike local providers, this sends meeting-derived text to the user's configured Mistral account. Mena can enforce a narrow technical perimeter, but it cannot verify the user's Mistral plan, ZDR activation, legal terms, subprocessor posture, account funds, or whether a meeting's content is appropriate for that account.
+`ADR-033` allows direct Mistral as a summarization provider under accepted setup/runtime policy. Unlike local providers, this sends meeting-derived text to the user's configured Mistral account: the transcript text selected for summarization, plus optional manual notes when the user includes them. Mena can enforce a narrow technical perimeter, but it cannot verify the user's Mistral plan, ZDR activation, legal terms, subprocessor posture, account funds, or whether a meeting's content is appropriate for that account.
 
 This is a product disclosure and consent problem, not a separate provider architecture.
 
@@ -18,8 +18,8 @@ Setup and runtime disclosure for direct Mistral summarization must be direct and
 
 Before a user selects or authorizes Mistral summarization, Mena must disclose that:
 
-- summarization text is sent to the user's configured Mistral account;
-- audio, transcription, diarization, speaker embeddings, and speaker-sensitive artifacts remain local-only;
+- transcript text selected for summarization, plus optional manual notes when included, is sent to the user's configured Mistral account;
+- audio, ASR processing, diarization processing, local transcript artifacts, speaker embeddings, and speaker-sensitive artifacts remain local-only;
 - Mistral use may incur provider charges and depends on the user's account, quota, subscription, workspace, ZDR posture, and legal terms;
 - Mena cannot verify ZDR approval, plan tier, training opt-out, subprocessor posture, legal isolation, account funds, or whether the account is appropriate for the meeting content;
 - users should not use remote summarization for meetings likely to contain special-category or similarly sensitive personal data unless they have confirmed that their Mistral account, legal basis, and contractual posture are appropriate for that content;
