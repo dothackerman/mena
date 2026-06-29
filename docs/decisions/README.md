@@ -81,11 +81,12 @@ Proposed → Accepted → [Superseded | Deprecated | Rejected]
 | ADR-023 | Architecture | PoC diarisation: pyannote community-1, scenario-aware invocation | Accepted | 2026-05-01 |
 | ADR-024 | Architecture | Linux PoC capture: PipeWire-first with dedicated null sink | Accepted | 2026-05-01 |
 | ADR-025 | Architecture | PoC internal protocol: stdio + newline-delimited JSON | Accepted | 2026-05-01 |
-| ADR-026 | Architecture | ZDR-bearing Mistral API fallback: operator-attested predicates | Accepted | 2026-05-01 |
+| ADR-026 | Architecture | ZDR-bearing Mistral API fallback: operator-attested predicates | Superseded | 2026-05-01 |
 | ADR-027 | Architecture | UX telemetry absent in PoC v0 | Deferred | 2026-05-01 |
 | ADR-028 | Architecture | Installation profiles, local setup state, and preflight separation | Accepted | 2026-05-23 |
 | ADR-029 | Architecture | Accepted runtime profile state, revalidation, and provenance | Accepted | 2026-06-08 |
 | ADR-030 | Architecture | Local runtime resource stewardship for post-meeting processing | Accepted | 2026-06-15 |
 | ADR-031 | Architecture | Runtime fallback authorization and setup state | Accepted | 2026-06-15 |
 | ADR-032 | Architecture | Continuous capture with rotating source segments | Accepted | 2026-06-17 |
+| ADR-033 | Architecture | Mistral summarization provider and ordered fallback | Accepted | 2026-06-28 |
 | PDR-001 | Product | Automatic correction overlay selection | Accepted | 2026-05-20 |
