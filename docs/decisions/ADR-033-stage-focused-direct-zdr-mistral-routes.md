@@ -23,7 +23,7 @@ The summarization port remains Mena-owned:
 - the input content sent to a provider is the existing summarization request content;
 - the summary output contract is the existing Mena `summary.v1` / `SummaryResult` schema;
 - the persisted summary artifact records provider metadata through the existing provider metadata field;
-- summary reuse remains scoped to provider configuration, as it already is for Ollama.
+- summary reuse remains scoped to provider configuration, including non-secret Mistral account/workspace or policy-evidence identity when remote account posture affects authorization.
 
 The Mistral provider owns Mistral-specific implementation details:
 
@@ -51,7 +51,7 @@ Implemented list shapes are intentionally small:
 
 Local LLM CPU fallback is not added by this decision. Controlled local Ollama CPU fallback should reuse the ordered fallback-provider list by adding an accepted local CPU Ollama provider/profile entry when that capability exists. Multi-step chains such as local GPU -> local CPU -> Mistral are future-valid only after the local CPU provider profile exists.
 
-Using the accepted primary provider does not require a runtime prompt. This is existing accepted-primary behavior, not Mistral-specific prompting logic. Runtime prompts apply only when Mena needs to use a fallback transition that was not pre-authorized. Local fallback authorization never authorizes a later remote fallback.
+Direct Mistral primary requires explicit setup/runtime authorization and `PDR-004` disclosure before it can become the accepted primary provider. After that acceptance, using the accepted primary provider does not require a prompt for every run. This supersedes `ADR-026`'s older per-session fallback-consent shape for direct Mistral summarization primary use. Runtime prompts apply only when Mena needs to use a fallback transition that was not pre-authorized. Local fallback authorization never authorizes a later remote fallback.
 
 This decision narrows earlier setup/runtime clauses for the summarization stage:
 

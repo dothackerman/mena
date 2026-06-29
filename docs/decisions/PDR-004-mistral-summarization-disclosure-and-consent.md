@@ -21,7 +21,8 @@ Before a user selects or authorizes Mistral summarization, Mena must disclose th
 - transcript text selected for summarization, plus optional manual notes when included, is sent to the user's configured Mistral account;
 - audio, ASR processing, diarization processing, local transcript artifacts, speaker embeddings, and speaker-sensitive artifacts remain local-only;
 - Mistral use may incur provider charges and depends on the user's account, quota, subscription, workspace, ZDR posture, and legal terms;
-- Mena cannot verify ZDR approval, plan tier, training opt-out, subprocessor posture, legal isolation, account funds, or whether the account is appropriate for the meeting content;
+- ZDR does not remove all residuals: Mistral may still retain non-content account, support, billing, abuse-prevention, or operational metadata, and Mistral-controlled routing or terms may still affect jurisdictional risk;
+- Mena cannot verify ZDR approval, plan tier, training opt-out, subprocessor posture, legal isolation, endpoint routing, account funds, or whether the account is appropriate for the meeting content;
 - users should not use remote summarization for meetings likely to contain special-category or similarly sensitive personal data unless they have confirmed that their Mistral account, legal basis, and contractual posture are appropriate for that content;
 - provider use is recorded in provenance when Mistral is used.
 
