@@ -4,7 +4,7 @@
 - **Status:** Accepted
 - **Date:** 2026-06-28
 - **Superseded by:** -
-- **Related:** ADR-021, ADR-026, ADR-028, ADR-029, ADR-031, PDR-004
+- **Related:** ADR-010, ADR-021, ADR-026, ADR-028, ADR-029, ADR-031, PDR-004
 
 ## Context
 
@@ -91,7 +91,7 @@ Setup disclosure is a product responsibility governed by `PDR-004`. At minimum, 
 ## Consequences
 
 - ADR-026 is superseded as the active implementation shape, but its operator-attested ZDR reasoning still carries forward as product/policy context.
-- ADR-028 and ADR-031 remain accepted, with their remote-fallback deferrals superseded only for direct Mistral summarization under this decision.
+- ADR-010, ADR-028, and ADR-031 remain accepted, with ADR-010's fallback-only Mistral consequence and the later remote-fallback deferrals superseded only for direct Mistral summarization under this decision.
 - The Mistral provider reuses the existing summarization port, `summary.v1` artifact, provider metadata, provider config identity, and runtime profile provenance.
 - The implementation must not introduce Mistral-specific payload selection, artifact schemas, or provenance subsystems.
 - The implementation must extend fallback ordering only as far as needed for accepted summarization provider/profile lists.
