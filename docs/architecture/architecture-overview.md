@@ -1452,7 +1452,7 @@ Issue #72 adds accepted runtime profile state. Successful setup persists the acc
 
 Processing fallback is explicit per run. If the accepted profile is stale or unavailable, non-interactive processing fails unless the command carries an explicit fallback policy. When fallback is used, run-level provenance records the accepted profile, actual profile, and fallback reason; stage artifacts continue to record provider/model/device metadata through their provider contracts.
 
-Issue #78 extends this into setup-time fallback authorization, and issue #29 extends the model to ordered fallback profile lists for summarization. Setup should persist the accepted primary profile, the ordered accepted summarization fallback profiles, and which fallback transitions may be used automatically. Runtime commands consume only those accepted choices; they do not invent new fallback profiles during processing. An accepted primary Mistral summarization profile uses the same accepted-primary runtime behavior as any other accepted primary profile: processing may run it without asking again after revalidating current evidence. If a fallback transition is not authorized, interactive commands ask before fallback and non-interactive commands fail unless a one-run fallback authorization is present.
+Issue #78 extends this into setup-time fallback authorization, and issue #29 extends the model to ordered fallback profile lists for summarization. The accepted primary summarization provider remains in the existing stage policy shape. Setup should persist a separate ordered list of accepted summarization fallback provider profiles, plus which fallback transitions may be used automatically. Runtime commands consume only those accepted choices; they do not invent new fallback profiles during processing. An accepted primary Mistral summarization profile uses the same accepted-primary runtime behavior as any other accepted primary profile: processing may run it without asking again after revalidating current evidence. If a fallback transition is not authorized, interactive commands ask before fallback and non-interactive commands fail unless a one-run fallback authorization is present.
 
 For #29, Mistral is a normal summarization provider behind the existing summarization port. It sits at the same provider abstraction level as Ollama:
 
@@ -1475,15 +1475,15 @@ The Mistral provider owns Mistral-specific details:
 
 #29 must not expose user-configurable Mistral endpoints or arbitrary Mistral model IDs. Research spike #92 selects the fixed model; #29 consumes that result. The implementation must read current Mistral API docs during the slice to choose the readiness probe, structured-output path, retry classification, and error mapping.
 
-The ordered fallback-list state shape should stay close to the current setup profile model: an ordered list of accepted summarization provider/profile entries with provider, model, device, policy, authorization status, automatic-transition authorization, authorization source where relevant, and blocking/unavailable reasons. Fallback direction comes only from the accepted ordered list for that stage, not from provider identity.
+The ordered fallback-list state shape should stay close to the current setup profile model: an ordered list of accepted summarization fallback provider/profile entries with provider, model, device, policy, authorization status, automatic-transition authorization, authorization source where relevant, and blocking/unavailable reasons. Fallback direction comes only from the accepted ordered list for that stage, not from provider identity.
 
 For #29 specifically, the implemented shapes are:
 
-- Mistral as accepted primary;
-- local summarization primary with Mistral as accepted fallback;
-- local summarization primary with no remote fallback.
+- Mistral as accepted primary in `stage_policies`, with an empty fallback list;
+- local summarization primary in `stage_policies`, with Mistral as the first accepted fallback provider;
+- local summarization primary in `stage_policies`, with an empty fallback list.
 
-Do not add a placeholder local LLM CPU fallback for summarization; #89 owns controlled local Ollama CPU fallback. Multi-step chains such as local GPU -> local CPU -> Mistral are future-valid only after #89 supplies that local CPU profile.
+Do not add a placeholder local LLM CPU fallback for summarization; #89 owns controlled local Ollama CPU fallback and should reuse the ordered fallback-provider list by adding an accepted local CPU Ollama provider/profile entry when that capability exists. Multi-step chains such as local GPU -> local CPU -> Mistral are future-valid only after #89 supplies that local CPU profile.
 
 For the PoC, the Mistral API key follows the same pattern as the pyannote/Hugging Face token: it is supplied through `MENA_MISTRAL_API_KEY` in the operator's environment or another runtime configuration source available to the process. Mena must not automatically consume generic `MISTRAL_API_KEY`, and must not write the key into `setup-state.json`, `config.toml`, logs, provenance artifacts, or error messages.
 

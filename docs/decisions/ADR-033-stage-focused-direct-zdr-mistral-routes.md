@@ -41,15 +41,15 @@ The Mistral provider owns Mistral-specific implementation details:
 
 Setup/runtime profile state should stay close to the existing provider profile model. A summarization profile names the provider, model, device, and policy. Mistral appears as a summarization provider/profile entry, not as a special workflow.
 
-Issue #29 may extend runtime profile state to represent an ordered fallback list for summarization. That list is an ordered set of accepted summarization provider/profile entries. Runtime consumes only that accepted order; it does not invent fallback based on provider identity.
+Issue #29 may extend runtime profile state to represent an ordered fallback list for summarization. The accepted primary summarization provider remains in the existing stage policy shape. Accepted fallback providers live in a separate ordered fallback-provider list. Runtime consumes only that accepted order; it does not invent fallback based on provider identity.
 
 For #29, implemented list shapes are intentionally small:
 
-- Mistral as accepted primary;
-- local summarization primary with Mistral as accepted fallback;
-- local summarization primary with no remote fallback.
+- Mistral as accepted primary in `stage_policies`, with an empty fallback list;
+- local summarization primary in `stage_policies`, with Mistral as the first accepted fallback provider;
+- local summarization primary in `stage_policies`, with an empty fallback list.
 
-Local LLM CPU fallback is not added by #29. #89 owns controlled local Ollama CPU fallback. Multi-step chains such as local GPU -> local CPU -> Mistral are future-valid only after the local CPU route exists.
+Local LLM CPU fallback is not added by #29. #89 owns controlled local Ollama CPU fallback and should reuse the ordered fallback-provider list by adding an accepted local CPU Ollama provider/profile entry when that capability exists. Multi-step chains such as local GPU -> local CPU -> Mistral are future-valid only after the local CPU provider profile exists.
 
 Using the accepted primary provider does not require a runtime prompt. This is existing accepted-primary behavior, not Mistral-specific prompting logic. Runtime prompts apply only when Mena needs to use a fallback transition that was not pre-authorized. Local fallback authorization never authorizes a later remote fallback.
 
