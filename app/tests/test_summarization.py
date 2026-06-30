@@ -640,6 +640,30 @@ def test_ollama_summarization_provider_parses_strict_json_response(
     assert result.general_summary == "The meeting focused on database migration risk."
 
 
+def test_ollama_summarization_provider_instructs_non_english_output_language(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OllamaSummarizationProvider(model="test-model")
+
+    def fake_post_json(path: str, payload: object) -> dict[str, object]:
+        assert isinstance(payload, dict)
+        messages = cast(list[dict[str, str]], payload["messages"])
+        assert "Write every user-facing summary field in de." in messages[0]["content"]
+        instructions = json.loads(messages[1]["content"])["instructions"]
+        assert instructions["output_language"] == (
+            "Write all user-facing strings in de: timeline entries, important points, "
+            "action item text, generated owner/due wording, and the general summary."
+        )
+        return {"message": {"content": json.dumps(_summary_result().to_dict())}}
+
+    monkeypatch.setattr(provider, "_post_json", fake_post_json)
+
+    request = replace(_summary_request(), policy=SummarizationPolicy(language="de"))
+    result = provider.summarize(request)
+
+    assert result.general_summary == "The meeting focused on database migration risk."
+
+
 def test_ollama_summarization_provider_rejects_invalid_json_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -269,7 +269,8 @@ class OllamaSummarizationProvider:
                         "You summarize meeting transcripts into strict JSON. Return only keys "
                         "timeline (array of strings), important_points (array of strings), "
                         "action_items (array of objects with text, owner, due), and "
-                        "general_summary (string). Be faithful to the transcript and manual notes."
+                        "general_summary (string). Be faithful to the transcript and manual notes. "
+                        f"Write every user-facing summary field in {request.policy.language}."
                     ),
                 },
                 {"role": "user", "content": _prompt(request)},
@@ -755,6 +756,7 @@ def _summary_artifact_name(
 
 
 def _prompt(request: SummarizationRequest) -> str:
+    output_language_instruction = _output_language_instruction(request.policy.language)
     return json.dumps(
         {
             "task": "meeting_summary",
@@ -772,6 +774,7 @@ def _prompt(request: SummarizationRequest) -> str:
             },
             "manual_notes": request.manual_notes,
             "instructions": {
+                "output_language": output_language_instruction,
                 "timeline": "Chronological account of the meeting.",
                 "important_points": "Key takeaways; weight manual notes when present.",
                 "action_items": "Tasks as objects with text, owner, and due fields.",
@@ -780,6 +783,13 @@ def _prompt(request: SummarizationRequest) -> str:
         },
         ensure_ascii=False,
         sort_keys=True,
+    )
+
+
+def _output_language_instruction(language: str) -> str:
+    return (
+        f"Write all user-facing strings in {language}: timeline entries, important points, "
+        "action item text, generated owner/due wording, and the general summary."
     )
 
 
