@@ -42,6 +42,10 @@ from mena.transcription import (
 )
 
 SOURCE_AUDIO_ARTIFACT_TYPE = "source_audio"
+PROVIDER_PREP_AUDIO_ARTIFACT_TYPE = "provider_prep_audio"
+PLAYBACK_AUDIO_ARTIFACT_TYPES = frozenset(
+    {SOURCE_AUDIO_ARTIFACT_TYPE, PROVIDER_PREP_AUDIO_ARTIFACT_TYPE}
+)
 PLAYBACK_PREROLL_SECONDS = 1.5
 PLAYBACK_POSTROLL_SECONDS = 1.5
 SUPPORTED_PLAYBACK_COMMANDS = ("ffplay", "pw-play", "paplay", "aplay")
@@ -233,12 +237,16 @@ def run_correction_workflow(
                 if action != "playback":
                     break
 
-                request = _resolve_playback_request(
-                    store=store,
-                    source_transcript=source_transcript,
-                    segment=segment,
-                    session_id=session_id,
-                )
+                try:
+                    request = _resolve_playback_request(
+                        store=store,
+                        source_transcript=source_transcript,
+                        segment=segment,
+                        session_id=session_id,
+                    )
+                except CorrectionWorkflowError as exc:
+                    print(f"Playback failed: {exc}")
+                    continue
                 try:
                     player(request)
                 except PlaybackError as exc:
@@ -528,11 +536,10 @@ def _resolve_playback_request(
         source_id=segment.source_id,
         session_id=session_id,
     )
-    source_audio_record = _record_for_ref(
+    source_audio_record = _record_for_playback_audio_ref(
         store=store,
         artifact_ref=transcript.source_artifact,
-        expected_type=SOURCE_AUDIO_ARTIFACT_TYPE,
-        label=f"Source audio artifact for source '{segment.source_id}'",
+        label=f"Playback audio artifact for source '{segment.source_id}'",
     )
     start_seconds, end_seconds = _playback_window(segment)
     return PlaybackRequest(
@@ -588,6 +595,24 @@ def _record_for_ref(
     return record
 
 
+def _record_for_playback_audio_ref(
+    *,
+    store: FileSystemArtifactStore,
+    artifact_ref: ArtifactRef,
+    label: str,
+) -> ArtifactRecord:
+    if artifact_ref.artifact_type not in PLAYBACK_AUDIO_ARTIFACT_TYPES:
+        expected_types = " or ".join(sorted(PLAYBACK_AUDIO_ARTIFACT_TYPES))
+        raise CorrectionWorkflowError(f"{label} must reference {expected_types}.")
+
+    return _record_for_ref(
+        store=store,
+        artifact_ref=artifact_ref,
+        expected_type=artifact_ref.artifact_type,
+        label=label,
+    )
+
+
 def _load_transcript_for_playback(
     *,
     store: FileSystemArtifactStore,
@@ -613,10 +638,6 @@ def _load_transcript_for_playback(
     if transcript.source_id != source_id:
         raise CorrectionWorkflowError(
             f"Transcript artifact for source '{source_id}' has mismatched source_id."
-        )
-    if transcript.source_artifact.artifact_type != SOURCE_AUDIO_ARTIFACT_TYPE:
-        raise CorrectionWorkflowError(
-            f"Transcript artifact for source '{source_id}' must reference source_audio."
         )
     return transcript
 

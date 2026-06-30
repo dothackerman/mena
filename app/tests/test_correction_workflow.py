@@ -643,6 +643,49 @@ def test_run_correction_workflow_playback_invokes_fake_player_and_returns_to_sam
     assert [entry["original_flag_id"] for entry in payload["entries"]] == ["flag_play_remote"]
 
 
+def test_run_correction_workflow_playback_accepts_provider_prep_audio(
+    tmp_path: Path,
+) -> None:
+    session_dir, store, _, source_records = _build_playback_session_bundle(
+        tmp_path,
+        flags=(
+            ReviewFlag(
+                id="flag_play_provider_prep",
+                segment_id="segment_2",
+                reason_code="low_speaker_confidence",
+                start_seconds=1.0,
+                end_seconds=1.8,
+                source_id="system_audio",
+                speaker_id="remote",
+                metadata={},
+            ),
+        ),
+        source_artifact_type_by_id={"system_audio": "provider_prep_audio"},
+    )
+    requests: list[PlaybackRequest] = []
+    inputs = iter(["p", "s"])
+
+    result = run_correction_workflow(
+        session_path=session_dir,
+        now=NOW,
+        input_fn=lambda _: next(inputs),
+        playback_player=requests.append,
+    )
+
+    assert result.reviewed == 1
+    assert result.skipped == 1
+    assert result.corrected == 0
+    assert len(requests) == 1
+    assert requests[0].source_id == "system_audio"
+    assert requests[0].segment_id == "segment_2"
+    assert requests[0].audio_path == session_dir / source_records["system_audio"].path
+    assert source_records["system_audio"].artifact_type == "provider_prep_audio"
+    payload = json.loads(store.retrieve(result.overlay_artifact_record.id))
+    assert [entry["original_flag_id"] for entry in payload["entries"]] == [
+        "flag_play_provider_prep"
+    ]
+
+
 def test_run_correction_workflow_playback_failure_does_not_consume_review_item(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -683,8 +726,9 @@ def test_run_correction_workflow_playback_failure_does_not_consume_review_item(
     assert "Playback failed: audio device unavailable" in captured.out
 
 
-def test_run_correction_workflow_playback_rejects_missing_transcript_reference(
+def test_run_correction_workflow_playback_reports_missing_transcript_reference_inline(
     tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     session_dir, _, _ = _build_session_bundle(
         tmp_path,
@@ -702,20 +746,26 @@ def test_run_correction_workflow_playback_rejects_missing_transcript_reference(
         ),
     )
     requests: list[PlaybackRequest] = []
+    inputs = iter(["p", "s"])
 
-    with pytest.raises(CorrectionWorkflowError, match="missing transcript artifact"):
-        run_correction_workflow(
-            session_path=session_dir,
-            now=NOW,
-            input_fn=lambda _: "p",
-            playback_player=requests.append,
-        )
+    result = run_correction_workflow(
+        session_path=session_dir,
+        now=NOW,
+        input_fn=lambda _: next(inputs),
+        playback_player=requests.append,
+    )
+    captured = capsys.readouterr()
 
+    assert result.reviewed == 1
+    assert result.skipped == 1
     assert requests == []
+    assert "Playback failed: Transcript source for source 'local_mic'" in captured.out
+    assert "missing transcript artifact" in captured.out
 
 
-def test_run_correction_workflow_playback_rejects_stale_source_audio_reference(
+def test_run_correction_workflow_playback_reports_stale_source_audio_reference_inline(
     tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     session_dir, _, _, _ = _build_playback_session_bundle(
         tmp_path,
@@ -733,18 +783,25 @@ def test_run_correction_workflow_playback_rejects_stale_source_audio_reference(
         ),
         source_audio_ref_sha_by_id={"system_audio": "0" * 64},
     )
+    inputs = iter(["p", "s"])
 
-    with pytest.raises(CorrectionWorkflowError, match="Source audio artifact .* sha256 is stale"):
-        run_correction_workflow(
-            session_path=session_dir,
-            now=NOW,
-            input_fn=lambda _: "p",
-            playback_player=lambda _: None,
-        )
+    result = run_correction_workflow(
+        session_path=session_dir,
+        now=NOW,
+        input_fn=lambda _: next(inputs),
+        playback_player=lambda _: None,
+    )
+    captured = capsys.readouterr()
+
+    assert result.reviewed == 1
+    assert result.skipped == 1
+    assert "Playback failed: Playback audio artifact for source 'system_audio'" in captured.out
+    assert "sha256 is stale" in captured.out
 
 
-def test_run_correction_workflow_playback_rejects_version_mismatched_source_audio_reference(
+def test_run_correction_workflow_playback_reports_version_mismatched_source_audio_reference_inline(
     tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     session_dir, _, _, _ = _build_playback_session_bundle(
         tmp_path,
@@ -762,18 +819,25 @@ def test_run_correction_workflow_playback_rejects_version_mismatched_source_audi
         ),
         source_audio_ref_version_by_id={"system_audio": 999},
     )
+    inputs = iter(["p", "s"])
 
-    with pytest.raises(CorrectionWorkflowError, match="Source audio artifact .* version is stale"):
-        run_correction_workflow(
-            session_path=session_dir,
-            now=NOW,
-            input_fn=lambda _: "p",
-            playback_player=lambda _: None,
-        )
+    result = run_correction_workflow(
+        session_path=session_dir,
+        now=NOW,
+        input_fn=lambda _: next(inputs),
+        playback_player=lambda _: None,
+    )
+    captured = capsys.readouterr()
+
+    assert result.reviewed == 1
+    assert result.skipped == 1
+    assert "Playback failed: Playback audio artifact for source 'system_audio'" in captured.out
+    assert "version is stale" in captured.out
 
 
-def test_run_correction_workflow_playback_wraps_malformed_transcript_source_ref(
+def test_run_correction_workflow_playback_reports_malformed_transcript_source_ref_inline(
     tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     session_dir = _create_session_record(tmp_path)
     store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=session_dir)
@@ -828,21 +892,25 @@ def test_run_correction_workflow_playback_wraps_malformed_transcript_source_ref(
         ),
         name="review/queue.json",
     )
+    inputs = iter(["p", "s"])
 
-    with pytest.raises(
-        CorrectionWorkflowError,
-        match="Transcript artifact for source 'system_audio' payload is invalid",
-    ):
-        run_correction_workflow(
-            session_path=session_dir,
-            now=NOW,
-            input_fn=lambda _: "p",
-            playback_player=lambda _: None,
-        )
+    result = run_correction_workflow(
+        session_path=session_dir,
+        now=NOW,
+        input_fn=lambda _: next(inputs),
+        playback_player=lambda _: None,
+    )
+    captured = capsys.readouterr()
+
+    assert result.reviewed == 1
+    assert result.skipped == 1
+    assert "Playback failed: Transcript artifact for source 'system_audio'" in captured.out
+    assert "payload is invalid" in captured.out
 
 
-def test_run_correction_workflow_playback_rejects_corrupt_source_audio_artifact(
+def test_run_correction_workflow_playback_reports_corrupt_source_audio_artifact_inline(
     tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     session_dir, _, _, source_records = _build_playback_session_bundle(
         tmp_path,
@@ -860,14 +928,20 @@ def test_run_correction_workflow_playback_rejects_corrupt_source_audio_artifact(
         ),
     )
     (session_dir / source_records["system_audio"].path).write_bytes(b"changed audio")
+    inputs = iter(["p", "s"])
 
-    with pytest.raises(CorrectionWorkflowError, match="Source audio artifact .* is invalid"):
-        run_correction_workflow(
-            session_path=session_dir,
-            now=NOW,
-            input_fn=lambda _: "p",
-            playback_player=lambda _: None,
-        )
+    result = run_correction_workflow(
+        session_path=session_dir,
+        now=NOW,
+        input_fn=lambda _: next(inputs),
+        playback_player=lambda _: None,
+    )
+    captured = capsys.readouterr()
+
+    assert result.reviewed == 1
+    assert result.skipped == 1
+    assert "Playback failed: Playback audio artifact for source 'system_audio'" in captured.out
+    assert "is invalid" in captured.out
 
 
 def test_run_correction_workflow_persists_skip_mark_entries(tmp_path: Path) -> None:
@@ -1462,13 +1536,15 @@ def _build_playback_session_bundle(
     flags: tuple[ReviewFlag, ...],
     source_audio_ref_sha_by_id: dict[str, str] | None = None,
     source_audio_ref_version_by_id: dict[str, int] | None = None,
+    source_artifact_type_by_id: dict[str, str] | None = None,
 ) -> tuple[Path, FileSystemArtifactStore, ArtifactRecord, dict[str, ArtifactRecord]]:
     session_dir = _create_session_record(tmp_path)
     store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=session_dir)
+    artifact_types = source_artifact_type_by_id or {}
     source_records = {
         source_id: store.store(
-            artifact_type="source_audio",
-            name=f"source_audio/{source_id}.wav",
+            artifact_type=artifact_types.get(source_id, "source_audio"),
+            name=f"{artifact_types.get(source_id, 'source_audio')}/{source_id}.wav",
             data=f"{source_id} audio".encode(),
             status="sealed",
             metadata={"source_id": source_id},
