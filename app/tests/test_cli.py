@@ -2578,17 +2578,19 @@ def test_main_correct_reports_playback_source_reference_errors(
     capsys: CaptureFixture[str],
 ) -> None:
     session_dir, _ = _build_cli_playback_session(tmp_path, valid_source_refs=False)
+    inputs = iter(["p", "s"])
 
     exit_code = main(
         ["correct", str(session_dir)],
-        input_fn=lambda _: "p",
+        input_fn=lambda _: next(inputs),
         playback_player=lambda _: None,
     )
     captured = capsys.readouterr()
 
-    assert exit_code == 1
-    assert "Cannot run correction workflow:" in captured.out
+    assert exit_code == 0
+    assert "Playback failed:" in captured.out
     assert "missing transcript artifact" in captured.out
+    assert "Correction completed. reviewed=1, skipped=1, corrected=0." in captured.out
 
 
 def test_main_correct_does_not_select_runtime_profile(
