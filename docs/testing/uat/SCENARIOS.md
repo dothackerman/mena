@@ -188,6 +188,67 @@ Pass criteria:
 - provenance records accepted profile, actual profile, fallback status, and
   whether fallback was used
 
+## Scenario UAT-D4: Mistral Primary Summarization
+
+Purpose: prove the installed product can accept Mistral as the summarization
+primary provider and produce the normal summary artifact contract.
+
+Pass criteria:
+
+- setup accepts Mistral only after showing the Mistral summarization notice
+- setup uses `MENA_MISTRAL_API_KEY`, not generic `MISTRAL_API_KEY`
+- setup records fixed request model `mistral-small-latest`, resolved model
+  `mistral-small-2603+1`, and the Mena allow-list policy
+- summarization runs without a per-run prompt after setup acceptance
+- the summary artifact validates as `summary.v1`
+- provenance records Mistral as accepted and actual provider
+
+## Scenario UAT-D5: Mistral Fallback Summarization
+
+Purpose: prove a local summarization primary can carry an accepted ordered
+fallback list with Mistral as the first summarization fallback provider.
+
+Pass criteria:
+
+- setup accepts local summarization primary in `stage_policies`
+- setup records Mistral as the first ordered summarization fallback provider
+- local fallback authorization alone does not authorize Mistral fallback
+- summary reuse remains scoped by provider config identity
+- provenance records accepted primary, ordered fallback provider list, actual
+  provider, fallback reason, and authorization source
+
+## Scenario UAT-D6: Provoked Local-To-Mistral Fallback
+
+Purpose: prove Mena uses Mistral only through the accepted ordered fallback list
+when local summarization is unavailable.
+
+Pass criteria:
+
+- local summarization is deliberately made unavailable after setup
+- Mena first attempts the accepted local primary
+- Mena then uses the accepted Mistral fallback without inventing any provider
+  outside the ordered fallback list
+- the fallback summary artifact validates as `summary.v1`
+- provenance records fallback as used for `summarization`
+
+## Scenario UAT-D7: Mistral Bad Paths
+
+Purpose: prove Mistral setup/runtime failures fail closed with clear outcomes
+and without persisting secrets.
+
+Pass criteria:
+
+- missing `MENA_MISTRAL_API_KEY` blocks Mistral readiness
+- generic `MISTRAL_API_KEY` alone is ignored
+- invalid API key produces an authentication/readiness failure without logging
+  or persisting the key
+- no internet or provider unavailable produces a provider-unavailable result
+- model alias drift away from `mistral-small-2603+1` fails closed
+- quota/funds/rate-limit failure is surfaced as provider unavailable when
+  recognizable from Mistral's response
+- setup state, summary artifacts, runtime provenance, logs, and user-facing
+  errors do not contain the API key
+
 ## Scenario UAT-E1: Failure And Resume
 
 Purpose: prove recording interruptions preserve sealed data and processing
