@@ -40,7 +40,9 @@ def test_export_summary_markdown_stores_artifact_with_expected_contract_and_meta
     assert export_result.export_record.artifact_type == SUMMARY_MARKDOWN_EXPORT_ARTIFACT_TYPE
     assert export_result.export_record.version == SUMMARY_MARKDOWN_EXPORT_ARTIFACT_VERSION
     assert export_result.export_record.status == "sealed"
-    assert "summary_markdown/" in export_result.export_record.path
+    assert f"summary_markdown/{SUMMARY_MARKDOWN_EXPORT_CONTRACT}/" in (
+        export_result.export_record.path
+    )
     assert summary_record.path.replace("/", "_") in export_result.export_record.path
 
     assert export_result.export_record.metadata["category"] == "export"
@@ -150,6 +152,56 @@ def test_export_summary_markdown_reuses_existing_matching_export(tmp_path: Path)
     assert store.list(artifact_type=SUMMARY_MARKDOWN_EXPORT_ARTIFACT_TYPE) == (first.export_record,)
 
 
+def test_export_summary_markdown_ignores_old_v1_export_for_localized_renderer(
+    tmp_path: Path,
+) -> None:
+    store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=tmp_path)
+    summary_record, _ = _persist_summary_artifact(
+        store=store,
+        created_at="2026-05-18T17:00:00Z",
+        name="summary/final.json",
+        language="de",
+    )
+    old_export = store.store(
+        artifact_type=SUMMARY_MARKDOWN_EXPORT_ARTIFACT_TYPE,
+        name=("summary_markdown/2026-05-18T170000+0000-artifacts_summary_summary_final.json.md"),
+        data=(
+            b"## Timeline\n\n"
+            b"- Discussed milestones.\n\n"
+            b"## Important points\n\n"
+            b"- Release blocked until review.\n\n"
+            b"## Action items\n\n"
+            b"\n\n"
+            b"## General summary\n\n"
+            b"The meeting was productive.\n"
+        ),
+        version=1,
+        status="sealed",
+        metadata={
+            "category": "export",
+            "contract": "summary-markdown.v1",
+            "summary_artifact_id": summary_record.id,
+        },
+    )
+
+    export_result = export_summary_markdown(store=store)
+    export_payload = store.retrieve(export_result.export_record.id).decode("utf-8")
+
+    assert export_result.export_record.id != old_export.id
+    assert export_result.export_record.version == 2
+    assert export_result.export_record.metadata["contract"] == SUMMARY_MARKDOWN_EXPORT_CONTRACT
+    assert f"summary_markdown/{SUMMARY_MARKDOWN_EXPORT_CONTRACT}/" in (
+        export_result.export_record.path
+    )
+    assert export_payload.startswith("## Zeitverlauf")
+    assert {
+        record.id for record in store.list(artifact_type=SUMMARY_MARKDOWN_EXPORT_ARTIFACT_TYPE)
+    } == {
+        old_export.id,
+        export_result.export_record.id,
+    }
+
+
 def test_export_summary_markdown_rejects_existing_export_metadata_drift(
     tmp_path: Path,
 ) -> None:
@@ -185,6 +237,7 @@ def _persist_summary_artifact(
     store: FileSystemArtifactStore,
     created_at: str,
     name: str,
+    language: str = "en",
 ) -> tuple[ArtifactRecord, SummaryArtifact]:
     summary_result = _summary_result_for_export()
     summary_artifact = SummaryArtifact(
@@ -197,7 +250,7 @@ def _persist_summary_artifact(
             sha256="1" * 64,
         ),
         manual_notes_artifact=None,
-        policy=SummarizationPolicy(language="en").to_dict(),
+        policy=SummarizationPolicy(language=language).to_dict(),
         provider=FakeSummarizationProvider(result=summary_result).metadata,
         timeline=summary_result.timeline,
         important_points=summary_result.important_points,

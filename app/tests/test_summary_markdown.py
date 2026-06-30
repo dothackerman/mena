@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 from mena.processing import ArtifactRef
 from mena.summarization import (
     FakeSummarizationProvider,
@@ -82,6 +84,29 @@ def test_summary_markdown_uses_german_chrome_for_german_summary_artifact() -> No
     assert "- Datenbankmigration abschliessen. (Verantwortlich: Du; Fällig: Freitag)" in markdown
     assert "## Timeline" not in markdown
     assert "Owner:" not in markdown
+
+
+def test_summary_markdown_uses_german_chrome_for_regional_german_codes() -> None:
+    for language in ("de-CH", "de_CH"):
+        artifact = _summary_artifact(
+            language="de",
+            action_items=(
+                SummaryActionItem(
+                    text="Datenbankmigration abschliessen.",
+                    owner="Du",
+                    due="Freitag",
+                ),
+            ),
+        )
+        policy = dict(artifact.policy)
+        policy["language"] = language
+
+        markdown = format_summary_markdown(replace(artifact, policy=policy))
+
+        assert "## Zeitverlauf" in markdown
+        assert "## Aufgaben" in markdown
+        assert "Verantwortlich: Du; Fällig: Freitag" in markdown
+        assert "## Timeline" not in markdown
 
 
 def test_summary_markdown_accepts_summary_result_payload() -> None:
