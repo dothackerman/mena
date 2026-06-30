@@ -95,7 +95,7 @@ class _GermanLabels:
     action_items = "Aufgaben"
     general_summary = "Zusammenfassung"
     owner = "Verantwortlich"
-    due = "Faellig"
+    due = "Fällig"
 
 
 def _payload_language(payload: SummaryArtifact | SummaryResult) -> str:

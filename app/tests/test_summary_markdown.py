@@ -79,7 +79,7 @@ def test_summary_markdown_uses_german_chrome_for_german_summary_artifact() -> No
         "## Aufgaben",
         "## Zusammenfassung",
     ]
-    assert "- Datenbankmigration abschliessen. (Verantwortlich: Du; Faellig: Freitag)" in markdown
+    assert "- Datenbankmigration abschliessen. (Verantwortlich: Du; Fällig: Freitag)" in markdown
     assert "## Timeline" not in markdown
     assert "Owner:" not in markdown
 
