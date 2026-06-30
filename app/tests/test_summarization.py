@@ -1,6 +1,9 @@
 import json
+import urllib.error
+import urllib.request
 from dataclasses import replace
 from datetime import UTC, datetime
+from email.message import Message
 from importlib.resources import files
 from pathlib import Path
 from typing import cast
@@ -29,8 +32,13 @@ from mena.merge_timing import (
 from mena.processing import ArtifactRef, ProcessingStageLedger
 from mena.runtime_stewardship import RuntimeLease
 from mena.summarization import (
+    MISTRAL_API_KEY_ENV,
+    MISTRAL_SUMMARY_ALLOWLIST_POLICY_ID,
+    MISTRAL_SUMMARY_REQUEST_MODEL,
+    MISTRAL_SUMMARY_RESOLVED_MODEL,
     SUMMARIZATION_STAGE,
     FakeSummarizationProvider,
+    MistralSummarizationProvider,
     OllamaSummarizationProvider,
     SummarizationContractError,
     SummarizationError,
@@ -683,6 +691,328 @@ def test_ollama_summarization_provider_preserves_raw_output_on_contract_failure(
     assert "Field 'general_summary' in Summary result must be a non-empty string." in message
     assert "Raw Ollama message content:" in message
     assert raw_content in message
+
+
+def test_mistral_summarization_provider_checks_fixed_model_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = MistralSummarizationProvider(api_key="test-key")
+
+    monkeypatch.setattr(
+        provider,
+        "_request_json",
+        lambda method, path, payload=None: {"id": MISTRAL_SUMMARY_RESOLVED_MODEL},
+    )
+
+    readiness = provider.readiness()
+
+    assert readiness.ready is True
+    assert readiness.request_model == MISTRAL_SUMMARY_REQUEST_MODEL
+    assert readiness.resolved_model == MISTRAL_SUMMARY_RESOLVED_MODEL
+    assert readiness.allowlist_policy == MISTRAL_SUMMARY_ALLOWLIST_POLICY_ID
+
+
+def test_mistral_summarization_provider_fails_closed_on_alias_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = MistralSummarizationProvider(api_key="test-key")
+
+    monkeypatch.setattr(
+        provider,
+        "_request_json",
+        lambda method, path, payload=None: {"id": "mistral-small-9999"},
+    )
+
+    readiness = provider.readiness()
+
+    assert readiness.ready is False
+    assert "not allow-listed" in readiness.detail
+    assert readiness.resolved_model == "mistral-small-9999"
+
+
+def test_mistral_summarization_provider_reports_readiness_probe_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = MistralSummarizationProvider(api_key="test-key")
+
+    def unavailable(*_args: object, **_kwargs: object) -> object:
+        raise SummarizationProviderUnavailable("Mistral API is unavailable.")
+
+    monkeypatch.setattr(provider, "_request_json", unavailable)
+    assert provider.readiness().detail == "Mistral API is unavailable."
+
+    def bad_contract(*_args: object, **_kwargs: object) -> object:
+        raise SummarizationContractError("bad readiness payload")
+
+    monkeypatch.setattr(provider, "_request_json", bad_contract)
+    assert provider.readiness().detail == "bad readiness payload"
+
+
+def test_mistral_readiness_accepts_resolved_model_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = MistralSummarizationProvider(api_key="test-key")
+
+    monkeypatch.setattr(
+        provider,
+        "_request_json",
+        lambda method, path, payload=None: {"aliases": [MISTRAL_SUMMARY_RESOLVED_MODEL]},
+    )
+
+    assert provider.readiness().ready is True
+
+
+def test_mistral_readiness_fails_closed_on_missing_model_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = MistralSummarizationProvider(api_key="test-key")
+    monkeypatch.setattr(provider, "_request_json", lambda *_args, **_kwargs: {"aliases": [123]})
+
+    readiness = provider.readiness()
+
+    assert readiness.ready is False
+    assert "did not name a model" in readiness.detail
+
+
+def test_mistral_summarization_provider_uses_json_schema_response_format(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = MistralSummarizationProvider(
+        api_key="test-key",
+        resolved_model=MISTRAL_SUMMARY_RESOLVED_MODEL,
+    )
+    captured: dict[str, object] = {}
+
+    def fake_request_json(
+        method: str,
+        path: str,
+        payload: object | None = None,
+    ) -> dict[str, object]:
+        captured["method"] = method
+        captured["path"] = path
+        captured["payload"] = payload
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(_summary_result().to_dict()),
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr(provider, "_request_json", fake_request_json)
+
+    result = provider.summarize(_summary_request())
+
+    payload = cast(dict[str, object], captured["payload"])
+    assert captured["method"] == "POST"
+    assert captured["path"] == "/chat/completions"
+    assert payload["model"] == MISTRAL_SUMMARY_REQUEST_MODEL
+    response_format = cast(dict[str, object], payload["response_format"])
+    assert response_format["type"] == "json_schema"
+    json_schema = cast(dict[str, object], response_format["json_schema"])
+    assert json_schema["name"] == "summary_v1"
+    assert json_schema["strict"] is True
+    schema = cast(dict[str, object], json_schema["schema"])
+    assert schema["required"] == [
+        "timeline",
+        "important_points",
+        "action_items",
+        "general_summary",
+    ]
+    assert payload["temperature"] == 0
+    assert result.general_summary == "The meeting focused on database migration risk."
+    assert provider.metadata.to_dict()["resolved_model"] == MISTRAL_SUMMARY_RESOLVED_MODEL
+
+
+def test_mistral_summarization_provider_rejects_invalid_json_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = MistralSummarizationProvider(api_key="test-key")
+
+    monkeypatch.setattr(
+        provider,
+        "_request_json",
+        lambda method, path, payload=None: {"choices": [{"message": {"content": "not-json"}}]},
+    )
+
+    with pytest.raises(SummarizationContractError) as exc_info:
+        provider.summarize(_summary_request())
+
+    assert "Mistral summary response was not valid JSON" in str(exc_info.value)
+
+
+def test_mistral_summarization_provider_preserves_contract_failure_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = MistralSummarizationProvider(api_key="test-key")
+    raw_content = json.dumps(
+        {
+            "timeline": ["Discussed migration risk."],
+            "important_points": ["Database migration needs rollback coverage."],
+            "action_items": [],
+            "general_summary": None,
+        }
+    )
+
+    monkeypatch.setattr(
+        provider,
+        "_request_json",
+        lambda method, path, payload=None: {
+            "choices": [{"message": {"content": raw_content}}],
+        },
+    )
+
+    with pytest.raises(SummarizationContractError) as exc_info:
+        provider.summarize(_summary_request())
+
+    message = str(exc_info.value)
+    assert "Field 'general_summary' in Summary result must be a non-empty string." in message
+    assert raw_content in message
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {},
+        {"choices": []},
+        {"choices": ["bad"]},
+        {"choices": [{"message": {}}]},
+    ],
+)
+def test_mistral_summarization_provider_rejects_invalid_completion_envelopes(
+    monkeypatch: pytest.MonkeyPatch,
+    response: dict[str, object],
+) -> None:
+    provider = MistralSummarizationProvider(api_key="test-key")
+    monkeypatch.setattr(provider, "_request_json", lambda *_args, **_kwargs: response)
+
+    with pytest.raises(SummarizationContractError):
+        provider.summarize(_summary_request())
+
+
+def test_mistral_summarization_provider_ignores_generic_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(MISTRAL_API_KEY_ENV, raising=False)
+    monkeypatch.setenv("MISTRAL_API_KEY", "generic-key")
+    provider = MistralSummarizationProvider()
+
+    with pytest.raises(SummarizationProviderUnavailable, match=MISTRAL_API_KEY_ENV):
+        provider.summarize(_summary_request())
+
+
+def test_mistral_request_json_posts_authenticated_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = MistralSummarizationProvider(api_key="test-key", endpoint="https://mistral.test/v1")
+    captured: dict[str, object] = {}
+
+    class Response:
+        def __enter__(self) -> "Response":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'{"ok": true}'
+
+    def fake_urlopen(request: object, timeout: float) -> Response:
+        assert isinstance(request, urllib.request.Request)
+        captured["url"] = request.full_url
+        captured["method"] = request.get_method()
+        captured["timeout"] = timeout
+        captured["headers"] = dict(request.header_items())
+        captured["data"] = request.data
+        return Response()
+
+    monkeypatch.setattr("mena.summarization.urllib.request.urlopen", fake_urlopen)
+
+    response = provider._request_json("POST", "/chat/completions", {"hello": "world"})
+
+    assert response == {"ok": True}
+    assert captured["url"] == "https://mistral.test/v1/chat/completions"
+    assert captured["method"] == "POST"
+    assert captured["data"] == b'{"hello": "world"}'
+    headers = cast(dict[str, str], captured["headers"])
+    assert headers["Authorization"] == "Bearer test-key"
+
+
+def test_mistral_request_json_requires_mena_scoped_api_key() -> None:
+    provider = MistralSummarizationProvider(api_key="")
+
+    with pytest.raises(SummarizationProviderUnavailable, match=MISTRAL_API_KEY_ENV):
+        provider._request_json("GET", "/models/mistral-small-latest")
+
+
+def test_mistral_request_json_classifies_http_and_transport_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = MistralSummarizationProvider(api_key="test-key")
+    headers = Message()
+
+    def raise_quota(*_args: object, **_kwargs: object) -> object:
+        raise urllib.error.HTTPError("url", 429, "too many", headers, None)
+
+    monkeypatch.setattr("mena.summarization.urllib.request.urlopen", raise_quota)
+    with pytest.raises(SummarizationProviderUnavailable, match="quota"):
+        provider._request_json("GET", "/models/mistral-small-latest")
+
+    def raise_auth(*_args: object, **_kwargs: object) -> object:
+        raise urllib.error.HTTPError("url", 401, "unauthorized", headers, None)
+
+    monkeypatch.setattr("mena.summarization.urllib.request.urlopen", raise_auth)
+    with pytest.raises(SummarizationContractError, match="authentication"):
+        provider._request_json("GET", "/models/mistral-small-latest")
+
+    def raise_bad_request(*_args: object, **_kwargs: object) -> object:
+        raise urllib.error.HTTPError("url", 404, "not found", headers, None)
+
+    monkeypatch.setattr("mena.summarization.urllib.request.urlopen", raise_bad_request)
+    with pytest.raises(SummarizationContractError, match="HTTP 404"):
+        provider._request_json("GET", "/models/mistral-small-latest")
+
+    def raise_network(*_args: object, **_kwargs: object) -> object:
+        raise OSError("network down")
+
+    monkeypatch.setattr("mena.summarization.urllib.request.urlopen", raise_network)
+    with pytest.raises(SummarizationProviderUnavailable, match="unavailable"):
+        provider._request_json("GET", "/models/mistral-small-latest")
+
+
+def test_mistral_request_json_rejects_invalid_envelopes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = MistralSummarizationProvider(api_key="test-key")
+
+    class Response:
+        def __init__(self, body: bytes) -> None:
+            self.body = body
+
+        def __enter__(self) -> "Response":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return self.body
+
+    monkeypatch.setattr(
+        "mena.summarization.urllib.request.urlopen",
+        lambda *_args, **_kwargs: Response(b"not-json"),
+    )
+    with pytest.raises(SummarizationContractError, match="not JSON"):
+        provider._request_json("GET", "/models/mistral-small-latest")
+
+    monkeypatch.setattr(
+        "mena.summarization.urllib.request.urlopen",
+        lambda *_args, **_kwargs: Response(b"[]"),
+    )
+    with pytest.raises(SummarizationContractError, match="must be a JSON object"):
+        provider._request_json("GET", "/models/mistral-small-latest")
 
 
 def test_summarization_policy_and_result_validate_contract() -> None:

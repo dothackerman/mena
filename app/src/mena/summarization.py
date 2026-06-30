@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import urllib.error
+import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -83,6 +86,12 @@ SUMMARY_RESPONSE_SCHEMA: dict[str, object] = {
     },
 }
 OLLAMA_DETERMINISTIC_OPTIONS: dict[str, object] = {"temperature": 0}
+MISTRAL_API_BASE_URL = "https://api.mistral.ai/v1"
+MISTRAL_API_KEY_ENV = "MENA_MISTRAL_API_KEY"
+MISTRAL_SUMMARY_REQUEST_MODEL = "mistral-small-latest"
+MISTRAL_SUMMARY_RESOLVED_MODEL = "mistral-small-2603+1"
+MISTRAL_SUMMARY_ALLOWLIST_POLICY_ID = "mena-mistral-summary-allowlist-2026-06-29-v1"
+MISTRAL_DETERMINISTIC_OPTIONS: dict[str, object] = {"temperature": 0}
 
 
 class SummarizationError(RuntimeError):
@@ -144,6 +153,20 @@ class SummarizationProviderMetadata(LocalLLMProviderMetadata):
 
     endpoint: str | None = None
     prompt_policy: str = PROMPT_POLICY
+    resolved_model: str | None = None
+    model_allowlist_policy: str | None = None
+
+    @property
+    def config_id(self) -> str:
+        return json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
+
+    def to_dict(self) -> dict[str, object]:
+        payload = super().to_dict()
+        if self.resolved_model is not None:
+            payload["resolved_model"] = self.resolved_model
+        if self.model_allowlist_policy is not None:
+            payload["model_allowlist_policy"] = self.model_allowlist_policy
+        return payload
 
 
 @dataclass(frozen=True)
@@ -330,6 +353,161 @@ class OllamaSummarizationProvider:
             status="released",
             detail=f"Ollama model release completed: {done_reason}.",
         )
+
+
+@dataclass(frozen=True)
+class MistralReadiness:
+    """Result of validating Mena's fixed Mistral summarization model."""
+
+    ready: bool
+    detail: str
+    request_model: str = MISTRAL_SUMMARY_REQUEST_MODEL
+    resolved_model: str | None = None
+    allowlist_policy: str = MISTRAL_SUMMARY_ALLOWLIST_POLICY_ID
+
+
+class MistralSummarizationProvider:
+    """Direct Mistral adapter for structured meeting summarization."""
+
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        request_model: str = MISTRAL_SUMMARY_REQUEST_MODEL,
+        resolved_model: str | None = None,
+        endpoint: str = MISTRAL_API_BASE_URL,
+        timeout_seconds: float = 60.0,
+    ) -> None:
+        self.api_key = api_key if api_key is not None else os.environ.get(MISTRAL_API_KEY_ENV)
+        self.endpoint = endpoint.rstrip("/")
+        self.timeout_seconds = timeout_seconds
+        self.metadata = SummarizationProviderMetadata(
+            name="mistral",
+            model=request_model,
+            endpoint=None,
+            resolved_model=resolved_model,
+            model_allowlist_policy=MISTRAL_SUMMARY_ALLOWLIST_POLICY_ID,
+        )
+
+    def readiness(self) -> MistralReadiness:
+        if not self.api_key:
+            return MistralReadiness(
+                ready=False,
+                detail=f"{MISTRAL_API_KEY_ENV} is required for Mistral summarization.",
+            )
+        try:
+            response = self._request_json("GET", f"/models/{self.metadata.model}")
+        except SummarizationProviderUnavailable as exc:
+            return MistralReadiness(ready=False, detail=str(exc))
+        except SummarizationContractError as exc:
+            return MistralReadiness(ready=False, detail=str(exc))
+        try:
+            resolved_model = _mistral_resolved_model(response)
+        except SummarizationContractError as exc:
+            return MistralReadiness(ready=False, detail=str(exc))
+        if resolved_model != MISTRAL_SUMMARY_RESOLVED_MODEL:
+            return MistralReadiness(
+                ready=False,
+                detail=(
+                    f"Mistral model {self.metadata.model} resolved to {resolved_model!r}, "
+                    f"not allow-listed {MISTRAL_SUMMARY_RESOLVED_MODEL!r} under "
+                    f"{MISTRAL_SUMMARY_ALLOWLIST_POLICY_ID}."
+                ),
+                resolved_model=resolved_model,
+            )
+        return MistralReadiness(
+            ready=True,
+            detail=(
+                f"Mistral model {self.metadata.model} resolved to {MISTRAL_SUMMARY_RESOLVED_MODEL}."
+            ),
+            resolved_model=resolved_model,
+        )
+
+    def summarize(self, request: SummarizationRequest) -> SummaryResult:
+        if not self.api_key:
+            raise SummarizationProviderUnavailable(
+                f"Mistral summarization requires {MISTRAL_API_KEY_ENV}."
+            )
+        payload: dict[str, object] = {
+            "model": self.metadata.model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You summarize meeting transcripts into strict JSON. Return only keys "
+                        "timeline (array of strings), important_points (array of strings), "
+                        "action_items (array of objects with text, owner, due), and "
+                        "general_summary (string). Be faithful to the transcript and manual notes."
+                    ),
+                },
+                {"role": "user", "content": _prompt(request)},
+            ],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "summary_v1",
+                    "schema": SUMMARY_RESPONSE_SCHEMA,
+                    "strict": True,
+                },
+            },
+            **MISTRAL_DETERMINISTIC_OPTIONS,
+        }
+        response = self._request_json("POST", "/chat/completions", payload)
+        content = _mistral_message_content(response)
+        try:
+            decoded = json.loads(strip_json_fence(content))
+        except json.JSONDecodeError as exc:
+            raise SummarizationContractError(
+                _with_raw_ollama_message_content(
+                    "Mistral summary response was not valid JSON.",
+                    content,
+                )
+            ) from exc
+        try:
+            return SummaryResult.from_dict(decoded)
+        except SummarizationContractError as exc:
+            raise SummarizationContractError(
+                _with_raw_ollama_message_content(str(exc), content)
+            ) from exc
+
+    def _request_json(
+        self,
+        method: str,
+        path: str,
+        payload: Mapping[str, object] | None = None,
+    ) -> Mapping[str, object]:
+        if not self.api_key:
+            raise SummarizationProviderUnavailable(
+                f"Mistral summarization requires {MISTRAL_API_KEY_ENV}."
+            )
+        data = None if payload is None else json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(
+            f"{self.endpoint}{path}",
+            data=data,
+            headers={
+                "authorization": f"Bearer {self.api_key}",
+                "content-type": "application/json",
+                "accept": "application/json",
+            },
+            method=method,
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                body = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            message = _mistral_http_error_message(exc)
+            if exc.code in {408, 409, 425, 429, 500, 502, 503, 504}:
+                raise SummarizationProviderUnavailable(message) from exc
+            raise SummarizationContractError(message) from exc
+        except OSError as exc:
+            raise SummarizationProviderUnavailable(
+                "Mistral summarization provider is unavailable."
+            ) from exc
+        try:
+            decoded = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise SummarizationContractError("Mistral response envelope was not JSON.") from exc
+        return _mapping(decoded, "Mistral response envelope")
 
 
 @dataclass(frozen=True)
@@ -822,10 +1000,56 @@ def _provider_from_dict(data: object) -> SummarizationProviderMetadata:
         model=_required_str(item, "model", "Summary provider"),
         endpoint=_optional_str(item, "endpoint", "Summary provider"),
         prompt_policy=_required_str(item, "prompt_policy", "Summary provider"),
+        resolved_model=_optional_str(item, "resolved_model", "Summary provider"),
+        model_allowlist_policy=_optional_str(
+            item,
+            "model_allowlist_policy",
+            "Summary provider",
+        ),
     )
     if provider.prompt_policy not in SUPPORTED_PROMPT_POLICIES:
         raise SummarizationContractError("Unsupported summary provider prompt policy.")
     return provider
+
+
+def _mistral_resolved_model(response: Mapping[str, object]) -> str:
+    for key in ("id", "name"):
+        value = response.get(key)
+        if isinstance(value, str) and value:
+            return value
+    aliases = response.get("aliases")
+    if isinstance(aliases, list):
+        for alias in aliases:
+            if isinstance(alias, str) and alias == MISTRAL_SUMMARY_RESOLVED_MODEL:
+                return alias
+    raise SummarizationContractError("Mistral model readiness response did not name a model.")
+
+
+def _mistral_message_content(response: Mapping[str, object]) -> str:
+    choices = response.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise SummarizationContractError("Mistral response missing choices.")
+    first = choices[0]
+    if not isinstance(first, Mapping):
+        raise SummarizationContractError("Mistral response choice must be an object.")
+    message = first.get("message")
+    if not isinstance(message, Mapping):
+        raise SummarizationContractError("Mistral response missing message object.")
+    content = message.get("content")
+    if not isinstance(content, str) or not content.strip():
+        raise SummarizationContractError("Mistral response message content is empty.")
+    return content
+
+
+def _mistral_http_error_message(exc: urllib.error.HTTPError) -> str:
+    status = exc.code
+    if status in {401, 403}:
+        return f"Mistral API authentication failed; check {MISTRAL_API_KEY_ENV}."
+    if status == 429:
+        return "Mistral API quota or rate limit is unavailable."
+    if status in {500, 502, 503, 504}:
+        return "Mistral API is temporarily unavailable."
+    return f"Mistral API request failed with HTTP {status}."
 
 
 def _summary_policy_payload(data: object) -> dict[str, object]:
