@@ -1482,6 +1482,7 @@ def _run_setup_command(
             runner=command_runner,
             command_identity=command_identity,
             hardware=hardware,
+            profile=profile,
         )
     except KeyboardInterrupt:
         print("Setup interrupted; local provider readiness is incomplete.")
@@ -1526,8 +1527,8 @@ def _run_setup_command(
             authorize_local_fallback=authorize_local_fallback,
             fallback_provider_profiles=mistral_fallback_profiles,
         )
-        state_path = persist_runtime_profile_state(accepted_state, paths=settings.paths)
         _print_mistral_setup_disclaimer(accepted_state)
+        state_path = persist_runtime_profile_state(accepted_state, paths=settings.paths)
         _print_runtime_fallback_authorization_notice(accepted_state)
         print(f"Accepted runtime profile state: {state_path}")
         return 0
@@ -1562,6 +1563,7 @@ def _run_setup_command(
             runner=command_runner,
             command_identity=command_identity,
             hardware=hardware,
+            profile=profile,
         )
     except KeyboardInterrupt:
         print("Setup interrupted; local provider readiness is incomplete.")
@@ -1611,8 +1613,8 @@ def _run_setup_command(
             authorize_local_fallback=authorize_local_fallback,
             fallback_provider_profiles=mistral_fallback_profiles,
         )
-        state_path = persist_runtime_profile_state(accepted_state, paths=settings.paths)
         _print_mistral_setup_disclaimer(accepted_state)
+        state_path = persist_runtime_profile_state(accepted_state, paths=settings.paths)
         _print_runtime_fallback_authorization_notice(accepted_state)
         print(f"Accepted runtime profile state: {state_path}")
     return 0 if final_ready else 1

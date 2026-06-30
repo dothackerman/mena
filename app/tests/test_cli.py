@@ -452,6 +452,59 @@ def test_setup_mistral_fallback_profiles_skip_when_not_requested_or_primary_is_m
     )
 
 
+def test_setup_accepts_mistral_primary_after_readiness_notice_before_persist(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    base_state = _setup_state(settings=settings, pyannote_token_present=True)
+    ready_mistral_state = replace(
+        base_state,
+        mistral=MistralReadiness(
+            ready=True,
+            detail="Mistral model mistral-small-latest resolved to mistral-small-2603+1.",
+            resolved_model="mistral-small-2603+1",
+        ),
+    )
+    observed_profiles: list[str] = []
+    event_order: list[str] = []
+
+    def _detect_state(_settings: AppSettings, **kwargs: object) -> LocalInstallationState:
+        profile = cast(Any, kwargs["profile"])
+        observed_profiles.append(profile.id)
+        return ready_mistral_state
+
+    def _persist_state(state: RuntimeProfileState, **_kwargs: object) -> Path:
+        event_order.append("persist")
+        return persist_runtime_profile_state(state, paths=settings.paths)
+
+    def _print_notice(state: RuntimeProfileState) -> None:
+        event_order.append("notice")
+        assert any(stage.provider == "mistral" for stage in state.stage_policies)
+        print("Mistral summarization notice: test")
+
+    monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
+    monkeypatch.setattr("mena.cli.persist_runtime_profile_state", _persist_state)
+    monkeypatch.setattr("mena.cli._print_mistral_setup_disclaimer", _print_notice)
+
+    exit_code = main(
+        ["setup", "--yes", "--summary-provider", "mistral"],
+        settings=settings,
+        setup_runner=SetupFakeRunner(),
+    )
+    captured = capsys.readouterr()
+    accepted = load_runtime_profile_state(settings.paths)
+
+    assert exit_code == 0
+    assert observed_profiles[0] == "linux-alpha-mistral-summary-v1"
+    assert event_order == ["notice", "persist"]
+    assert accepted.stage_policies[2].provider == "mistral"
+    assert accepted.stage_policies[2].resolved_model == "mistral-small-2603+1"
+    assert accepted.fallback_provider_profiles == ()
+    assert "Mistral summarization notice" in captured.out
+
+
 def test_setup_mistral_fallback_profiles_require_ready_mistral(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
