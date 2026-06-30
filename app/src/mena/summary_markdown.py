@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Protocol
 
+from mena.settings import normalize_summary_language
 from mena.summarization import DEFAULT_LANGUAGE, SummaryActionItem, SummaryArtifact, SummaryResult
 
 SummaryMarkdownSource = SummaryArtifact | SummaryResult | Mapping[str, object]
@@ -107,6 +108,7 @@ def _payload_language(payload: SummaryArtifact | SummaryResult) -> str:
 
 
 def _labels_for_language(language: str) -> _Labels:
-    if language.lower().split("-", maxsplit=1)[0] == "de":
+    normalized = normalize_summary_language(language, "summary language")
+    if normalized.split("-", maxsplit=1)[0] == "de":
         return _GermanLabels()
     return _EnglishLabels()

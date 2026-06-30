@@ -37,6 +37,7 @@ from mena.processing import (
     ProcessingStageState,
 )
 from mena.runtime_stewardship import RuntimeLease, RuntimeReleaseResult
+from mena.settings import SettingsError, normalize_summary_language
 
 SUMMARY_ARTIFACT_TYPE = "summary"
 SUMMARY_ARTIFACT_VERSION = 1
@@ -46,8 +47,9 @@ MANUAL_NOTES_CONTRACT = "manual-notes.raw"
 SUMMARIZATION_STAGE = "summarization"
 SUMMARIZATION_POLICY_VERSION = 1
 LEGACY_PROMPT_POLICY = "meeting-summary-json-v1"
-PROMPT_POLICY = "meeting-summary-json-schema-v1"
-SUPPORTED_PROMPT_POLICIES = frozenset({LEGACY_PROMPT_POLICY, PROMPT_POLICY})
+SCHEMA_PROMPT_POLICY = "meeting-summary-json-schema-v1"
+PROMPT_POLICY = "meeting-summary-json-schema-language-output-v2"
+SUPPORTED_PROMPT_POLICIES = frozenset({LEGACY_PROMPT_POLICY, SCHEMA_PROMPT_POLICY, PROMPT_POLICY})
 DEFAULT_LANGUAGE = "en"
 SUMMARY_RESPONSE_SCHEMA: dict[str, object] = {
     "type": "object",
@@ -105,6 +107,16 @@ class SummarizationPolicy:
     prompt_policy: str = PROMPT_POLICY
     language: str = DEFAULT_LANGUAGE
     include_manual_notes: bool = True
+
+    def __post_init__(self) -> None:
+        try:
+            language = normalize_summary_language(
+                self.language,
+                "Summarization policy language",
+            )
+        except SettingsError as exc:
+            raise SummarizationContractError(str(exc)) from exc
+        object.__setattr__(self, "language", language)
 
     @classmethod
     def from_dict(cls, data: object) -> Self:

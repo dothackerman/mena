@@ -36,7 +36,15 @@ class SettingsError(ValueError):
 def validate_summary_language(value: object, label: str) -> str:
     """Validate and return a configured summary language code."""
 
-    return _language(value, label)
+    return normalize_summary_language(value, label)
+
+
+def normalize_summary_language(value: object, label: str) -> str:
+    """Validate and return the canonical summary language code."""
+
+    language = _language(value, label).replace("_", "-")
+    primary, separator, rest = language.partition("-")
+    return f"{primary.lower()}{separator}{rest}"
 
 
 @dataclass(frozen=True)

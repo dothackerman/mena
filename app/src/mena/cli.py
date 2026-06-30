@@ -1754,6 +1754,7 @@ def _run_summarize_command(
         session_record,
         settings.summary.language,
     )
+    summary_language = validate_summary_language(summary_language, "summary language")
     store = FileSystemArtifactStore(session_id=session_id, session_dir=session_dir)
 
     merged_transcript_record = _resolve_latest_merged_transcript_record(store=store)
