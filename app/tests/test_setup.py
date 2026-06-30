@@ -29,6 +29,7 @@ from mena.setup import (
     SetupEvaluation,
     SetupPlan,
     SetupProfile,
+    StageProviderProfile,
     SubprocessCommandRunner,
     _detect_avx2,
     _detect_nvidia_vram_gb,
@@ -45,6 +46,13 @@ from mena.setup import (
     get_alpha_local_profile,
     load_runtime_profile_state,
     persist_runtime_profile_state,
+)
+from mena.summarization import (
+    MISTRAL_API_KEY_ENV,
+    MISTRAL_SUMMARY_ALLOWLIST_POLICY_ID,
+    MISTRAL_SUMMARY_REQUEST_MODEL,
+    MISTRAL_SUMMARY_RESOLVED_MODEL,
+    MistralReadiness,
 )
 
 
@@ -77,6 +85,18 @@ def test_profile_catalog_exposes_supported_cpu_fallback_profile() -> None:
     assert fallback.catalog_version == RUNTIME_PROFILE_CATALOG_VERSION
     assert fallback.minimum_cuda_vram_gb == 0.0
     assert _stage_model(fallback, "transcription") == "small"
+
+
+def test_profile_catalog_exposes_mistral_summarization_primary_profile() -> None:
+    mistral = default_profile_catalog("llama3.2:3b")[2]
+    summary_stage = next(stage for stage in mistral.stages if stage.stage == "summarization")
+
+    assert mistral.id == "linux-alpha-mistral-summary-v1"
+    assert summary_stage.provider == "mistral"
+    assert summary_stage.model == MISTRAL_SUMMARY_REQUEST_MODEL
+    assert summary_stage.request_model == MISTRAL_SUMMARY_REQUEST_MODEL
+    assert summary_stage.resolved_model == MISTRAL_SUMMARY_RESOLVED_MODEL
+    assert summary_stage.model_allowlist_policy == MISTRAL_SUMMARY_ALLOWLIST_POLICY_ID
 
 
 def test_cpu_fallback_profile_requires_cpu_capable_hardware() -> None:
@@ -135,6 +155,43 @@ def test_runtime_profile_state_persists_under_runtime_state_home(tmp_path: Path)
     assert loaded.fallback_authorization.automatic_local_fallback_authorized is True
     assert set(loaded.fallback_authorization.stage_scope) == {"transcription", "diarization"}
     assert loaded.fallback_authorization.remote_status == "not_configured"
+    assert loaded.fallback_provider_profiles == ()
+
+
+def test_runtime_profile_state_persists_ordered_summarization_fallback_profiles(
+    tmp_path: Path,
+) -> None:
+    profile = get_alpha_local_profile()
+    state = _state(runtime_paths=_runtime_paths(tmp_path), asr_model_present=True)
+    evaluation = evaluate_setup(profile, state)
+    fallback_profile = default_profile_catalog()[2].stages[2]
+
+    accepted = build_runtime_profile_state(
+        evaluation,
+        fallback_provider_profiles=(
+            StageProviderProfile(
+                stage=fallback_profile.stage,
+                provider=fallback_profile.provider,
+                model=fallback_profile.model,
+                device=fallback_profile.device,
+                policy=fallback_profile.policy,
+                authorization_source="setup_authorized",
+                request_model=fallback_profile.request_model,
+                resolved_model=fallback_profile.resolved_model,
+                model_allowlist_policy=fallback_profile.model_allowlist_policy,
+            ),
+        ),
+    )
+    state_path = persist_runtime_profile_state(accepted, paths=state.runtime_paths)
+    loaded = load_runtime_profile_state(state.runtime_paths)
+
+    assert state_path.is_file()
+    primary_summary = next(
+        stage for stage in loaded.stage_policies if stage.stage == "summarization"
+    )
+    assert primary_summary.model == "llama3.2:3b"
+    assert loaded.fallback_provider_profiles[0].provider == "mistral"
+    assert loaded.fallback_provider_profiles[0].resolved_model == MISTRAL_SUMMARY_RESOLVED_MODEL
 
 
 def test_runtime_profile_state_requires_explicit_local_fallback_authorization() -> None:
@@ -527,6 +584,37 @@ def test_detect_local_installation_state_uses_runner_env_and_configured_paths(
     assert runner.run_calls[0] == ("ollama", "list")
     assert runner.run_envs[0]["OLLAMA_HOST"] == "http://127.0.0.1:11435"
     assert any(call[1] == "-c" and "faster_whisper" in call[2] for call in runner.run_calls)
+
+
+def test_detect_local_installation_state_does_not_consume_generic_mistral_api_key(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    mistral_profile = default_profile_catalog()[2]
+
+    state = detect_local_installation_state(
+        settings,
+        runner=FakeRunner(),
+        command_identity=CommandIdentity(
+            current_executable=Path("/bin/mena"),
+            plain_mena_path=Path("/bin/mena"),
+            version="0.1.0",
+            invocation_mode="installed-product",
+        ),
+        hardware=HardwareFacts(
+            system="Linux",
+            ram_gb=32.0,
+            cuda_available=True,
+            vram_gb=12.0,
+            avx2_available=True,
+        ),
+        profile=mistral_profile,
+        env={"MISTRAL_API_KEY": "generic-key"},
+        python_executable=Path("/target/python"),
+    )
+
+    assert state.mistral.ready is False
+    assert MISTRAL_API_KEY_ENV in state.mistral.detail
 
 
 def test_detect_local_installation_state_probes_surfaces_with_target_interpreter(
@@ -990,6 +1078,7 @@ def _state(
                 else "model llama3.2:3b is not listed by Ollama"
             ),
         ),
+        mistral=MistralReadiness(ready=False, detail="Mistral was not evaluated for tests."),
         asr_model_present=asr_model_present,
         diarization_model_present=diarization_model_present,
         pyannote_token_present=pyannote_token_present,

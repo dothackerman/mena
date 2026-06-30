@@ -19,6 +19,8 @@ from mena.setup import (
     SetupEvaluation,
     SetupPlan,
     SetupProfile,
+    StageProfile,
+    StageProviderProfile,
     SubprocessCommandRunner,
     build_runtime_profile_state,
     default_profile_catalog,
@@ -26,7 +28,13 @@ from mena.setup import (
     evaluate_setup,
     load_runtime_profile_state,
 )
-from mena.summarization import OllamaSummarizationProvider
+from mena.summarization import (
+    MISTRAL_SUMMARY_REQUEST_MODEL,
+    MISTRAL_SUMMARY_RESOLVED_MODEL,
+    MistralSummarizationProvider,
+    OllamaSummarizationProvider,
+    SummarizationProvider,
+)
 from mena.transcription import FasterWhisperTranscriptionProvider
 
 ProviderFactory = Callable[[], Any]
@@ -83,11 +91,10 @@ def select_runtime_profile(
 ) -> RuntimeProfileSelection:
     """Select the accepted or explicit fallback runtime profile for derived artifacts."""
 
-    scope = _runtime_revalidation_scope(required_stages)
     accepted = load_runtime_profile_state(settings.paths)
     catalog = {
         (profile.id, profile.version): profile
-        for profile in default_profile_catalog(_stage_model(accepted, "summarization"))
+        for profile in default_profile_catalog(_accepted_ollama_model(accepted, settings))
     }
     accepted_profile = catalog.get(
         (accepted.accepted_profile_id, accepted.accepted_profile_version)
@@ -97,6 +104,7 @@ def select_runtime_profile(
             "Accepted runtime profile state is incompatible with the bundled profile catalog; "
             "run `mena setup` again."
         )
+    scope = _runtime_revalidation_scope(required_stages, accepted_profile)
 
     command_runner = runner or SubprocessCommandRunner()
     accepted_detection_profile = _profile_for_scope(accepted_profile, scope)
@@ -119,6 +127,16 @@ def select_runtime_profile(
             fallback_used=False,
             current_command_identity=accepted_evaluation.state.command_identity,
             revalidation=accepted_evaluation,
+        )
+    if _accepted_summarization_fallback_available(accepted, scope):
+        return RuntimeProfileSelection(
+            accepted=accepted,
+            actual=accepted,
+            fallback_used=False,
+            current_command_identity=accepted_evaluation.state.command_identity,
+            revalidation=accepted_evaluation,
+            fallback_reason=accepted_failure,
+            fallback_status="available_after_primary_revalidation_failure",
         )
 
     fallback_runtime_state, fallback_evaluation, authorization_source = (
@@ -186,11 +204,17 @@ def select_runtime_profile_after_stage_failure(
     fallback profile rather than from a default. Defaults to the failed stage.
     """
 
-    scope = _runtime_revalidation_scope(revalidation_stages or frozenset({failed_stage}))
     catalog = {
         (profile.id, profile.version): profile
-        for profile in default_profile_catalog(_stage_model(accepted, "summarization"))
+        for profile in default_profile_catalog(_accepted_ollama_model(accepted, settings))
     }
+    accepted_profile = catalog.get(
+        (accepted.accepted_profile_id, accepted.accepted_profile_version)
+    )
+    scope = _runtime_revalidation_scope(
+        revalidation_stages or frozenset({failed_stage}),
+        accepted_profile,
+    )
     fallback_runtime_state, fallback_evaluation, authorization_source = (
         _resolve_authorized_fallback(
             settings=settings,
@@ -366,10 +390,45 @@ def runtime_summarization_provider(
     *,
     settings: AppSettings,
     runtime_state: RuntimeProfileState,
-) -> OllamaSummarizationProvider:
-    return OllamaSummarizationProvider(
-        model=_stage_model(runtime_state, "summarization"),
-        endpoint=settings.local_llm.ollama_endpoint,
+) -> SummarizationProvider:
+    return _summarization_provider_for_stage(
+        settings=settings,
+        stage=_stage_policy(runtime_state, "summarization"),
+    )
+
+
+def runtime_summarization_fallback_providers(
+    *,
+    settings: AppSettings,
+    runtime_state: RuntimeProfileState,
+) -> tuple[SummarizationProvider, ...]:
+    return tuple(
+        _summarization_provider_for_stage(settings=settings, stage=profile)
+        for profile in runtime_state.fallback_provider_profiles
+        if profile.stage == "summarization"
+    )
+
+
+def runtime_state_with_actual_provider(
+    runtime_state: RuntimeProfileState,
+    provider_profile: StageProviderProfile,
+) -> RuntimeProfileState:
+    replacement = StageProfile(
+        stage=provider_profile.stage,
+        provider=provider_profile.provider,
+        model=provider_profile.model,
+        device=provider_profile.device,
+        policy=provider_profile.policy,
+        request_model=provider_profile.request_model,
+        resolved_model=provider_profile.resolved_model,
+        model_allowlist_policy=provider_profile.model_allowlist_policy,
+    )
+    return replace(
+        runtime_state,
+        stage_policies=tuple(
+            replacement if policy.stage == provider_profile.stage else policy
+            for policy in runtime_state.stage_policies
+        ),
     )
 
 
@@ -426,6 +485,10 @@ def store_runtime_profile_provenance(
                 None,
             ),
             "authorization": selection.accepted.fallback_authorization.to_dict(),
+            "provider_profiles": [
+                _stage_provider_profile_payload(profile)
+                for profile in selection.accepted.fallback_provider_profiles
+            ],
         },
         "revalidation": {
             "ready": selection.revalidation.ready,
@@ -448,30 +511,62 @@ def store_runtime_profile_provenance(
     )
 
 
+def _stage_provider_profile_payload(profile: StageProviderProfile) -> dict[str, str]:
+    payload = {
+        "stage": profile.stage,
+        "provider": profile.provider,
+        "model": profile.model,
+        "device": profile.device,
+        "policy": profile.policy,
+        "authorization_source": profile.authorization_source,
+    }
+    if profile.request_model is not None:
+        payload["request_model"] = profile.request_model
+    if profile.resolved_model is not None:
+        payload["resolved_model"] = profile.resolved_model
+    if profile.model_allowlist_policy is not None:
+        payload["model_allowlist_policy"] = profile.model_allowlist_policy
+    return payload
+
+
 def runtime_stage_policy_payload(runtime_state: RuntimeProfileState) -> list[dict[str, str]]:
-    return [
-        {
+    payload: list[dict[str, str]] = []
+    for policy in runtime_state.stage_policies:
+        item = {
             "stage": policy.stage,
             "provider": policy.provider,
             "model": policy.model,
             "device": policy.device,
             "policy": policy.policy,
         }
-        for policy in runtime_state.stage_policies
-    ]
+        if policy.request_model is not None:
+            item["request_model"] = policy.request_model
+        if policy.resolved_model is not None:
+            item["resolved_model"] = policy.resolved_model
+        if policy.model_allowlist_policy is not None:
+            item["model_allowlist_policy"] = policy.model_allowlist_policy
+        payload.append(item)
+    return payload
 
 
 def _runtime_revalidation_scope(
     required_stages: frozenset[str] | None,
+    profile: SetupProfile | None = None,
 ) -> RuntimeRevalidationScope | None:
     if required_stages is None:
         return None
     readiness_ids = {"command:mena"}
     command_names = ["mena"]
     python_surface_imports: set[str] = set()
-    if "summarization" in required_stages or "semantic-review" in required_stages:
+    summarization_provider = _profile_stage_provider(profile, "summarization")
+    if (
+        "summarization" in required_stages
+        and (summarization_provider is None or summarization_provider.lower() == "ollama")
+    ) or "semantic-review" in required_stages:
         readiness_ids.update({"command:ollama", "ollama-model"})
         command_names.append("ollama")
+    if "summarization" in required_stages and summarization_provider == "mistral":
+        readiness_ids.add("mistral-summary-model")
     if "transcription" in required_stages:
         readiness_ids.update({"hardware", "python:faster_whisper", "asr-model"})
         python_surface_imports.add("faster_whisper")
@@ -485,6 +580,15 @@ def _runtime_revalidation_scope(
         python_surface_imports=frozenset(python_surface_imports),
         requires_asr_selection_match="transcription" in required_stages,
     )
+
+
+def _profile_stage_provider(profile: SetupProfile | None, stage: str) -> str | None:
+    if profile is None:
+        return None
+    for policy in profile.stages:
+        if policy.stage == stage:
+            return policy.provider
+    return None
 
 
 def _profile_for_scope(
@@ -534,6 +638,35 @@ def stage_device(runtime_state: RuntimeProfileState, stage: str) -> str | None:
     return None
 
 
+def _summarization_provider_for_stage(
+    *,
+    settings: AppSettings,
+    stage: StageProfile | StageProviderProfile,
+) -> SummarizationProvider:
+    provider = stage.provider.lower()
+    if provider == "ollama":
+        return OllamaSummarizationProvider(
+            model=stage.model,
+            endpoint=settings.local_llm.ollama_endpoint,
+        )
+    if provider == "mistral":
+        return MistralSummarizationProvider(
+            request_model=stage.request_model or MISTRAL_SUMMARY_REQUEST_MODEL,
+            resolved_model=stage.resolved_model or MISTRAL_SUMMARY_RESOLVED_MODEL,
+        )
+    raise ValueError(f"Unsupported summarization provider {stage.provider!r}.")
+
+
+def _stage_policy(runtime_state: RuntimeProfileState, stage: str) -> StageProfile:
+    for policy in runtime_state.stage_policies:
+        if policy.stage == stage:
+            return policy
+    raise ValueError(
+        f"Accepted runtime profile {runtime_state.accepted_profile_id!r} "
+        f"does not define stage {stage!r}."
+    )
+
+
 def _stage_model(runtime_state: RuntimeProfileState, stage: str) -> str:
     for policy in runtime_state.stage_policies:
         if policy.stage == stage:
@@ -542,6 +675,13 @@ def _stage_model(runtime_state: RuntimeProfileState, stage: str) -> str:
         f"Accepted runtime profile {runtime_state.accepted_profile_id!r} "
         f"does not define stage {stage!r}."
     )
+
+
+def _accepted_ollama_model(runtime_state: RuntimeProfileState, settings: AppSettings) -> str:
+    for policy in runtime_state.stage_policies:
+        if policy.provider.lower() == "ollama":
+            return policy.model
+    return settings.local_llm.ollama_model
 
 
 def _runtime_profile_failure(
@@ -567,6 +707,15 @@ def _runtime_profile_failure(
             f"{expected.id}/{expected.checkpoint}/{expected.device}/{expected.compute_type})"
         )
     return None
+
+
+def _accepted_summarization_fallback_available(
+    accepted: RuntimeProfileState,
+    scope: RuntimeRevalidationScope | None,
+) -> bool:
+    if scope is None or scope.stages != {"summarization"}:
+        return False
+    return any(profile.stage == "summarization" for profile in accepted.fallback_provider_profiles)
 
 
 def _fallback_profile(

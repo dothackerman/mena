@@ -113,6 +113,8 @@ from mena.runtime_profile import (
     production_runtime_required,
     runtime_diarization_factory,
     runtime_semantic_factory,
+    runtime_state_with_actual_provider,
+    runtime_summarization_fallback_providers,
     runtime_summarization_provider,
     runtime_transcription_factory,
     select_runtime_profile,
@@ -156,6 +158,7 @@ from mena.setup import (
     ReadinessItem,
     RuntimeProfileState,
     SetupEvaluation,
+    StageProviderProfile,
     SubprocessCommandRunner,
     build_runtime_profile_state,
     default_profile_catalog,
@@ -167,8 +170,12 @@ from mena.setup import (
     persist_runtime_profile_state,
 )
 from mena.summarization import (
+    MISTRAL_SUMMARY_ALLOWLIST_POLICY_ID,
+    MISTRAL_SUMMARY_REQUEST_MODEL,
+    MISTRAL_SUMMARY_RESOLVED_MODEL,
     SummarizationError,
     SummarizationPolicy,
+    SummarizationProviderUnavailable,
     run_summarization_stage,
 )
 from mena.transcription import (
@@ -411,6 +418,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Authorize automatic local runtime fallback when the fallback profile is ready.",
     )
+    setup_parser.add_argument(
+        "--summary-provider",
+        choices=("local", "mistral"),
+        default="local",
+        help="Accepted primary summarization provider for setup state.",
+    )
+    setup_parser.add_argument(
+        "--authorize-mistral-fallback",
+        action="store_true",
+        help="Authorize Mistral as the first accepted summarization fallback provider.",
+    )
     setup_parser.set_defaults(command="setup")
 
     for command in COMMANDS[1:]:
@@ -504,6 +522,8 @@ def main(
             check_only=args.check,
             assume_yes=args.yes,
             authorize_local_fallback=args.authorize_local_fallback,
+            summary_provider=args.summary_provider,
+            authorize_mistral_fallback=args.authorize_mistral_fallback,
             settings=app_settings,
             input_fn=input_fn,
             runner=setup_runner,
@@ -1443,6 +1463,8 @@ def _run_setup_command(
     check_only: bool,
     assume_yes: bool,
     authorize_local_fallback: bool,
+    summary_provider: str,
+    authorize_mistral_fallback: bool,
     settings: AppSettings,
     input_fn: Callable[[str], str] | None,
     runner: CommandRunner | None,
@@ -1450,7 +1472,10 @@ def _run_setup_command(
     hardware: HardwareFacts | None,
 ) -> int:
     command_runner = runner or SubprocessCommandRunner()
-    profile = get_alpha_local_profile(settings.local_llm.ollama_model)
+    profile = _setup_primary_profile(
+        settings=settings,
+        summary_provider=summary_provider,
+    )
     try:
         state = detect_local_installation_state(
             settings,
@@ -1487,12 +1512,22 @@ def _run_setup_command(
         except KeyboardInterrupt:
             print("Setup interrupted; local provider readiness is incomplete.")
             return 1
+        mistral_fallback_profiles = _evaluate_setup_mistral_fallback_profiles(
+            authorize_mistral_fallback=authorize_mistral_fallback,
+            primary_profile=profile,
+            settings=settings,
+            runner=command_runner,
+            command_identity=command_identity,
+            hardware=hardware,
+        )
         accepted_state = build_runtime_profile_state(
             evaluation,
             fallback_evaluation=fallback_evaluation,
             authorize_local_fallback=authorize_local_fallback,
+            fallback_provider_profiles=mistral_fallback_profiles,
         )
         state_path = persist_runtime_profile_state(accepted_state, paths=settings.paths)
+        _print_mistral_setup_disclaimer(accepted_state)
         _print_runtime_fallback_authorization_notice(accepted_state)
         print(f"Accepted runtime profile state: {state_path}")
         return 0
@@ -1562,15 +1597,117 @@ def _run_setup_command(
         except KeyboardInterrupt:
             print("Setup interrupted; local provider readiness is incomplete.")
             return 1
+        mistral_fallback_profiles = _evaluate_setup_mistral_fallback_profiles(
+            authorize_mistral_fallback=authorize_mistral_fallback,
+            primary_profile=profile,
+            settings=settings,
+            runner=command_runner,
+            command_identity=command_identity,
+            hardware=hardware,
+        )
         accepted_state = build_runtime_profile_state(
             refreshed_evaluation,
             fallback_evaluation=fallback_evaluation,
             authorize_local_fallback=authorize_local_fallback,
+            fallback_provider_profiles=mistral_fallback_profiles,
         )
         state_path = persist_runtime_profile_state(accepted_state, paths=settings.paths)
+        _print_mistral_setup_disclaimer(accepted_state)
         _print_runtime_fallback_authorization_notice(accepted_state)
         print(f"Accepted runtime profile state: {state_path}")
     return 0 if final_ready else 1
+
+
+def _setup_primary_profile(*, settings: AppSettings, summary_provider: str) -> Any:
+    if summary_provider == "local":
+        return get_alpha_local_profile(settings.local_llm.ollama_model)
+    if summary_provider == "mistral":
+        for profile in default_profile_catalog(settings.local_llm.ollama_model):
+            if any(
+                stage.stage == "summarization" and stage.provider.lower() == "mistral"
+                for stage in profile.stages
+            ):
+                return profile
+    raise ValueError(f"Unsupported summary provider {summary_provider!r}.")
+
+
+def _evaluate_setup_mistral_fallback_profiles(
+    *,
+    authorize_mistral_fallback: bool,
+    primary_profile: Any,
+    settings: AppSettings,
+    runner: CommandRunner,
+    command_identity: CommandIdentity | None,
+    hardware: HardwareFacts | None,
+) -> tuple[StageProviderProfile, ...]:
+    if not authorize_mistral_fallback:
+        return ()
+    primary_summary = next(
+        (stage for stage in primary_profile.stages if stage.stage == "summarization"),
+        None,
+    )
+    if primary_summary is None or primary_summary.provider.lower() == "mistral":
+        return ()
+    mistral_profile = _mistral_summary_catalog_profile(settings)
+    mistral_state = detect_local_installation_state(
+        settings,
+        runner=runner,
+        command_identity=command_identity,
+        hardware=hardware,
+        profile=mistral_profile,
+    )
+    mistral_evaluation = evaluate_setup(mistral_profile, mistral_state)
+    if not mistral_state.mistral.ready:
+        print(f"Mistral summarization fallback was not authorized: {mistral_state.mistral.detail}")
+        return ()
+    if not mistral_evaluation.ready:
+        print(
+            "Mistral summarization fallback was not authorized because its profile is "
+            "not currently ready."
+        )
+        return ()
+    return (
+        StageProviderProfile(
+            stage="summarization",
+            provider="mistral",
+            model=MISTRAL_SUMMARY_REQUEST_MODEL,
+            device="remote-api",
+            policy="direct Mistral summarization fallback, fixed allow-listed model",
+            authorization_source="setup_authorized",
+            request_model=MISTRAL_SUMMARY_REQUEST_MODEL,
+            resolved_model=MISTRAL_SUMMARY_RESOLVED_MODEL,
+            model_allowlist_policy=MISTRAL_SUMMARY_ALLOWLIST_POLICY_ID,
+        ),
+    )
+
+
+def _mistral_summary_catalog_profile(settings: AppSettings) -> Any:
+    for profile in default_profile_catalog(settings.local_llm.ollama_model):
+        if any(
+            stage.stage == "summarization" and stage.provider.lower() == "mistral"
+            for stage in profile.stages
+        ):
+            return profile
+    raise ValueError("Bundled catalog does not define a Mistral summarization profile.")
+
+
+def _print_mistral_setup_disclaimer(state: RuntimeProfileState) -> None:
+    uses_mistral = any(
+        stage.stage == "summarization" and stage.provider.lower() == "mistral"
+        for stage in state.stage_policies
+    ) or any(
+        profile.stage == "summarization" and profile.provider.lower() == "mistral"
+        for profile in state.fallback_provider_profiles
+    )
+    if not uses_mistral:
+        return
+    print(
+        "Mistral summarization notice: transcript text selected for summarization and "
+        "included manual notes are sent to the user's configured Mistral account. "
+        "Mistral use may incur API charges; account, ZDR, funds, quota, legal, and "
+        "workspace posture remain the operator's responsibility. Summary artifacts and "
+        "runtime provenance record when Mistral is used."
+    )
 
 
 def _evaluate_setup_fallback_authorization(
@@ -1792,25 +1929,49 @@ def _run_summarize_command(
         settings=settings,
         runtime_state=runtime_selection.actual,
     )
+    ledger = ProcessingStageLedger(
+        store=store,
+        session_id=session_id,
+        run_id=run_id,
+    )
+    policy = SummarizationPolicy(language=summary_language)
+    attempt = 1
     try:
-        result = run_summarization_stage(
-            store=store,
-            ledger=ProcessingStageLedger(
+        try:
+            result = run_summarization_stage(
                 store=store,
-                session_id=session_id,
+                ledger=ledger,
+                merged_transcript_record=merged_transcript_record,
+                correction_overlay_record=resolved_overlay[0],
+                manual_notes_record=manual_notes_record,
+                provider=provider,
+                policy=policy,
+                attempt=attempt,
+            )
+        except SummarizationProviderUnavailable as exc:
+            fallback_providers = runtime_summarization_fallback_providers(
+                settings=settings,
+                runtime_state=runtime_selection.accepted,
+            )
+            if not fallback_providers:
+                raise
+            result = _run_summarization_fallback_chain(
+                store=store,
+                ledger=ledger,
+                runtime_selection=runtime_selection,
                 run_id=run_id,
-            ),
-            merged_transcript_record=merged_transcript_record,
-            correction_overlay_record=resolved_overlay[0],
-            manual_notes_record=manual_notes_record,
-            provider=provider,
-            policy=SummarizationPolicy(language=summary_language),
-        )
+                primary_error=exc,
+                fallback_providers=fallback_providers,
+                merged_transcript_record=merged_transcript_record,
+                correction_overlay_record=resolved_overlay[0],
+                manual_notes_record=manual_notes_record,
+                policy=policy,
+            )
     finally:
         _record_terminal_local_llm_release(
             store=store,
             run_id=run_id,
-            attempt=1,
+            attempt=attempt,
             provider=provider,
             stage="summarization",
             boundary="summarize",
@@ -1818,6 +1979,62 @@ def _run_summarize_command(
 
     print(f"Summary written to: {result.summary_record.path}")
     return 0
+
+
+def _run_summarization_fallback_chain(
+    *,
+    store: FileSystemArtifactStore,
+    ledger: ProcessingStageLedger,
+    runtime_selection: RuntimeProfileSelection,
+    run_id: str,
+    primary_error: SummarizationProviderUnavailable,
+    fallback_providers: tuple[Any, ...],
+    merged_transcript_record: ArtifactRecord,
+    correction_overlay_record: ArtifactRecord,
+    manual_notes_record: ArtifactRecord | None,
+    policy: SummarizationPolicy,
+) -> Any:
+    last_error: SummarizationProviderUnavailable = primary_error
+    fallback_profiles = tuple(
+        profile
+        for profile in runtime_selection.accepted.fallback_provider_profiles
+        if profile.stage == "summarization"
+    )
+    for index, fallback_provider in enumerate(fallback_providers, start=1):
+        profile = fallback_profiles[index - 1]
+        fallback_attempt = index + 1
+        fallback_selection = RuntimeProfileSelection(
+            accepted=runtime_selection.accepted,
+            actual=runtime_state_with_actual_provider(runtime_selection.accepted, profile),
+            fallback_used=True,
+            current_command_identity=runtime_selection.current_command_identity,
+            revalidation=runtime_selection.revalidation,
+            fallback_reason=str(primary_error),
+            fallback_status="used_after_stage_failure",
+            fallback_failed_stage="summarization",
+            fallback_authorization_source=profile.authorization_source,
+        )
+        store_runtime_profile_provenance(
+            store=store,
+            run_id=run_id,
+            attempt=fallback_attempt,
+            selection=fallback_selection,
+            name_suffix=f"fallback-{index}",
+        )
+        try:
+            return run_summarization_stage(
+                store=store,
+                ledger=ledger,
+                merged_transcript_record=merged_transcript_record,
+                correction_overlay_record=correction_overlay_record,
+                manual_notes_record=manual_notes_record,
+                provider=fallback_provider,
+                policy=policy,
+                attempt=fallback_attempt,
+            )
+        except SummarizationProviderUnavailable as exc:
+            last_error = exc
+    raise last_error
 
 
 def _run_export_command(

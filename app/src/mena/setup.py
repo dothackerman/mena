@@ -19,6 +19,14 @@ from typing import Protocol
 from mena import __version__
 from mena.local_llm import OLLAMA_DEFAULT_MODEL
 from mena.settings import CONFIG_FILENAME, AppSettings, RuntimePaths
+from mena.summarization import (
+    MISTRAL_API_KEY_ENV,
+    MISTRAL_SUMMARY_ALLOWLIST_POLICY_ID,
+    MISTRAL_SUMMARY_REQUEST_MODEL,
+    MISTRAL_SUMMARY_RESOLVED_MODEL,
+    MistralReadiness,
+    MistralSummarizationProvider,
+)
 from mena.transcription import (
     FasterWhisperModelProfile,
     HardwareSnapshot,
@@ -42,6 +50,8 @@ LOCAL_FALLBACK_STATUSES = frozenset(
     {"not_configured", "configured_unauthorized", "authorized", "unavailable"}
 )
 REMOTE_FALLBACK_STATUSES = frozenset({"not_configured", "configured_unauthorized", "authorized"})
+MISTRAL_SUMMARY_PROFILE_ID = "linux-alpha-mistral-summary-v1"
+MISTRAL_SUMMARY_PROFILE_VERSION = "2026.06"
 
 
 @dataclass(frozen=True)
@@ -124,6 +134,24 @@ class StageProfile:
     model: str
     device: str
     policy: str
+    request_model: str | None = None
+    resolved_model: str | None = None
+    model_allowlist_policy: str | None = None
+
+
+@dataclass(frozen=True)
+class StageProviderProfile:
+    """Accepted ordered fallback provider profile for one runtime stage."""
+
+    stage: str
+    provider: str
+    model: str
+    device: str
+    policy: str
+    authorization_source: str
+    request_model: str | None = None
+    resolved_model: str | None = None
+    model_allowlist_policy: str | None = None
 
 
 @dataclass(frozen=True)
@@ -217,6 +245,7 @@ class LocalInstallationState:
     playback_commands: tuple[CommandCheck, ...]
     python_surfaces: tuple[PythonSurfaceCheck, ...]
     ollama: OllamaState
+    mistral: MistralReadiness
     asr_model_present: bool | None
     diarization_model_present: bool | None
     pyannote_token_present: bool
@@ -292,6 +321,7 @@ class RuntimeProfileState:
     evidence_digest: str
     evidence: Mapping[str, object]
     fallback_authorization: RuntimeFallbackAuthorization
+    fallback_provider_profiles: tuple[StageProviderProfile, ...]
 
     @classmethod
     def from_dict(cls, data: object) -> RuntimeProfileState:
@@ -315,6 +345,9 @@ class RuntimeProfileState:
             fallback_authorization=RuntimeFallbackAuthorization.from_dict(
                 data.get("fallback_authorization")
             ),
+            fallback_provider_profiles=_stage_provider_profiles_from_dicts(
+                data.get("fallback_provider_profiles")
+            ),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -331,6 +364,10 @@ class RuntimeProfileState:
             "evidence_digest": self.evidence_digest,
             "evidence": dict(self.evidence),
             "fallback_authorization": self.fallback_authorization.to_dict(),
+            "fallback_provider_profiles": [
+                _stage_provider_profile_to_dict(profile)
+                for profile in self.fallback_provider_profiles
+            ],
         }
 
 
@@ -520,6 +557,61 @@ def default_profile_catalog(ollama_model: str = OLLAMA_DEFAULT_MODEL) -> tuple[S
             minimum_cuda_vram_gb=0.0,
             fallback=True,
         ),
+        SetupProfile(
+            id=MISTRAL_SUMMARY_PROFILE_ID,
+            version=MISTRAL_SUMMARY_PROFILE_VERSION,
+            catalog_version=RUNTIME_PROFILE_CATALOG_VERSION,
+            name="Linux alpha Mistral summarization profile",
+            stages=(
+                StageProfile(
+                    stage="transcription",
+                    provider="faster-whisper",
+                    model="hardware-selected Whisper profile",
+                    device="hardware-selected",
+                    policy="local-only",
+                ),
+                StageProfile(
+                    stage="diarization",
+                    provider="pyannote.audio",
+                    model=PYANNOTE_COMMUNITY_CHECKPOINT,
+                    device="hardware-selected",
+                    policy="local-only",
+                ),
+                StageProfile(
+                    stage="summarization",
+                    provider="mistral",
+                    model=MISTRAL_SUMMARY_REQUEST_MODEL,
+                    device="remote-api",
+                    policy="direct Mistral summarization, fixed allow-listed model",
+                    request_model=MISTRAL_SUMMARY_REQUEST_MODEL,
+                    resolved_model=MISTRAL_SUMMARY_RESOLVED_MODEL,
+                    model_allowlist_policy=MISTRAL_SUMMARY_ALLOWLIST_POLICY_ID,
+                ),
+                StageProfile(
+                    stage="semantic-review",
+                    provider="Ollama",
+                    model=ollama_model,
+                    device="local-service",
+                    policy="local-preferred, remote fallback not configured by setup",
+                ),
+            ),
+            python_surfaces=(
+                PythonSurfaceRequirement(
+                    label="faster-whisper",
+                    import_name="faster_whisper",
+                    install_extra="asr",
+                ),
+                PythonSurfaceRequirement(
+                    label="pyannote.audio",
+                    import_name="pyannote.audio",
+                    install_extra="diarization",
+                ),
+            ),
+            required_commands=REQUIRED_COMMANDS,
+            playback_commands=PLAYBACK_COMMANDS,
+            minimum_ram_gb=MINIMUM_RAM_GB,
+            minimum_cuda_vram_gb=MINIMUM_CUDA_VRAM_GB,
+        ),
     )
 
 
@@ -607,7 +699,7 @@ def detect_local_installation_state(
         )
         for requirement in evaluated_profile.python_surfaces
     )
-    if _profile_has_any_stage(evaluated_profile, {"summarization", "semantic-review"}):
+    if _profile_has_ollama_stage(evaluated_profile):
         ollama = _detect_ollama_state(
             settings=settings,
             model=_local_llm_model(evaluated_profile),
@@ -616,6 +708,11 @@ def detect_local_installation_state(
         )
     else:
         ollama = _not_evaluated_ollama_state(settings)
+    mistral = (
+        _detect_mistral_state(current_env)
+        if _profile_has_mistral_summary(evaluated_profile)
+        else MistralReadiness(ready=False, detail="Mistral was not evaluated for this profile.")
+    )
     asr_model_present = (
         _detect_asr_model_present(
             runner=command_runner,
@@ -645,6 +742,7 @@ def detect_local_installation_state(
         playback_commands=playback_commands,
         python_surfaces=surfaces,
         ollama=ollama,
+        mistral=mistral,
         asr_model_present=asr_model_present,
         diarization_model_present=diarization_model_present,
         pyannote_token_present=bool(
@@ -679,8 +777,10 @@ def evaluate_setup(
     _evaluate_required_commands(profile, state, readiness, actions)
     _evaluate_playback_commands(state, readiness, actions)
     _evaluate_python_surfaces(state, readiness, actions)
-    if _profile_has_any_stage(profile, {"summarization", "semantic-review"}):
+    if _profile_has_ollama_stage(profile):
         _evaluate_ollama_model(state, readiness, actions)
+    if _profile_has_mistral_summary(profile):
+        _evaluate_mistral_summary(state, readiness, actions)
     if _profile_has_stage(profile, "transcription"):
         _evaluate_asr_model(state, selected_asr_profile, readiness, actions)
     if _profile_has_stage(profile, "diarization"):
@@ -782,6 +882,7 @@ def build_runtime_profile_state(
     accepted_at: datetime | None = None,
     fallback_evaluation: SetupEvaluation | None = None,
     authorize_local_fallback: bool = False,
+    fallback_provider_profiles: Sequence[StageProviderProfile] = (),
 ) -> RuntimeProfileState:
     """Build persisted state from an already-ready setup evaluation."""
 
@@ -809,6 +910,7 @@ def build_runtime_profile_state(
             fallback_evaluation=fallback_evaluation,
             authorize_local_fallback=authorize_local_fallback,
         ),
+        fallback_provider_profiles=tuple(fallback_provider_profiles),
     )
 
 
@@ -892,6 +994,13 @@ def runtime_evidence_to_dict(state: LocalInstallationState) -> dict[str, object]
             "reachable": state.ollama.reachable,
             "model_present": state.ollama.model_present,
             "detail": state.ollama.detail,
+        },
+        "mistral": {
+            "request_model": state.mistral.request_model,
+            "resolved_model": state.mistral.resolved_model,
+            "allowlist_policy": state.mistral.allowlist_policy,
+            "ready": state.mistral.ready,
+            "detail": state.mistral.detail,
         },
         "models": {
             "asr_model_present": state.asr_model_present,
@@ -1163,6 +1272,33 @@ def _evaluate_ollama_model(
         )
 
 
+def _evaluate_mistral_summary(
+    state: LocalInstallationState,
+    readiness: list[ReadinessItem],
+    actions: list[SetupAction],
+) -> None:
+    readiness.append(
+        ReadinessItem(
+            id="mistral-summary-model",
+            label=f"Mistral model {state.mistral.request_model}",
+            ready=state.mistral.ready,
+            detail=state.mistral.detail,
+        )
+    )
+    if not state.mistral.ready and f"{MISTRAL_API_KEY_ENV} is required" in state.mistral.detail:
+        actions.append(
+            SetupAction(
+                id="mistral-summary-model",
+                label="Configure Mistral summarization API key",
+                mode="manual",
+                detail=(
+                    f"Expose {MISTRAL_API_KEY_ENV} for the installed product environment; "
+                    "generic MISTRAL_API_KEY is not consumed."
+                ),
+            )
+        )
+
+
 def _evaluate_asr_model(
     state: LocalInstallationState,
     selected_asr_profile: FasterWhisperModelProfile,
@@ -1370,6 +1506,11 @@ def _not_evaluated_ollama_state(settings: AppSettings) -> OllamaState:
     )
 
 
+def _detect_mistral_state(env: Mapping[str, str]) -> MistralReadiness:
+    provider = MistralSummarizationProvider(api_key=env.get(MISTRAL_API_KEY_ENV))
+    return provider.readiness()
+
+
 def _detect_ram_gb() -> float | None:
     try:
         pages = os.sysconf("SC_PHYS_PAGES")
@@ -1470,11 +1611,9 @@ def _stage_model(profile: SetupProfile | RuntimeProfileState, stage: str) -> str
 
 
 def _local_llm_model(profile: SetupProfile) -> str:
-    for stage in ("summarization", "semantic-review"):
-        try:
-            return _stage_model(profile, stage)
-        except ValueError:
-            continue
+    for policy in profile.stages:
+        if policy.provider.lower() == "ollama":
+            return policy.model
     raise ValueError(f"Profile {profile!r} does not define a local LLM stage.")
 
 
@@ -1499,6 +1638,17 @@ def _profile_has_stage(profile: SetupProfile, stage: str) -> bool:
 
 def _profile_has_any_stage(profile: SetupProfile, stages: set[str]) -> bool:
     return any(policy.stage in stages for policy in profile.stages)
+
+
+def _profile_has_ollama_stage(profile: SetupProfile) -> bool:
+    return any(policy.provider.lower() == "ollama" for policy in profile.stages)
+
+
+def _profile_has_mistral_summary(profile: SetupProfile) -> bool:
+    return any(
+        policy.stage == "summarization" and policy.provider.lower() == "mistral"
+        for policy in profile.stages
+    )
 
 
 def _profile_requires_hardware_gate(profile: SetupProfile) -> bool:
@@ -1916,9 +2066,39 @@ def _stage_profiles_from_dicts(data: object) -> tuple[StageProfile, ...]:
                 model=_required_str(item, "model"),
                 device=_required_str(item, "device"),
                 policy=_required_str(item, "policy"),
+                request_model=_optional_str(item, "request_model"),
+                resolved_model=_optional_str(item, "resolved_model"),
+                model_allowlist_policy=_optional_str(item, "model_allowlist_policy"),
             )
         )
     return tuple(stages)
+
+
+def _stage_provider_profiles_from_dicts(data: object) -> tuple[StageProviderProfile, ...]:
+    if data is None:
+        return ()
+    if not isinstance(data, list):
+        raise ValueError("Runtime profile state fallback_provider_profiles must be an array.")
+    profiles: list[StageProviderProfile] = []
+    for item in data:
+        if not isinstance(item, dict):
+            raise ValueError(
+                "Runtime profile state fallback_provider_profiles entries must be objects."
+            )
+        profiles.append(
+            StageProviderProfile(
+                stage=_required_str(item, "stage"),
+                provider=_required_str(item, "provider"),
+                model=_required_str(item, "model"),
+                device=_required_str(item, "device"),
+                policy=_required_str(item, "policy"),
+                authorization_source=_required_str(item, "authorization_source"),
+                request_model=_optional_str(item, "request_model"),
+                resolved_model=_optional_str(item, "resolved_model"),
+                model_allowlist_policy=_optional_str(item, "model_allowlist_policy"),
+            )
+        )
+    return tuple(profiles)
 
 
 def _readiness_items_from_dicts(data: object) -> tuple[ReadinessItem, ...]:
@@ -1955,13 +2135,38 @@ def _asr_profile_from_dict(data: object) -> FasterWhisperModelProfile:
 
 
 def _stage_profile_to_dict(stage: StageProfile) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "stage": stage.stage,
         "provider": stage.provider,
         "model": stage.model,
         "device": stage.device,
         "policy": stage.policy,
     }
+    if stage.request_model is not None:
+        payload["request_model"] = stage.request_model
+    if stage.resolved_model is not None:
+        payload["resolved_model"] = stage.resolved_model
+    if stage.model_allowlist_policy is not None:
+        payload["model_allowlist_policy"] = stage.model_allowlist_policy
+    return payload
+
+
+def _stage_provider_profile_to_dict(profile: StageProviderProfile) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "stage": profile.stage,
+        "provider": profile.provider,
+        "model": profile.model,
+        "device": profile.device,
+        "policy": profile.policy,
+        "authorization_source": profile.authorization_source,
+    }
+    if profile.request_model is not None:
+        payload["request_model"] = profile.request_model
+    if profile.resolved_model is not None:
+        payload["resolved_model"] = profile.resolved_model
+    if profile.model_allowlist_policy is not None:
+        payload["model_allowlist_policy"] = profile.model_allowlist_policy
+    return payload
 
 
 def _readiness_item_to_dict(item: ReadinessItem) -> dict[str, object]:
