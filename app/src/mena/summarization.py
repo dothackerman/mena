@@ -37,6 +37,7 @@ from mena.processing import (
     ProcessingStageState,
 )
 from mena.runtime_stewardship import RuntimeLease, RuntimeReleaseResult
+from mena.settings import SettingsError, normalize_summary_language
 
 SUMMARY_ARTIFACT_TYPE = "summary"
 SUMMARY_ARTIFACT_VERSION = 1
@@ -46,8 +47,9 @@ MANUAL_NOTES_CONTRACT = "manual-notes.raw"
 SUMMARIZATION_STAGE = "summarization"
 SUMMARIZATION_POLICY_VERSION = 1
 LEGACY_PROMPT_POLICY = "meeting-summary-json-v1"
-PROMPT_POLICY = "meeting-summary-json-schema-v1"
-SUPPORTED_PROMPT_POLICIES = frozenset({LEGACY_PROMPT_POLICY, PROMPT_POLICY})
+SCHEMA_PROMPT_POLICY = "meeting-summary-json-schema-v1"
+PROMPT_POLICY = "meeting-summary-json-schema-language-output-v2"
+SUPPORTED_PROMPT_POLICIES = frozenset({LEGACY_PROMPT_POLICY, SCHEMA_PROMPT_POLICY, PROMPT_POLICY})
 DEFAULT_LANGUAGE = "en"
 SUMMARY_RESPONSE_SCHEMA: dict[str, object] = {
     "type": "object",
@@ -105,6 +107,16 @@ class SummarizationPolicy:
     prompt_policy: str = PROMPT_POLICY
     language: str = DEFAULT_LANGUAGE
     include_manual_notes: bool = True
+
+    def __post_init__(self) -> None:
+        try:
+            language = normalize_summary_language(
+                self.language,
+                "Summarization policy language",
+            )
+        except SettingsError as exc:
+            raise SummarizationContractError(str(exc)) from exc
+        object.__setattr__(self, "language", language)
 
     @classmethod
     def from_dict(cls, data: object) -> Self:
@@ -269,7 +281,8 @@ class OllamaSummarizationProvider:
                         "You summarize meeting transcripts into strict JSON. Return only keys "
                         "timeline (array of strings), important_points (array of strings), "
                         "action_items (array of objects with text, owner, due), and "
-                        "general_summary (string). Be faithful to the transcript and manual notes."
+                        "general_summary (string). Be faithful to the transcript and manual notes. "
+                        f"Write every user-facing summary field in {request.policy.language}."
                     ),
                 },
                 {"role": "user", "content": _prompt(request)},
@@ -755,6 +768,7 @@ def _summary_artifact_name(
 
 
 def _prompt(request: SummarizationRequest) -> str:
+    output_language_instruction = _output_language_instruction(request.policy.language)
     return json.dumps(
         {
             "task": "meeting_summary",
@@ -772,6 +786,7 @@ def _prompt(request: SummarizationRequest) -> str:
             },
             "manual_notes": request.manual_notes,
             "instructions": {
+                "output_language": output_language_instruction,
                 "timeline": "Chronological account of the meeting.",
                 "important_points": "Key takeaways; weight manual notes when present.",
                 "action_items": "Tasks as objects with text, owner, and due fields.",
@@ -780,6 +795,13 @@ def _prompt(request: SummarizationRequest) -> str:
         },
         ensure_ascii=False,
         sort_keys=True,
+    )
+
+
+def _output_language_instruction(language: str) -> str:
+    return (
+        f"Write all user-facing strings in {language}: timeline entries, important points, "
+        "action item text, generated owner/due wording, and the general summary."
     )
 
 

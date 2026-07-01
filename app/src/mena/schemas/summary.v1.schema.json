@@ -74,7 +74,11 @@
           "type": "integer"
         },
         "prompt_policy": {
-          "enum": ["meeting-summary-json-v1", "meeting-summary-json-schema-v1"],
+          "enum": [
+            "meeting-summary-json-v1",
+            "meeting-summary-json-schema-v1",
+            "meeting-summary-json-schema-language-output-v2"
+          ],
           "type": "string"
         }
       },
@@ -110,7 +114,11 @@
           "type": "string"
         },
         "prompt_policy": {
-          "enum": ["meeting-summary-json-v1", "meeting-summary-json-schema-v1"],
+          "enum": [
+            "meeting-summary-json-v1",
+            "meeting-summary-json-schema-v1",
+            "meeting-summary-json-schema-language-output-v2"
+          ],
           "type": "string"
         }
       },

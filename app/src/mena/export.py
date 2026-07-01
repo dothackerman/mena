@@ -17,8 +17,8 @@ from mena.summarization import (
 from mena.summary_markdown import format_summary_markdown
 
 SUMMARY_MARKDOWN_EXPORT_ARTIFACT_TYPE = "summary_markdown_export"
-SUMMARY_MARKDOWN_EXPORT_ARTIFACT_VERSION = 1
-SUMMARY_MARKDOWN_EXPORT_CONTRACT = "summary-markdown.v1"
+SUMMARY_MARKDOWN_EXPORT_ARTIFACT_VERSION = 2
+SUMMARY_MARKDOWN_EXPORT_CONTRACT = "summary-markdown-language-chrome-v2"
 
 
 class SummaryMarkdownExportError(RuntimeError):
@@ -224,7 +224,11 @@ def _artifact_reference_metadata(
 def _export_artifact_name(*, summary_record: ArtifactRecord, summary: SummaryArtifact) -> Path:
     created_at_token = _format_timestamp(summary.created_at)
     normalized_path = Path(summary_record.path).as_posix().replace("/", "_")
-    return Path("summary_markdown") / f"{created_at_token}-{normalized_path}.md"
+    return (
+        Path("summary_markdown")
+        / SUMMARY_MARKDOWN_EXPORT_CONTRACT
+        / f"{created_at_token}-{normalized_path}.md"
+    )
 
 
 def _summary_created_at(summary: SummaryArtifact) -> datetime:

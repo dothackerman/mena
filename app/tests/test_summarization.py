@@ -29,6 +29,8 @@ from mena.merge_timing import (
 from mena.processing import ArtifactRef, ProcessingStageLedger
 from mena.runtime_stewardship import RuntimeLease
 from mena.summarization import (
+    PROMPT_POLICY,
+    SCHEMA_PROMPT_POLICY,
     SUMMARIZATION_STAGE,
     FakeSummarizationProvider,
     OllamaSummarizationProvider,
@@ -40,6 +42,7 @@ from mena.summarization import (
     SummaryActionItem,
     SummaryArtifact,
     SummaryResult,
+    persist_summary_artifact,
     run_summarization_stage,
 )
 
@@ -73,6 +76,8 @@ def test_summarization_stage_persists_summary_and_checkpoint(tmp_path: Path) -> 
     Draft202012Validator(_load_summary_schema(), format_checker=FormatChecker()).validate(payload)
     artifact = SummaryArtifact.from_dict(payload)
     assert artifact.provider.name == "fake"
+    assert artifact.policy["prompt_policy"] == PROMPT_POLICY
+    assert artifact.provider.prompt_policy == PROMPT_POLICY
     assert "provider_config_id" not in artifact.policy
     assert artifact.timeline == ("Discussed database migration before Friday.",)
     assert artifact.action_items[0].owner == "You"
@@ -207,6 +212,71 @@ def test_summarization_stage_reuses_verified_completed_output() -> None:
     assert second.skipped is True
     assert second.skip_reason == "completed_output_reused"
     assert second.summary_record == first.summary_record
+
+
+def test_summarization_stage_does_not_reuse_old_prompt_policy_completed_output() -> None:
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    merged_record = _persist_merged_transcript(store=store)
+    ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+    old_result = _summary_result()
+    old_provider_metadata = replace(
+        FakeSummarizationProvider(result=old_result).metadata,
+        prompt_policy=SCHEMA_PROMPT_POLICY,
+    )
+    old_artifact = SummaryArtifact(
+        version=1,
+        session_id=SESSION_ID,
+        merged_transcript_artifact=ArtifactRef.from_record(merged_record),
+        manual_notes_artifact=None,
+        policy={
+            "policy_version": 1,
+            "prompt_policy": SCHEMA_PROMPT_POLICY,
+            "language": "de",
+            "include_manual_notes": True,
+        },
+        provider=old_provider_metadata,
+        timeline=old_result.timeline,
+        important_points=old_result.important_points,
+        action_items=old_result.action_items,
+        general_summary=old_result.general_summary,
+        created_at="2026-05-18T17:00:00Z",
+    )
+    old_record = persist_summary_artifact(
+        store=store,
+        artifact=old_artifact,
+        correction_overlay_record=None,
+        name="summary/old-prompt-policy.json",
+    )
+    input_artifacts = (ArtifactRef.from_record(merged_record),)
+    running = ledger.mark_running(
+        stage=SUMMARIZATION_STAGE,
+        input_artifacts=input_artifacts,
+        now=NOW,
+    )
+    ledger.mark_completed(
+        stage=SUMMARIZATION_STAGE,
+        input_artifacts=input_artifacts,
+        output_artifacts=(ArtifactRef.from_record(old_record),),
+        started_at=running.started_at,
+        now=NOW,
+    )
+    provider = FakeSummarizationProvider(result=_summary_result())
+
+    result = run_summarization_stage(
+        store=store,
+        ledger=ledger,
+        merged_transcript_record=merged_record,
+        provider=provider,
+        policy=SummarizationPolicy(language="de"),
+        now=NOW,
+    )
+
+    assert result.skipped is False
+    assert len(provider.requests) == 1
+    assert result.summary_record.id != old_record.id
+    assert result.summary.policy["prompt_policy"] == PROMPT_POLICY
+    assert result.summary.provider.prompt_policy == PROMPT_POLICY
+    assert len(store.list(artifact_type="summary")) == 2
 
 
 def test_summarization_stage_reuse_ignores_manual_notes_when_policy_excludes_them() -> None:
@@ -640,6 +710,30 @@ def test_ollama_summarization_provider_parses_strict_json_response(
     assert result.general_summary == "The meeting focused on database migration risk."
 
 
+def test_ollama_summarization_provider_instructs_non_english_output_language(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OllamaSummarizationProvider(model="test-model")
+
+    def fake_post_json(path: str, payload: object) -> dict[str, object]:
+        assert isinstance(payload, dict)
+        messages = cast(list[dict[str, str]], payload["messages"])
+        assert "Write every user-facing summary field in de." in messages[0]["content"]
+        instructions = json.loads(messages[1]["content"])["instructions"]
+        assert instructions["output_language"] == (
+            "Write all user-facing strings in de: timeline entries, important points, "
+            "action item text, generated owner/due wording, and the general summary."
+        )
+        return {"message": {"content": json.dumps(_summary_result().to_dict())}}
+
+    monkeypatch.setattr(provider, "_post_json", fake_post_json)
+
+    request = replace(_summary_request(), policy=SummarizationPolicy(language="de"))
+    result = provider.summarize(request)
+
+    assert result.general_summary == "The meeting focused on database migration risk."
+
+
 def test_ollama_summarization_provider_rejects_invalid_json_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -687,6 +781,7 @@ def test_ollama_summarization_provider_preserves_raw_output_on_contract_failure(
 
 def test_summarization_policy_and_result_validate_contract() -> None:
     assert "provider_config_id" not in SummarizationPolicy(language="en").to_dict()
+    assert SummarizationPolicy(language="de_CH").language == "de-CH"
 
     with pytest.raises(SummarizationContractError, match="Unsupported summarization prompt"):
         SummarizationPolicy.from_dict(
@@ -768,6 +863,15 @@ def test_summary_artifact_from_dict_accepts_legacy_prompt_policy() -> None:
     assert loaded.policy["prompt_policy"] == "meeting-summary-json-v1"
     assert loaded.provider.prompt_policy == "meeting-summary-json-v1"
     Draft202012Validator(_load_summary_schema(), format_checker=FormatChecker()).validate(payload)
+
+    payload = artifact.to_dict()
+    cast(dict[str, object], payload["policy"])["prompt_policy"] = SCHEMA_PROMPT_POLICY
+    cast(dict[str, object], payload["provider"])["prompt_policy"] = SCHEMA_PROMPT_POLICY
+
+    loaded = SummaryArtifact.from_dict(payload)
+
+    assert loaded.policy["prompt_policy"] == SCHEMA_PROMPT_POLICY
+    assert loaded.provider.prompt_policy == SCHEMA_PROMPT_POLICY
 
 
 def test_summary_schema_validates_contract() -> None:

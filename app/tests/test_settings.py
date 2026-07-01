@@ -9,6 +9,7 @@ from mena.settings import (
     SUMMARY_LANGUAGE_ENV_VAR,
     AppSettings,
     SettingsError,
+    normalize_summary_language,
     resolve_runtime_paths,
 )
 
@@ -134,6 +135,21 @@ model = "mistral:7b"
     assert settings.summary.language == "de-CH"
     assert settings.local_llm.ollama_endpoint == "http://127.0.0.1:11435"
     assert settings.local_llm.ollama_model == "mistral:7b"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("de_CH", "de-CH"),
+        ("DE-CH", "de-CH"),
+        ("en", "en"),
+    ],
+)
+def test_normalize_summary_language_canonicalizes_supported_codes(
+    raw: str,
+    expected: str,
+) -> None:
+    assert normalize_summary_language(raw, "summary language") == expected
 
 
 def test_app_settings_environment_overrides_config_file(tmp_path: Path) -> None:
