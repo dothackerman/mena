@@ -29,6 +29,7 @@ class AudioRoute:
     description: str | None
     media_class: str
     active: bool
+    is_default: bool = False
     node_name: str | None = None
     object_serial: str | None = None
     pw_record_target: str | None = None
@@ -41,6 +42,7 @@ class AudioRoute:
             "description": self.description,
             "media_class": self.media_class,
             "active": self.active,
+            "is_default": self.is_default,
             "node_name": self.node_name,
             "object_serial": self.object_serial,
             "pw_record_target": self.pw_record_target,
@@ -55,6 +57,7 @@ class AudioRoute:
             description=_optional_str(data, "description"),
             media_class=_required_str(data, "media_class"),
             active=_required_bool(data, "active"),
+            is_default=_optional_bool(data, "is_default") or False,
             node_name=_optional_str(data, "node_name"),
             object_serial=_optional_str(data, "object_serial"),
             pw_record_target=_optional_str(data, "pw_record_target"),
@@ -166,7 +169,12 @@ def discover_audio_routes(
     if not isinstance(graph, list):
         return _unavailable(profile, "PipeWire discovery returned an unexpected JSON shape.")
 
-    sources, sinks, playback_streams = _parse_pw_dump(graph)
+    default_source_name, default_sink_name = _discover_default_route_names(runner)
+    sources, sinks, playback_streams = _parse_pw_dump(
+        graph,
+        default_source_name=default_source_name,
+        default_sink_name=default_sink_name,
+    )
     if profile is CaptureProfileId.IN_PERSON_SINGLE_MIC:
         sinks = ()
         playback_streams = ()
@@ -201,6 +209,9 @@ def format_discovery(discovery: AudioDiscovery) -> str:
 
 def _parse_pw_dump(
     graph: Sequence[object],
+    *,
+    default_source_name: str | None = None,
+    default_sink_name: str | None = None,
 ) -> tuple[
     tuple[AudioRoute, ...],
     tuple[AudioRoute, ...],
@@ -224,10 +235,29 @@ def _parse_pw_dump(
         if not isinstance(node_id, int) or not media_class:
             continue
 
+        if media_class == "Audio/Source/Internal":
+            continue
+
         if media_class.startswith("Audio/Source"):
-            sources.append(_route_from_props(node_id, media_class, info, props))
+            sources.append(
+                _route_from_props(
+                    node_id,
+                    media_class,
+                    info,
+                    props,
+                    default_route_name=default_source_name,
+                )
+            )
         elif media_class.startswith("Audio/Sink"):
-            sinks.append(_route_from_props(node_id, media_class, info, props))
+            sinks.append(
+                _route_from_props(
+                    node_id,
+                    media_class,
+                    info,
+                    props,
+                    default_route_name=default_sink_name,
+                )
+            )
         elif media_class == "Stream/Output/Audio":
             playback_streams.append(_stream_from_props(node_id, info, props))
 
@@ -251,16 +281,20 @@ def _route_from_props(
     media_class: str,
     info: dict[str, object],
     props: dict[object, object],
+    *,
+    default_route_name: str | None = None,
 ) -> AudioRoute:
     node_name = _prop(props, "node.name")
     object_serial = _object_serial(props)
+    is_default = node_name is not None and node_name == default_route_name
     return AudioRoute(
         id=node_id,
         route_id=f"pipewire:node:{node_id}",
         name=node_name or f"node-{node_id}",
         description=_prop(props, "node.description"),
         media_class=media_class,
-        active=_is_active(info),
+        active=_is_active(info) or is_default,
+        is_default=is_default,
         node_name=node_name,
         object_serial=object_serial,
         pw_record_target=node_name or object_serial,
@@ -290,6 +324,49 @@ def _stream_from_props(
 def _is_active(info: dict[str, object]) -> bool:
     state = info.get("state")
     return state in {"running", "active"}
+
+
+def _discover_default_route_names(runner: Runner) -> tuple[str | None, str | None]:
+    completed = _run_pw_metadata(runner)
+    if completed is None:
+        return (None, None)
+
+    default_source_name = _default_route_name(completed.stdout, "default.audio.source")
+    default_sink_name = _default_route_name(completed.stdout, "default.audio.sink")
+    return (default_source_name, default_sink_name)
+
+
+def _run_pw_metadata(runner: Runner) -> subprocess.CompletedProcess[str] | None:
+    try:
+        return runner(["pw-metadata", "-n", "default"], capture_output=True, text=True, check=True)
+    except FileNotFoundError:
+        return None
+    except subprocess.CalledProcessError:
+        try:
+            return runner(["pw-metadata"], capture_output=True, text=True, check=True)
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            return None
+
+
+def _default_route_name(metadata_output: str, key: str) -> str | None:
+    key_token = f"key:'{key}'"
+    for line in metadata_output.splitlines():
+        if key_token not in line:
+            continue
+        _, _, value_part = line.partition(" value:'")
+        if not value_part:
+            continue
+        raw_value, _, _ = value_part.partition("'")
+        try:
+            value = json.loads(raw_value)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(value, dict):
+            continue
+        name = value.get("name")
+        if isinstance(name, str) and name:
+            return name
+    return None
 
 
 def _prop(props: dict[object, object], key: str) -> str | None:
@@ -358,6 +435,15 @@ def _required_bool(data: dict[str, object], key: str) -> bool:
     value = data.get(key)
     if not isinstance(value, bool):
         raise ValueError(f"discovery.{key} must be a boolean.")
+    return value
+
+
+def _optional_bool(data: dict[str, object], key: str) -> bool | None:
+    value = data.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise ValueError(f"discovery.{key} must be a boolean or null.")
     return value
 
 

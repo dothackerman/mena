@@ -1301,6 +1301,7 @@ def _resolve_audio_route(
         choices=routes,
         formatter=_format_audio_route_choice,
         input_fn=reader,
+        default_index=_default_audio_route_index(routes),
     )
 
 
@@ -1358,17 +1359,27 @@ def _prompt_choice(
     choices: tuple[ChoiceT, ...],
     formatter: Callable[[ChoiceT], str],
     input_fn: Callable[[str], str],
+    default_index: int = 1,
 ) -> ChoiceT:
+    if default_index < 1 or default_index > len(choices):
+        raise ValueError(f"Invalid default {title.lower()} selection '{default_index}'.")
     print(f"{title}:")
     for index, choice in enumerate(choices, start=1):
         print(f"  {index}. {formatter(choice)}")
-    answer = input_fn(f"Select {title.lower()} [1]: ").strip() or "1"
+    answer = input_fn(f"Select {title.lower()} [{default_index}]: ").strip() or str(default_index)
     if not answer.isdigit():
         raise ValueError(f"Invalid {title.lower()} selection '{answer}'.")
     selected_index = int(answer)
     if selected_index < 1 or selected_index > len(choices):
         raise ValueError(f"Invalid {title.lower()} selection '{answer}'.")
     return choices[selected_index - 1]
+
+
+def _default_audio_route_index(routes: tuple[AudioRoute, ...]) -> int:
+    for index, route in enumerate(routes, start=1):
+        if route.is_default:
+            return index
+    return 1
 
 
 def _record_input(input_fn: Callable[[str], str] | None) -> Callable[[str], str] | None:
@@ -1427,7 +1438,12 @@ def _read_record_command(
 
 
 def _format_audio_route_choice(route: AudioRoute) -> str:
-    label = route.description or route.name
+    base_label = route.description or route.name
+    label = base_label
+    if route.is_default:
+        label = f"{label} [default]"
+    if route.node_name and route.node_name != base_label:
+        label = f"{label} - {route.node_name}"
     return f"{label} ({route.route_id})"
 
 

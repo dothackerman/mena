@@ -85,6 +85,177 @@ def test_discover_sorts_routes_for_stable_output() -> None:
     assert [source.id for source in discovery.sources] == [7, 42]
 
 
+def test_discover_marks_pipewire_default_source_active_when_suspended() -> None:
+    graph = """[
+      {
+        "id": 104,
+        "info": {
+          "state": "suspended",
+          "props": {
+            "media.class": "Audio/Source",
+            "node.name": "bluez_input.58:18:62:27:F2:5F",
+            "node.description": "WH-1000XM6"
+          }
+        }
+      }
+    ]"""
+    metadata = (
+        'Found "default" metadata 40\n'
+        "update: id:0 key:'default.audio.source' "
+        'value:\'{"name":"bluez_input.58:18:62:27:F2:5F"}\' '
+        "type:'Spa:String:JSON'\n"
+    )
+
+    discovery = discover_audio_routes(
+        CaptureProfileId.ONLINE_DUAL_STREAM,
+        runner=_runner_with_outputs(
+            {
+                ("pw-dump",): graph,
+                ("pw-metadata", "-n", "default"): metadata,
+            }
+        ),
+    )
+
+    assert discovery.sources[0].active is True
+    assert discovery.sources[0].is_default is True
+
+
+def test_discover_falls_back_to_bare_pw_metadata_for_default_source() -> None:
+    graph = """[
+      {
+        "id": 104,
+        "info": {
+          "state": "suspended",
+          "props": {
+            "media.class": "Audio/Source",
+            "node.name": "bluez_input.58:18:62:27:F2:5F",
+            "node.description": "WH-1000XM6"
+          }
+        }
+      }
+    ]"""
+    metadata = (
+        'Found "default" metadata 40\n'
+        "update: id:0 key:'default.audio.source' "
+        'value:\'{"name":"bluez_input.58:18:62:27:F2:5F"}\' '
+        "type:'Spa:String:JSON'\n"
+    )
+    seen_commands: list[tuple[str, ...]] = []
+
+    def runner(
+        command: list[str],
+        *_args: object,
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        command_key = tuple(command)
+        seen_commands.append(command_key)
+        if command_key == ("pw-dump",):
+            return subprocess.CompletedProcess(command, 0, stdout=graph, stderr="")
+        if command_key == ("pw-metadata", "-n", "default"):
+            raise subprocess.CalledProcessError(1, command, stderr="Unknown option 'n'")
+        if command_key == ("pw-metadata",):
+            return subprocess.CompletedProcess(command, 0, stdout=metadata, stderr="")
+        raise AssertionError(f"Unexpected command: {command_key}")
+
+    discovery = discover_audio_routes(CaptureProfileId.ONLINE_DUAL_STREAM, runner=runner)
+
+    assert seen_commands == [
+        ("pw-dump",),
+        ("pw-metadata", "-n", "default"),
+        ("pw-metadata",),
+    ]
+    assert discovery.sources[0].active is True
+    assert discovery.sources[0].is_default is True
+
+
+def test_discover_keeps_running_non_default_route_distinct_from_default() -> None:
+    graph = """[
+      {
+        "id": 104,
+        "info": {
+          "state": "running",
+          "props": {
+            "media.class": "Audio/Source",
+            "node.name": "alsa_input.usb-headset",
+            "node.description": "USB Headset Microphone"
+          }
+        }
+      }
+    ]"""
+    metadata = (
+        'Found "default" metadata 40\n'
+        "update: id:0 key:'default.audio.source' "
+        'value:\'{"name":"bluez_input.58:18:62:27:F2:5F"}\' '
+        "type:'Spa:String:JSON'\n"
+    )
+
+    discovery = discover_audio_routes(
+        CaptureProfileId.ONLINE_DUAL_STREAM,
+        runner=_runner_with_outputs(
+            {
+                ("pw-dump",): graph,
+                ("pw-metadata", "-n", "default"): metadata,
+            }
+        ),
+    )
+
+    assert discovery.sources[0].active is True
+    assert discovery.sources[0].is_default is False
+
+
+def test_discover_ignores_internal_audio_source_nodes() -> None:
+    graph = """[
+      {
+        "id": 82,
+        "info": {
+          "state": "running",
+          "props": {
+            "media.class": "Audio/Source",
+            "node.name": "bluez_input.58:18:62:27:F2:5F",
+            "node.description": "WH-1000XM6"
+          }
+        }
+      },
+      {
+        "id": 115,
+        "info": {
+          "state": "running",
+          "props": {
+            "media.class": "Audio/Source/Internal",
+            "node.name": "bluez_input.58_18_62_27_F2_5F.0",
+            "node.description": "WH-1000XM6"
+          }
+        }
+      },
+      {
+        "id": 119,
+        "info": {
+          "state": "running",
+          "props": {
+            "media.class": "Audio/Source/Virtual",
+            "node.name": "virtual_mic",
+            "node.description": "Virtual Microphone"
+          }
+        }
+      }
+    ]"""
+
+    discovery = discover_audio_routes(
+        CaptureProfileId.ONLINE_DUAL_STREAM,
+        runner=_runner_with_outputs(
+            {
+                ("pw-dump",): graph,
+                ("pw-metadata", "-n", "default"): "",
+            }
+        ),
+    )
+
+    assert [source.route_id for source in discovery.sources] == [
+        "pipewire:node:82",
+        "pipewire:node:119",
+    ]
+
+
 def test_discover_handles_missing_pipewire_command() -> None:
     def missing_runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
         raise FileNotFoundError
@@ -161,5 +332,22 @@ def _fixture(name: str) -> str:
 def _runner_with_stdout(stdout: str) -> Callable[..., subprocess.CompletedProcess[str]]:
     def runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(["pw-dump"], 0, stdout=stdout, stderr="")
+
+    return runner
+
+
+def _runner_with_outputs(
+    outputs: dict[tuple[str, ...], str],
+) -> Callable[..., subprocess.CompletedProcess[str]]:
+    def runner(
+        command: list[str],
+        *_args: object,
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        command_key = tuple(command)
+        stdout = outputs.get(command_key)
+        if stdout is None:
+            raise AssertionError(f"Unexpected command: {command_key}")
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
     return runner

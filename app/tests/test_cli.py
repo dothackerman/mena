@@ -26,6 +26,7 @@ from mena.cli import (
     SourceAudioInput,
     _CaptureEventMonitor,
     _collect_capture_segments,
+    _format_audio_route_choice,
     _latest_failed_stage_input_artifacts,
     _record_terminal_local_llm_release,
     _require_provider,
@@ -991,6 +992,73 @@ def test_resolve_route_selections_prompts_for_ambiguous_online_routes() -> None:
     assert selections.microphone_route_id == "pipewire:node:32"
     assert selections.playback_stream_route_id == "pulse:sink-input:152"
     assert selections.output_sink_route_id == "pipewire:node:43"
+
+
+def test_resolve_route_selections_uses_marked_default_route_for_blank_prompt() -> None:
+    prompts: list[str] = []
+
+    def _blank_prompt(prompt: str) -> str:
+        prompts.append(prompt)
+        return ""
+
+    selections = _resolve_route_selections(
+        profile=CaptureProfileId.ONLINE_DUAL_STREAM,
+        discovery=_ambiguous_default_discoverer(CaptureProfileId.ONLINE_DUAL_STREAM),
+        microphone_route_id=None,
+        playback_stream_route_id=None,
+        output_sink_route_id=None,
+        input_fn=_blank_prompt,
+    )
+
+    assert selections.microphone_route_id == "pipewire:node:32"
+    assert selections.playback_stream_route_id == "pulse:sink-input:151"
+    assert selections.output_sink_route_id == "pipewire:node:43"
+    assert prompts == [
+        "Select microphone routes [2]: ",
+        "Select playback streams [1]: ",
+        "Select output sink routes [2]: ",
+    ]
+
+
+def test_format_audio_route_choice_marks_default_and_includes_node_name() -> None:
+    route = AudioRoute(
+        id=104,
+        route_id="pipewire:node:104",
+        name="bluez_input.58:18:62:27:F2:5F",
+        description="WH-1000XM6",
+        media_class="Audio/Source",
+        active=True,
+        is_default=True,
+        node_name="bluez_input.58:18:62:27:F2:5F",
+        object_serial="5229",
+        pw_record_target="bluez_input.58:18:62:27:F2:5F",
+    )
+
+    choice = _format_audio_route_choice(route)
+
+    assert choice.startswith("WH-1000XM6 [default]")
+    assert "bluez_input.58:18:62:27:F2:5F" in choice
+    assert "pipewire:node:104" in choice
+
+
+def test_format_audio_route_choice_does_not_mark_active_non_default() -> None:
+    route = AudioRoute(
+        id=104,
+        route_id="pipewire:node:104",
+        name="bluez_input.58:18:62:27:F2:5F",
+        description="WH-1000XM6",
+        media_class="Audio/Source",
+        active=True,
+        is_default=False,
+        node_name="bluez_input.58:18:62:27:F2:5F",
+        object_serial="5229",
+        pw_record_target="bluez_input.58:18:62:27:F2:5F",
+    )
+
+    choice = _format_audio_route_choice(route)
+
+    assert choice.startswith("WH-1000XM6 - bluez_input.58:18:62:27:F2:5F")
+    assert "[default]" not in choice
 
 
 def test_resolve_route_selections_rejects_in_person_online_flags() -> None:
@@ -5678,6 +5746,21 @@ def _ambiguous_discoverer(profile: CaptureProfileId) -> AudioDiscovery:
                 sink_input_id="152",
                 active=True,
             ),
+        ),
+    )
+
+
+def _ambiguous_default_discoverer(profile: CaptureProfileId) -> AudioDiscovery:
+    discovery = _ambiguous_discoverer(profile)
+    return replace(
+        discovery,
+        sources=(
+            discovery.sources[0],
+            replace(discovery.sources[1], is_default=True),
+        ),
+        sinks=(
+            discovery.sinks[0],
+            replace(discovery.sinks[1], is_default=True),
         ),
     )
 
