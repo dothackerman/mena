@@ -85,6 +85,48 @@ def test_discover_sorts_routes_for_stable_output() -> None:
     assert [source.id for source in discovery.sources] == [7, 42]
 
 
+def test_discover_hides_only_internal_audio_sources() -> None:
+    graph = """[
+      {
+        "id": 1,
+        "info": {
+          "state": "running",
+          "props": {
+            "media.class": "Audio/Source",
+            "node.name": "real-mic"
+          }
+        }
+      },
+      {
+        "id": 2,
+        "info": {
+          "state": "running",
+          "props": {
+            "media.class": "Audio/Source/Internal",
+            "node.name": "internal-source"
+          }
+        }
+      },
+      {
+        "id": 3,
+        "info": {
+          "state": "running",
+          "props": {
+            "media.class": "Audio/Source/Virtual",
+            "node.name": "virtual-mic"
+          }
+        }
+      }
+    ]"""
+
+    discovery = discover_audio_routes(
+        CaptureProfileId.ONLINE_DUAL_STREAM,
+        runner=_runner_with_stdout(graph),
+    )
+
+    assert [source.name for source in discovery.sources] == ["real-mic", "virtual-mic"]
+
+
 def test_discover_handles_missing_pipewire_command() -> None:
     def missing_runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
         raise FileNotFoundError

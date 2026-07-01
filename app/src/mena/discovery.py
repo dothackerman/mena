@@ -224,6 +224,9 @@ def _parse_pw_dump(
         if not isinstance(node_id, int) or not media_class:
             continue
 
+        if media_class == "Audio/Source/Internal":
+            continue
+
         if media_class.startswith("Audio/Source"):
             sources.append(_route_from_props(node_id, media_class, info, props))
         elif media_class.startswith("Audio/Sink"):
