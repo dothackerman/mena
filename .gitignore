@@ -13,9 +13,9 @@ build/
 # Virtual environments
 .venv/
 app/.venv/
-.worktrees/
 
 # Local editor and OS files
 .DS_Store
 .idea/
 .vscode/
+
