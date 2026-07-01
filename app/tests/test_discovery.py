@@ -142,6 +142,17 @@ def test_discover_ignores_internal_audio_source_nodes() -> None:
             "node.description": "WH-1000XM6"
           }
         }
+      },
+      {
+        "id": 119,
+        "info": {
+          "state": "running",
+          "props": {
+            "media.class": "Audio/Source/Virtual",
+            "node.name": "virtual_mic",
+            "node.description": "Virtual Microphone"
+          }
+        }
       }
     ]"""
 
@@ -155,7 +166,10 @@ def test_discover_ignores_internal_audio_source_nodes() -> None:
         ),
     )
 
-    assert [source.route_id for source in discovery.sources] == ["pipewire:node:82"]
+    assert [source.route_id for source in discovery.sources] == [
+        "pipewire:node:82",
+        "pipewire:node:119",
+    ]
 
 
 def test_discover_handles_missing_pipewire_command() -> None:
