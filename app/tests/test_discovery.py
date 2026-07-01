@@ -120,6 +120,54 @@ def test_discover_marks_pipewire_default_source_active_when_suspended() -> None:
     assert discovery.sources[0].is_default is True
 
 
+def test_discover_falls_back_to_bare_pw_metadata_for_default_source() -> None:
+    graph = """[
+      {
+        "id": 104,
+        "info": {
+          "state": "suspended",
+          "props": {
+            "media.class": "Audio/Source",
+            "node.name": "bluez_input.58:18:62:27:F2:5F",
+            "node.description": "WH-1000XM6"
+          }
+        }
+      }
+    ]"""
+    metadata = (
+        'Found "default" metadata 40\n'
+        "update: id:0 key:'default.audio.source' "
+        'value:\'{"name":"bluez_input.58:18:62:27:F2:5F"}\' '
+        "type:'Spa:String:JSON'\n"
+    )
+    seen_commands: list[tuple[str, ...]] = []
+
+    def runner(
+        command: list[str],
+        *_args: object,
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        command_key = tuple(command)
+        seen_commands.append(command_key)
+        if command_key == ("pw-dump",):
+            return subprocess.CompletedProcess(command, 0, stdout=graph, stderr="")
+        if command_key == ("pw-metadata", "-n", "default"):
+            raise subprocess.CalledProcessError(1, command, stderr="Unknown option 'n'")
+        if command_key == ("pw-metadata",):
+            return subprocess.CompletedProcess(command, 0, stdout=metadata, stderr="")
+        raise AssertionError(f"Unexpected command: {command_key}")
+
+    discovery = discover_audio_routes(CaptureProfileId.ONLINE_DUAL_STREAM, runner=runner)
+
+    assert seen_commands == [
+        ("pw-dump",),
+        ("pw-metadata", "-n", "default"),
+        ("pw-metadata",),
+    ]
+    assert discovery.sources[0].active is True
+    assert discovery.sources[0].is_default is True
+
+
 def test_discover_keeps_running_non_default_route_distinct_from_default() -> None:
     graph = """[
       {

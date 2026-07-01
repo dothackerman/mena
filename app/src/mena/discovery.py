@@ -327,16 +327,25 @@ def _is_active(info: dict[str, object]) -> bool:
 
 
 def _discover_default_route_names(runner: Runner) -> tuple[str | None, str | None]:
-    try:
-        completed = runner(
-            ["pw-metadata", "-n", "default"], capture_output=True, text=True, check=True
-        )
-    except (FileNotFoundError, subprocess.CalledProcessError):
+    completed = _run_pw_metadata(runner)
+    if completed is None:
         return (None, None)
 
     default_source_name = _default_route_name(completed.stdout, "default.audio.source")
     default_sink_name = _default_route_name(completed.stdout, "default.audio.sink")
     return (default_source_name, default_sink_name)
+
+
+def _run_pw_metadata(runner: Runner) -> subprocess.CompletedProcess[str] | None:
+    try:
+        return runner(["pw-metadata", "-n", "default"], capture_output=True, text=True, check=True)
+    except FileNotFoundError:
+        return None
+    except subprocess.CalledProcessError:
+        try:
+            return runner(["pw-metadata"], capture_output=True, text=True, check=True)
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            return None
 
 
 def _default_route_name(metadata_output: str, key: str) -> str | None:
