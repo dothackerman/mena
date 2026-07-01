@@ -117,6 +117,42 @@ def test_discover_marks_pipewire_default_source_active_when_suspended() -> None:
     )
 
     assert discovery.sources[0].active is True
+    assert discovery.sources[0].is_default is True
+
+
+def test_discover_keeps_running_non_default_route_distinct_from_default() -> None:
+    graph = """[
+      {
+        "id": 104,
+        "info": {
+          "state": "running",
+          "props": {
+            "media.class": "Audio/Source",
+            "node.name": "alsa_input.usb-headset",
+            "node.description": "USB Headset Microphone"
+          }
+        }
+      }
+    ]"""
+    metadata = (
+        'Found "default" metadata 40\n'
+        "update: id:0 key:'default.audio.source' "
+        'value:\'{"name":"bluez_input.58:18:62:27:F2:5F"}\' '
+        "type:'Spa:String:JSON'\n"
+    )
+
+    discovery = discover_audio_routes(
+        CaptureProfileId.ONLINE_DUAL_STREAM,
+        runner=_runner_with_outputs(
+            {
+                ("pw-dump",): graph,
+                ("pw-metadata", "-n", "default"): metadata,
+            }
+        ),
+    )
+
+    assert discovery.sources[0].active is True
+    assert discovery.sources[0].is_default is False
 
 
 def test_discover_ignores_internal_audio_source_nodes() -> None:

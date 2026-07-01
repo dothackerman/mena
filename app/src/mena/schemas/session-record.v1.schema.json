@@ -15,6 +15,9 @@
           "minimum": 0,
           "type": "integer"
         },
+        "is_default": {
+          "type": "boolean"
+        },
         "media_class": {
           "minLength": 1,
           "type": "string"

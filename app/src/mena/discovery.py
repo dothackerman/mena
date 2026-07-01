@@ -29,6 +29,7 @@ class AudioRoute:
     description: str | None
     media_class: str
     active: bool
+    is_default: bool = False
     node_name: str | None = None
     object_serial: str | None = None
     pw_record_target: str | None = None
@@ -41,6 +42,7 @@ class AudioRoute:
             "description": self.description,
             "media_class": self.media_class,
             "active": self.active,
+            "is_default": self.is_default,
             "node_name": self.node_name,
             "object_serial": self.object_serial,
             "pw_record_target": self.pw_record_target,
@@ -55,6 +57,7 @@ class AudioRoute:
             description=_optional_str(data, "description"),
             media_class=_required_str(data, "media_class"),
             active=_required_bool(data, "active"),
+            is_default=_optional_bool(data, "is_default") or False,
             node_name=_optional_str(data, "node_name"),
             object_serial=_optional_str(data, "object_serial"),
             pw_record_target=_optional_str(data, "pw_record_target"),
@@ -283,13 +286,15 @@ def _route_from_props(
 ) -> AudioRoute:
     node_name = _prop(props, "node.name")
     object_serial = _object_serial(props)
+    is_default = node_name is not None and node_name == default_route_name
     return AudioRoute(
         id=node_id,
         route_id=f"pipewire:node:{node_id}",
         name=node_name or f"node-{node_id}",
         description=_prop(props, "node.description"),
         media_class=media_class,
-        active=_is_active(info) or (node_name is not None and node_name == default_route_name),
+        active=_is_active(info) or is_default,
+        is_default=is_default,
         node_name=node_name,
         object_serial=object_serial,
         pw_record_target=node_name or object_serial,
@@ -421,6 +426,15 @@ def _required_bool(data: dict[str, object], key: str) -> bool:
     value = data.get(key)
     if not isinstance(value, bool):
         raise ValueError(f"discovery.{key} must be a boolean.")
+    return value
+
+
+def _optional_bool(data: dict[str, object], key: str) -> bool | None:
+    value = data.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise ValueError(f"discovery.{key} must be a boolean or null.")
     return value
 
 

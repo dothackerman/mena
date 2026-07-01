@@ -1429,7 +1429,7 @@ def _read_record_command(
 def _format_audio_route_choice(route: AudioRoute) -> str:
     base_label = route.description or route.name
     label = base_label
-    if route.active:
+    if route.is_default:
         label = f"{label} [default]"
     if route.node_name and route.node_name != base_label:
         label = f"{label} - {route.node_name}"
