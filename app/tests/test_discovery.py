@@ -119,6 +119,45 @@ def test_discover_marks_pipewire_default_source_active_when_suspended() -> None:
     assert discovery.sources[0].active is True
 
 
+def test_discover_ignores_internal_audio_source_nodes() -> None:
+    graph = """[
+      {
+        "id": 82,
+        "info": {
+          "state": "running",
+          "props": {
+            "media.class": "Audio/Source",
+            "node.name": "bluez_input.58:18:62:27:F2:5F",
+            "node.description": "WH-1000XM6"
+          }
+        }
+      },
+      {
+        "id": 115,
+        "info": {
+          "state": "running",
+          "props": {
+            "media.class": "Audio/Source/Internal",
+            "node.name": "bluez_input.58_18_62_27_F2_5F.0",
+            "node.description": "WH-1000XM6"
+          }
+        }
+      }
+    ]"""
+
+    discovery = discover_audio_routes(
+        CaptureProfileId.ONLINE_DUAL_STREAM,
+        runner=_runner_with_outputs(
+            {
+                ("pw-dump",): graph,
+                ("pw-metadata", "-n", "default"): "",
+            }
+        ),
+    )
+
+    assert [source.route_id for source in discovery.sources] == ["pipewire:node:82"]
+
+
 def test_discover_handles_missing_pipewire_command() -> None:
     def missing_runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
         raise FileNotFoundError
