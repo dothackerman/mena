@@ -26,6 +26,7 @@ from mena.cli import (
     SourceAudioInput,
     _CaptureEventMonitor,
     _collect_capture_segments,
+    _format_audio_route_choice,
     _latest_failed_stage_input_artifacts,
     _record_terminal_local_llm_release,
     _require_provider,
@@ -991,6 +992,26 @@ def test_resolve_route_selections_prompts_for_ambiguous_online_routes() -> None:
     assert selections.microphone_route_id == "pipewire:node:32"
     assert selections.playback_stream_route_id == "pulse:sink-input:152"
     assert selections.output_sink_route_id == "pipewire:node:43"
+
+
+def test_format_audio_route_choice_marks_active_and_includes_node_name() -> None:
+    route = AudioRoute(
+        id=104,
+        route_id="pipewire:node:104",
+        name="bluez_input.58:18:62:27:F2:5F",
+        description="WH-1000XM6",
+        media_class="Audio/Source",
+        active=True,
+        node_name="bluez_input.58:18:62:27:F2:5F",
+        object_serial="5229",
+        pw_record_target="bluez_input.58:18:62:27:F2:5F",
+    )
+
+    choice = _format_audio_route_choice(route)
+
+    assert choice.startswith("WH-1000XM6 [default]")
+    assert "bluez_input.58:18:62:27:F2:5F" in choice
+    assert "pipewire:node:104" in choice
 
 
 def test_resolve_route_selections_rejects_in_person_online_flags() -> None:

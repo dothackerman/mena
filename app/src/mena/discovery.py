@@ -166,7 +166,12 @@ def discover_audio_routes(
     if not isinstance(graph, list):
         return _unavailable(profile, "PipeWire discovery returned an unexpected JSON shape.")
 
-    sources, sinks, playback_streams = _parse_pw_dump(graph)
+    default_source_name, default_sink_name = _discover_default_route_names(runner)
+    sources, sinks, playback_streams = _parse_pw_dump(
+        graph,
+        default_source_name=default_source_name,
+        default_sink_name=default_sink_name,
+    )
     if profile is CaptureProfileId.IN_PERSON_SINGLE_MIC:
         sinks = ()
         playback_streams = ()
@@ -201,6 +206,9 @@ def format_discovery(discovery: AudioDiscovery) -> str:
 
 def _parse_pw_dump(
     graph: Sequence[object],
+    *,
+    default_source_name: str | None = None,
+    default_sink_name: str | None = None,
 ) -> tuple[
     tuple[AudioRoute, ...],
     tuple[AudioRoute, ...],
@@ -225,9 +233,25 @@ def _parse_pw_dump(
             continue
 
         if media_class.startswith("Audio/Source"):
-            sources.append(_route_from_props(node_id, media_class, info, props))
+            sources.append(
+                _route_from_props(
+                    node_id,
+                    media_class,
+                    info,
+                    props,
+                    default_route_name=default_source_name,
+                )
+            )
         elif media_class.startswith("Audio/Sink"):
-            sinks.append(_route_from_props(node_id, media_class, info, props))
+            sinks.append(
+                _route_from_props(
+                    node_id,
+                    media_class,
+                    info,
+                    props,
+                    default_route_name=default_sink_name,
+                )
+            )
         elif media_class == "Stream/Output/Audio":
             playback_streams.append(_stream_from_props(node_id, info, props))
 
@@ -251,6 +275,8 @@ def _route_from_props(
     media_class: str,
     info: dict[str, object],
     props: dict[object, object],
+    *,
+    default_route_name: str | None = None,
 ) -> AudioRoute:
     node_name = _prop(props, "node.name")
     object_serial = _object_serial(props)
@@ -260,7 +286,7 @@ def _route_from_props(
         name=node_name or f"node-{node_id}",
         description=_prop(props, "node.description"),
         media_class=media_class,
-        active=_is_active(info),
+        active=_is_active(info) or (node_name is not None and node_name == default_route_name),
         node_name=node_name,
         object_serial=object_serial,
         pw_record_target=node_name or object_serial,
@@ -290,6 +316,40 @@ def _stream_from_props(
 def _is_active(info: dict[str, object]) -> bool:
     state = info.get("state")
     return state in {"running", "active"}
+
+
+def _discover_default_route_names(runner: Runner) -> tuple[str | None, str | None]:
+    try:
+        completed = runner(
+            ["pw-metadata", "-n", "default"], capture_output=True, text=True, check=True
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return (None, None)
+
+    default_source_name = _default_route_name(completed.stdout, "default.audio.source")
+    default_sink_name = _default_route_name(completed.stdout, "default.audio.sink")
+    return (default_source_name, default_sink_name)
+
+
+def _default_route_name(metadata_output: str, key: str) -> str | None:
+    key_token = f"key:'{key}'"
+    for line in metadata_output.splitlines():
+        if key_token not in line:
+            continue
+        _, _, value_part = line.partition(" value:'")
+        if not value_part:
+            continue
+        raw_value, _, _ = value_part.partition("'")
+        try:
+            value = json.loads(raw_value)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(value, dict):
+            continue
+        name = value.get("name")
+        if isinstance(name, str) and name:
+            return name
+    return None
 
 
 def _prop(props: dict[object, object], key: str) -> str | None:
