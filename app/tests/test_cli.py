@@ -23,8 +23,8 @@ from mena.capture import make_wav_bytes
 from mena.cli import (
     COMMANDS,
     WORKER_EXIT_TIMEOUT_SECONDS,
+    ConsoleRecordInteraction,
     SourceAudioInput,
-    _CaptureEventMonitor,
     _collect_capture_segments,
     _format_audio_route_choice,
     _latest_failed_stage_input_artifacts,
@@ -80,6 +80,7 @@ from mena.protocol import (
     StartCapturePayload,
     WorkerProcess,
 )
+from mena.recording_control import _CaptureEventMonitor
 from mena.review_flagging import (
     REVIEW_QUEUE_SCHEMA_VERSION,
     ConfidenceFlaggingPolicy,
@@ -1262,6 +1263,7 @@ def test_capture_event_monitor_drains_progress_and_returns_finalization(
         cast(WorkerProcess, worker),
         record_path=created_session.record_path,
         start_payload=start_payload,
+        interaction=ConsoleRecordInteraction(None),
     )
 
     monitor.start()
@@ -1307,6 +1309,7 @@ def test_capture_event_monitor_raises_structured_worker_error(tmp_path: Path) ->
         cast(WorkerProcess, worker),
         record_path=created_session.record_path,
         start_payload=_monitor_start_payload(),
+        interaction=ConsoleRecordInteraction(None),
     )
 
     monitor.start()
@@ -1339,6 +1342,7 @@ def test_wait_for_record_stop_surfaces_background_capture_error(tmp_path: Path) 
         cast(WorkerProcess, worker),
         record_path=created_session.record_path,
         start_payload=_monitor_start_payload(),
+        interaction=ConsoleRecordInteraction(None),
     )
     prompt_started = threading.Event()
 
@@ -1364,6 +1368,7 @@ def test_capture_event_monitor_propagates_reader_failure(tmp_path: Path) -> None
         cast(WorkerProcess, _EventWorker([])),
         record_path=created_session.record_path,
         start_payload=_monitor_start_payload(),
+        interaction=ConsoleRecordInteraction(None),
     )
 
     monitor.start()
@@ -1383,6 +1388,7 @@ def test_capture_event_monitor_rejects_unexpected_event_type(tmp_path: Path) -> 
         cast(WorkerProcess, worker),
         record_path=created_session.record_path,
         start_payload=_monitor_start_payload(),
+        interaction=ConsoleRecordInteraction(None),
     )
 
     monitor.start()

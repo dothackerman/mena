@@ -7,7 +7,6 @@ import hashlib
 import json
 import queue
 import shutil
-import subprocess
 import sys
 import threading
 import wave
@@ -26,9 +25,7 @@ from mena.artifacts import (
     FileSystemArtifactStore,
 )
 from mena.capture_planning import (
-    CapturePlanningError,
     RouteSelections,
-    build_start_capture_payload,
 )
 from mena.correction_overlay import (
     CorrectionOverlayContractError,
@@ -51,7 +48,6 @@ from mena.diarization import (
 from mena.discovery import (
     AudioDiscovery,
     AudioRoute,
-    DiscoveryStatus,
     PlaybackStream,
     discover_audio_routes,
     format_discovery,
@@ -61,6 +57,13 @@ from mena.export import (
     export_summary_markdown,
 )
 from mena.fields import optional_str, required_int, required_str
+from mena.interaction import (
+    ChoiceOption,
+    ChoiceRequest,
+    ConfirmationRequest,
+    TextRequest,
+    WorkflowNotice,
+)
 from mena.manual_notes import ManualNotesIngestionError, ingest_manual_notes_file
 from mena.merge_timing import (
     MERGE_TIMING_STAGE,
@@ -81,25 +84,22 @@ from mena.profiles import (
     CaptureProfile,
     CaptureProfileId,
     CaptureProfileSelection,
-    CaptureSourceId,
     DiarisationPolicy,
     capture_profile_choices,
     get_capture_profile,
     parse_capture_profile,
 )
 from mena.protocol import (
-    CaptureFinalizedPayload,
-    CaptureRouteBindingPayload,
-    CaptureRouteEventPayload,
-    CaptureStatusPayload,
-    ErrorPayload,
-    ProtocolError,
-    ProtocolMessage,
-    SegmentFlushedPayload,
-    SegmentsFlushedPayload,
     StartCapturePayload,
-    WorkerExitedError,
     WorkerProcess,
+)
+from mena.recording_control import (
+    RecordCommandInput,
+    _format_record_diagnostics,
+    run_recording_control_workflow,
+)
+from mena.recording_control import (
+    _CaptureEventMonitor as CaptureEventMonitor,
 )
 from mena.review_flagging import (
     CONFIDENCE_FLAGGING_STAGE,
@@ -140,14 +140,7 @@ from mena.session_integrity import (
 )
 from mena.sessions import (
     SESSION_RECORD_FILENAME,
-    append_session_degradation,
-    append_session_failure,
-    create_session,
     read_session_record,
-    update_session_capture_metadata,
-    update_session_capture_plan,
-    update_session_discovery,
-    update_session_record,
 )
 from mena.settings import AppSettings, SettingsError, validate_summary_language
 from mena.setup import (
@@ -172,7 +165,7 @@ from mena.summarization import (
     SummarizationPolicy,
     run_summarization_stage,
 )
-from mena.timestamps import parse_utc_timestamp, utc_timestamp
+from mena.timestamps import parse_utc_timestamp
 from mena.transcription import (
     TRANSCRIPTION_STAGE,
     FasterWhisperTranscriptionProvider,
@@ -234,113 +227,115 @@ class CaptureSegmentInput:
     capture_mode: str | None
 
 
-class _CaptureEventMonitor:
-    """Drain worker capture events while the foreground prompt waits for stop."""
+class ConsoleRecordInteraction:
+    """Console adapter for record workflow interaction topics."""
 
-    def __init__(
-        self,
-        worker: WorkerProcess,
-        *,
-        record_path: Path,
-        start_payload: StartCapturePayload,
-    ) -> None:
-        self.worker = worker
-        self.record_path = record_path
-        self.start_payload = start_payload
-        self.segments: list[dict[str, object]] = []
-        self._terminal_events: queue.Queue[ProtocolMessage | BaseException] = queue.Queue()
-        self._thread = threading.Thread(
-            target=self._run,
-            name="mena-capture-events",
-            daemon=True,
+    def __init__(self, input_fn: Callable[[str], str] | None) -> None:
+        self._input_fn = input_fn
+
+    def choose(self, request: ChoiceRequest) -> ChoiceOption:
+        reader = _record_input(self._input_fn)
+        if reader is None:
+            if request.topic == "record.capture_route.playback_stream":
+                raise ValueError(
+                    "Playback stream confirmation is required; pass --playback-stream."
+                )
+            role, flag_name, title = _record_choice_prompt_metadata(request.topic)
+            raise ValueError(f"Multiple {role} routes were discovered; pass {flag_name}.")
+        _role, _flag_name, title = _record_choice_prompt_metadata(request.topic)
+        choices = request.options
+        default_index = 1
+        if request.default_option_id is not None:
+            for index, option in enumerate(choices, start=1):
+                if option.option_id == request.default_option_id:
+                    default_index = index
+                    break
+        return _prompt_choice(
+            title=title,
+            choices=choices,
+            formatter=lambda option: option.label,
+            input_fn=reader,
+            default_index=default_index,
         )
 
-    def start(self) -> None:
-        self._thread.start()
+    def confirm(self, request: ConfirmationRequest) -> bool:
+        raise ValueError(f"Unsupported record confirmation topic '{request.topic}'.")
 
-    def wait_for_finalized(self) -> ProtocolMessage:
-        event = self._terminal_events.get()
-        self._thread.join()
-        if isinstance(event, BaseException):
-            raise event
-        return event
+    def request_text(self, request: TextRequest) -> str:
+        reader = _record_input(self._input_fn)
+        if reader is None:
+            raise RuntimeError("Recording requires an interactive terminal to stop.")
+        if request.topic == "record.stop_command":
+            return reader("record> ")
+        raise ValueError(f"Unsupported record text topic '{request.topic}'.")
 
-    def poll_terminal_event(self) -> ProtocolMessage | None:
-        try:
-            event = self._terminal_events.get_nowait()
-        except queue.Empty:
-            return None
-        self._thread.join()
-        if isinstance(event, BaseException):
-            raise event
-        return event
-
-    def _run(self) -> None:
-        while True:
-            try:
-                message = self.worker.receive()
-                should_continue = self._handle_message(message)
-            except BaseException as exc:
-                self._terminal_events.put(exc)
-                return
-            if not should_continue:
-                return
-
-    def _handle_message(self, message: ProtocolMessage) -> bool:
-        if message.type == "segment_flushed":
-            segment = SegmentFlushedPayload.from_dict(message.payload)
-            self._persist_segments((dict(message.payload),))
-            self._print_segment(segment)
-            return True
-        if message.type == "segments_flushed":
-            batch = SegmentsFlushedPayload.from_dict(message.payload)
-            raw_segments = message.payload["segments"]
-            if not isinstance(raw_segments, list):
-                raise ProtocolError("segments_flushed payload segments must be a list.")
-            self._persist_segments(
-                tuple(cast(dict[str, object], segment) for segment in raw_segments)
+    def notify(self, notice: WorkflowNotice) -> None:
+        topic = notice.topic
+        context = notice.context
+        if topic == "record.session_created":
+            print(f"Created session {context['session_id']}")
+        elif topic == "record.session_record":
+            print(f"Session record: {context['record_path']}")
+        elif topic == "record.discovery":
+            print(format_discovery(cast(AudioDiscovery, context["discovery"])))
+        elif topic == "record.capture_not_started.discovery_unavailable":
+            print("Capture not started: audio discovery is unavailable.")
+        elif topic == "record.capture_not_started.error":
+            print(f"Capture not started: {context['error']}")
+        elif topic == "record.capture_not_started.noninteractive_stop":
+            print("Capture not started: recording requires an interactive terminal to stop.")
+        elif topic == "record.setup_cancelled":
+            print("Recording setup cancelled.")
+        elif topic == "record.diagnostics":
+            print(_format_record_diagnostics(cast(StartCapturePayload, context["start_payload"])))
+        elif topic == "record.consent_notice":
+            print(
+                "Recording notice: you are responsible for obtaining consent "
+                "from meeting participants."
             )
-            for segment in batch.segments:
-                self._print_segment(segment)
-            return True
-        if message.type == "capture_status":
-            status = CaptureStatusPayload.from_dict(message.payload)
+        elif topic == "record.stop_prompt_started":
+            print("Recording. Press q to stop.")
+        elif topic == "record.stop_prompt_continues":
+            print("Recording continues. Type q to stop.")
+        elif topic == "record.segment_flushed":
+            print(f"Sealed {context['source_id']} segment {context['index']}.")
+        elif topic == "record.capture_status":
             print(
                 "Recording: "
-                f"{int(status.elapsed_seconds)}s elapsed, "
-                f"{status.sealed_segment_count} sealed segment(s)."
+                f"{int(cast(float, context['elapsed_seconds']))}s elapsed, "
+                f"{context['sealed_segment_count']} sealed segment(s)."
             )
-            return True
-        if message.type == "capture_route_event":
-            event = CaptureRouteEventPayload.from_dict(message.payload)
-            append_session_degradation(self.record_path, event.to_dict())
-            label = "Capture recovered" if event.event == "recovered" else "Capture degraded"
-            print(f"{label}: {event.message}")
-            return True
-        if message.type == "capture_finalized":
-            self._terminal_events.put(message)
-            return False
-        if message.type == "error":
-            error = ErrorPayload.from_dict(message.payload)
-            self._terminal_events.put(ProtocolError(error.message))
-            return False
-        self._terminal_events.put(ProtocolError(f"Unexpected capture event '{message.type}'."))
-        return False
+        elif topic == "record.capture_route_event":
+            label = (
+                "Capture recovered" if context.get("event") == "recovered" else "Capture degraded"
+            )
+            print(f"{label}: {context['message']}")
+        elif topic == "record.worker_teardown_interrupted":
+            print("Worker teardown interrupted after capture finalization.")
+        elif topic == "record.stop_interrupted":
+            print("Recording stop requested; finalizing capture.")
+        elif topic == "record.capture_failed":
+            print(f"Capture failed: {context['error']}")
+        elif topic == "record.capture_finalized":
+            print("Capture finalized")
+        elif topic == "record.process_handoff":
+            print(f"To process this recording, run: mena process {context['record_path']}")
+        elif topic == "record.finalized_status_error":
+            print(f"Capture finalized as {context['status']}: {context['error']}")
+        elif topic == "record.finalized_status":
+            print(f"Capture finalized as {context['status']}.")
+        else:
+            raise ValueError(f"Unsupported record notice topic '{topic}'.")
 
-    def _persist_segments(self, segments: tuple[dict[str, object], ...]) -> None:
-        self.segments.extend(segments)
-        # Incremental metadata is intentional: a session can be interrupted
-        # before finalization and still retain processable sealed chunks.
-        update_session_capture_metadata(
-            self.record_path,
-            _capture_metadata_from_segments(
-                self.start_payload,
-                self.segments,
-            ),
-        )
 
-    def _print_segment(self, segment: SegmentFlushedPayload) -> None:
-        print(f"Sealed {segment.source_id} segment {segment.index}.")
+def _record_choice_prompt_metadata(topic: str) -> tuple[str, str, str]:
+    if topic == "record.capture_route.microphone":
+        return ("microphone", "--mic", "Microphone routes")
+    if topic == "record.capture_route.playback_stream":
+        return ("playback stream", "--playback-stream", "Playback streams")
+    if topic == "record.capture_route.output_sink":
+        return ("output sink", "--output-sink", "Output sink routes")
+    raise ValueError(f"Unsupported record choice topic '{topic}'.")
 
 
 @dataclass(frozen=True)
@@ -528,221 +523,27 @@ def main(
         except (EOFError, KeyboardInterrupt):
             print("Recording setup cancelled.")
             return 1
-        created_session = create_session(
-            profile=profile,
-            language=language,
-            name=args.name,
-            data_root=data_root,
-        )
-        print(f"Created session {created_session.record.id}")
-        print(f"Session record: {created_session.record_path}")
-        discovery = discoverer(profile.id)
-        update_session_discovery(created_session.record_path, discovery.to_dict())
-        print(format_discovery(discovery))
-        if args.dry_run:
-            return 0
-        if discovery.status is not DiscoveryStatus.AVAILABLE:
-            print("Capture not started: audio discovery is unavailable.")
-            return 1
-        try:
-            route_selections = _resolve_route_selections(
-                profile=profile.id,
-                discovery=discovery,
+
+        result = run_recording_control_workflow(
+            RecordCommandInput(
+                profile=profile,
+                language=language,
+                name=args.name,
                 microphone_route_id=args.mic,
                 playback_stream_route_id=args.playback_stream,
                 output_sink_route_id=args.output_sink,
-                input_fn=input_fn,
-            )
-            start_payload = build_start_capture_payload(
-                profile=profile.id,
-                language=language,
-                discovery=discovery,
-                selections=route_selections,
-            )
-            if args.verbose:
-                print(_format_record_diagnostics(start_payload))
-        except (EOFError, KeyboardInterrupt):
-            print("Recording setup cancelled.")
-            return 1
-        except (CapturePlanningError, ValueError) as exc:
-            print(f"Capture not started: {exc}")
-            return 1
-        if _record_input(input_fn) is None:
-            print("Capture not started: recording requires an interactive terminal to stop.")
-            return 1
-        update_session_capture_plan(
-            created_session.record_path,
-            _capture_plan_from_start_payload(start_payload, status="planned"),
+                dry_run=args.dry_run,
+                verbose=args.verbose,
+                worker_exit_timeout=args.worker_exit_timeout,
+                stop_input_available=_record_input(input_fn) is not None,
+            ),
+            data_root=data_root,
+            discoverer=discoverer,
+            worker_factory=worker_factory,
+            interaction=ConsoleRecordInteraction(input_fn),
+            now=now,
         )
-        started_at = _utc_timestamp(now)
-        update_session_record(
-            created_session.record_path,
-            updates={
-                "status": "recording",
-                "recording": _recording_lifecycle(
-                    started_at=started_at,
-                    stopped_at=None,
-                    stop_reason=None,
-                    finalization_status="pending",
-                    completed_at=None,
-                    error=None,
-                ),
-                "capture_plan": _capture_plan_from_start_payload(
-                    start_payload,
-                    status="active",
-                ),
-            },
-        )
-        try:
-            worker_kwargs: dict[str, object] = {
-                "session_id": created_session.record.id,
-                "session_dir": created_session.bundle_path,
-            }
-            if args.verbose:
-                worker_kwargs["capture_diagnostics"] = True
-            worker_context = worker_factory(**worker_kwargs)
-            worker = worker_context.__enter__()
-        except (OSError, subprocess.SubprocessError) as exc:
-            _persist_capture_failure(
-                record_path=created_session.record_path,
-                start_payload=start_payload,
-                started_at=started_at,
-                error_message=str(exc),
-                now=now,
-            )
-            print(f"Capture failed: {exc}")
-            return 1
-        try:
-            capture_monitor = _capture_event_monitor(
-                worker,
-                record_path=created_session.record_path,
-                start_payload=start_payload,
-            )
-            interrupted_stop = False
-            start_command_sent = False
-            monitor_started = False
-            finalized: ProtocolMessage | None = None
-            try:
-                worker.handshake()
-                print(
-                    "Recording notice: you are responsible for obtaining consent "
-                    "from meeting participants."
-                )
-                start_command_sent = True
-                worker.start_capture(start_payload)
-                if capture_monitor is not None:
-                    capture_monitor.start()
-                    monitor_started = True
-                _wait_for_record_stop(input_fn, capture_monitor=capture_monitor)
-                finalized = _finalize_recording(
-                    worker,
-                    capture_monitor if monitor_started else None,
-                )
-                exit_code = worker.wait(timeout=args.worker_exit_timeout)
-                if exit_code != 0:
-                    raise WorkerExitedError(f"Worker exited with status {exit_code}.")
-            except (EOFError, KeyboardInterrupt):
-                if finalized is not None:
-                    print("Worker teardown interrupted after capture finalization.")
-                elif not start_command_sent:
-                    _persist_capture_failure(
-                        record_path=created_session.record_path,
-                        start_payload=start_payload,
-                        started_at=started_at,
-                        error_message="Recording setup cancelled.",
-                        now=now,
-                    )
-                    print("Recording setup cancelled.")
-                    return 1
-                else:
-                    print("Recording stop requested; finalizing capture.")
-                    interrupted_stop = True
-                    try:
-                        finalized = _finalize_recording(
-                            worker,
-                            capture_monitor if monitor_started else None,
-                        )
-                        exit_code = worker.wait(timeout=args.worker_exit_timeout)
-                        if exit_code != 0:
-                            raise WorkerExitedError(f"Worker exited with status {exit_code}.")
-                    except (
-                        ProtocolError,
-                        WorkerExitedError,
-                        subprocess.TimeoutExpired,
-                        ValueError,
-                    ) as exc:
-                        _persist_capture_failure(
-                            record_path=created_session.record_path,
-                            start_payload=start_payload,
-                            started_at=started_at,
-                            error_message=str(exc),
-                            now=now,
-                        )
-                        print(f"Capture failed: {exc}")
-                        return 1
-            except (
-                ProtocolError,
-                WorkerExitedError,
-                subprocess.TimeoutExpired,
-                ValueError,
-            ) as exc:
-                _persist_capture_failure(
-                    record_path=created_session.record_path,
-                    start_payload=start_payload,
-                    started_at=started_at,
-                    error_message=str(exc),
-                    now=now,
-                )
-                print(f"Capture failed: {exc}")
-                return 1
-        finally:
-            worker_context.__exit__(*sys.exc_info())
-        finalized_payload = CaptureFinalizedPayload.from_dict(finalized.payload)
-        completed_at = finalized_payload.completed_at or _utc_timestamp(now)
-        stop_reason = "interrupted" if interrupted_stop else finalized_payload.stop_reason
-        capture_metadata = (
-            _capture_metadata_from_segments(start_payload, capture_monitor.segments)
-            if capture_monitor is not None
-            else finalized_payload.capture_metadata
-        )
-        source_independence_error = _source_independence_error(
-            capture_metadata,
-            session_dir=created_session.bundle_path,
-        )
-        final_status = finalized_payload.status
-        final_error = finalized_payload.error
-        if source_independence_error is not None:
-            final_status = "failed"
-            final_error = source_independence_error
-        update_session_capture_metadata(created_session.record_path, capture_metadata)
-        update_session_record(
-            created_session.record_path,
-            updates={
-                "status": final_status,
-                "recording": _recording_lifecycle(
-                    started_at=started_at,
-                    stopped_at=completed_at,
-                    stop_reason=stop_reason,
-                    finalization_status=(
-                        "finalized" if final_status == "recorded" else final_status
-                    ),
-                    completed_at=completed_at,
-                    error=final_error,
-                ),
-                "capture_plan": _capture_plan_from_start_payload(
-                    start_payload,
-                    status=("finalized" if final_status == "recorded" else final_status),
-                ),
-            },
-        )
-        print("Capture finalized")
-        if final_status == "recorded":
-            print(f"To process this recording, run: mena process {created_session.record_path}")
-        elif final_error:
-            print(f"Capture finalized as {final_status}: {final_error}")
-        else:
-            print(f"Capture finalized as {final_status}.")
-        return 1 if final_status == "failed" else 0
+        return result.exit_code
 
     if args.command == "correct":
         try:
@@ -894,311 +695,6 @@ def main(
 
     print(f"Command '{args.command}' is not implemented yet.")
     return 0
-
-
-def _capture_plan_from_start_payload(
-    payload: StartCapturePayload,
-    *,
-    status: str,
-) -> dict[str, object]:
-    plan = payload.to_dict()
-    plan["version"] = 1
-    plan["status"] = status
-    return plan
-
-
-def _format_record_diagnostics(payload: StartCapturePayload) -> str:
-    lines = [
-        "Record diagnostics:",
-        f"  profile: {payload.profile}",
-        f"  language: {payload.language}",
-        f"  segment_seconds: {payload.segment_seconds}",
-        f"  selected_sources: {', '.join(payload.selected_sources)}",
-        "  routes:",
-    ]
-    for route in payload.routes:
-        lines.append(
-            "    "
-            f"role={route.role} source={route.source_id or '-'} "
-            f"route_id={route.route_id} backend={route.backend} "
-            f"backend_name={route.backend_name or '-'} label={route.label}"
-        )
-    return "\n".join(lines)
-
-
-def _capture_metadata_from_segments(
-    payload: StartCapturePayload,
-    segments: list[dict[str, object]],
-) -> dict[str, object]:
-    sample_rate = _latest_segment_int(segments, "sample_rate", default=48_000)
-    channels = _latest_segment_int(segments, "channels", default=1)
-    return {
-        "version": 1,
-        "profile": payload.profile,
-        "sample_rate": sample_rate,
-        "channels": channels,
-        "segment_seconds": payload.segment_seconds,
-        "segment_count": len(segments),
-        "segments": list(segments),
-        "sources": _capture_source_summaries(payload, segments),
-    }
-
-
-def _capture_source_summaries(
-    payload: StartCapturePayload,
-    segments: list[dict[str, object]],
-) -> list[dict[str, object]]:
-    routes_by_source = {
-        route.source_id: route for route in payload.routes if route.source_id is not None
-    }
-    ordered_sources = tuple(
-        dict.fromkeys(str(segment["source_id"]) for segment in segments if "source_id" in segment)
-    )
-    summaries: list[dict[str, object]] = []
-    for source_id in ordered_sources:
-        source_segments = [segment for segment in segments if segment.get("source_id") == source_id]
-        route = routes_by_source.get(source_id)
-        channel_layout = source_segments[-1].get("channel_layout", "unknown")
-        latest_route_id = source_segments[-1].get("route_id")
-        latest_route_label = source_segments[-1].get("route_label")
-        latest_capture_mode = source_segments[-1].get("capture_mode")
-        summaries.append(
-            {
-                "source_id": source_id,
-                "route_id": latest_route_id or (None if route is None else route.route_id),
-                "route_label": latest_route_label or (None if route is None else route.label),
-                "capture_mode": latest_capture_mode or _capture_mode_for_route(route),
-                "channel_layout": channel_layout,
-                "segment_count": len(source_segments),
-            }
-        )
-    return summaries
-
-
-def _source_independence_error(
-    capture_metadata: dict[str, object],
-    *,
-    session_dir: Path | None = None,
-) -> str | None:
-    if capture_metadata.get("profile") != CaptureProfileId.ONLINE_DUAL_STREAM.value:
-        return None
-    route_ids = _capture_route_ids_by_source(capture_metadata)
-    local_route_id = route_ids.get(CaptureSourceId.LOCAL_MIC.value)
-    system_route_id = route_ids.get(CaptureSourceId.SYSTEM_AUDIO.value)
-    if local_route_id is None or system_route_id is None or local_route_id == system_route_id:
-        return None
-    segments = capture_metadata.get("segments")
-    if not isinstance(segments, list):
-        return None
-    local_segments = _sealed_segments_by_index(segments, CaptureSourceId.LOCAL_MIC.value)
-    system_segments = _sealed_segments_by_index(segments, CaptureSourceId.SYSTEM_AUDIO.value)
-    local_hashes = _segment_hashes(local_segments)
-    system_hashes = _segment_hashes(system_segments)
-    common_indexes = sorted(set(local_hashes) & set(system_hashes))
-    if not common_indexes:
-        return None
-    if any(local_hashes[index] != system_hashes[index] for index in common_indexes):
-        return None
-    if _all_same_index_pairs_are_silent(
-        local_segments,
-        system_segments,
-        common_indexes,
-        session_dir=session_dir,
-    ):
-        return None
-    return (
-        "Online capture source independence failed: local_mic and system_audio "
-        "produced identical same-index audio hashes for distinct selected routes."
-    )
-
-
-def _capture_route_ids_by_source(capture_metadata: dict[str, object]) -> dict[str, str]:
-    route_ids: dict[str, str] = {}
-    sources = capture_metadata.get("sources")
-    if not isinstance(sources, list):
-        return route_ids
-    for source in sources:
-        if not isinstance(source, dict):
-            continue
-        source_id = source.get("source_id")
-        route_id = source.get("route_id")
-        if isinstance(source_id, str) and isinstance(route_id, str) and route_id:
-            route_ids[source_id] = route_id
-    return route_ids
-
-
-def _sealed_segments_by_index(
-    segments: list[object],
-    source_id: str,
-) -> dict[int, dict[str, object]]:
-    indexed: dict[int, dict[str, object]] = {}
-    for segment in segments:
-        if not isinstance(segment, dict) or segment.get("source_id") != source_id:
-            continue
-        if segment.get("status") != "sealed":
-            continue
-        index = segment.get("index")
-        if isinstance(index, int):
-            indexed[index] = segment
-    return indexed
-
-
-def _segment_hashes(segments: dict[int, dict[str, object]]) -> dict[int, str]:
-    hashes: dict[int, str] = {}
-    for index, segment in segments.items():
-        sha256 = segment.get("sha256")
-        if isinstance(sha256, str) and sha256:
-            hashes[index] = sha256
-    return hashes
-
-
-def _all_same_index_pairs_are_silent(
-    local_segments: dict[int, dict[str, object]],
-    system_segments: dict[int, dict[str, object]],
-    indexes: Sequence[int],
-    *,
-    session_dir: Path | None,
-) -> bool:
-    if session_dir is None:
-        return False
-    for index in indexes:
-        local_silent = _segment_wav_is_silent(local_segments[index], session_dir=session_dir)
-        system_silent = _segment_wav_is_silent(system_segments[index], session_dir=session_dir)
-        if local_silent is not True or system_silent is not True:
-            return False
-    return True
-
-
-def _segment_wav_is_silent(segment: dict[str, object], *, session_dir: Path) -> bool | None:
-    raw_path = segment.get("path")
-    if not isinstance(raw_path, str) or not raw_path:
-        return None
-    path = Path(raw_path)
-    if not path.is_absolute():
-        path = session_dir / path
-    try:
-        with wave.open(str(path), "rb") as wav_file:
-            frames = wav_file.readframes(wav_file.getnframes())
-    except (EOFError, OSError, wave.Error):
-        return None
-    if not frames:
-        return True
-    return all(byte == 0 for byte in frames)
-
-
-def _capture_mode_for_route(route: CaptureRouteBindingPayload | None) -> str | None:
-    if route is None:
-        return None
-    if route.role == "microphone":
-        return "selected_microphone"
-    if route.role == "playback_stream":
-        return "dedicated_route"
-    return None
-
-
-def _latest_segment_int(
-    segments: list[dict[str, object]],
-    key: str,
-    *,
-    default: int,
-) -> int:
-    for segment in reversed(segments):
-        value = segment.get(key)
-        if isinstance(value, int) and not isinstance(value, bool):
-            return value
-    return default
-
-
-def _recording_lifecycle(
-    *,
-    started_at: str | None,
-    stopped_at: str | None,
-    stop_reason: str | None,
-    finalization_status: str,
-    completed_at: str | None,
-    error: str | None,
-) -> dict[str, object]:
-    return {
-        "started_at": started_at,
-        "stopped_at": stopped_at,
-        "stop_reason": stop_reason,
-        "finalization": {
-            "status": finalization_status,
-            "completed_at": completed_at,
-            "error": error,
-        },
-    }
-
-
-def _persist_capture_failure(
-    *,
-    record_path: Path,
-    start_payload: StartCapturePayload,
-    started_at: str,
-    error_message: str,
-    now: datetime | None,
-) -> None:
-    completed_at = _utc_timestamp(now)
-    append_session_failure(
-        record_path,
-        {
-            "code": "capture_failed",
-            "message": error_message or "Capture failed.",
-            "source_id": None,
-            "occurred_at": completed_at,
-            "recoverable": False,
-        },
-    )
-    update_session_record(
-        record_path,
-        updates={
-            "status": "failed",
-            "recording": _recording_lifecycle(
-                started_at=started_at,
-                stopped_at=completed_at,
-                stop_reason="error",
-                finalization_status="failed",
-                completed_at=completed_at,
-                error=error_message or "Capture failed.",
-            ),
-            "capture_plan": _capture_plan_from_start_payload(
-                start_payload,
-                status="failed",
-            ),
-        },
-    )
-
-
-def _capture_event_monitor(
-    worker: Any,
-    *,
-    record_path: Path,
-    start_payload: StartCapturePayload,
-) -> _CaptureEventMonitor | None:
-    if isinstance(worker, WorkerProcess):
-        return _CaptureEventMonitor(
-            worker,
-            record_path=record_path,
-            start_payload=start_payload,
-        )
-    return None
-
-
-def _finalize_recording(
-    worker: Any,
-    capture_monitor: _CaptureEventMonitor | None,
-) -> ProtocolMessage:
-    if capture_monitor is not None:
-        worker.request_stop_capture()
-        return capture_monitor.wait_for_finalized()
-    finalized = worker.stop_capture()
-    if not isinstance(finalized, ProtocolMessage):
-        raise ProtocolError("Worker stop_capture did not return a protocol message.")
-    return finalized
-
-
-def _utc_timestamp(now: datetime | None) -> str:
-    return utc_timestamp(now)
 
 
 def _resolve_record_profile(
@@ -1394,7 +890,7 @@ def _record_input(input_fn: Callable[[str], str] | None) -> Callable[[str], str]
 def _wait_for_record_stop(
     input_fn: Callable[[str], str] | None,
     *,
-    capture_monitor: _CaptureEventMonitor | None = None,
+    capture_monitor: CaptureEventMonitor | None = None,
 ) -> None:
     reader = _record_input(input_fn)
     if reader is None:
@@ -1410,7 +906,7 @@ def _wait_for_record_stop(
 def _read_record_command(
     reader: Callable[[str], str],
     *,
-    capture_monitor: _CaptureEventMonitor | None,
+    capture_monitor: CaptureEventMonitor | None,
 ) -> str:
     if capture_monitor is None:
         return reader("record> ")
