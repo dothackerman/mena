@@ -12,6 +12,14 @@ from pathlib import Path
 from typing import Self
 
 from mena.artifacts import ArtifactRecord, ArtifactStore
+from mena.fields import (
+    optional_str,
+    required_bool,
+    required_int,
+    required_mapping,
+    required_number,
+    required_str,
+)
 from mena.merge_timing import (
     MergedTranscriptArtifact,
     MergedTranscriptSegment,
@@ -23,6 +31,7 @@ from mena.processing import (
     ProcessingStageLedger,
     ProcessingStageState,
 )
+from mena.timestamps import utc_timestamp
 
 REVIEW_QUEUE_ARTIFACT_TYPE = "review_queue"
 REVIEW_QUEUE_ARTIFACT_VERSION = 1
@@ -643,44 +652,48 @@ def _list(data: Mapping[str, object], field_name: str) -> list[object]:
 
 
 def _required_str(data: Mapping[str, object], field_name: str, label: str) -> str:
-    value = data.get(field_name)
-    if not isinstance(value, str) or not value:
-        raise ReviewFlaggingContractError(
-            f"Field '{field_name}' in {label} must be a non-empty string."
-        )
-    return value
+    return required_str(
+        data,
+        field_name,
+        error=ReviewFlaggingContractError,
+        message=f"Field '{field_name}' in {label} must be a non-empty string.",
+    )
 
 
 def _optional_str(data: Mapping[str, object], field_name: str, label: str) -> str | None:
-    value = data.get(field_name)
-    if value is None:
-        return None
-    if not isinstance(value, str) or not value:
-        raise ReviewFlaggingContractError(
-            f"Field '{field_name}' in {label} must be null or a non-empty string."
-        )
-    return value
+    return optional_str(
+        data,
+        field_name,
+        error=ReviewFlaggingContractError,
+        message=f"Field '{field_name}' in {label} must be null or a non-empty string.",
+    )
 
 
 def _required_int(data: Mapping[str, object], field_name: str, label: str) -> int:
-    value = data.get(field_name)
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ReviewFlaggingContractError(f"Field '{field_name}' in {label} must be an integer.")
-    return value
+    return required_int(
+        data,
+        field_name,
+        error=ReviewFlaggingContractError,
+        message=f"Field '{field_name}' in {label} must be an integer.",
+    )
 
 
 def _required_number(data: Mapping[str, object], field_name: str, label: str) -> float:
-    value = data.get(field_name)
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ReviewFlaggingContractError(f"Field '{field_name}' in {label} must be a number.")
-    return float(value)
+    return required_number(
+        data,
+        field_name,
+        error=ReviewFlaggingContractError,
+        message=f"Field '{field_name}' in {label} must be a number.",
+    )
 
 
 def _required_bool(data: Mapping[str, object], field_name: str, label: str) -> bool:
-    value = data.get(field_name)
-    if not isinstance(value, bool):
-        raise ReviewFlaggingContractError(f"Field '{field_name}' in {label} must be a boolean.")
-    return value
+    return required_bool(
+        data,
+        field_name,
+        error=ReviewFlaggingContractError,
+        message=f"Field '{field_name}' in {label} must be a boolean.",
+    )
 
 
 def _required_json_object(
@@ -688,10 +701,12 @@ def _required_json_object(
     field_name: str,
     label: str,
 ) -> Mapping[str, object]:
-    value = data.get(field_name)
-    if not isinstance(value, Mapping):
-        raise ReviewFlaggingContractError(f"{label} must be a JSON object.")
-    return value
+    return required_mapping(
+        data,
+        field_name,
+        error=ReviewFlaggingContractError,
+        message=f"{label} must be a JSON object.",
+    )
 
 
 def _validate_stable_id(value: str, label: str) -> None:
@@ -712,5 +727,4 @@ def _validate_span(start_seconds: float, end_seconds: float, label: str) -> None
 
 
 def _timestamp(now: datetime | None) -> str:
-    current = now or datetime.now(UTC)
-    return current.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return utc_timestamp(now or datetime.now(UTC))

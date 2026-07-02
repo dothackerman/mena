@@ -15,6 +15,14 @@ from pathlib import Path
 from typing import Any, Protocol, Self, cast
 
 from mena.artifacts import ArtifactRecord, ArtifactStore
+from mena.fields import (
+    optional_int,
+    optional_str,
+    required_bool,
+    required_int,
+    required_number,
+    required_str,
+)
 from mena.processing import (
     PROCESSING_STATE_VERSION,
     ArtifactRef,
@@ -23,6 +31,7 @@ from mena.processing import (
     ProcessingStageState,
     is_gpu_resource_error,
 )
+from mena.timestamps import utc_timestamp
 
 DIARIZATION_ARTIFACT_TYPE = "diarization"
 DIARIZATION_ARTIFACT_VERSION = 1
@@ -1226,8 +1235,7 @@ def _validate_artifact(artifact: DiarizationArtifact) -> None:
 
 
 def _timestamp(now: datetime | None) -> str:
-    timestamp = (now or datetime.now(UTC)).astimezone(UTC)
-    return timestamp.isoformat(timespec="seconds").replace("+00:00", "Z")
+    return utc_timestamp(now or datetime.now(UTC))
 
 
 def _mapping(data: object, label: str) -> Mapping[str, object]:
@@ -1244,10 +1252,12 @@ def _list(data: Mapping[str, object], key: str) -> list[object]:
 
 
 def _required_str(data: Mapping[str, object], key: str, label: str) -> str:
-    value = data.get(key)
-    if not isinstance(value, str) or not value:
-        raise DiarizationContractError(f"{label} field '{key}' must be a non-empty string.")
-    return value
+    return required_str(
+        data,
+        key,
+        error=DiarizationContractError,
+        message=f"{label} field '{key}' must be a non-empty string.",
+    )
 
 
 def _required_field(data: Mapping[str, object], key: str, label: str) -> object:
@@ -1257,12 +1267,12 @@ def _required_field(data: Mapping[str, object], key: str, label: str) -> object:
 
 
 def _optional_str(data: Mapping[str, object], key: str, label: str) -> str | None:
-    value = data.get(key)
-    if value is None:
-        return None
-    if not isinstance(value, str) or not value:
-        raise DiarizationContractError(f"{label} field '{key}' must be null or a string.")
-    return value
+    return optional_str(
+        data,
+        key,
+        error=DiarizationContractError,
+        message=f"{label} field '{key}' must be null or a string.",
+    )
 
 
 def _required_optional_str(data: Mapping[str, object], key: str, label: str) -> str | None:
@@ -1272,19 +1282,21 @@ def _required_optional_str(data: Mapping[str, object], key: str, label: str) -> 
 
 
 def _required_int(data: Mapping[str, object], key: str, label: str) -> int:
-    value = data.get(key)
-    if type(value) is not int:
-        raise DiarizationContractError(f"{label} field '{key}' must be an integer.")
-    return value
+    return required_int(
+        data,
+        key,
+        error=DiarizationContractError,
+        message=f"{label} field '{key}' must be an integer.",
+    )
 
 
 def _optional_int(data: Mapping[str, object], key: str, label: str) -> int | None:
-    value = data.get(key)
-    if value is None:
-        return None
-    if type(value) is not int:
-        raise DiarizationContractError(f"{label} field '{key}' must be null or an integer.")
-    return value
+    return optional_int(
+        data,
+        key,
+        error=DiarizationContractError,
+        message=f"{label} field '{key}' must be null or an integer.",
+    )
 
 
 def _required_optional_int(data: Mapping[str, object], key: str, label: str) -> int | None:
@@ -1294,17 +1306,21 @@ def _required_optional_int(data: Mapping[str, object], key: str, label: str) -> 
 
 
 def _required_bool(data: Mapping[str, object], key: str, label: str) -> bool:
-    value = data.get(key)
-    if type(value) is not bool:
-        raise DiarizationContractError(f"{label} field '{key}' must be a boolean.")
-    return value
+    return required_bool(
+        data,
+        key,
+        error=DiarizationContractError,
+        message=f"{label} field '{key}' must be a boolean.",
+    )
 
 
 def _required_number(data: Mapping[str, object], key: str, label: str) -> float:
-    value = data.get(key)
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        raise DiarizationContractError(f"{label} field '{key}' must be a number.")
-    return float(value)
+    return required_number(
+        data,
+        key,
+        error=DiarizationContractError,
+        message=f"{label} field '{key}' must be a number.",
+    )
 
 
 def _json_object(data: object, label: str, *, optional: bool = True) -> Mapping[str, object]:

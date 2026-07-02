@@ -17,6 +17,7 @@ from mena.correction_overlay import (
     CorrectionOverlayContractError,
     apply_correction_overlay,
 )
+from mena.fields import optional_str, required_bool, required_int, required_str
 from mena.local_llm import (
     OLLAMA_DEFAULT_ENDPOINT,
     OLLAMA_DEFAULT_MODEL,
@@ -38,6 +39,7 @@ from mena.processing import (
 )
 from mena.runtime_stewardship import RuntimeLease, RuntimeReleaseResult
 from mena.settings import SettingsError, normalize_summary_language
+from mena.timestamps import utc_timestamp
 
 SUMMARY_ARTIFACT_TYPE = "summary"
 SUMMARY_ARTIFACT_VERSION = 1
@@ -900,39 +902,40 @@ def _str_list(data: Mapping[str, object], field_name: str, label: str) -> list[s
 
 
 def _required_str(data: Mapping[str, object], field_name: str, label: str) -> str:
-    value = data.get(field_name)
-    if not isinstance(value, str) or not value:
-        raise SummarizationContractError(
-            f"Field '{field_name}' in {label} must be a non-empty string."
-        )
-    return value
+    return required_str(
+        data,
+        field_name,
+        error=SummarizationContractError,
+        message=f"Field '{field_name}' in {label} must be a non-empty string.",
+    )
 
 
 def _optional_str(data: Mapping[str, object], field_name: str, label: str) -> str | None:
-    value = data.get(field_name)
-    if value is None:
-        return None
-    if not isinstance(value, str) or not value:
-        raise SummarizationContractError(
-            f"Field '{field_name}' in {label} must be null or a non-empty string."
-        )
-    return value
+    return optional_str(
+        data,
+        field_name,
+        error=SummarizationContractError,
+        message=f"Field '{field_name}' in {label} must be null or a non-empty string.",
+    )
 
 
 def _required_int(data: Mapping[str, object], field_name: str, label: str) -> int:
-    value = data.get(field_name)
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise SummarizationContractError(f"Field '{field_name}' in {label} must be an integer.")
-    return value
+    return required_int(
+        data,
+        field_name,
+        error=SummarizationContractError,
+        message=f"Field '{field_name}' in {label} must be an integer.",
+    )
 
 
 def _required_bool(data: Mapping[str, object], field_name: str, label: str) -> bool:
-    value = data.get(field_name)
-    if not isinstance(value, bool):
-        raise SummarizationContractError(f"Field '{field_name}' in {label} must be a boolean.")
-    return value
+    return required_bool(
+        data,
+        field_name,
+        error=SummarizationContractError,
+        message=f"Field '{field_name}' in {label} must be a boolean.",
+    )
 
 
 def _timestamp(now: datetime | None) -> str:
-    current = now or datetime.now(UTC)
-    return current.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return utc_timestamp(now or datetime.now(UTC))

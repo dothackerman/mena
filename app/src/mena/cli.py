@@ -60,6 +60,7 @@ from mena.export import (
     SummaryMarkdownExportError,
     export_summary_markdown,
 )
+from mena.fields import optional_str, required_int, required_str
 from mena.manual_notes import ManualNotesIngestionError, ingest_manual_notes_file
 from mena.merge_timing import (
     MERGE_TIMING_STAGE,
@@ -171,6 +172,7 @@ from mena.summarization import (
     SummarizationPolicy,
     run_summarization_stage,
 )
+from mena.timestamps import utc_timestamp
 from mena.transcription import (
     TRANSCRIPTION_STAGE,
     FasterWhisperTranscriptionProvider,
@@ -1196,8 +1198,7 @@ def _finalize_recording(
 
 
 def _utc_timestamp(now: datetime | None) -> str:
-    timestamp = (now or datetime.now(UTC)).astimezone(UTC)
-    return timestamp.isoformat(timespec="seconds").replace("+00:00", "Z")
+    return utc_timestamp(now)
 
 
 def _resolve_record_profile(
@@ -2869,26 +2870,35 @@ def _asr_language_from_session_language(language: str | None) -> str | None:
 
 
 def _required_str(payload: dict[str, object] | object, key: str) -> str:
-    value = payload.get(key) if isinstance(payload, dict) else None
-    if not isinstance(value, str) or not value:
+    if not isinstance(payload, dict):
         raise ValueError(f"Session field '{key}' is required and must be a non-empty string.")
-    return value
+    return required_str(
+        payload,
+        key,
+        error=ValueError,
+        message=f"Session field '{key}' is required and must be a non-empty string.",
+    )
 
 
 def _required_int(payload: dict[str, object], key: str) -> int:
-    value = payload.get(key)
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+    value = required_int(
+        payload,
+        key,
+        error=ValueError,
+        message=f"Session field '{key}' must be a positive integer.",
+    )
+    if value <= 0:
         raise ValueError(f"Session field '{key}' must be a positive integer.")
     return value
 
 
 def _optional_metadata_str(payload: dict[str, object], key: str) -> str | None:
-    value = payload.get(key)
-    if value is None:
-        return None
-    if not isinstance(value, str) or not value:
-        raise ValueError(f"Session field '{key}' must be a non-empty string or null.")
-    return value
+    return optional_str(
+        payload,
+        key,
+        error=ValueError,
+        message=f"Session field '{key}' must be a non-empty string or null.",
+    )
 
 
 def _provider_implements(provider: Any, *required_attrs: str) -> bool:

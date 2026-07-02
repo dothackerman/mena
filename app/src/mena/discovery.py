@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Self
 
+from mena.fields import optional_str, required_bool, required_int, required_list, required_str
 from mena.profiles import CaptureProfileId
 
 DISCOVERY_VERSION = 1
@@ -425,17 +426,21 @@ def _format_streams(streams: tuple[PlaybackStream, ...]) -> list[str]:
 
 
 def _required_int(data: dict[str, object], key: str) -> int:
-    value = data.get(key)
-    if not isinstance(value, int):
-        raise ValueError(f"discovery.{key} must be an integer.")
-    return value
+    return required_int(
+        data,
+        key,
+        error=ValueError,
+        message=f"discovery.{key} must be an integer.",
+    )
 
 
 def _required_bool(data: dict[str, object], key: str) -> bool:
-    value = data.get(key)
-    if not isinstance(value, bool):
-        raise ValueError(f"discovery.{key} must be a boolean.")
-    return value
+    return required_bool(
+        data,
+        key,
+        error=ValueError,
+        message=f"discovery.{key} must be a boolean.",
+    )
 
 
 def _optional_bool(data: dict[str, object], key: str) -> bool | None:
@@ -448,26 +453,30 @@ def _optional_bool(data: dict[str, object], key: str) -> bool | None:
 
 
 def _required_str(data: dict[str, object], key: str) -> str:
-    value = data.get(key)
-    if not isinstance(value, str) or not value:
-        raise ValueError(f"discovery.{key} must be a non-empty string.")
-    return value
+    return required_str(
+        data,
+        key,
+        error=ValueError,
+        message=f"discovery.{key} must be a non-empty string.",
+    )
 
 
 def _optional_str(data: dict[str, object], key: str) -> str | None:
-    value = data.get(key)
-    if value is None:
-        return None
-    if not isinstance(value, str) or not value:
-        raise ValueError(f"discovery.{key} must be a non-empty string or null.")
-    return value
+    return optional_str(
+        data,
+        key,
+        error=ValueError,
+        message=f"discovery.{key} must be a non-empty string or null.",
+    )
 
 
 def _required_list(data: dict[str, object], key: str) -> list[object]:
-    value = data.get(key)
-    if not isinstance(value, list):
-        raise ValueError(f"discovery.{key} must be a list.")
-    return value
+    return required_list(
+        data,
+        key,
+        error=ValueError,
+        message=f"discovery.{key} must be a list.",
+    )
 
 
 def _required_dict(value: object) -> dict[str, object]:
