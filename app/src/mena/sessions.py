@@ -9,8 +9,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
+from mena.fileops import write_json_atomically
 from mena.profiles import CaptureProfileSelection
 from mena.settings import AppSettings
+from mena.timestamps import utc_timestamp, utc_timestamp_for_filename
 
 SESSION_RECORD_VERSION = 1
 SESSION_RECORD_FILENAME = "session.json"
@@ -92,7 +94,7 @@ def create_session(
     record = SessionRecord(
         version=SESSION_RECORD_VERSION,
         id=session_id,
-        created_at=created_at.isoformat(timespec="seconds").replace("+00:00", "Z"),
+        created_at=utc_timestamp(created_at),
         name=name,
         status="created",
         profile=profile.id.value,
@@ -108,7 +110,7 @@ def create_session(
         failures=(),
     )
     record_path = bundle_path / SESSION_RECORD_FILENAME
-    _write_json_atomically(record_path, asdict(record))
+    write_json_atomically(record_path, asdict(record))
     return CreatedSession(bundle_path=bundle_path, record_path=record_path, record=record)
 
 
@@ -130,7 +132,7 @@ def update_session_record(
 
     record = read_session_record(record_path)
     record.update(updates)
-    _write_json_atomically(record_path, record)
+    write_json_atomically(record_path, record)
     return record
 
 
@@ -207,19 +209,10 @@ def _append_session_list_item(
     if not isinstance(existing, list):
         raise ValueError(f"Session field '{key}' must be an array.")
     record[key] = [*existing, dict(item)]
-    _write_json_atomically(record_path, record)
+    write_json_atomically(record_path, record)
     return record
 
 
 def _bundle_directory_name(session_id: str, created_at: datetime) -> str:
-    timestamp = created_at.isoformat(timespec="seconds").replace("+00:00", "Z").replace(":", "")
+    timestamp = utc_timestamp_for_filename(created_at)
     return f"{session_id}_{timestamp}"
-
-
-def _write_json_atomically(path: Path, data: Mapping[str, object]) -> None:
-    temp_path = path.with_name(f".{path.name}.tmp")
-    temp_path.write_text(
-        json.dumps(data, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    temp_path.replace(path)

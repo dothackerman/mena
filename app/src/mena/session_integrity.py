@@ -14,6 +14,8 @@ from mena.artifacts import (
     ARTIFACT_MANIFEST_VERSION,
     ArtifactRecord,
     ArtifactStoreError,
+    session_artifact_manifest_path,
+    session_artifact_root,
 )
 from mena.processing import ArtifactRef, ProcessingStageState, ProcessingStateError
 from mena.sessions import SESSION_RECORD_FILENAME, read_session_record
@@ -314,7 +316,7 @@ def _load_manifest_records(
     session_id: str,
     findings: list[SessionIntegrityFinding],
 ) -> tuple[ArtifactRecord, ...]:
-    manifest_path = session_dir / "artifacts" / ARTIFACT_MANIFEST_FILENAME
+    manifest_path = session_artifact_manifest_path(session_dir)
     if not manifest_path.exists():
         return ()
     try:
@@ -520,7 +522,7 @@ def _verify_orphaned_artifact_files(
     expected_files: set[Path],
     findings: list[SessionIntegrityFinding],
 ) -> None:
-    artifact_root = session_dir / "artifacts"
+    artifact_root = session_artifact_root(session_dir)
     if not artifact_root.exists():
         return
     for path in sorted(item for item in artifact_root.rglob("*") if item.is_file()):

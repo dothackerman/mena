@@ -35,6 +35,7 @@ from mena.review_flagging import (
     ReviewQueueArtifact,
 )
 from mena.sessions import SESSION_RECORD_FILENAME, read_session_record
+from mena.timestamps import utc_timestamp
 from mena.transcription import (
     TRANSCRIPT_ARTIFACT_TYPE,
     TranscriptArtifact,
@@ -894,7 +895,7 @@ def _timestamp(now: datetime | None, *, index: int = 0) -> str:
     if now.tzinfo is None:
         now = now.replace(tzinfo=UTC)
     now = now.astimezone(UTC) + timedelta(seconds=index)
-    return now.isoformat(timespec="seconds").replace("+00:00", "Z")
+    return utc_timestamp(now)
 
 
 def _overlay_name(*, session_id: str) -> Path:

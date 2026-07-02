@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Self, TypeVar
 
+from mena.fields import optional_str, required_str
+
 EnumValue = TypeVar("EnumValue", bound=StrEnum)
 
 
@@ -296,19 +298,21 @@ def _source_contract(
 
 
 def _required_str(data: dict[str, object], key: str, label: str) -> str:
-    value = data.get(key)
-    if not isinstance(value, str) or not value:
-        raise ValueError(f"{label}.{key} must be a non-empty string.")
-    return value
+    return required_str(
+        data,
+        key,
+        error=ValueError,
+        message=f"{label}.{key} must be a non-empty string.",
+    )
 
 
 def _optional_str(data: dict[str, object], key: str, label: str) -> str | None:
-    value = data.get(key)
-    if value is None:
-        return None
-    if not isinstance(value, str) or not value:
-        raise ValueError(f"{label}.{key} must be a non-empty string or null.")
-    return value
+    return optional_str(
+        data,
+        key,
+        error=ValueError,
+        message=f"{label}.{key} must be a non-empty string or null.",
+    )
 
 
 def _enum_value(

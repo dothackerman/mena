@@ -9,6 +9,8 @@ from datetime import UTC, datetime
 from typing import Self
 
 from mena.artifacts import ArtifactRecord, ArtifactStore
+from mena.fields import optional_str, required_bool, required_int, required_str
+from mena.timestamps import utc_timestamp
 
 PROCESSING_STATE_ARTIFACT_TYPE = "processing_state"
 PROCESSING_STATE_VERSION = 1
@@ -379,35 +381,40 @@ def _artifact_refs(data: object) -> tuple[ArtifactRef, ...]:
 
 
 def _timestamp(now: datetime | None) -> str:
-    timestamp = (now or datetime.now(UTC)).astimezone(UTC)
-    return timestamp.isoformat(timespec="seconds").replace("+00:00", "Z")
+    return utc_timestamp(now or datetime.now(UTC))
 
 
 def _required_str(data: dict[str, object], key: str) -> str:
-    value = data.get(key)
-    if not isinstance(value, str) or not value:
-        raise ProcessingStateError(f"Processing field '{key}' must be a non-empty string.")
-    return value
+    return required_str(
+        data,
+        key,
+        error=ProcessingStateError,
+        message=f"Processing field '{key}' must be a non-empty string.",
+    )
 
 
 def _optional_str(data: dict[str, object], key: str) -> str | None:
-    value = data.get(key)
-    if value is None:
-        return None
-    if not isinstance(value, str) or not value:
-        raise ProcessingStateError(f"Processing field '{key}' must be null or a non-empty string.")
-    return value
+    return optional_str(
+        data,
+        key,
+        error=ProcessingStateError,
+        message=f"Processing field '{key}' must be null or a non-empty string.",
+    )
 
 
 def _required_int(data: dict[str, object], key: str) -> int:
-    value = data.get(key)
-    if type(value) is not int:
-        raise ProcessingStateError(f"Processing field '{key}' must be an integer.")
-    return value
+    return required_int(
+        data,
+        key,
+        error=ProcessingStateError,
+        message=f"Processing field '{key}' must be an integer.",
+    )
 
 
 def _required_bool(data: dict[str, object], key: str) -> bool:
-    value = data.get(key)
-    if type(value) is not bool:
-        raise ProcessingStateError(f"Processing field '{key}' must be a boolean.")
-    return value
+    return required_bool(
+        data,
+        key,
+        error=ProcessingStateError,
+        message=f"Processing field '{key}' must be a boolean.",
+    )

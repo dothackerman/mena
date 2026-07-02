@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Self
 
 from mena.artifacts import ArtifactRecord, ArtifactStore
+from mena.fields import required_int, required_mapping, required_nullable_str, required_str
 from mena.merge_timing import (
     MERGED_TRANSCRIPT_ARTIFACT_TYPE,
     MergedTranscriptArtifact,
@@ -21,6 +22,7 @@ from mena.merge_timing import (
     SpeakerIdentity,
 )
 from mena.processing import ArtifactRef, ProcessingStateError
+from mena.timestamps import utc_timestamp
 
 CORRECTION_OVERLAY_ARTIFACT_TYPE = "correction_overlay"
 CORRECTION_OVERLAY_ARTIFACT_VERSION = 1
@@ -468,10 +470,12 @@ def _list(data: Mapping[str, object], key: str) -> list[object]:
 
 
 def _required_str(data: Mapping[str, object], key: str, label: str) -> str:
-    value = data.get(key)
-    if not isinstance(value, str) or value == "":
-        raise CorrectionOverlayContractError(f"{label} {key} must be a non-empty string.")
-    return value
+    return required_str(
+        data,
+        key,
+        error=CorrectionOverlayContractError,
+        message=f"{label} {key} must be a non-empty string.",
+    )
 
 
 def _required_nullable_str(
@@ -481,19 +485,31 @@ def _required_nullable_str(
     *,
     allow_empty: bool = False,
 ) -> str | None:
-    value = _required_key(data, key, label)
-    if value is None:
-        return None
-    if not isinstance(value, str) or (value == "" and not allow_empty):
-        raise CorrectionOverlayContractError(f"{label} {key} must be a non-empty string or null.")
-    return value
+    if allow_empty:
+        value = _required_key(data, key, label)
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise CorrectionOverlayContractError(
+                f"{label} {key} must be a non-empty string or null."
+            )
+        return value
+    return required_nullable_str(
+        data,
+        key,
+        error=CorrectionOverlayContractError,
+        missing_message=f"{label} {key} is required.",
+        invalid_message=f"{label} {key} must be a non-empty string or null.",
+    )
 
 
 def _required_int(data: Mapping[str, object], key: str, label: str) -> int:
-    value = data.get(key)
-    if not isinstance(value, int) or isinstance(value, bool):
-        raise CorrectionOverlayContractError(f"{label} {key} must be an integer.")
-    return value
+    return required_int(
+        data,
+        key,
+        error=CorrectionOverlayContractError,
+        message=f"{label} {key} must be an integer.",
+    )
 
 
 def _required_nullable_bool(data: Mapping[str, object], key: str, label: str) -> bool | None:
@@ -532,9 +548,12 @@ def _artifact_ref_from_dict(data: object, label: str) -> ArtifactRef:
 
 
 def _required_json_object(data: Mapping[str, object], key: str, label: str) -> Mapping[str, object]:
-    value = data.get(key)
-    if not isinstance(value, Mapping):
-        raise CorrectionOverlayContractError(f"{label} must be an object.")
+    value = required_mapping(
+        data,
+        key,
+        error=CorrectionOverlayContractError,
+        message=f"{label} must be an object.",
+    )
     for item_key in value:
         if not isinstance(item_key, str):
             raise CorrectionOverlayContractError(f"{label} keys must be strings.")
@@ -613,4 +632,4 @@ def _timestamp(now: datetime | None) -> str:
     current = now or datetime.now(tz=UTC)
     if current.tzinfo is None:
         current = current.replace(tzinfo=UTC)
-    return current.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return utc_timestamp(current)

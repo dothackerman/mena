@@ -15,6 +15,7 @@ from mena.summarization import (
     SummaryArtifact,
 )
 from mena.summary_markdown import format_summary_markdown
+from mena.timestamps import utc_timestamp
 
 SUMMARY_MARKDOWN_EXPORT_ARTIFACT_TYPE = "summary_markdown_export"
 SUMMARY_MARKDOWN_EXPORT_ARTIFACT_VERSION = 2
@@ -254,7 +255,7 @@ def _format_timestamp(value: str) -> str:
 
 
 def _now_utc_iso8601() -> str:
-    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return utc_timestamp()
 
 
 def _sha256(data: bytes) -> str:

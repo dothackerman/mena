@@ -15,6 +15,8 @@ from mena.artifacts import (
     ArtifactStoreError,
     FileSystemArtifactStore,
     InMemoryArtifactStore,
+    session_artifact_manifest_path,
+    session_artifact_root,
 )
 
 SESSION_ID = "00000000-0000-0000-0000-000000000001"
@@ -27,6 +29,14 @@ def _memory_store(_tmp_path: Path) -> ArtifactStore:
 
 def _file_system_store(tmp_path: Path) -> ArtifactStore:
     return FileSystemArtifactStore(session_id=SESSION_ID, session_dir=tmp_path)
+
+
+def test_session_artifact_layout_helpers_return_owned_paths(tmp_path: Path) -> None:
+    assert session_artifact_root(tmp_path) == tmp_path / "artifacts"
+    assert (
+        session_artifact_manifest_path(tmp_path)
+        == tmp_path / "artifacts" / ARTIFACT_MANIFEST_FILENAME
+    )
 
 
 @pytest.mark.parametrize("store_factory", [_memory_store, _file_system_store])

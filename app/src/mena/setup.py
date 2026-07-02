@@ -17,8 +17,10 @@ from pathlib import Path
 from typing import Protocol
 
 from mena import __version__
+from mena.fields import optional_str, required_bool, required_dict, required_int, required_str
 from mena.local_llm import OLLAMA_DEFAULT_MODEL
 from mena.settings import CONFIG_FILENAME, AppSettings, RuntimePaths
+from mena.timestamps import utc_timestamp
 from mena.transcription import (
     FasterWhisperModelProfile,
     HardwareSnapshot,
@@ -791,13 +793,13 @@ def build_runtime_profile_state(
     evidence_digest = sha256(
         json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
-    timestamp = (accepted_at or datetime.now(UTC)).astimezone(UTC)
+    timestamp = accepted_at or datetime.now(UTC)
     return RuntimeProfileState(
         schema_version=RUNTIME_PROFILE_STATE_SCHEMA_VERSION,
         catalog_version=evaluation.profile.catalog_version,
         accepted_profile_id=evaluation.profile.id,
         accepted_profile_version=evaluation.profile.version,
-        accepted_at=timestamp.isoformat(timespec="seconds").replace("+00:00", "Z"),
+        accepted_at=utc_timestamp(timestamp),
         product_version=evaluation.state.command_identity.version,
         stage_policies=_resolved_stage_profiles(evaluation),
         selected_asr_profile=evaluation.selected_asr_profile,
@@ -1824,40 +1826,48 @@ def _format_bool(value: bool | None) -> str:
 
 
 def _required_str(data: Mapping[str, object], key: str) -> str:
-    value = data.get(key)
-    if not isinstance(value, str) or not value:
-        raise ValueError(f"Runtime profile state field '{key}' must be a non-empty string.")
-    return value
+    return required_str(
+        data,
+        key,
+        error=ValueError,
+        message=f"Runtime profile state field '{key}' must be a non-empty string.",
+    )
 
 
 def _optional_str(data: Mapping[str, object], key: str) -> str | None:
-    value = data.get(key)
-    if value is None:
-        return None
-    if not isinstance(value, str) or not value:
-        raise ValueError(f"Runtime profile state field '{key}' must be null or a non-empty string.")
-    return value
+    return optional_str(
+        data,
+        key,
+        error=ValueError,
+        message=f"Runtime profile state field '{key}' must be null or a non-empty string.",
+    )
 
 
 def _required_int(data: Mapping[str, object], key: str) -> int:
-    value = data.get(key)
-    if type(value) is not int:
-        raise ValueError(f"Runtime profile state field '{key}' must be an integer.")
-    return value
+    return required_int(
+        data,
+        key,
+        error=ValueError,
+        message=f"Runtime profile state field '{key}' must be an integer.",
+    )
 
 
 def _required_bool(data: Mapping[str, object], key: str) -> bool:
-    value = data.get(key)
-    if type(value) is not bool:
-        raise ValueError(f"Runtime profile state field '{key}' must be a boolean.")
-    return value
+    return required_bool(
+        data,
+        key,
+        error=ValueError,
+        message=f"Runtime profile state field '{key}' must be a boolean.",
+    )
 
 
 def _required_mapping(data: Mapping[str, object], key: str) -> Mapping[str, object]:
-    value = data.get(key)
-    if not isinstance(value, dict):
-        raise ValueError(f"Runtime profile state field '{key}' must be a JSON object.")
-    return value
+    return required_dict(
+        data,
+        key,
+        error=ValueError,
+        message=f"Runtime profile state field '{key}' must be a JSON object.",
+    )
 
 
 def _str_tuple(data: object, key: str) -> tuple[str, ...]:

@@ -12,6 +12,13 @@ from pathlib import Path
 from typing import Protocol, Self
 
 from mena.artifacts import ArtifactRecord, ArtifactStore
+from mena.fields import (
+    optional_mapping,
+    required_bool,
+    required_int,
+    required_number,
+    required_str,
+)
 from mena.local_llm import (
     OLLAMA_DEFAULT_ENDPOINT,
     OLLAMA_DEFAULT_MODEL,
@@ -43,6 +50,7 @@ from mena.review_flagging import (
     persist_review_queue_artifact,
 )
 from mena.runtime_stewardship import RuntimeLease, RuntimeReleaseResult
+from mena.timestamps import utc_timestamp
 
 SEMANTIC_COHERENCE_STAGE = "semantic_coherence"
 SEMANTIC_COHERENCE_POLICY_VERSION = 1
@@ -711,33 +719,39 @@ def _mapping(data: object, label: str) -> Mapping[str, object]:
 
 
 def _required_str(data: Mapping[str, object], field_name: str, label: str) -> str:
-    value = data.get(field_name)
-    if not isinstance(value, str) or not value:
-        raise SemanticCoherenceContractError(
-            f"Field '{field_name}' in {label} must be a non-empty string."
-        )
-    return value
+    return required_str(
+        data,
+        field_name,
+        error=SemanticCoherenceContractError,
+        message=f"Field '{field_name}' in {label} must be a non-empty string.",
+    )
 
 
 def _required_int(data: Mapping[str, object], field_name: str, label: str) -> int:
-    value = data.get(field_name)
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise SemanticCoherenceContractError(f"Field '{field_name}' in {label} must be an integer.")
-    return value
+    return required_int(
+        data,
+        field_name,
+        error=SemanticCoherenceContractError,
+        message=f"Field '{field_name}' in {label} must be an integer.",
+    )
 
 
 def _required_number(data: Mapping[str, object], field_name: str, label: str) -> float:
-    value = data.get(field_name)
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise SemanticCoherenceContractError(f"Field '{field_name}' in {label} must be a number.")
-    return float(value)
+    return required_number(
+        data,
+        field_name,
+        error=SemanticCoherenceContractError,
+        message=f"Field '{field_name}' in {label} must be a number.",
+    )
 
 
 def _required_bool(data: Mapping[str, object], field_name: str, label: str) -> bool:
-    value = data.get(field_name)
-    if not isinstance(value, bool):
-        raise SemanticCoherenceContractError(f"Field '{field_name}' in {label} must be a boolean.")
-    return value
+    return required_bool(
+        data,
+        field_name,
+        error=SemanticCoherenceContractError,
+        message=f"Field '{field_name}' in {label} must be a boolean.",
+    )
 
 
 def _optional_json_object(
@@ -745,12 +759,12 @@ def _optional_json_object(
     field_name: str,
     label: str,
 ) -> Mapping[str, object]:
-    value = data.get(field_name)
-    if value is None:
-        return {}
-    if not isinstance(value, Mapping):
-        raise SemanticCoherenceContractError(f"Field '{field_name}' in {label} must be an object.")
-    return value
+    return optional_mapping(
+        data,
+        field_name,
+        error=SemanticCoherenceContractError,
+        message=f"Field '{field_name}' in {label} must be an object.",
+    )
 
 
 def _validate_probability(value: float, label: str) -> None:
@@ -759,5 +773,4 @@ def _validate_probability(value: float, label: str) -> None:
 
 
 def _timestamp(now: datetime | None) -> str:
-    current = now or datetime.now(UTC)
-    return current.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return utc_timestamp(now or datetime.now(UTC))

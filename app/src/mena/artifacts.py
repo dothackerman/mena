@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Protocol, Self
 from uuid import uuid4
 
+from mena.fields import required_int, required_str
+
 ARTIFACT_MANIFEST_FILENAME = "artifact-manifest.v1.json"
 ARTIFACT_MANIFEST_VERSION = 1
 ARTIFACT_RECORD_VERSION = 1
@@ -165,8 +167,8 @@ class FileSystemArtifactStore:
     def __init__(self, *, session_id: str, session_dir: Path) -> None:
         self.session_id = session_id
         self.session_dir = session_dir
-        self.artifact_root = session_dir / "artifacts"
-        self.manifest_path = self.artifact_root / ARTIFACT_MANIFEST_FILENAME
+        self.artifact_root = session_artifact_root(session_dir)
+        self.manifest_path = session_artifact_manifest_path(session_dir)
         self.artifact_root.mkdir(parents=True, exist_ok=True)
 
     def store(
@@ -506,6 +508,14 @@ def _artifact_relative_path(*, artifact_type: str, name: str | Path) -> Path:
     return Path("artifacts") / artifact_type / artifact_name
 
 
+def session_artifact_root(session_dir: Path) -> Path:
+    return session_dir / "artifacts"
+
+
+def session_artifact_manifest_path(session_dir: Path) -> Path:
+    return session_artifact_root(session_dir) / ARTIFACT_MANIFEST_FILENAME
+
+
 def _validate_manifest_path(path: str) -> Path:
     relative_path = Path(path)
     if relative_path.is_absolute():
@@ -607,17 +617,21 @@ def _verification(
 
 
 def _required_str(data: Mapping[str, object], key: str) -> str:
-    value = data.get(key)
-    if not isinstance(value, str) or not value:
-        raise ArtifactStoreError(f"Artifact field '{key}' must be a non-empty string.")
-    return value
+    return required_str(
+        data,
+        key,
+        error=ArtifactStoreError,
+        message=f"Artifact field '{key}' must be a non-empty string.",
+    )
 
 
 def _required_int(data: Mapping[str, object], key: str) -> int:
-    value = data.get(key)
-    if type(value) is not int:
-        raise ArtifactStoreError(f"Artifact field '{key}' must be an integer.")
-    return value
+    return required_int(
+        data,
+        key,
+        error=ArtifactStoreError,
+        message=f"Artifact field '{key}' must be an integer.",
+    )
 
 
 def _mapping(data: object) -> Mapping[str, object]:

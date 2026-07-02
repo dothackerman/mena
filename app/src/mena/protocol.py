@@ -12,6 +12,21 @@ from types import TracebackType
 from typing import IO, Self
 from uuid import uuid4
 
+from mena.fields import (
+    optional_enum_str,
+    optional_int,
+    optional_number,
+    optional_str,
+    required_bool,
+    required_dict,
+    required_enum_str,
+    required_int,
+    required_list,
+    required_number,
+    required_sha256,
+    required_str,
+)
+
 PROTOCOL_MAJOR = 1
 PROTOCOL_MINOR = 1
 ENVELOPE_VERSION = 1
@@ -863,17 +878,21 @@ class WorkerProcess:
 
 
 def _required_str(data: dict[str, object], key: str) -> str:
-    value = data.get(key)
-    if not isinstance(value, str) or not value:
-        raise ProtocolError(f"Protocol field '{key}' must be a non-empty string.")
-    return value
+    return required_str(
+        data,
+        key,
+        error=ProtocolError,
+        message=f"Protocol field '{key}' must be a non-empty string.",
+    )
 
 
 def _required_int(data: dict[str, object], key: str) -> int:
-    value = data.get(key)
-    if type(value) is not int:
-        raise ProtocolError(f"Protocol field '{key}' must be an integer.")
-    return value
+    return required_int(
+        data,
+        key,
+        error=ProtocolError,
+        message=f"Protocol field '{key}' must be an integer.",
+    )
 
 
 def _required_positive_int(data: dict[str, object], key: str) -> int:
@@ -891,17 +910,21 @@ def _required_non_negative_int(data: dict[str, object], key: str) -> int:
 
 
 def _required_bool(data: dict[str, object], key: str) -> bool:
-    value = data.get(key)
-    if type(value) is not bool:
-        raise ProtocolError(f"Protocol field '{key}' must be a boolean.")
-    return value
+    return required_bool(
+        data,
+        key,
+        error=ProtocolError,
+        message=f"Protocol field '{key}' must be a boolean.",
+    )
 
 
 def _required_non_negative_number(data: dict[str, object], key: str) -> float:
-    value = data.get(key)
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ProtocolError(f"Protocol field '{key}' must be a number.")
-    normalized = float(value)
+    normalized = required_number(
+        data,
+        key,
+        error=ProtocolError,
+        message=f"Protocol field '{key}' must be a number.",
+    )
     if normalized < 0:
         raise ProtocolError(f"Protocol field '{key}' must be non-negative.")
     return normalized
@@ -912,12 +935,14 @@ def _optional_non_negative_number(
     key: str,
     context: str,
 ) -> float | None:
-    value = data.get(key)
-    if value is None:
+    normalized = optional_number(
+        data,
+        key,
+        error=ProtocolError,
+        message=f"{context} field '{key}' must be a number or null.",
+    )
+    if normalized is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ProtocolError(f"{context} field '{key}' must be a number or null.")
-    normalized = float(value)
     if normalized < 0:
         raise ProtocolError(f"{context} field '{key}' must be non-negative.")
     return normalized
@@ -928,11 +953,14 @@ def _optional_positive_int(
     key: str,
     context: str,
 ) -> int | None:
-    value = data.get(key)
+    value = optional_int(
+        data,
+        key,
+        error=ProtocolError,
+        message=f"{context} field '{key}' must be an integer or null.",
+    )
     if value is None:
         return None
-    if type(value) is not int:
-        raise ProtocolError(f"{context} field '{key}' must be an integer or null.")
     if value < 1:
         raise ProtocolError(f"{context} field '{key}' must be positive.")
     return value
@@ -944,11 +972,15 @@ def _required_enum_str(
     allowed_values: frozenset[str],
     context: str,
 ) -> str:
-    value = _required_str(data, key)
-    if value not in allowed_values:
-        allowed = ", ".join(sorted(allowed_values))
-        raise ProtocolError(f"{context} field '{key}' must be one of: {allowed}.")
-    return value
+    allowed = ", ".join(sorted(allowed_values))
+    return required_enum_str(
+        data,
+        key,
+        allowed_values,
+        error=ProtocolError,
+        string_message=f"Protocol field '{key}' must be a non-empty string.",
+        enum_message=f"{context} field '{key}' must be one of: {allowed}.",
+    )
 
 
 def _optional_enum_str(
@@ -957,31 +989,34 @@ def _optional_enum_str(
     allowed_values: frozenset[str],
     context: str,
 ) -> str | None:
-    value = data.get(key)
-    if value is None:
-        return None
-    if not isinstance(value, str) or not value:
-        raise ProtocolError(f"{context} field '{key}' must be a non-empty string or null.")
-    if value not in allowed_values:
-        allowed = ", ".join(sorted(allowed_values))
-        raise ProtocolError(f"{context} field '{key}' must be one of: {allowed}, or null.")
-    return value
+    allowed = ", ".join(sorted(allowed_values))
+    return optional_enum_str(
+        data,
+        key,
+        allowed_values,
+        error=ProtocolError,
+        string_message=f"{context} field '{key}' must be a non-empty string or null.",
+        enum_message=f"{context} field '{key}' must be one of: {allowed}, or null.",
+    )
 
 
 def _optional_str(data: dict[str, object], key: str, context: str) -> str | None:
-    value = data.get(key)
-    if value is None:
-        return None
-    if not isinstance(value, str) or not value:
-        raise ProtocolError(f"{context} field '{key}' must be a non-empty string or null.")
-    return value
+    return optional_str(
+        data,
+        key,
+        error=ProtocolError,
+        message=f"{context} field '{key}' must be a non-empty string or null.",
+    )
 
 
 def _required_sha256(data: dict[str, object], key: str) -> str:
-    value = _required_str(data, key)
-    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
-        raise ProtocolError(f"Protocol field '{key}' must be a lowercase SHA-256 hex digest.")
-    return value
+    return required_sha256(
+        data,
+        key,
+        error=ProtocolError,
+        string_message=f"Protocol field '{key}' must be a non-empty string.",
+        sha_message=f"Protocol field '{key}' must be a lowercase SHA-256 hex digest.",
+    )
 
 
 def _ensure_mapping(data: Mapping[str, object], context: str) -> dict[str, object]:
@@ -995,10 +1030,12 @@ def _required_mapping(
     key: str,
     context: str,
 ) -> dict[str, object]:
-    value = data.get(key)
-    if not isinstance(value, dict):
-        raise ProtocolError(f"{context} field '{key}' must be a JSON object.")
-    return value
+    return required_dict(
+        data,
+        key,
+        error=ProtocolError,
+        message=f"{context} field '{key}' must be a JSON object.",
+    )
 
 
 def _required_list(
@@ -1006,10 +1043,12 @@ def _required_list(
     key: str,
     context: str,
 ) -> list[object]:
-    value = data.get(key)
-    if not isinstance(value, list):
-        raise ProtocolError(f"{context} field '{key}' must be an array.")
-    return value
+    return required_list(
+        data,
+        key,
+        error=ProtocolError,
+        message=f"{context} field '{key}' must be an array.",
+    )
 
 
 def _required_str_sequence(
