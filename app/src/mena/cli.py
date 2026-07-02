@@ -172,7 +172,7 @@ from mena.summarization import (
     SummarizationPolicy,
     run_summarization_stage,
 )
-from mena.timestamps import utc_timestamp
+from mena.timestamps import parse_utc_timestamp, utc_timestamp
 from mena.transcription import (
     TRANSCRIPTION_STAGE,
     FasterWhisperTranscriptionProvider,
@@ -2818,14 +2818,10 @@ def _merged_transcript_timestamp_key(
 def _parse_iso_timestamp(value: str) -> datetime | None:
     if not value:
         return None
-    normalized = value.replace("Z", "+00:00")
     try:
-        parsed = datetime.fromisoformat(normalized)
+        return parse_utc_timestamp(value)
     except ValueError:
         return None
-    if parsed.tzinfo is None:
-        return None
-    return parsed.astimezone(UTC)
 
 
 def _resolve_session(session_path: Path) -> tuple[Path, dict[str, object]]:

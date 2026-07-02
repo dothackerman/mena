@@ -15,7 +15,7 @@ from mena.summarization import (
     SummaryArtifact,
 )
 from mena.summary_markdown import format_summary_markdown
-from mena.timestamps import utc_timestamp
+from mena.timestamps import parse_utc_timestamp, utc_timestamp
 
 SUMMARY_MARKDOWN_EXPORT_ARTIFACT_TYPE = "summary_markdown_export"
 SUMMARY_MARKDOWN_EXPORT_ARTIFACT_VERSION = 2
@@ -237,14 +237,10 @@ def _summary_created_at(summary: SummaryArtifact) -> datetime:
 
 
 def _parse_iso_timestamp(value: str) -> datetime | None:
-    normalized = value.replace("Z", "+00:00")
     try:
-        parsed = datetime.fromisoformat(normalized)
+        return parse_utc_timestamp(value)
     except ValueError:
         return None
-    if parsed.tzinfo is None:
-        return None
-    return parsed.astimezone(UTC)
 
 
 def _format_timestamp(value: str) -> str:
