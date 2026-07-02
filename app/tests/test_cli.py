@@ -198,7 +198,7 @@ def test_setup_check_reports_product_paths_and_ready_state(
     def _detect_state(_settings: AppSettings, **_kwargs: object) -> LocalInstallationState:
         return state
 
-    monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
+    monkeypatch.setattr("mena.setup_detection.detect_local_installation_state", _detect_state)
 
     exit_code = main(["setup", "--check"], settings=settings)
 
@@ -224,7 +224,7 @@ def test_setup_decline_does_not_mutate_or_report_complete(
     def _detect_state(_settings: AppSettings, **_kwargs: object) -> LocalInstallationState:
         return state
 
-    monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
+    monkeypatch.setattr("mena.setup_detection.detect_local_installation_state", _detect_state)
 
     exit_code = main(
         ["setup"],
@@ -255,7 +255,7 @@ def test_setup_interrupt_does_not_mutate_or_traceback(
     def _interrupt(_prompt: str) -> str:
         raise EOFError
 
-    monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
+    monkeypatch.setattr("mena.setup_detection.detect_local_installation_state", _detect_state)
 
     exit_code = main(
         ["setup"],
@@ -281,7 +281,7 @@ def test_setup_interrupt_during_initial_detection_does_not_traceback(
     def _detect_state(_settings: AppSettings, **_kwargs: object) -> LocalInstallationState:
         raise KeyboardInterrupt
 
-    monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
+    monkeypatch.setattr("mena.setup_detection.detect_local_installation_state", _detect_state)
 
     exit_code = main(["setup", "--check"], settings=settings, setup_runner=runner)
 
@@ -315,7 +315,7 @@ def test_setup_does_not_mutate_from_repo_dev_invocation(
     def _detect_state(_settings: AppSettings, **_kwargs: object) -> LocalInstallationState:
         return state
 
-    monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
+    monkeypatch.setattr("mena.setup_detection.detect_local_installation_state", _detect_state)
 
     exit_code = main(["setup", "--yes"], settings=settings, setup_runner=runner)
 
@@ -349,7 +349,7 @@ def test_setup_yes_executes_planned_actions_through_runner(
     def _detect_state(_settings: AppSettings, **_kwargs: object) -> LocalInstallationState:
         return detected_states.pop(0) if detected_states else ready_state
 
-    monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
+    monkeypatch.setattr("mena.setup_detection.detect_local_installation_state", _detect_state)
 
     exit_code = main(["setup", "--yes"], settings=settings, setup_runner=runner)
 
@@ -384,7 +384,7 @@ def test_setup_authorize_local_fallback_flag_persists_automatic_authorization(
     def _detect_state(_settings: AppSettings, **_kwargs: object) -> LocalInstallationState:
         return state
 
-    monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
+    monkeypatch.setattr("mena.setup_detection.detect_local_installation_state", _detect_state)
 
     exit_code = main(
         ["setup", "--yes", "--authorize-local-fallback"],
@@ -419,7 +419,7 @@ def test_setup_authorize_local_fallback_reports_unavailable_blockers(
             return fallback_missing_asr
         return primary_ready
 
-    monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
+    monkeypatch.setattr("mena.setup_detection.detect_local_installation_state", _detect_state)
 
     exit_code = main(
         ["setup", "--yes", "--authorize-local-fallback"],
@@ -459,7 +459,7 @@ def test_setup_authorize_local_fallback_runs_fallback_actions_before_persisting(
             return fallback_states.pop(0)
         return primary_ready
 
-    monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
+    monkeypatch.setattr("mena.setup_detection.detect_local_installation_state", _detect_state)
 
     exit_code = main(
         ["setup", "--yes", "--authorize-local-fallback"],
@@ -502,7 +502,7 @@ def test_setup_authorize_local_fallback_prompts_before_running_fallback_actions(
         prompts.append(prompt)
         return "n"
 
-    monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
+    monkeypatch.setattr("mena.setup_detection.detect_local_installation_state", _detect_state)
 
     exit_code = main(
         ["setup", "--authorize-local-fallback"],
@@ -542,7 +542,7 @@ def test_setup_evaluates_fallback_profile_before_authorizing_it(
         observed_profiles.append("primary")
         return primary_ready
 
-    monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
+    monkeypatch.setattr("mena.setup_detection.detect_local_installation_state", _detect_state)
 
     assert main(["setup", "--yes"], settings=settings, setup_runner=SetupFakeRunner()) == 0
 
@@ -570,7 +570,7 @@ def test_setup_interrupt_during_ready_fallback_evaluation_does_not_persist_state
             raise KeyboardInterrupt
         return primary_ready
 
-    monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
+    monkeypatch.setattr("mena.setup_detection.detect_local_installation_state", _detect_state)
 
     exit_code = main(["setup", "--yes"], settings=settings, setup_runner=SetupFakeRunner())
     captured = capsys.readouterr()
@@ -601,7 +601,7 @@ def test_setup_with_only_manual_actions_does_not_prompt_or_execute(
     def _prompt(_prompt: str) -> str:
         raise AssertionError("manual-only setup should not prompt")
 
-    monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
+    monkeypatch.setattr("mena.setup_detection.detect_local_installation_state", _detect_state)
 
     exit_code = main(["setup"], settings=settings, input_fn=_prompt, setup_runner=runner)
 
@@ -629,7 +629,7 @@ def test_setup_interrupt_during_actions_does_not_traceback(
     def _detect_state(_settings: AppSettings, **_kwargs: object) -> LocalInstallationState:
         return state
 
-    monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
+    monkeypatch.setattr("mena.setup_detection.detect_local_installation_state", _detect_state)
 
     exit_code = main(["setup", "--yes"], settings=settings, setup_runner=runner)
 
@@ -660,7 +660,7 @@ def test_setup_interrupt_during_post_action_refresh_does_not_traceback(
             return detected_states.pop(0)
         raise KeyboardInterrupt
 
-    monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
+    monkeypatch.setattr("mena.setup_detection.detect_local_installation_state", _detect_state)
 
     exit_code = main(["setup", "--yes"], settings=settings, setup_runner=runner)
 
@@ -693,7 +693,7 @@ def test_setup_interrupt_during_refreshed_fallback_evaluation_does_not_persist_s
             raise KeyboardInterrupt
         return detected_states.pop(0)
 
-    monkeypatch.setattr("mena.cli.detect_local_installation_state", _detect_state)
+    monkeypatch.setattr("mena.setup_detection.detect_local_installation_state", _detect_state)
 
     exit_code = main(["setup", "--yes"], settings=settings, setup_runner=runner)
     captured = capsys.readouterr()
