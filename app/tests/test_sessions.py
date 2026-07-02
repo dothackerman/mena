@@ -222,14 +222,14 @@ def test_session_lifecycle_predicates_read_recording_status(tmp_path: Path) -> N
             "stopped_at": "2026-05-08T05:31:00Z",
             "stop_reason": "user_stop",
             "finalization": {
-                "status": "completed",
+                "status": "finalized",
                 "completed_at": "2026-05-08T05:31:00Z",
                 "error": None,
             },
         },
     )
 
-    assert session_recording_finalization_status(finalized_record) == "completed"
+    assert session_recording_finalization_status(finalized_record) == "finalized"
     assert is_recording_started(finalized_record)
     assert is_recording_finalized(finalized_record)
 

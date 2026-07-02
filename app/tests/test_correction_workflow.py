@@ -1239,6 +1239,13 @@ def test_extract_session_id_validates_payload() -> None:
     assert session_id({"id": SESSION_ID}) == SESSION_ID
 
 
+def test_run_correction_workflow_preserves_missing_session_id_error(tmp_path: Path) -> None:
+    (tmp_path / SESSION_RECORD_FILENAME).write_text(json.dumps({}), encoding="utf-8")
+
+    with pytest.raises(CorrectionWorkflowError, match="Session record must include"):
+        run_correction_workflow(tmp_path)
+
+
 def test_prompt_overlap_mark_reprompts_on_invalid_input() -> None:
     values = iter(["maybe", "yes"])
     response = _prompt_overlap_mark(input_fn=_read_with_values(values))

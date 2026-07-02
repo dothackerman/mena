@@ -193,9 +193,12 @@ def run_correction_workflow(
     session_path = Path(session_path)
     try:
         resolved_session = resolve_session(session_path)
-        session_id_value = session_id(resolved_session.record)
     except SessionRecordError as exc:
         raise CorrectionWorkflowError(str(exc)) from exc
+    try:
+        session_id_value = session_id(resolved_session.record)
+    except SessionRecordError as exc:
+        raise CorrectionWorkflowError("Session record must include a non-empty id.") from exc
     session_dir = resolved_session.session_dir
     store = FileSystemArtifactStore(session_id=session_id_value, session_dir=session_dir)
 

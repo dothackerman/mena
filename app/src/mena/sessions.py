@@ -241,9 +241,9 @@ def is_recording_finalized(session_record: Mapping[str, object]) -> bool:
     """Return whether recording reached a terminal finalization state."""
 
     return session_recording_finalization_status(session_record) in {
-        "completed",
+        "finalized",
         "failed",
-        "interrupted",
+        "interrupted_partial",
     }
 
 
