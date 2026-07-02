@@ -1,8 +1,6 @@
 import hashlib
 import json
 import queue
-import threading
-import time
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -23,22 +21,19 @@ from mena.capture import make_wav_bytes
 from mena.cli import (
     COMMANDS,
     WORKER_EXIT_TIMEOUT_SECONDS,
+    ConsoleRecordInteraction,
     SourceAudioInput,
-    _CaptureEventMonitor,
     _collect_capture_segments,
-    _format_audio_route_choice,
     _latest_failed_stage_input_artifacts,
     _record_terminal_local_llm_release,
     _require_provider,
     _resolve_latest_merged_transcript_record,
     _resolve_record_language,
     _resolve_record_profile,
-    _resolve_route_selections,
     _resolve_runtime_fallback_input,
     _run_processing_command,
     _run_processing_stages,
     _runtime_fallback_stage_for_provider_failure,
-    _wait_for_record_stop,
     main,
 )
 from mena.correction_overlay import (
@@ -80,6 +75,7 @@ from mena.protocol import (
     StartCapturePayload,
     WorkerProcess,
 )
+from mena.recording_control import _CaptureEventMonitor
 from mena.review_flagging import (
     REVIEW_QUEUE_SCHEMA_VERSION,
     ConfidenceFlaggingPolicy,
@@ -977,221 +973,6 @@ def test_resolve_record_language_prompts_with_default() -> None:
     )
 
 
-def test_resolve_route_selections_prompts_for_ambiguous_online_routes() -> None:
-    answers = iter(["2", "2", "2"])
-
-    selections = _resolve_route_selections(
-        profile=CaptureProfileId.ONLINE_DUAL_STREAM,
-        discovery=_ambiguous_discoverer(CaptureProfileId.ONLINE_DUAL_STREAM),
-        microphone_route_id=None,
-        playback_stream_route_id=None,
-        output_sink_route_id=None,
-        input_fn=lambda _prompt: next(answers),
-    )
-
-    assert selections.microphone_route_id == "pipewire:node:32"
-    assert selections.playback_stream_route_id == "pulse:sink-input:152"
-    assert selections.output_sink_route_id == "pipewire:node:43"
-
-
-def test_resolve_route_selections_uses_marked_default_route_for_blank_prompt() -> None:
-    prompts: list[str] = []
-
-    def _blank_prompt(prompt: str) -> str:
-        prompts.append(prompt)
-        return ""
-
-    selections = _resolve_route_selections(
-        profile=CaptureProfileId.ONLINE_DUAL_STREAM,
-        discovery=_ambiguous_default_discoverer(CaptureProfileId.ONLINE_DUAL_STREAM),
-        microphone_route_id=None,
-        playback_stream_route_id=None,
-        output_sink_route_id=None,
-        input_fn=_blank_prompt,
-    )
-
-    assert selections.microphone_route_id == "pipewire:node:32"
-    assert selections.playback_stream_route_id == "pulse:sink-input:151"
-    assert selections.output_sink_route_id == "pipewire:node:43"
-    assert prompts == [
-        "Select microphone routes [2]: ",
-        "Select playback streams [1]: ",
-        "Select output sink routes [2]: ",
-    ]
-
-
-def test_format_audio_route_choice_marks_default_and_includes_node_name() -> None:
-    route = AudioRoute(
-        id=104,
-        route_id="pipewire:node:104",
-        name="bluez_input.58:18:62:27:F2:5F",
-        description="WH-1000XM6",
-        media_class="Audio/Source",
-        active=True,
-        is_default=True,
-        node_name="bluez_input.58:18:62:27:F2:5F",
-        object_serial="5229",
-        pw_record_target="bluez_input.58:18:62:27:F2:5F",
-    )
-
-    choice = _format_audio_route_choice(route)
-
-    assert choice.startswith("WH-1000XM6 [default]")
-    assert "bluez_input.58:18:62:27:F2:5F" in choice
-    assert "pipewire:node:104" in choice
-
-
-def test_format_audio_route_choice_does_not_mark_active_non_default() -> None:
-    route = AudioRoute(
-        id=104,
-        route_id="pipewire:node:104",
-        name="bluez_input.58:18:62:27:F2:5F",
-        description="WH-1000XM6",
-        media_class="Audio/Source",
-        active=True,
-        is_default=False,
-        node_name="bluez_input.58:18:62:27:F2:5F",
-        object_serial="5229",
-        pw_record_target="bluez_input.58:18:62:27:F2:5F",
-    )
-
-    choice = _format_audio_route_choice(route)
-
-    assert choice.startswith("WH-1000XM6 - bluez_input.58:18:62:27:F2:5F")
-    assert "[default]" not in choice
-
-
-def test_resolve_route_selections_rejects_in_person_online_flags() -> None:
-    with pytest.raises(ValueError, match="accepts --mic only"):
-        _resolve_route_selections(
-            profile=CaptureProfileId.IN_PERSON_SINGLE_MIC,
-            discovery=_available_discoverer(CaptureProfileId.IN_PERSON_SINGLE_MIC),
-            microphone_route_id=None,
-            playback_stream_route_id="pulse:sink-input:151",
-            output_sink_route_id=None,
-            input_fn=None,
-        )
-
-
-def test_resolve_route_selections_rejects_missing_playback_streams() -> None:
-    discovery = AudioDiscovery(
-        version=1,
-        profile=CaptureProfileId.ONLINE_DUAL_STREAM,
-        status=DiscoveryStatus.AVAILABLE,
-        sources=_available_discoverer(CaptureProfileId.ONLINE_DUAL_STREAM).sources,
-        sinks=_available_discoverer(CaptureProfileId.ONLINE_DUAL_STREAM).sinks,
-        playback_streams=(),
-    )
-
-    with pytest.raises(ValueError, match="No playback streams were discovered"):
-        _resolve_route_selections(
-            profile=CaptureProfileId.ONLINE_DUAL_STREAM,
-            discovery=discovery,
-            microphone_route_id=None,
-            playback_stream_route_id=None,
-            output_sink_route_id=None,
-            input_fn=None,
-        )
-
-
-def test_resolve_route_selections_requires_single_playback_confirmation() -> None:
-    with pytest.raises(ValueError, match="Playback stream confirmation is required"):
-        _resolve_route_selections(
-            profile=CaptureProfileId.ONLINE_DUAL_STREAM,
-            discovery=_available_discoverer(CaptureProfileId.ONLINE_DUAL_STREAM),
-            microphone_route_id=None,
-            playback_stream_route_id=None,
-            output_sink_route_id=None,
-            input_fn=None,
-        )
-
-
-def test_resolve_route_selections_prompts_for_single_playback_stream() -> None:
-    selections = _resolve_route_selections(
-        profile=CaptureProfileId.ONLINE_DUAL_STREAM,
-        discovery=_available_discoverer(CaptureProfileId.ONLINE_DUAL_STREAM),
-        microphone_route_id=None,
-        playback_stream_route_id=None,
-        output_sink_route_id=None,
-        input_fn=lambda _prompt: "1",
-    )
-
-    assert selections.playback_stream_route_id == "pulse:sink-input:151"
-
-
-def test_resolve_route_selections_rejects_inactive_explicit_playback_stream() -> None:
-    discovery = _discovery_with_playback_streams(
-        PlaybackStream(
-            id=51,
-            route_id="pulse:sink-input:151",
-            name="Paused Stream",
-            app_binary_name="firefox",
-            stream_name="WebRTC playback",
-            media_name="Meet",
-            sink_input_id="151",
-            active=False,
-        )
-    )
-
-    with pytest.raises(ValueError, match="Selected playback stream route .* is not active"):
-        _resolve_route_selections(
-            profile=CaptureProfileId.ONLINE_DUAL_STREAM,
-            discovery=discovery,
-            microphone_route_id=None,
-            playback_stream_route_id="pulse:sink-input:151",
-            output_sink_route_id=None,
-            input_fn=None,
-        )
-
-
-def test_resolve_route_selections_rejects_inactive_only_playback_streams() -> None:
-    discovery = _discovery_with_playback_streams(
-        PlaybackStream(
-            id=51,
-            route_id="pulse:sink-input:151",
-            name="Paused Stream",
-            app_binary_name="firefox",
-            stream_name="WebRTC playback",
-            media_name="Meet",
-            sink_input_id="151",
-            active=False,
-        )
-    )
-
-    with pytest.raises(ValueError, match="No active playback streams were discovered"):
-        _resolve_route_selections(
-            profile=CaptureProfileId.ONLINE_DUAL_STREAM,
-            discovery=discovery,
-            microphone_route_id=None,
-            playback_stream_route_id=None,
-            output_sink_route_id=None,
-            input_fn=lambda _prompt: "1",
-        )
-
-
-def test_resolve_route_selections_rejects_invalid_prompt_choice() -> None:
-    with pytest.raises(ValueError, match="Invalid microphone routes selection"):
-        _resolve_route_selections(
-            profile=CaptureProfileId.ONLINE_DUAL_STREAM,
-            discovery=_ambiguous_discoverer(CaptureProfileId.ONLINE_DUAL_STREAM),
-            microphone_route_id=None,
-            playback_stream_route_id=None,
-            output_sink_route_id=None,
-            input_fn=lambda _prompt: "x",
-        )
-
-
-def test_wait_for_record_stop_continues_after_invalid_command(
-    capsys: CaptureFixture[str],
-) -> None:
-    answers = iter(["later", "", "q"])
-
-    _wait_for_record_stop(lambda _prompt: next(answers))
-
-    captured = capsys.readouterr()
-    assert captured.out.count("Recording continues. Type q to stop.") == 2
-
-
 def test_capture_event_monitor_drains_progress_and_returns_finalization(
     tmp_path: Path,
     capsys: CaptureFixture[str],
@@ -1262,6 +1043,7 @@ def test_capture_event_monitor_drains_progress_and_returns_finalization(
         cast(WorkerProcess, worker),
         record_path=created_session.record_path,
         start_payload=start_payload,
+        interaction=ConsoleRecordInteraction(None),
     )
 
     monitor.start()
@@ -1307,51 +1089,13 @@ def test_capture_event_monitor_raises_structured_worker_error(tmp_path: Path) ->
         cast(WorkerProcess, worker),
         record_path=created_session.record_path,
         start_payload=_monitor_start_payload(),
+        interaction=ConsoleRecordInteraction(None),
     )
 
     monitor.start()
 
     with pytest.raises(ProtocolError, match="disk full"):
         monitor.wait_for_finalized()
-
-
-def test_wait_for_record_stop_surfaces_background_capture_error(tmp_path: Path) -> None:
-    worker = _EventWorker(
-        [
-            ProtocolMessage(
-                type="error",
-                session_id=SESSION_ID,
-                payload={
-                    "code": "capture_flush_failed",
-                    "message": "disk full",
-                    "recoverable": False,
-                    "details": {},
-                },
-            )
-        ]
-    )
-    created_session = create_session(
-        profile=parse_capture_profile("online"),
-        language="en",
-        data_root=tmp_path,
-    )
-    monitor = _CaptureEventMonitor(
-        cast(WorkerProcess, worker),
-        record_path=created_session.record_path,
-        start_payload=_monitor_start_payload(),
-    )
-    prompt_started = threading.Event()
-
-    def blocking_input(_prompt: str) -> str:
-        prompt_started.set()
-        time.sleep(5)
-        return "q"
-
-    monitor.start()
-
-    with pytest.raises(ProtocolError, match="disk full"):
-        _wait_for_record_stop(blocking_input, capture_monitor=monitor)
-    assert prompt_started.is_set()
 
 
 def test_capture_event_monitor_propagates_reader_failure(tmp_path: Path) -> None:
@@ -1364,6 +1108,7 @@ def test_capture_event_monitor_propagates_reader_failure(tmp_path: Path) -> None
         cast(WorkerProcess, _EventWorker([])),
         record_path=created_session.record_path,
         start_payload=_monitor_start_payload(),
+        interaction=ConsoleRecordInteraction(None),
     )
 
     monitor.start()
@@ -1383,6 +1128,7 @@ def test_capture_event_monitor_rejects_unexpected_event_type(tmp_path: Path) -> 
         cast(WorkerProcess, worker),
         record_path=created_session.record_path,
         start_payload=_monitor_start_payload(),
+        interaction=ConsoleRecordInteraction(None),
     )
 
     monitor.start()

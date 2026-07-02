@@ -22,7 +22,7 @@ from mena.merge_timing import (
     SpeakerIdentity,
 )
 from mena.processing import ArtifactRef, ProcessingStateError
-from mena.timestamps import utc_timestamp
+from mena.timestamps import NaiveTimestampError, parse_utc_timestamp, utc_timestamp
 
 CORRECTION_OVERLAY_ARTIFACT_TYPE = "correction_overlay"
 CORRECTION_OVERLAY_ARTIFACT_VERSION = 1
@@ -569,14 +569,12 @@ def _required_key(data: Mapping[str, object], key: str, label: str) -> object:
 def _overlay_timestamp(value: object, label: str) -> datetime:
     if not isinstance(value, str) or not value:
         raise CorrectionOverlayContractError(f"{label} must be a timestamp string.")
-    normalized = value.replace("Z", "+00:00")
     try:
-        parsed = datetime.fromisoformat(normalized)
+        return parse_utc_timestamp(value)
+    except NaiveTimestampError as exc:
+        raise CorrectionOverlayContractError(f"{label} must include a timezone.") from exc
     except ValueError as exc:
         raise CorrectionOverlayContractError(f"{label} must be a RFC 3339 date-time.") from exc
-    if parsed.tzinfo is None:
-        raise CorrectionOverlayContractError(f"{label} must include a timezone.")
-    return parsed.astimezone(UTC)
 
 
 def _overlay_record_timestamp(
@@ -619,13 +617,12 @@ def _validate_uuid(value: str, label: str) -> None:
 
 
 def _validate_timestamp(value: str, label: str) -> None:
-    normalized = value.replace("Z", "+00:00")
     try:
-        parsed = datetime.fromisoformat(normalized)
+        parse_utc_timestamp(value)
+    except NaiveTimestampError as exc:
+        raise CorrectionOverlayContractError(f"{label} must include a timezone.") from exc
     except ValueError as exc:
         raise CorrectionOverlayContractError(f"{label} must be an RFC 3339 date-time.") from exc
-    if parsed.tzinfo is None:
-        raise CorrectionOverlayContractError(f"{label} must include a timezone.")
 
 
 def _timestamp(now: datetime | None) -> str:
