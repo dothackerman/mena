@@ -8,8 +8,13 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from mena.artifacts import ArtifactRecord, FileSystemArtifactStore
-from mena.diarization import PyannoteCommunityDiarizationProvider
-from mena.semantic_coherence import OllamaSemanticCoherenceProvider
+from mena.diarization import (
+    DIARIZATION_STAGE,
+    DiarizationProvider,
+    DiarizationProviderUnavailable,
+    PyannoteCommunityDiarizationProvider,
+)
+from mena.semantic_coherence import OllamaSemanticCoherenceProvider, SemanticCoherenceProvider
 from mena.settings import AppSettings
 from mena.setup import (
     CommandIdentity,
@@ -26,10 +31,20 @@ from mena.setup import (
     evaluate_setup,
     load_runtime_profile_state,
 )
+from mena.stage_policy import stage_device as lookup_stage_device
+from mena.stage_policy import stage_model as lookup_stage_model
 from mena.summarization import OllamaSummarizationProvider
-from mena.transcription import FasterWhisperTranscriptionProvider
+from mena.transcription import (
+    TRANSCRIPTION_STAGE,
+    FasterWhisperTranscriptionProvider,
+    TranscriptionProvider,
+    TranscriptionProviderUnavailable,
+)
 
 ProviderFactory = Callable[[], Any]
+RuntimeProfileStore = Callable[..., Any]
+ProcessingRuntimeRunner = Callable[["BoundProcessingRuntime"], Any]
+FailedInputArtifactsResolver = Callable[[str], tuple[str, ...]]
 RUNTIME_PROFILE_PROVENANCE_CONTRACT = "runtime-profile-provenance.v1"
 PROCESSING_REQUIRED_RUNTIME_STAGES = frozenset({"transcription", "diarization"})
 PROCESSING_OPTIONAL_RUNTIME_STAGES = frozenset({"semantic-review"})
@@ -59,6 +74,20 @@ class RuntimeProfileSelection:
     fallback_failed_input_artifacts: tuple[str, ...] = ()
     fallback_failure_class: str | None = None
     fallback_authorization_source: str | None = None
+
+
+@dataclass(frozen=True)
+class BoundProcessingRuntime:
+    selection: RuntimeProfileSelection
+    transcription_provider: TranscriptionProvider
+    diarization_provider: DiarizationProvider
+    semantic_coherence_provider: SemanticCoherenceProvider
+
+
+@dataclass(frozen=True)
+class ProcessingRuntimeRunResult:
+    value: Any
+    runtime: BoundProcessingRuntime
 
 
 class RuntimeFallbackUnavailable(ValueError):
@@ -233,6 +262,159 @@ def select_runtime_profile_after_stage_failure(
         fallback_failure_class=failure_class,
         fallback_authorization_source=authorization_source,
     )
+
+
+def resolve_processing_runtime(
+    *,
+    settings: AppSettings,
+    store: FileSystemArtifactStore,
+    run_id: str,
+    attempt: int,
+    transcription_provider_factory: ProviderFactory,
+    diarization_provider_factory: ProviderFactory,
+    semantic_coherence_provider_factory: ProviderFactory,
+    runner: CommandRunner | None,
+    command_identity: CommandIdentity | None,
+    hardware: HardwareFacts | None,
+    allow_runtime_fallback: bool,
+    authorize_runtime_fallback: Callable[[str, SetupEvaluation], bool] | None = None,
+    runtime_selection_fn: Callable[..., RuntimeProfileSelection] = select_runtime_profile,
+    runtime_profile_store_fn: RuntimeProfileStore | None = None,
+) -> BoundProcessingRuntime:
+    """Resolve and bind production processing providers for the accepted runtime profile."""
+
+    if runtime_profile_store_fn is None:
+        runtime_profile_store_fn = store_runtime_profile_provenance
+    selection = runtime_selection_fn(
+        settings=settings,
+        runner=runner,
+        command_identity=command_identity,
+        hardware=hardware,
+        allow_runtime_fallback=allow_runtime_fallback,
+        authorize_runtime_fallback=authorize_runtime_fallback,
+        required_stages=PROCESSING_REQUIRED_RUNTIME_STAGES,
+    )
+    runtime_profile_store_fn(
+        store=store,
+        run_id=run_id,
+        attempt=attempt,
+        selection=selection,
+    )
+    return bind_processing_runtime(
+        selection=selection,
+        settings=settings,
+        transcription_provider_factory=transcription_provider_factory,
+        diarization_provider_factory=diarization_provider_factory,
+        semantic_coherence_provider_factory=semantic_coherence_provider_factory,
+    )
+
+
+def bind_processing_runtime(
+    *,
+    selection: RuntimeProfileSelection,
+    settings: AppSettings,
+    transcription_provider_factory: ProviderFactory,
+    diarization_provider_factory: ProviderFactory,
+    semantic_coherence_provider_factory: ProviderFactory,
+    semantic_coherence_provider: SemanticCoherenceProvider | None = None,
+) -> BoundProcessingRuntime:
+    """Construct providers bound to a selected runtime profile."""
+
+    transcription_provider = runtime_transcription_factory(
+        transcription_provider_factory,
+        selection.actual,
+    )()
+    diarization_provider = runtime_diarization_factory(
+        diarization_provider_factory,
+        selection.actual,
+    )()
+    semantic_provider = (
+        semantic_coherence_provider
+        if semantic_coherence_provider is not None
+        else runtime_semantic_factory(
+            semantic_coherence_provider_factory,
+            settings=settings,
+            runtime_state=selection.accepted,
+        )()
+    )
+    return BoundProcessingRuntime(
+        selection=selection,
+        transcription_provider=transcription_provider,
+        diarization_provider=diarization_provider,
+        semantic_coherence_provider=semantic_provider,
+    )
+
+
+def run_processing_with_runtime_fallback(
+    *,
+    runtime: BoundProcessingRuntime,
+    run: ProcessingRuntimeRunner,
+    settings: AppSettings,
+    store: FileSystemArtifactStore,
+    run_id: str,
+    attempt: int,
+    runner: CommandRunner | None,
+    command_identity: CommandIdentity | None,
+    hardware: HardwareFacts | None,
+    allow_runtime_fallback: bool,
+    authorize_runtime_fallback: Callable[[str, SetupEvaluation], bool] | None,
+    transcription_provider_factory: ProviderFactory,
+    diarization_provider_factory: ProviderFactory,
+    semantic_coherence_provider_factory: ProviderFactory,
+    failed_input_artifacts: FailedInputArtifactsResolver,
+    runtime_profile_selector_after_failure_fn: Callable[..., RuntimeProfileSelection] = (
+        select_runtime_profile_after_stage_failure
+    ),
+    runtime_profile_store_fn: RuntimeProfileStore | None = None,
+) -> ProcessingRuntimeRunResult:
+    """Run processing once, with one resolver-owned fallback retry when policy allows it."""
+
+    if runtime_profile_store_fn is None:
+        runtime_profile_store_fn = store_runtime_profile_provenance
+    try:
+        return ProcessingRuntimeRunResult(value=run(runtime), runtime=runtime)
+    except (TranscriptionProviderUnavailable, DiarizationProviderUnavailable) as exc:
+        if runtime.selection.fallback_used:
+            raise
+        failed_stage = runtime_fallback_stage_for_provider_failure(exc)
+        fallback_selection = runtime_profile_selector_after_failure_fn(
+            settings=settings,
+            runner=runner,
+            command_identity=command_identity,
+            hardware=hardware,
+            accepted=runtime.selection.accepted,
+            failed_stage=failed_stage,
+            failure_reason=str(exc),
+            failure_class=exc.__class__.__name__,
+            failed_input_artifacts=failed_input_artifacts(failed_stage),
+            allow_runtime_fallback=allow_runtime_fallback,
+            authorize_runtime_fallback=authorize_runtime_fallback,
+            revalidation_stages=PROCESSING_REQUIRED_RUNTIME_STAGES,
+        )
+        runtime_profile_store_fn(
+            store=store,
+            run_id=run_id,
+            attempt=attempt,
+            selection=fallback_selection,
+            name_suffix="stage-fallback",
+        )
+        fallback_runtime = bind_processing_runtime(
+            selection=fallback_selection,
+            settings=settings,
+            transcription_provider_factory=transcription_provider_factory,
+            diarization_provider_factory=diarization_provider_factory,
+            semantic_coherence_provider_factory=semantic_coherence_provider_factory,
+            semantic_coherence_provider=runtime.semantic_coherence_provider,
+        )
+        return ProcessingRuntimeRunResult(value=run(fallback_runtime), runtime=fallback_runtime)
+
+
+def runtime_fallback_stage_for_provider_failure(
+    exc: TranscriptionProviderUnavailable | DiarizationProviderUnavailable,
+) -> str:
+    if isinstance(exc, TranscriptionProviderUnavailable):
+        return TRANSCRIPTION_STAGE
+    return DIARIZATION_STAGE
 
 
 def _resolve_authorized_fallback(
@@ -528,19 +710,14 @@ def _scope_evaluation(
 
 
 def stage_device(runtime_state: RuntimeProfileState, stage: str) -> str | None:
-    for policy in runtime_state.stage_policies:
-        if policy.stage == stage:
-            return policy.device
-    return None
+    return lookup_stage_device(runtime_state.stage_policies, stage)
 
 
 def _stage_model(runtime_state: RuntimeProfileState, stage: str) -> str:
-    for policy in runtime_state.stage_policies:
-        if policy.stage == stage:
-            return policy.model
-    raise ValueError(
-        f"Accepted runtime profile {runtime_state.accepted_profile_id!r} "
-        f"does not define stage {stage!r}."
+    return lookup_stage_model(
+        runtime_state.stage_policies,
+        stage,
+        profile_label=repr(runtime_state.accepted_profile_id),
     )
 
 

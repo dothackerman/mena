@@ -3595,8 +3595,14 @@ def test_main_process_retries_authorized_fallback_after_primary_diarization_oom(
     def _fake_run_semantic_coherence_stage(**_kwargs: object) -> object:
         return SimpleNamespace(review_queue_record=None, skipped=False, skip_reason=None)
 
-    monkeypatch.setattr("mena.cli.runtime_transcription_factory", _runtime_transcription_factory)
-    monkeypatch.setattr("mena.cli.runtime_diarization_factory", _runtime_diarization_factory)
+    monkeypatch.setattr(
+        "mena.runtime_profile.runtime_transcription_factory",
+        _runtime_transcription_factory,
+    )
+    monkeypatch.setattr(
+        "mena.runtime_profile.runtime_diarization_factory",
+        _runtime_diarization_factory,
+    )
     monkeypatch.setattr("mena.cli.run_merge_timing_stage", _fake_run_merge_timing_stage)
     monkeypatch.setattr(
         "mena.cli.run_confidence_flagging_stage", _fake_run_confidence_flagging_stage
@@ -3749,8 +3755,14 @@ def test_main_process_retries_authorized_fallback_after_primary_transcription_oo
     def _fake_run_semantic_coherence_stage(**_kwargs: object) -> object:
         return SimpleNamespace(review_queue_record=None, skipped=False, skip_reason=None)
 
-    monkeypatch.setattr("mena.cli.runtime_transcription_factory", _runtime_transcription_factory)
-    monkeypatch.setattr("mena.cli.runtime_diarization_factory", _runtime_diarization_factory)
+    monkeypatch.setattr(
+        "mena.runtime_profile.runtime_transcription_factory",
+        _runtime_transcription_factory,
+    )
+    monkeypatch.setattr(
+        "mena.runtime_profile.runtime_diarization_factory",
+        _runtime_diarization_factory,
+    )
     monkeypatch.setattr("mena.cli.run_merge_timing_stage", _fake_run_merge_timing_stage)
     monkeypatch.setattr(
         "mena.cli.run_confidence_flagging_stage", _fake_run_confidence_flagging_stage

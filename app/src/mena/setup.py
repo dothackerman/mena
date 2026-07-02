@@ -20,6 +20,8 @@ from mena import __version__
 from mena.fields import optional_str, required_bool, required_dict, required_int, required_str
 from mena.local_llm import OLLAMA_DEFAULT_MODEL
 from mena.settings import CONFIG_FILENAME, AppSettings, RuntimePaths
+from mena.stage_policy import stage_device as lookup_stage_device
+from mena.stage_policy import stage_model as lookup_stage_model
 from mena.timestamps import utc_timestamp
 from mena.transcription import (
     FasterWhisperModelProfile,
@@ -1463,12 +1465,10 @@ def _profile_asr_profile(
 
 
 def _stage_model(profile: SetupProfile | RuntimeProfileState, stage: str) -> str:
-    for policy in (
+    policies = (
         profile.stage_policies if isinstance(profile, RuntimeProfileState) else profile.stages
-    ):
-        if policy.stage == stage:
-            return policy.model
-    raise ValueError(f"Profile {profile!r} does not define stage {stage!r}.")
+    )
+    return lookup_stage_model(policies, stage, profile_label=repr(profile))
 
 
 def _local_llm_model(profile: SetupProfile) -> str:
@@ -1485,14 +1485,14 @@ def _stage_device(
     stage: str,
     selected_asr_profile: FasterWhisperModelProfile,
 ) -> str:
-    for policy in profile.stages:
-        if policy.stage == stage:
-            return (
-                selected_asr_profile.device
-                if policy.device == "hardware-selected"
-                else policy.device
-            )
-    return selected_asr_profile.device
+    device = lookup_stage_device(
+        profile.stages,
+        stage,
+        hardware_selected_device=selected_asr_profile.device,
+    )
+    if device is None:
+        raise ValueError(f"Profile {profile!r} does not define stage {stage!r}.")
+    return device
 
 
 def _profile_has_stage(profile: SetupProfile, stage: str) -> bool:

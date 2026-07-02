@@ -89,12 +89,8 @@ from mena.review_flagging import (
 from mena.runtime_profile import (
     RuntimeFallbackUnavailable,
     production_runtime_required,
-    runtime_diarization_factory,
-    runtime_semantic_factory,
     runtime_summarization_provider,
-    runtime_transcription_factory,
     select_runtime_profile,
-    select_runtime_profile_after_stage_failure,
     store_runtime_profile_provenance,
 )
 from mena.runtime_stewardship import (
@@ -1194,9 +1190,6 @@ def _run_processing_command(
         setup_hardware=setup_hardware,
         allow_runtime_fallback=allow_runtime_fallback,
         runtime_fallback_input_fn=runtime_fallback_input_fn,
-        runtime_selection_fn=select_runtime_profile,
-        runtime_profile_selector_after_failure_fn=select_runtime_profile_after_stage_failure,
-        runtime_profile_provenance_store_fn=store_runtime_profile_provenance,
         terminal_llm_release=_record_terminal_local_llm_release,
         processing_stages_runner=_processing_stages_adapter,
         transcription_stage_runner=run_transcription_stage,
@@ -1205,9 +1198,6 @@ def _run_processing_command(
         room_mic_merge_timing_stage_runner=run_room_mic_merge_timing_stage,
         confidence_flagging_stage_runner=run_confidence_flagging_stage,
         semantic_coherence_stage_runner=run_semantic_coherence_stage,
-        runtime_transcription_provider_factory=runtime_transcription_factory,
-        runtime_diarization_provider_factory=runtime_diarization_factory,
-        runtime_semantic_provider_factory=runtime_semantic_factory,
     )
 
 
