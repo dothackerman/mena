@@ -6,6 +6,7 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Self
 
 from mena.artifacts import ArtifactRecord, ArtifactStore
@@ -15,6 +16,9 @@ from mena.timestamps import utc_timestamp
 PROCESSING_STATE_ARTIFACT_TYPE = "processing_state"
 PROCESSING_STATE_VERSION = 1
 PROCESSING_STAGE_STATUSES = frozenset({"pending", "running", "completed", "failed", "skipped"})
+PROCESSING_PIPELINE_STAGES = frozenset(
+    {"transcription", "diarization", "merge_timing", "confidence_flagging", "semantic_coherence"}
+)
 _ARTIFACT_TYPE_PATTERN = re.compile(r"^[a-z][a-z0-9_:-]*$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _STAGE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -382,6 +386,99 @@ def _artifact_refs(data: object) -> tuple[ArtifactRef, ...]:
 
 def _timestamp(now: datetime | None) -> str:
     return utc_timestamp(now or datetime.now(UTC))
+
+
+def _processing_state_order(record: ArtifactRecord) -> int:
+    prefix = Path(record.path).stem.split("-", 1)[0]
+    try:
+        return int(prefix)
+    except ValueError as exc:
+        raise ProcessingStateError(
+            "Processing state artifact name must start with sequence."
+        ) from exc
+
+
+def _latest_processing_state(
+    store: ArtifactStore,
+    session_id: str,
+    *,
+    allowed_statuses: frozenset[str],
+    require_retryable_error: bool | None = None,
+) -> ProcessingStageState | None:
+    matches: list[tuple[int, ProcessingStageState]] = []
+    for state_record in store.list(artifact_type=PROCESSING_STATE_ARTIFACT_TYPE):
+        payload = json.loads(store.retrieve(state_record.id))
+        state = ProcessingStageState.from_dict(payload)
+        if (
+            state.session_id != session_id
+            or state.status not in allowed_statuses
+            or state.stage not in PROCESSING_PIPELINE_STAGES
+        ):
+            continue
+
+        if state.status == "failed":
+            if state.error is None:
+                continue
+            if require_retryable_error is True and not state.error.retryable:
+                continue
+            if require_retryable_error is False and state.error.retryable:
+                continue
+
+        matches.append((_processing_state_order(state_record), state))
+
+    if not matches:
+        return None
+    return max(matches, key=lambda item: item[0])[1]
+
+
+def latest_retryable_processing_state(
+    store: ArtifactStore,
+    session_id: str,
+) -> ProcessingStageState | None:
+    return _latest_processing_state(
+        store=store,
+        session_id=session_id,
+        allowed_statuses=frozenset({"failed"}),
+        require_retryable_error=True,
+    )
+
+
+def latest_resumable_processing_state(
+    store: ArtifactStore,
+    session_id: str,
+) -> ProcessingStageState | None:
+    latest = _latest_processing_state(
+        store=store,
+        session_id=session_id,
+        allowed_statuses=frozenset({"running", "completed", "failed", "skipped"}),
+    )
+    if latest is None or latest.status == "running":
+        return latest
+    if latest.status in {"completed", "skipped"}:
+        return None if _is_final_processing_stage(latest) else latest
+    if latest.error is not None and latest.error.retryable:
+        return latest
+    return None
+
+
+def _is_final_processing_stage(state: ProcessingStageState) -> bool:
+    return state.stage == "semantic_coherence"
+
+
+def latest_non_retryable_processing_failure(
+    store: ArtifactStore,
+    session_id: str,
+) -> ProcessingStageState | None:
+    latest = _latest_processing_state(
+        store=store,
+        session_id=session_id,
+        allowed_statuses=frozenset({"running", "completed", "failed", "skipped"}),
+    )
+    if latest is None or latest.status != "failed":
+        return None
+    if latest.error is not None and not latest.error.retryable:
+        return latest
+    return None
 
 
 def _required_str(data: dict[str, object], key: str) -> str:

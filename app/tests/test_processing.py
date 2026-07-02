@@ -18,6 +18,9 @@ from mena.processing import (
     ProcessingStageLedger,
     ProcessingStageState,
     ProcessingStateError,
+    latest_non_retryable_processing_failure,
+    latest_resumable_processing_state,
+    latest_retryable_processing_state,
 )
 
 SESSION_ID = "00000000-0000-0000-0000-000000000001"
@@ -193,6 +196,69 @@ def test_processing_ledger_tracks_latest_retryable_failure(tmp_path: Path) -> No
         now=NOW,
     )
     assert ledger.retryable_failure("diarization") is False
+
+
+def test_processing_state_queries_find_latest_retryable_and_blocking_failures(
+    tmp_path: Path,
+) -> None:
+    store = _memory_store(tmp_path)
+    ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+    source = ArtifactRef(
+        id=f"{SESSION_ID}:artifacts/source_audio/local.wav",
+        artifact_type="source_audio",
+        version=1,
+        sha256="0" * 64,
+    )
+
+    running = ledger.mark_running(
+        stage="transcription",
+        input_artifacts=(source,),
+        now=NOW,
+    )
+    retryable = ledger.mark_failed(
+        stage="diarization",
+        input_artifacts=(source,),
+        error=ProcessingErrorInfo(message="temporary", retryable=True, code="gpu"),
+        now=NOW,
+    )
+    blocking = ledger.mark_failed(
+        stage="merge_timing",
+        input_artifacts=(source,),
+        error=ProcessingErrorInfo(message="bad input", retryable=False, code="contract"),
+        now=NOW,
+    )
+
+    assert latest_retryable_processing_state(store, SESSION_ID) == retryable
+    assert latest_resumable_processing_state(store, SESSION_ID) is None
+    assert latest_non_retryable_processing_failure(store, SESSION_ID) == blocking
+
+    other_store = InMemoryArtifactStore(session_id=OTHER_SESSION_ID)
+    other_ledger = ProcessingStageLedger(
+        store=other_store,
+        session_id=OTHER_SESSION_ID,
+        run_id=RUN_ID,
+    )
+    other_ledger.record(
+        ProcessingStageState.from_dict({**running.to_dict(), "session_id": OTHER_SESSION_ID})
+    )
+    assert latest_retryable_processing_state(other_store, SESSION_ID) is None
+
+
+def test_processing_state_queries_treat_final_completion_as_not_resumable(
+    tmp_path: Path,
+) -> None:
+    store = _memory_store(tmp_path)
+    output = store.store(artifact_type="semantic_review", name="review.json", data=b"{}")
+    ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+
+    ledger.mark_completed(
+        stage="semantic_coherence",
+        input_artifacts=(),
+        output_artifacts=(ArtifactRef.from_record(output),),
+        now=NOW,
+    )
+
+    assert latest_resumable_processing_state(store, SESSION_ID) is None
 
 
 def test_processing_ledger_rejects_cross_session_state(tmp_path: Path) -> None:
