@@ -44,7 +44,12 @@ from mena.semantic_coherence import (
     SemanticCoherenceStageResult,
     run_semantic_coherence_stage,
 )
-from mena.sessions import read_session_record
+from mena.sessions import (
+    resolve_session,
+    session_id,
+    session_language_or_default,
+    session_profile,
+)
 from mena.settings import AppSettings
 from mena.transcription import (
     TRANSCRIPTION_STAGE,
@@ -128,12 +133,14 @@ def run_processing_command(
     base_transcription_provider_factory = transcription_provider_factory
     base_diarization_provider_factory = diarization_provider_factory
     base_semantic_coherence_provider_factory = semantic_coherence_provider_factory
-    session_dir, session_record = _resolve_session(session_path)
-    session_id = _extract_session_id(session_record)
+    resolved_session = resolve_session(session_path)
+    session_dir = resolved_session.session_dir
+    session_record = resolved_session.record
+    session_id_value = session_id(session_record)
     profile = _resolve_capture_profile(session_record)
-    session_language = _session_language_or_default(session_record, "")
+    session_language = session_language_or_default(session_record, "")
     _validate_processing_profile_support(profile)
-    store = FileSystemArtifactStore(session_id=session_id, session_dir=session_dir)
+    store = FileSystemArtifactStore(session_id=session_id_value, session_dir=session_dir)
     source_inputs = prepare_source_audio_inputs(
         session_dir=session_dir,
         profile=profile,
@@ -200,7 +207,7 @@ def run_processing_command(
         )
 
     pipeline_timestamp = now if now is not None else datetime.now(UTC)
-    ledger = ProcessingStageLedger(store=store, session_id=session_id, run_id=run_id)
+    ledger = ProcessingStageLedger(store=store, session_id=session_id_value, run_id=run_id)
     transcription_provider = _require_provider(
         transcription_provider_factory,
         TranscriptionProvider,
@@ -224,7 +231,7 @@ def run_processing_command(
         semantic_coherence_provider: SemanticCoherenceProvider,
     ) -> ProcessingPipelineResult:
         return processing_stages_runner(
-            session_id=session_id,
+            session_id=session_id_value,
             profile=profile,
             source_inputs=source_inputs,
             store=store,
@@ -903,36 +910,10 @@ def _store_provider_prep_audio_artifact(
     )
 
 
-def _resolve_session(session_path: Path) -> tuple[Path, dict[str, object]]:
-    from mena.sessions import SESSION_RECORD_FILENAME
-
-    if session_path.is_dir():
-        session_record_path = session_path / SESSION_RECORD_FILENAME
-        resolved_session_dir = session_path
-    elif session_path.is_file() and session_path.name == SESSION_RECORD_FILENAME:
-        session_record_path = session_path
-        resolved_session_dir = session_path.parent
-    else:
-        raise ValueError(
-            "Session path must be a session directory or an existing session.json path."
-        )
-
-    try:
-        record = read_session_record(session_record_path)
-    except Exception as exc:
-        raise ValueError(f"Cannot read session record at {session_record_path}.") from exc
-
-    return resolved_session_dir, record
-
-
-def _extract_session_id(session_record: dict[str, object]) -> str:
-    return _required_str(session_record, "id")
-
-
 def _resolve_capture_profile(session_record: dict[str, object]) -> CaptureProfile:
     from mena.profiles import get_capture_profile
 
-    return get_capture_profile(_required_str(session_record, "profile"))
+    return get_capture_profile(session_profile(session_record))
 
 
 def _requires_runtime_profile(
@@ -962,13 +943,6 @@ def _asr_language_from_session_language(language: str | None) -> str | None:
         return None
     normalized = language.replace("_", "-").split("-", 1)[0].lower()
     return normalized or None
-
-
-def _session_language_or_default(session_record: dict[str, object], default_language: str) -> str:
-    language = session_record.get("language")
-    if isinstance(language, str) and language:
-        return language
-    return default_language
 
 
 def _confirm_one_run_runtime_fallback(

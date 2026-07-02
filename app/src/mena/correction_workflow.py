@@ -34,7 +34,7 @@ from mena.review_flagging import (
     ReviewFlaggingContractError,
     ReviewQueueArtifact,
 )
-from mena.sessions import SESSION_RECORD_FILENAME, read_session_record
+from mena.sessions import SessionRecordError, resolve_session, session_id
 from mena.timestamps import utc_timestamp
 from mena.transcription import (
     TRANSCRIPT_ARTIFACT_TYPE,
@@ -191,18 +191,22 @@ def run_correction_workflow(
     """Run an interactive correction session and persist a correction overlay."""
 
     session_path = Path(session_path)
-    session_dir, session_record = _resolve_session(session_path)
-    session_id = _extract_session_id(session_record)
-    store = FileSystemArtifactStore(session_id=session_id, session_dir=session_dir)
+    try:
+        resolved_session = resolve_session(session_path)
+        session_id_value = session_id(resolved_session.record)
+    except SessionRecordError as exc:
+        raise CorrectionWorkflowError(str(exc)) from exc
+    session_dir = resolved_session.session_dir
+    store = FileSystemArtifactStore(session_id=session_id_value, session_dir=session_dir)
 
     review_queue_record, review_queue = _load_review_queue(
         store=store,
-        session_id=session_id,
+        session_id=session_id_value,
     )
     source_record, source_transcript = _load_source_transcript(
         store=store,
         source_ref=review_queue.merged_transcript_artifact,
-        session_id=session_id,
+        session_id=session_id_value,
     )
     review_items = _ordered_review_flags(
         review_queue=review_queue,
@@ -243,7 +247,7 @@ def run_correction_workflow(
                         store=store,
                         source_transcript=source_transcript,
                         segment=segment,
-                        session_id=session_id,
+                        session_id=session_id_value,
                     )
                 except CorrectionWorkflowError as exc:
                     print(f"Playback failed: {exc}")
@@ -311,7 +315,7 @@ def run_correction_workflow(
         if entries:
             _persist_overlay(
                 store=store,
-                session_id=session_id,
+                session_id=session_id_value,
                 source_record=source_record,
                 review_queue_record=review_queue_record,
                 entries=entries,
@@ -329,7 +333,7 @@ def run_correction_workflow(
     completed_at = _timestamp(now)
     overlay_record = _persist_overlay(
         store=store,
-        session_id=session_id,
+        session_id=session_id_value,
         source_record=source_record,
         review_queue_record=review_queue_record,
         entries=entries,
@@ -378,35 +382,6 @@ def _persist_overlay(
         status=status,
         metadata=metadata,
     )
-
-
-def _resolve_session(session_path: Path) -> tuple[Path, dict[str, object]]:
-    if session_path.is_dir():
-        session_record_path = session_path / SESSION_RECORD_FILENAME
-        session_dir = session_path
-    elif session_path.is_file() and session_path.name == SESSION_RECORD_FILENAME:
-        session_record_path = session_path
-        session_dir = session_path.parent
-    else:
-        raise CorrectionWorkflowError(
-            "Session path must be a session directory or an existing session.json path."
-        )
-
-    try:
-        record = read_session_record(session_record_path)
-    except Exception as exc:  # noqa: BLE001
-        raise CorrectionWorkflowError(
-            f"Cannot read session record at {session_record_path}."
-        ) from exc
-
-    return session_dir, record
-
-
-def _extract_session_id(session_record: dict[str, object]) -> str:
-    session_id = session_record.get("id")
-    if not isinstance(session_id, str) or not session_id:
-        raise CorrectionWorkflowError("Session record must include a non-empty id.")
-    return session_id
 
 
 def _load_review_queue(

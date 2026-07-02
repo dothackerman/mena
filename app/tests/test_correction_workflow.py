@@ -26,12 +26,8 @@ from mena.correction_workflow import (
     _print_review_item,
     _prompt_overlap_mark,
     _prompt_speaker_assignment,
-    _resolve_session,
     _timestamp,
     run_correction_workflow,
-)
-from mena.correction_workflow import (
-    _extract_session_id as extract_session_id,
 )
 from mena.merge_timing import (
     MERGED_TRANSCRIPT_SCHEMA_VERSION,
@@ -51,7 +47,13 @@ from mena.review_flagging import (
     ReviewQueueArtifact,
     persist_review_queue_artifact,
 )
-from mena.sessions import SESSION_RECORD_FILENAME, SESSION_RECORD_VERSION
+from mena.sessions import (
+    SESSION_RECORD_FILENAME,
+    SESSION_RECORD_VERSION,
+    SessionRecordError,
+    resolve_session,
+    session_id,
+)
 from mena.transcription import (
     TRANSCRIPT_SCHEMA_VERSION,
     TranscriptArtifact,
@@ -1210,31 +1212,31 @@ def test_load_review_queue_uses_file_mtime_when_created_at_ties(tmp_path: Path) 
 def test_resolve_session_supports_session_directory_and_session_record_file(tmp_path: Path) -> None:
     session_dir = _create_session_record(tmp_path)
     session_record_path = session_dir / SESSION_RECORD_FILENAME
-    resolved_dir, record = _resolve_session(session_record_path)
+    resolved = resolve_session(session_record_path)
 
-    assert resolved_dir == session_dir
-    assert isinstance(record, dict)
-    assert record["id"] == SESSION_ID
+    assert resolved.session_dir == session_dir
+    assert isinstance(resolved.record, dict)
+    assert resolved.record["id"] == SESSION_ID
 
 
 def test_resolve_session_handles_bad_inputs_and_read_failures(tmp_path: Path) -> None:
     (tmp_path / SESSION_RECORD_FILENAME).write_text("{", encoding="utf-8")
 
     with pytest.raises(
-        CorrectionWorkflowError,
+        SessionRecordError,
         match="Session path must be a session directory or an existing session.json path.",
     ):
-        _resolve_session(tmp_path / "missing")
+        resolve_session(tmp_path / "missing")
 
-    with pytest.raises(CorrectionWorkflowError, match="Cannot read session record"):
-        _resolve_session(tmp_path / SESSION_RECORD_FILENAME)
+    with pytest.raises(SessionRecordError, match="Cannot read session record"):
+        resolve_session(tmp_path / SESSION_RECORD_FILENAME)
 
 
-def test_extract_session_id_validates_payload(tmp_path: Path) -> None:
-    with pytest.raises(CorrectionWorkflowError, match="non-empty id"):
-        extract_session_id({})
+def test_extract_session_id_validates_payload() -> None:
+    with pytest.raises(SessionRecordError, match="non-empty string"):
+        session_id({})
 
-    assert extract_session_id({"id": SESSION_ID}) == SESSION_ID
+    assert session_id({"id": SESSION_ID}) == SESSION_ID
 
 
 def test_prompt_overlap_mark_reprompts_on_invalid_input() -> None:

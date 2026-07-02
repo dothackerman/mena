@@ -11,11 +11,26 @@ from jsonschema.exceptions import ValidationError
 from mena.profiles import CaptureProfileId, parse_capture_profile
 from mena.sessions import (
     SESSION_RECORD_VERSION,
+    SessionRecordError,
     append_session_degradation,
     append_session_failure,
     create_session,
     default_data_root,
+    is_recording_finalized,
+    is_recording_started,
+    persist_session_capture_metadata,
+    persist_session_capture_plan,
+    persist_session_discovery,
+    persist_session_recording_lifecycle,
     read_session_record,
+    resolve_session,
+    session_capture_metadata,
+    session_degradations,
+    session_failures,
+    session_id,
+    session_language_or_default,
+    session_profile,
+    session_recording_finalization_status,
     update_session_capture_metadata,
     update_session_capture_plan,
     update_session_discovery,
@@ -128,6 +143,95 @@ def test_create_session_rejects_empty_language(tmp_path: Path) -> None:
             data_root=tmp_path,
             now=datetime(2026, 5, 8, 5, 30, 0, tzinfo=UTC),
         )
+
+
+def test_resolve_session_accepts_session_directory_and_record_path(tmp_path: Path) -> None:
+    created_session = create_session(
+        profile=parse_capture_profile("online"),
+        language="de-CH",
+        data_root=tmp_path,
+        now=datetime(2026, 5, 8, 5, 30, 0, tzinfo=UTC),
+    )
+
+    from_dir = resolve_session(created_session.bundle_path)
+    from_record = resolve_session(created_session.record_path)
+
+    assert from_dir == from_record
+    assert from_dir.session_dir == created_session.bundle_path
+    assert from_dir.record_path == created_session.record_path
+    assert session_id(from_dir.record) == created_session.record.id
+    assert session_profile(from_dir.record) == "online_dual_stream"
+    assert session_language_or_default(from_dir.record, "en") == "de-CH"
+
+
+def test_resolve_session_rejects_invalid_or_unreadable_path(tmp_path: Path) -> None:
+    with pytest.raises(SessionRecordError, match="Session path must be"):
+        resolve_session(tmp_path / "missing.json")
+
+    bad_session = tmp_path / "session.json"
+    bad_session.write_text("{", encoding="utf-8")
+
+    with pytest.raises(SessionRecordError, match="Cannot read session record"):
+        resolve_session(bad_session)
+
+
+def test_session_typed_reads_reject_invalid_record_fields() -> None:
+    with pytest.raises(SessionRecordError, match="field 'id'"):
+        session_id({})
+    with pytest.raises(SessionRecordError, match="field 'profile'"):
+        session_profile({})
+    with pytest.raises(SessionRecordError, match="field 'recording'"):
+        session_recording_finalization_status({})
+    with pytest.raises(SessionRecordError, match="capture_metadata"):
+        session_capture_metadata({"capture_metadata": []})
+    with pytest.raises(SessionRecordError, match="failures"):
+        session_failures({"failures": {}})
+    with pytest.raises(SessionRecordError, match="degradations"):
+        session_degradations({"degradations": [None]})
+
+
+def test_session_lifecycle_predicates_read_recording_status(tmp_path: Path) -> None:
+    created_session = create_session(
+        profile=parse_capture_profile("online"),
+        data_root=tmp_path,
+        now=datetime(2026, 5, 8, 5, 30, 0, tzinfo=UTC),
+    )
+    started_record = persist_session_recording_lifecycle(
+        created_session.record_path,
+        status="recording",
+        recording={
+            "started_at": "2026-05-08T05:30:01Z",
+            "stopped_at": None,
+            "stop_reason": None,
+            "finalization": {
+                "status": "pending",
+                "completed_at": None,
+                "error": None,
+            },
+        },
+    )
+
+    assert is_recording_started(started_record)
+    assert not is_recording_finalized(started_record)
+
+    finalized_record = persist_session_recording_lifecycle(
+        created_session.record_path,
+        status="recorded",
+        recording={
+            "started_at": "2026-05-08T05:30:01Z",
+            "stopped_at": "2026-05-08T05:31:00Z",
+            "stop_reason": "user_stop",
+            "finalization": {
+                "status": "completed",
+                "completed_at": "2026-05-08T05:31:00Z",
+                "error": None,
+            },
+        },
+    )
+
+    assert session_recording_finalization_status(finalized_record) == "completed"
+    assert is_recording_started(finalized_record)
+    assert is_recording_finalized(finalized_record)
 
 
 def test_append_session_degradation_persists_schema_valid_fact(tmp_path: Path) -> None:
@@ -264,6 +368,30 @@ def test_update_session_discovery_writes_schema_valid_session_record(tmp_path: P
     validator.validate(record)
 
 
+def test_persist_session_discovery_writes_schema_valid_session_record(tmp_path: Path) -> None:
+    created_session = create_session(
+        profile=parse_capture_profile("online"),
+        data_root=tmp_path,
+        now=datetime(2026, 5, 8, 5, 30, 0, tzinfo=UTC),
+    )
+    discovery = {
+        "version": 1,
+        "profile": "online_dual_stream",
+        "status": "unavailable",
+        "sources": [],
+        "sinks": [],
+        "playback_streams": [],
+        "error": "no routes",
+    }
+
+    record = persist_session_discovery(created_session.record_path, discovery)
+
+    assert record["discovery"] == discovery
+    Draft202012Validator(_load_session_record_schema(), format_checker=FormatChecker()).validate(
+        record
+    )
+
+
 def test_session_record_schema_rejects_malformed_discovery_route() -> None:
     schema = _load_session_record_schema()
     record = {
@@ -391,6 +519,44 @@ def test_update_session_capture_plan_writes_schema_valid_session_record(tmp_path
     validator.validate(record)
 
 
+def test_persist_session_capture_plan_writes_schema_valid_session_record(tmp_path: Path) -> None:
+    created_session = create_session(
+        profile=parse_capture_profile("online"),
+        data_root=tmp_path,
+        now=datetime(2026, 5, 8, 5, 30, 0, tzinfo=UTC),
+    )
+    capture_plan = {
+        "version": 1,
+        "profile": "online_dual_stream",
+        "language": "en",
+        "segment_seconds": 30,
+        "selected_sources": ["local_mic"],
+        "routes": [
+            {
+                "role": "microphone",
+                "source_id": "local_mic",
+                "route_id": "pipewire:node:31",
+                "label": "Headset Mic",
+                "backend": "pipewire",
+                "backend_name": "alsa_input.headset",
+                "backend_target": "alsa_input.headset",
+                "node_name": "alsa_input.headset",
+                "object_serial": "131",
+                "sink_input_id": None,
+                "required": True,
+            }
+        ],
+        "status": "planned",
+    }
+
+    record = persist_session_capture_plan(created_session.record_path, capture_plan)
+
+    assert record["capture_plan"] == capture_plan
+    Draft202012Validator(_load_session_record_schema(), format_checker=FormatChecker()).validate(
+        record
+    )
+
+
 def test_update_session_capture_metadata_writes_schema_valid_session_record(
     tmp_path: Path,
 ) -> None:
@@ -447,6 +613,34 @@ def test_update_session_capture_metadata_writes_schema_valid_session_record(
 
     assert record["capture_metadata"] == capture_metadata
     validator.validate(record)
+
+
+def test_persist_session_capture_metadata_writes_schema_valid_session_record(
+    tmp_path: Path,
+) -> None:
+    created_session = create_session(
+        profile=parse_capture_profile("online"),
+        data_root=tmp_path,
+        now=datetime(2026, 5, 8, 5, 30, 0, tzinfo=UTC),
+    )
+    capture_metadata = {
+        "version": 1,
+        "profile": "online_dual_stream",
+        "sample_rate": 48000,
+        "channels": 1,
+        "segment_seconds": 30,
+        "segment_count": 0,
+        "segments": [],
+        "sources": [],
+    }
+
+    record = persist_session_capture_metadata(created_session.record_path, capture_metadata)
+
+    assert record["capture_metadata"] == capture_metadata
+    assert session_capture_metadata(record) == capture_metadata
+    Draft202012Validator(_load_session_record_schema(), format_checker=FormatChecker()).validate(
+        record
+    )
 
 
 def test_default_data_root_uses_env_override(

@@ -115,10 +115,7 @@ from mena.session_integrity import (
     load_verified_session_bundle,
     verify_session_bundle,
 )
-from mena.sessions import (
-    SESSION_RECORD_FILENAME,
-    read_session_record,
-)
+from mena.sessions import resolve_session, session_id
 from mena.settings import AppSettings, SettingsError, validate_summary_language
 from mena.setup import (
     CommandIdentity,
@@ -579,12 +576,21 @@ def main(
                 invocation_run_id = run_id or str(uuid4())
                 invocation_attempt = 1
             else:
-                session_dir, session_record = _resolve_session(Path(args.session_path))
-                session_id = _extract_session_id(session_record)
-                store = FileSystemArtifactStore(session_id=session_id, session_dir=session_dir)
-                resumable = _latest_resumable_processing_state(store, session_id=session_id)
+                resolved_session = resolve_session(Path(args.session_path))
+                session_id_value = session_id(resolved_session.record)
+                store = FileSystemArtifactStore(
+                    session_id=session_id_value,
+                    session_dir=resolved_session.session_dir,
+                )
+                resumable = _latest_resumable_processing_state(
+                    store,
+                    session_id=session_id_value,
+                )
                 if resumable is None:
-                    blocked = _latest_non_retryable_processing_failure(store, session_id=session_id)
+                    blocked = _latest_non_retryable_processing_failure(
+                        store,
+                        session_id=session_id_value,
+                    )
                     if blocked is not None:
                         reason = (
                             blocked.error.message
@@ -1056,11 +1062,11 @@ def _run_export_command(
 ) -> int:
     verified = load_verified_session_bundle(session_path)
     session_record = dict(verified.record)
-    session_id = _extract_session_id(session_record)
+    session_id_value = session_id(session_record)
 
     export_result = export_summary_markdown(
         store=FileSystemArtifactStore(
-            session_id=session_id,
+            session_id=session_id_value,
             session_dir=verified.session_dir,
         ),
         summary_record_id=summary_artifact_id,
@@ -1478,40 +1484,6 @@ def _parse_iso_timestamp(value: str) -> datetime | None:
         return parse_utc_timestamp(value)
     except ValueError:
         return None
-
-
-def _resolve_session(session_path: Path) -> tuple[Path, dict[str, object]]:
-    if session_path.is_dir():
-        session_record_path = session_path / SESSION_RECORD_FILENAME
-        resolved_session_dir = session_path
-    elif session_path.is_file() and session_path.name == SESSION_RECORD_FILENAME:
-        session_record_path = session_path
-        resolved_session_dir = session_path.parent
-    else:
-        raise ValueError(
-            "Session path must be a session directory or an existing session.json path."
-        )
-
-    try:
-        record = read_session_record(session_record_path)
-    except Exception as exc:
-        raise ValueError(f"Cannot read session record at {session_record_path}.") from exc
-
-    return resolved_session_dir, record
-
-
-def _extract_session_id(session_record: dict[str, object]) -> str:
-    return _required_str(session_record, "id")
-
-
-def _session_language_or_default(
-    session_record: dict[str, object],
-    default_language: str,
-) -> str:
-    language = session_record.get("language")
-    if isinstance(language, str) and language:
-        return language
-    return default_language
 
 
 def _asr_language_from_session_language(language: str | None) -> str | None:

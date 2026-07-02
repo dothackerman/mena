@@ -18,7 +18,7 @@ from mena.artifacts import (
     session_artifact_root,
 )
 from mena.processing import ArtifactRef, ProcessingStageState, ProcessingStateError
-from mena.sessions import SESSION_RECORD_FILENAME, read_session_record
+from mena.sessions import SESSION_RECORD_FILENAME, read_session_record, resolve_session_paths
 
 
 class SessionIntegrityError(RuntimeError):
@@ -107,7 +107,7 @@ class SessionIndexEntry:
 def load_verified_session_bundle(session_path: Path) -> VerifiedSessionBundle:
     """Load a session only if its bundle passes integrity verification."""
 
-    session_dir, record_path = _resolve_session_paths(session_path)
+    session_dir, record_path = resolve_session_paths(session_path)
     report = verify_session_bundle(session_path)
     if not report.ok:
         details = "; ".join(f"{finding.code}: {finding.message}" for finding in report.findings)
@@ -124,7 +124,7 @@ def verify_session_bundle(session_path: Path) -> SessionIntegrityReport:
     """Verify one session bundle without repairing or mutating it."""
 
     findings: list[SessionIntegrityFinding] = []
-    session_dir, record_path = _resolve_session_paths(session_path)
+    session_dir, record_path = resolve_session_paths(session_path)
     record = _read_record(record_path, findings)
     session_id = _optional_record_str(record, "id")
 
@@ -635,12 +635,6 @@ def _read_record(
             )
         )
         return {}
-
-
-def _resolve_session_paths(session_path: Path) -> tuple[Path, Path]:
-    if session_path.name == SESSION_RECORD_FILENAME:
-        return session_path.parent, session_path
-    return session_path, session_path / SESSION_RECORD_FILENAME
 
 
 def _resolve_recorded_path(*, session_dir: Path, path_value: str) -> Path:

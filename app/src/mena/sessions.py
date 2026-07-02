@@ -61,12 +61,25 @@ class SessionRecord:
 
 
 @dataclass(frozen=True)
+class ResolvedSession:
+    """A session bundle path and its canonical record."""
+
+    session_dir: Path
+    record_path: Path
+    record: dict[str, object]
+
+
+@dataclass(frozen=True)
 class CreatedSession:
     """Result of creating a session bundle on disk."""
 
     bundle_path: Path
     record_path: Path
     record: SessionRecord
+
+
+class SessionRecordError(ValueError):
+    """Raised when a session record cannot satisfy the session contract."""
 
 
 def default_data_root() -> Path:
@@ -123,6 +136,144 @@ def read_session_record(record_path: Path) -> dict[str, object]:
     return data
 
 
+def resolve_session(session_path: Path) -> ResolvedSession:
+    """Resolve a session directory or session.json path into a session reference."""
+
+    session_dir, record_path = resolve_session_paths(session_path)
+    if not session_dir.is_dir() or not record_path.is_file():
+        raise SessionRecordError(
+            "Session path must be a session directory or an existing session.json path."
+        )
+
+    try:
+        record = read_session_record(record_path)
+    except Exception as exc:
+        raise SessionRecordError(f"Cannot read session record at {record_path}.") from exc
+    return ResolvedSession(session_dir=session_dir, record_path=record_path, record=record)
+
+
+def resolve_session_paths(session_path: Path) -> tuple[Path, Path]:
+    """Return the session directory and session record path for a session input path."""
+
+    if session_path.name == SESSION_RECORD_FILENAME:
+        return session_path.parent, session_path
+    return session_path, session_path / SESSION_RECORD_FILENAME
+
+
+def session_id(session_record: Mapping[str, object]) -> str:
+    """Return the required session id from a session record."""
+
+    value = session_record.get("id")
+    if not isinstance(value, str) or not value:
+        raise SessionRecordError("Session field 'id' is required and must be a non-empty string.")
+    return value
+
+
+def session_language_or_default(
+    session_record: Mapping[str, object],
+    default_language: str,
+) -> str:
+    """Return the persisted session language or a caller-provided default."""
+
+    language = session_record.get("language")
+    if isinstance(language, str) and language:
+        return language
+    return default_language
+
+
+def session_profile(session_record: Mapping[str, object]) -> str:
+    """Return the required capture profile id from a session record."""
+
+    value = session_record.get("profile")
+    if not isinstance(value, str) or not value:
+        raise SessionRecordError(
+            "Session field 'profile' is required and must be a non-empty string."
+        )
+    return value
+
+
+def session_recording(session_record: Mapping[str, object]) -> Mapping[str, object]:
+    """Return the recording lifecycle object from a session record."""
+
+    value = session_record.get("recording")
+    if not isinstance(value, Mapping):
+        raise SessionRecordError("Session field 'recording' is required and must be an object.")
+    return value
+
+
+def session_recording_finalization(
+    session_record: Mapping[str, object],
+) -> Mapping[str, object]:
+    """Return the recording finalization object from a session record."""
+
+    recording = session_recording(session_record)
+    value = recording.get("finalization")
+    if not isinstance(value, Mapping):
+        raise SessionRecordError(
+            "Session field 'recording.finalization' is required and must be an object."
+        )
+    return value
+
+
+def session_recording_finalization_status(
+    session_record: Mapping[str, object],
+) -> str:
+    """Return the persisted recording finalization status."""
+
+    finalization = session_recording_finalization(session_record)
+    value = finalization.get("status")
+    if not isinstance(value, str) or not value:
+        raise SessionRecordError(
+            "Session field 'recording.finalization.status' is required and must be a "
+            "non-empty string."
+        )
+    return value
+
+
+def is_recording_started(session_record: Mapping[str, object]) -> bool:
+    """Return whether session recording has started."""
+
+    recording = session_recording(session_record)
+    return isinstance(recording.get("started_at"), str) and bool(recording["started_at"])
+
+
+def is_recording_finalized(session_record: Mapping[str, object]) -> bool:
+    """Return whether recording reached a terminal finalization state."""
+
+    return session_recording_finalization_status(session_record) in {
+        "completed",
+        "failed",
+        "interrupted",
+    }
+
+
+def session_capture_metadata(
+    session_record: Mapping[str, object],
+) -> Mapping[str, object] | None:
+    """Return capture metadata when present."""
+
+    value = session_record.get(SESSION_CAPTURE_METADATA_KEY)
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise SessionRecordError("Session field 'capture_metadata' must be an object.")
+    return value
+
+
+def session_failures(session_record: Mapping[str, object]) -> tuple[Mapping[str, object], ...]:
+    """Return persisted session failure facts."""
+
+    return _session_mapping_tuple(session_record, SESSION_FAILURES_KEY)
+
+
+def session_degradations(
+    session_record: Mapping[str, object],
+) -> tuple[Mapping[str, object], ...]:
+    """Return persisted session degradation facts."""
+
+    return _session_mapping_tuple(session_record, SESSION_DEGRADATIONS_KEY)
+
+
 def update_session_record(
     record_path: Path,
     *,
@@ -136,7 +287,7 @@ def update_session_record(
     return record
 
 
-def update_session_discovery(
+def persist_session_discovery(
     record_path: Path, discovery: Mapping[str, object]
 ) -> dict[str, object]:
     """Persist read-only audio discovery facts on the canonical session record."""
@@ -144,7 +295,15 @@ def update_session_discovery(
     return update_session_record(record_path, updates={SESSION_DISCOVERY_KEY: dict(discovery)})
 
 
-def update_session_capture_plan(
+def update_session_discovery(
+    record_path: Path, discovery: Mapping[str, object]
+) -> dict[str, object]:
+    """Persist read-only audio discovery facts on the canonical session record."""
+
+    return persist_session_discovery(record_path, discovery)
+
+
+def persist_session_capture_plan(
     record_path: Path,
     capture_plan: Mapping[str, object],
 ) -> dict[str, object]:
@@ -156,7 +315,16 @@ def update_session_capture_plan(
     )
 
 
-def update_session_capture_metadata(
+def update_session_capture_plan(
+    record_path: Path,
+    capture_plan: Mapping[str, object],
+) -> dict[str, object]:
+    """Persist the selected capture plan on the canonical session record."""
+
+    return persist_session_capture_plan(record_path, capture_plan)
+
+
+def persist_session_capture_metadata(
     record_path: Path,
     capture_metadata: Mapping[str, object],
 ) -> dict[str, object]:
@@ -168,7 +336,31 @@ def update_session_capture_metadata(
     )
 
 
-def append_session_degradation(
+def update_session_capture_metadata(
+    record_path: Path,
+    capture_metadata: Mapping[str, object],
+) -> dict[str, object]:
+    """Persist capture metadata emitted by the worker on the canonical session record."""
+
+    return persist_session_capture_metadata(record_path, capture_metadata)
+
+
+def persist_session_recording_lifecycle(
+    record_path: Path,
+    *,
+    status: str,
+    recording: Mapping[str, object],
+    capture_plan: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """Persist session-level recording lifecycle facts."""
+
+    updates: dict[str, object] = {"status": status, "recording": dict(recording)}
+    if capture_plan is not None:
+        updates[SESSION_CAPTURE_PLAN_KEY] = dict(capture_plan)
+    return update_session_record(record_path, updates=updates)
+
+
+def append_session_degradation_fact(
     record_path: Path,
     degradation: Mapping[str, object],
 ) -> dict[str, object]:
@@ -177,13 +369,31 @@ def append_session_degradation(
     return _append_session_list_item(record_path, SESSION_DEGRADATIONS_KEY, degradation)
 
 
-def append_session_failure(
+def append_session_degradation(
+    record_path: Path,
+    degradation: Mapping[str, object],
+) -> dict[str, object]:
+    """Append an explicit capture degradation fact to the session record."""
+
+    return append_session_degradation_fact(record_path, degradation)
+
+
+def append_session_failure_fact(
     record_path: Path,
     failure: Mapping[str, object],
 ) -> dict[str, object]:
     """Append an explicit capture failure fact to the session record."""
 
     return _append_session_list_item(record_path, SESSION_FAILURES_KEY, failure)
+
+
+def append_session_failure(
+    record_path: Path,
+    failure: Mapping[str, object],
+) -> dict[str, object]:
+    """Append an explicit capture failure fact to the session record."""
+
+    return append_session_failure_fact(record_path, failure)
 
 
 def _sessions_root(data_root: Path | None) -> Path:
@@ -211,6 +421,18 @@ def _append_session_list_item(
     record[key] = [*existing, dict(item)]
     write_json_atomically(record_path, record)
     return record
+
+
+def _session_mapping_tuple(
+    session_record: Mapping[str, object],
+    key: str,
+) -> tuple[Mapping[str, object], ...]:
+    value = session_record.get(key, [])
+    if not isinstance(value, list):
+        raise SessionRecordError(f"Session field '{key}' must be an array.")
+    if not all(isinstance(item, Mapping) for item in value):
+        raise SessionRecordError(f"Session field '{key}' must contain objects.")
+    return tuple(value)
 
 
 def _bundle_directory_name(session_id: str, created_at: datetime) -> str:

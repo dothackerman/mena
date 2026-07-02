@@ -48,13 +48,13 @@ from mena.protocol import (
     WorkerProcess,
 )
 from mena.sessions import (
-    append_session_degradation,
-    append_session_failure,
+    append_session_degradation_fact,
+    append_session_failure_fact,
     create_session,
-    update_session_capture_metadata,
-    update_session_capture_plan,
-    update_session_discovery,
-    update_session_record,
+    persist_session_capture_metadata,
+    persist_session_capture_plan,
+    persist_session_discovery,
+    persist_session_recording_lifecycle,
 )
 from mena.timestamps import utc_timestamp
 
@@ -168,7 +168,7 @@ class _CaptureEventMonitor:
             return True
         if message.type == "capture_route_event":
             event = CaptureRouteEventPayload.from_dict(message.payload)
-            append_session_degradation(self.record_path, event.to_dict())
+            append_session_degradation_fact(self.record_path, event.to_dict())
             self.interaction.notify(
                 WorkflowNotice(
                     topic="record.capture_route_event",
@@ -191,7 +191,7 @@ class _CaptureEventMonitor:
         self.segments.extend(segments)
         # Incremental metadata is intentional: a session can be interrupted
         # before finalization and still retain processable sealed chunks.
-        update_session_capture_metadata(
+        persist_session_capture_metadata(
             self.record_path,
             _capture_metadata_from_segments(
                 self.start_payload,
@@ -236,7 +236,7 @@ def run_recording_control_workflow(
         )
     )
     discovery = discoverer(command.profile.id)
-    update_session_discovery(created_session.record_path, discovery.to_dict())
+    persist_session_discovery(created_session.record_path, discovery.to_dict())
     interaction.notify(WorkflowNotice(topic="record.discovery", context={"discovery": discovery}))
     if command.dry_run:
         return RecordingControlResult(exit_code=0, record_path=created_session.record_path)
@@ -279,28 +279,23 @@ def run_recording_control_workflow(
     if not command.stop_input_available:
         interaction.notify(WorkflowNotice(topic="record.capture_not_started.noninteractive_stop"))
         return RecordingControlResult(exit_code=1, record_path=created_session.record_path)
-    update_session_capture_plan(
+    persist_session_capture_plan(
         created_session.record_path,
         _capture_plan_from_start_payload(start_payload, status="planned"),
     )
     started_at = _utc_timestamp(now)
-    update_session_record(
+    persist_session_recording_lifecycle(
         created_session.record_path,
-        updates={
-            "status": "recording",
-            "recording": _recording_lifecycle(
-                started_at=started_at,
-                stopped_at=None,
-                stop_reason=None,
-                finalization_status="pending",
-                completed_at=None,
-                error=None,
-            ),
-            "capture_plan": _capture_plan_from_start_payload(
-                start_payload,
-                status="active",
-            ),
-        },
+        status="recording",
+        recording=_recording_lifecycle(
+            started_at=started_at,
+            stopped_at=None,
+            stop_reason=None,
+            finalization_status="pending",
+            completed_at=None,
+            error=None,
+        ),
+        capture_plan=_capture_plan_from_start_payload(start_payload, status="active"),
     )
     try:
         worker_kwargs: dict[str, object] = {
@@ -430,24 +425,22 @@ def run_recording_control_workflow(
     if source_independence_error is not None:
         final_status = "failed"
         final_error = source_independence_error
-    update_session_capture_metadata(created_session.record_path, capture_metadata)
-    update_session_record(
+    persist_session_capture_metadata(created_session.record_path, capture_metadata)
+    persist_session_recording_lifecycle(
         created_session.record_path,
-        updates={
-            "status": final_status,
-            "recording": _recording_lifecycle(
-                started_at=started_at,
-                stopped_at=completed_at,
-                stop_reason=stop_reason,
-                finalization_status=("finalized" if final_status == "recorded" else final_status),
-                completed_at=completed_at,
-                error=final_error,
-            ),
-            "capture_plan": _capture_plan_from_start_payload(
-                start_payload,
-                status=("finalized" if final_status == "recorded" else final_status),
-            ),
-        },
+        status=final_status,
+        recording=_recording_lifecycle(
+            started_at=started_at,
+            stopped_at=completed_at,
+            stop_reason=stop_reason,
+            finalization_status=("finalized" if final_status == "recorded" else final_status),
+            completed_at=completed_at,
+            error=final_error,
+        ),
+        capture_plan=_capture_plan_from_start_payload(
+            start_payload,
+            status=("finalized" if final_status == "recorded" else final_status),
+        ),
     )
     interaction.notify(WorkflowNotice(topic="record.capture_finalized"))
     if final_status == "recorded":
@@ -721,7 +714,7 @@ def _persist_capture_failure(
     now: datetime | None,
 ) -> None:
     completed_at = _utc_timestamp(now)
-    append_session_failure(
+    append_session_failure_fact(
         record_path,
         {
             "code": "capture_failed",
@@ -731,23 +724,18 @@ def _persist_capture_failure(
             "recoverable": False,
         },
     )
-    update_session_record(
+    persist_session_recording_lifecycle(
         record_path,
-        updates={
-            "status": "failed",
-            "recording": _recording_lifecycle(
-                started_at=started_at,
-                stopped_at=completed_at,
-                stop_reason="error",
-                finalization_status="failed",
-                completed_at=completed_at,
-                error=error_message or "Capture failed.",
-            ),
-            "capture_plan": _capture_plan_from_start_payload(
-                start_payload,
-                status="failed",
-            ),
-        },
+        status="failed",
+        recording=_recording_lifecycle(
+            started_at=started_at,
+            stopped_at=completed_at,
+            stop_reason="error",
+            finalization_status="failed",
+            completed_at=completed_at,
+            error=error_message or "Capture failed.",
+        ),
+        capture_plan=_capture_plan_from_start_payload(start_payload, status="failed"),
     )
 
 
