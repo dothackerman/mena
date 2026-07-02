@@ -1,8 +1,21 @@
 import json
+import threading
+import time
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
-from mena.interaction import ChoiceRequest, ScriptedInteraction, ScriptedResponse
+import pytest
+
+from mena.interaction import (
+    ChoiceOption,
+    ChoiceRequest,
+    ConfirmationRequest,
+    ScriptedInteraction,
+    ScriptedResponse,
+    TextRequest,
+    WorkflowNotice,
+)
 from mena.profiles import CaptureProfileId, parse_capture_profile
 from mena.protocol import ProtocolError, ProtocolMessage, WorkerProcess
 from mena.recording_control import (
@@ -19,12 +32,33 @@ from test_cli import (
     _ambiguous_default_discoverer,
     _ambiguous_discoverer,
     _available_discoverer,
+    _discovery_with_playback_streams,
     _EventWorker,
     _finalized_capture_message,
     _monitor_start_payload,
     _segment_payload,
     _unavailable_discoverer,
 )
+
+
+class _BlockingTextInteraction:
+    def __init__(self) -> None:
+        self.prompt_started = threading.Event()
+        self.notices: list[WorkflowNotice] = []
+
+    def choose(self, request: ChoiceRequest) -> ChoiceOption:
+        raise AssertionError(f"unexpected choice request {request.topic}")
+
+    def confirm(self, request: ConfirmationRequest) -> bool:
+        raise AssertionError(f"unexpected confirmation request {request.topic}")
+
+    def request_text(self, request: TextRequest) -> str:
+        self.prompt_started.set()
+        time.sleep(5)
+        return "q"
+
+    def notify(self, notice: WorkflowNotice) -> None:
+        self.notices.append(notice)
 
 
 def test_recording_control_creates_recorded_session_with_scripted_stop(tmp_path: Path) -> None:
@@ -222,6 +256,57 @@ def test_resolve_route_selections_uses_marked_default_route() -> None:
     assert selections.output_sink_route_id == "pipewire:node:43"
 
 
+def test_resolve_route_selections_prompts_for_single_playback_stream() -> None:
+    interaction = ScriptedInteraction(
+        [ScriptedResponse(kind="choose", topic="record.capture_route.playback_stream")]
+    )
+
+    selections = _resolve_route_selections(
+        profile=CaptureProfileId.ONLINE_DUAL_STREAM,
+        discovery=_available_discoverer(CaptureProfileId.ONLINE_DUAL_STREAM),
+        microphone_route_id=None,
+        playback_stream_route_id=None,
+        output_sink_route_id=None,
+        interaction=interaction,
+    )
+
+    assert selections.playback_stream_route_id == "pulse:sink-input:151"
+    assert [request.topic for request in interaction.requests] == [
+        "record.capture_route.playback_stream"
+    ]
+
+
+def test_resolve_route_selections_rejects_missing_playback_streams() -> None:
+    with pytest.raises(ValueError, match="No playback streams were discovered"):
+        _resolve_route_selections(
+            profile=CaptureProfileId.ONLINE_DUAL_STREAM,
+            discovery=_discovery_with_playback_streams(),
+            microphone_route_id=None,
+            playback_stream_route_id=None,
+            output_sink_route_id=None,
+            interaction=ScriptedInteraction(),
+        )
+
+
+def test_resolve_route_selections_rejects_inactive_explicit_playback_stream() -> None:
+    discovery = _discovery_with_playback_streams(
+        replace(
+            _available_discoverer(CaptureProfileId.ONLINE_DUAL_STREAM).playback_streams[0],
+            active=False,
+        )
+    )
+
+    with pytest.raises(ValueError, match="Selected playback stream route .* is not active"):
+        _resolve_route_selections(
+            profile=CaptureProfileId.ONLINE_DUAL_STREAM,
+            discovery=discovery,
+            microphone_route_id=None,
+            playback_stream_route_id="pulse:sink-input:151",
+            output_sink_route_id=None,
+            interaction=ScriptedInteraction(),
+        )
+
+
 def test_capture_event_monitor_records_notices_and_degradations(tmp_path: Path) -> None:
     created_session = create_session(
         profile=parse_capture_profile("online"),
@@ -307,6 +392,41 @@ def test_wait_for_record_stop_continues_after_invalid_command() -> None:
         "record.stop_prompt_continues",
         "record.stop_prompt_continues",
     ]
+
+
+def test_wait_for_record_stop_surfaces_background_capture_error(tmp_path: Path) -> None:
+    worker = _EventWorker(
+        [
+            ProtocolMessage(
+                type="error",
+                session_id=SESSION_ID,
+                payload={
+                    "code": "capture_flush_failed",
+                    "message": "disk full",
+                    "recoverable": False,
+                    "details": {},
+                },
+            )
+        ]
+    )
+    created_session = create_session(
+        profile=parse_capture_profile("online"),
+        language="en",
+        data_root=tmp_path,
+    )
+    interaction = _BlockingTextInteraction()
+    monitor = _CaptureEventMonitor(
+        cast(WorkerProcess, worker),
+        record_path=created_session.record_path,
+        start_payload=_monitor_start_payload(),
+        interaction=interaction,
+    )
+
+    monitor.start()
+
+    with pytest.raises(ProtocolError, match="disk full"):
+        _wait_for_record_stop(interaction, capture_monitor=monitor)
+    assert interaction.prompt_started.is_set()
 
 
 def test_capture_event_monitor_surfaces_background_error(tmp_path: Path) -> None:

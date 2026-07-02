@@ -5,10 +5,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import queue
 import shutil
 import sys
-import threading
 import wave
 from collections.abc import Callable, Sequence
 from contextlib import suppress
@@ -23,9 +21,6 @@ from mena.artifacts import (
     ArtifactStore,
     ArtifactStoreError,
     FileSystemArtifactStore,
-)
-from mena.capture_planning import (
-    RouteSelections,
 )
 from mena.correction_overlay import (
     CorrectionOverlayContractError,
@@ -47,8 +42,6 @@ from mena.diarization import (
 )
 from mena.discovery import (
     AudioDiscovery,
-    AudioRoute,
-    PlaybackStream,
     discover_audio_routes,
     format_discovery,
 )
@@ -82,7 +75,6 @@ from mena.processing import (
 )
 from mena.profiles import (
     CaptureProfile,
-    CaptureProfileId,
     CaptureProfileSelection,
     DiarisationPolicy,
     capture_profile_choices,
@@ -97,9 +89,6 @@ from mena.recording_control import (
     RecordCommandInput,
     _format_record_diagnostics,
     run_recording_control_workflow,
-)
-from mena.recording_control import (
-    _CaptureEventMonitor as CaptureEventMonitor,
 )
 from mena.review_flagging import (
     CONFIDENCE_FLAGGING_STAGE,
@@ -736,120 +725,6 @@ def _resolve_record_language(
     return validate_summary_language(answer, "meeting language")
 
 
-def _resolve_route_selections(
-    *,
-    profile: CaptureProfileId,
-    discovery: AudioDiscovery,
-    microphone_route_id: str | None,
-    playback_stream_route_id: str | None,
-    output_sink_route_id: str | None,
-    input_fn: Callable[[str], str] | None,
-) -> RouteSelections:
-    microphone = _resolve_audio_route(
-        discovery.sources,
-        role="microphone",
-        flag_name="--mic",
-        selected_route_id=microphone_route_id,
-        input_fn=input_fn,
-    )
-    if profile is CaptureProfileId.IN_PERSON_SINGLE_MIC:
-        if playback_stream_route_id is not None or output_sink_route_id is not None:
-            raise ValueError("In-person recording accepts --mic only.")
-        return RouteSelections(microphone_route_id=microphone.route_id)
-
-    playback_stream = _resolve_playback_stream(
-        discovery.playback_streams,
-        selected_route_id=playback_stream_route_id,
-        input_fn=input_fn,
-    )
-    output_sink = _resolve_audio_route(
-        discovery.sinks,
-        role="output sink",
-        flag_name="--output-sink",
-        selected_route_id=output_sink_route_id,
-        input_fn=input_fn,
-    )
-    return RouteSelections(
-        microphone_route_id=microphone.route_id,
-        playback_stream_route_id=playback_stream.route_id,
-        output_sink_route_id=output_sink.route_id,
-    )
-
-
-def _resolve_audio_route(
-    routes: tuple[AudioRoute, ...],
-    *,
-    role: str,
-    flag_name: str,
-    selected_route_id: str | None,
-    input_fn: Callable[[str], str] | None,
-) -> AudioRoute:
-    if selected_route_id is not None:
-        return _find_audio_route(routes, selected_route_id, role)
-    if len(routes) == 1:
-        return routes[0]
-    if not routes:
-        raise ValueError(f"No {role} routes were discovered.")
-    reader = _record_input(input_fn)
-    if reader is None:
-        raise ValueError(f"Multiple {role} routes were discovered; pass {flag_name}.")
-    return _prompt_choice(
-        title=f"{role.title()} routes",
-        choices=routes,
-        formatter=_format_audio_route_choice,
-        input_fn=reader,
-        default_index=_default_audio_route_index(routes),
-    )
-
-
-def _resolve_playback_stream(
-    streams: tuple[PlaybackStream, ...],
-    *,
-    selected_route_id: str | None,
-    input_fn: Callable[[str], str] | None,
-) -> PlaybackStream:
-    active_streams = tuple(stream for stream in streams if stream.active)
-    if selected_route_id is not None:
-        return _find_active_playback_stream(streams, selected_route_id)
-    if not streams:
-        raise ValueError("No playback streams were discovered.")
-    if not active_streams:
-        raise ValueError("No active playback streams were discovered.")
-    reader = _record_input(input_fn)
-    if reader is None:
-        raise ValueError("Playback stream confirmation is required; pass --playback-stream.")
-    return _prompt_choice(
-        title="Playback streams",
-        choices=active_streams,
-        formatter=_format_playback_stream_choice,
-        input_fn=reader,
-    )
-
-
-def _find_audio_route(routes: tuple[AudioRoute, ...], route_id: str, role: str) -> AudioRoute:
-    for route in routes:
-        if route.route_id == route_id:
-            return route
-    raise ValueError(f"Selected {role} route '{route_id}' was not discovered.")
-
-
-def _find_playback_stream(streams: tuple[PlaybackStream, ...], route_id: str) -> PlaybackStream:
-    for stream in streams:
-        if stream.route_id == route_id:
-            return stream
-    raise ValueError(f"Selected playback stream route '{route_id}' was not discovered.")
-
-
-def _find_active_playback_stream(
-    streams: tuple[PlaybackStream, ...],
-    route_id: str,
-) -> PlaybackStream:
-    stream = _find_playback_stream(streams, route_id)
-    if not stream.active:
-        raise ValueError(f"Selected playback stream route '{route_id}' is not active.")
-    return stream
-
-
 def _prompt_choice(
     *,
     title: str,
@@ -872,83 +747,12 @@ def _prompt_choice(
     return choices[selected_index - 1]
 
 
-def _default_audio_route_index(routes: tuple[AudioRoute, ...]) -> int:
-    for index, route in enumerate(routes, start=1):
-        if route.is_default:
-            return index
-    return 1
-
-
 def _record_input(input_fn: Callable[[str], str] | None) -> Callable[[str], str] | None:
     if input_fn is not None:
         return input_fn
     if sys.stdin.isatty():
         return input
     return None
-
-
-def _wait_for_record_stop(
-    input_fn: Callable[[str], str] | None,
-    *,
-    capture_monitor: CaptureEventMonitor | None = None,
-) -> None:
-    reader = _record_input(input_fn)
-    if reader is None:
-        raise RuntimeError("Recording requires an interactive terminal to stop.")
-    print("Recording. Press q to stop.")
-    while True:
-        answer = _read_record_command(reader, capture_monitor=capture_monitor).strip().lower()
-        if answer in {"q", "quit", "stop"}:
-            return
-        print("Recording continues. Type q to stop.")
-
-
-def _read_record_command(
-    reader: Callable[[str], str],
-    *,
-    capture_monitor: CaptureEventMonitor | None,
-) -> str:
-    if capture_monitor is None:
-        return reader("record> ")
-
-    result_queue: queue.Queue[str | BaseException] = queue.Queue(maxsize=1)
-
-    def read_input() -> None:
-        try:
-            result_queue.put(reader("record> "))
-        except BaseException as exc:
-            result_queue.put(exc)
-
-    input_thread = threading.Thread(target=read_input, name="mena-record-input", daemon=True)
-    input_thread.start()
-    while True:
-        terminal_event = capture_monitor.poll_terminal_event()
-        if terminal_event is not None:
-            return "q"
-        try:
-            result = result_queue.get(timeout=0.1)
-        except queue.Empty:
-            continue
-        if isinstance(result, BaseException):
-            raise result
-        return result
-
-
-def _format_audio_route_choice(route: AudioRoute) -> str:
-    base_label = route.description or route.name
-    label = base_label
-    if route.is_default:
-        label = f"{label} [default]"
-    if route.node_name and route.node_name != base_label:
-        label = f"{label} - {route.node_name}"
-    return f"{label} ({route.route_id})"
-
-
-def _format_playback_stream_choice(stream: PlaybackStream) -> str:
-    label = stream.media_name or stream.stream_name or stream.name
-    if stream.app_binary_name:
-        label = f"{label} - {stream.app_binary_name}"
-    return f"{label} ({stream.route_id})"
 
 
 def _run_setup_command(
