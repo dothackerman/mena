@@ -20,6 +20,22 @@ _Avoid_: global runtime profile, provider preference
 An accepted provider choice for the summarization stage, including provider identity, model, device/runtime class, and policy. Ollama and Mistral are peer summarization providers behind the same Mena-owned summarization input and output contract.
 _Avoid_: Mistral route subsystem, provider-specific summary schema
 
+**Note package**:
+The persisted generated meeting-notes result for a session. It contains first-class note products and replaces "summary" as the name for the whole generated notes output.
+_Avoid_: whole summary, combined summary, summary artifact
+
+**Note product**:
+One generated section of a note package with its own output contract and generation responsibility. The next PoC note package contains timestamped timeline, action items, and general summary products.
+_Avoid_: summary field, summary section
+
+**Timestamped timeline**:
+A chronological note product made of grounded meeting events with user-legible elapsed meeting times. It is not a list of bare timestamps.
+_Avoid_: timestamp list, timeline offsets
+
+**General summary**:
+The high-level takeaway note product inside a note package. "Summary" should not be used for the whole generated notes output when it would be confused with this product.
+_Avoid_: full summary, generated summary, summary artifact
+
 **Selectable primary route option**:
 An eligible provider profile that setup may offer as the accepted primary for one stage. Mena may recommend local Ollama when available while still allowing the user to choose Mistral as the summarization primary when policy allows it.
 _Avoid_: second primary runtime profile, remote fallback when primary
