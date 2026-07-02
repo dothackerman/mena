@@ -1468,7 +1468,7 @@ def _stage_model(profile: SetupProfile | RuntimeProfileState, stage: str) -> str
     policies = (
         profile.stage_policies if isinstance(profile, RuntimeProfileState) else profile.stages
     )
-    return lookup_stage_model(policies, stage, profile_label=repr(profile))
+    return lookup_stage_model(policies, stage, f"Profile {profile!r}")
 
 
 def _local_llm_model(profile: SetupProfile) -> str:

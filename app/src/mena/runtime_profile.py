@@ -717,7 +717,7 @@ def _stage_model(runtime_state: RuntimeProfileState, stage: str) -> str:
     return lookup_stage_model(
         runtime_state.stage_policies,
         stage,
-        profile_label=repr(runtime_state.accepted_profile_id),
+        f"Accepted runtime profile {runtime_state.accepted_profile_id!r}",
     )
 
 
