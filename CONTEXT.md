@@ -28,6 +28,18 @@ _Avoid_: second primary runtime profile, remote fallback when primary
 The accepted fallback provider profiles for a stage in priority order. Runtime tries the first viable and authorized fallback profile first; if that fallback cannot complete the stage, runtime may move to the next viable and authorized fallback profile.
 _Avoid_: fallback depth, fallback boolean
 
+**Application workflow module**:
+A module that owns one user-meaningful workflow (record, process, correct, summarize, export) behind an interface that is independent of any user interface. Interface adapters (CLI today, GUI/agent later) delegate to workflow modules and own only argument parsing, wording, rendering, and exit codes. The interface of a workflow module is its test surface; tests must not need to go through an interface adapter to exercise workflow behavior.
+_Avoid_: CLI command implementation, service class, manager, handler
+
+**Interaction port**:
+The seam through which an application workflow module asks the user for decisions (choices, confirmations) and reports notices, expressed semantically rather than as terminal text. The workflow owns which decision is needed and when; the interface adapter owns prompt wording, rendering, and input mechanics. Test adapters script answers at this seam instead of monkeypatching.
+_Avoid_: input_fn, prompt callback, print hook
+
+**Capability resolver**:
+The single module that turns a processing stage plus the accepted stage-focused runtime profile state into a bound, authorized provider. It owns eligibility, authorization checks, re-selection from the ordered fallback provider list when a provider reports unavailable, bounded retry, and route provenance recording. Workflow modules ask the resolver for a working provider; they do not select, validate, or fall back between providers themselves.
+_Avoid_: provider factory helper, runtime fallback dance, per-command provider selection
+
 **Direct Mistral summarization provider**:
 The Mistral summarization provider behind Mena's existing summarization port. The provider owns Mistral API endpoint/request details and the fixed Mena-selected model; Mena owns the summarization input/output contract and setup/runtime authorization policy.
 _Avoid_: Mistral route subsystem, OpenRouter route, user-configured Mistral endpoint
