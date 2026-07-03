@@ -50,7 +50,13 @@ from mena.diarization import (
     FakeDiarizationProvider,
     PyannoteCommunityDiarizationProvider,
 )
-from mena.discovery import AudioDiscovery, AudioRoute, DiscoveryStatus, PlaybackStream
+from mena.discovery import (
+    AudioDiscovery,
+    AudioRoute,
+    DiscoveryStatus,
+    PlaybackStream,
+    format_discovery,
+)
 from mena.interaction import (
     ChoiceOption,
     ChoiceRequest,
@@ -112,6 +118,7 @@ from mena.sessions import (
     SESSION_RECORD_VERSION,
     CreatedSession,
     create_session,
+    persist_session_recording_lifecycle,
     update_session_capture_metadata,
 )
 from mena.settings import DATA_ROOT_ENV_VAR, AppSettings
@@ -759,10 +766,10 @@ def test_record_creates_session_bundle_and_record(
     assert exit_code == 0
     assert "Created session" in captured.out
     assert "Recording notice: you are responsible for obtaining consent" in captured.out
-    assert f"To process this recording, run: mena process {sessions[0] / 'session.json'}" in (
-        captured.out
-    )
     assert len(sessions) == 1
+    assert "Recording saved and ready to process." in captured.out
+    assert "Next command: mena process" in captured.out
+    assert f"Session record: {sessions[0] / 'session.json'}" in captured.out
 
     record_path = sessions[0] / "session.json"
     record = json.loads(record_path.read_text(encoding="utf-8"))
@@ -1303,6 +1310,45 @@ def test_record_dry_run_persists_discovery_and_prints_routes(
     assert record["discovery"]["status"] == "unavailable"
     assert record["discovery"]["profile"] == "online_dual_stream"
     assert "capture_metadata" not in record
+
+
+def test_format_discovery_uses_neutral_idle_route_wording() -> None:
+    discovery = AudioDiscovery(
+        version=1,
+        profile=CaptureProfileId.ONLINE_DUAL_STREAM,
+        status=DiscoveryStatus.AVAILABLE,
+        sources=(
+            AudioRoute(
+                id=31,
+                route_id="pipewire:node:31",
+                name="Headset Mic",
+                description=None,
+                media_class="Audio/Source",
+                active=False,
+                node_name="alsa_input.usb_mic",
+                object_serial="131",
+                pw_record_target="alsa_input.usb_mic",
+            ),
+        ),
+        sinks=(),
+        playback_streams=(
+            PlaybackStream(
+                id=51,
+                route_id="pulse:sink-input:151",
+                name="Meeting Stream",
+                app_binary_name="firefox",
+                stream_name="WebRTC playback",
+                media_name="Meet",
+                sink_input_id="151",
+                active=False,
+            ),
+        ),
+    )
+
+    formatted = format_discovery(discovery)
+
+    assert "[idle]" in formatted
+    assert "[inactive]" not in formatted
 
 
 def test_record_does_not_start_capture_when_discovery_unavailable(
@@ -2024,6 +2070,90 @@ model = "semantic-model:latest"
     assert exit_code == 0
     assert captured["model"] == "llama3.2:3b"
     assert captured["endpoint"] == "http://localhost:11434"
+
+
+def test_main_process_without_session_path_uses_latest_recorded_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    older = _create_runtime_session(settings, status="recorded", created_at="2026-05-19T10:00:00Z")
+    _create_runtime_session(settings, status="failed", created_at="2026-05-19T11:00:00Z")
+    latest = _create_runtime_session(
+        settings,
+        status="recorded",
+        created_at="2026-05-19T12:00:00Z",
+    )
+    calls: list[Path] = []
+
+    def _fake_run_processing_command(**kwargs: object) -> int:
+        calls.append(cast(Path, kwargs["session_path"]))
+        return 0
+
+    monkeypatch.setattr("mena.cli._run_processing_command", _fake_run_processing_command)
+
+    exit_code = main(["process"], settings=settings)
+
+    assert exit_code == 0
+    assert calls == [latest.record_path]
+    assert older.record_path != latest.record_path
+
+
+def test_main_process_without_session_path_reports_missing_recorded_session(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    _create_runtime_session(settings, status="failed", created_at="2026-05-19T11:00:00Z")
+
+    exit_code = main(["process"], settings=settings)
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "Cannot run processing workflow: no recorded sessions found." in captured.out
+
+
+def test_main_process_without_session_path_reports_missing_sessions_root(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+
+    exit_code = main(["process"], settings=settings)
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "Cannot run processing workflow: no recorded sessions found." in captured.out
+
+
+def test_main_process_explicit_session_path_overrides_latest_recorded_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    explicit = _create_runtime_session(
+        settings,
+        status="recorded",
+        created_at="2026-05-19T10:00:00Z",
+    )
+    latest = _create_runtime_session(
+        settings,
+        status="recorded",
+        created_at="2026-05-19T12:00:00Z",
+    )
+    calls: list[Path] = []
+
+    def _fake_run_processing_command(**kwargs: object) -> int:
+        calls.append(cast(Path, kwargs["session_path"]))
+        return 0
+
+    monkeypatch.setattr("mena.cli._run_processing_command", _fake_run_processing_command)
+
+    exit_code = main(["process", str(explicit.record_path)], settings=settings)
+
+    assert exit_code == 0
+    assert calls == [explicit.record_path]
+    assert explicit.record_path != latest.record_path
 
 
 def test_main_summarize_accepts_session_json_file(
@@ -5126,6 +5256,34 @@ def _create_session_record(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     return session_dir
+
+
+def _create_runtime_session(
+    settings: AppSettings,
+    *,
+    status: str,
+    created_at: str,
+) -> CreatedSession:
+    session = create_session(
+        profile=parse_capture_profile("online"),
+        data_root=settings.paths.sessions_dir.parent,
+        now=datetime.fromisoformat(created_at.replace("Z", "+00:00")),
+    )
+    persist_session_recording_lifecycle(
+        session.record_path,
+        status=status,
+        recording={
+            "started_at": "2026-05-19T09:59:00Z",
+            "stopped_at": created_at,
+            "stop_reason": "user_stop",
+            "finalization": {
+                "status": "finalized" if status == "recorded" else status,
+                "completed_at": created_at,
+                "error": None if status == "recorded" else "capture failed",
+            },
+        },
+    )
+    return session
 
 
 def _summary_result_for_export() -> SummaryResult:

@@ -112,7 +112,7 @@ from mena.session_integrity import (
     load_verified_session_bundle,
     verify_session_bundle,
 )
-from mena.sessions import resolve_session, session_id
+from mena.sessions import latest_recorded_session_record_path, resolve_session, session_id
 from mena.settings import AppSettings, SettingsError, validate_summary_language
 from mena.setup import (
     CommandIdentity,
@@ -269,7 +269,9 @@ class ConsoleRecordInteraction:
         elif topic == "record.capture_finalized":
             print("Capture finalized")
         elif topic == "record.process_handoff":
-            print(f"To process this recording, run: mena process {context['record_path']}")
+            print("Recording saved and ready to process.")
+            print("Next command: mena process")
+            print(f"Session record: {context['record_path']}")
         elif topic == "record.finalized_status_error":
             print(f"Capture finalized as {context['status']}: {context['error']}")
         elif topic == "record.finalized_status":
@@ -442,10 +444,20 @@ def build_parser() -> argparse.ArgumentParser:
             continue
         subparser = subparsers.add_parser(command)
         if command in {"correct", "process", "resume", "summarize", "export", "inspect"}:
-            subparser.add_argument(
-                "session_path",
-                help="Path to the session directory or session.json.",
-            )
+            if command == "process":
+                subparser.add_argument(
+                    "session_path",
+                    nargs="?",
+                    help=(
+                        "Path to the session directory or session.json. "
+                        "Defaults to the latest recorded session."
+                    ),
+                )
+            else:
+                subparser.add_argument(
+                    "session_path",
+                    help="Path to the session directory or session.json.",
+                )
         if command in {"process", "resume", "summarize"}:
             subparser.add_argument(
                 "--allow-runtime-fallback",
@@ -650,8 +662,10 @@ def main(
             if args.command == "process":
                 invocation_run_id = run_id or str(uuid4())
                 invocation_attempt = 1
+                session_path = _resolve_process_session_path(args.session_path, app_settings)
             else:
-                resolved_session = resolve_session(Path(args.session_path))
+                session_path = Path(args.session_path)
+                resolved_session = resolve_session(session_path)
                 session_id_value = session_id(resolved_session.record)
                 store = FileSystemArtifactStore(
                     session_id=session_id_value,
@@ -691,7 +705,7 @@ def main(
                 invocation_attempt = resumable.attempt + 1
 
             return _run_processing_command(
-                session_path=Path(args.session_path),
+                session_path=session_path,
                 run_id=invocation_run_id,
                 attempt=invocation_attempt,
                 now=now,
@@ -800,6 +814,15 @@ def _record_input(input_fn: Callable[[str], str] | None) -> Callable[[str], str]
     if sys.stdin.isatty():
         return input
     return None
+
+
+def _resolve_process_session_path(session_path: str | None, settings: AppSettings) -> Path:
+    if session_path is not None:
+        return Path(session_path)
+    latest = latest_recorded_session_record_path(settings.paths.sessions_dir)
+    if latest is None:
+        raise ValueError("no recorded sessions found.")
+    return latest
 
 
 def _run_setup_command(

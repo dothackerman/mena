@@ -12,7 +12,7 @@ from uuid import uuid4
 from mena.fileops import write_json_atomically
 from mena.profiles import CaptureProfileSelection
 from mena.settings import AppSettings
-from mena.timestamps import utc_timestamp, utc_timestamp_for_filename
+from mena.timestamps import parse_utc_timestamp, utc_timestamp, utc_timestamp_for_filename
 
 SESSION_RECORD_VERSION = 1
 SESSION_RECORD_FILENAME = "session.json"
@@ -158,6 +158,35 @@ def resolve_session_paths(session_path: Path) -> tuple[Path, Path]:
     if session_path.name == SESSION_RECORD_FILENAME:
         return session_path.parent, session_path
     return session_path, session_path / SESSION_RECORD_FILENAME
+
+
+def latest_recorded_session_record_path(sessions_root: Path) -> Path | None:
+    """Return the newest successfully recorded session record under a sessions root."""
+
+    best: tuple[datetime, str, Path] | None = None
+    try:
+        for session_dir in sessions_root.iterdir():
+            if not session_dir.is_dir():
+                continue
+            record_path = session_dir / SESSION_RECORD_FILENAME
+            if not record_path.is_file():
+                continue
+            try:
+                record = read_session_record(record_path)
+                if record.get("status") != "recorded":
+                    continue
+                created_at = record.get("created_at")
+                if not isinstance(created_at, str):
+                    continue
+                created_at_time = parse_utc_timestamp(created_at)
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+            item = (created_at_time, str(record_path), record_path)
+            if best is None or item > best:
+                best = item
+    except OSError:
+        return None
+    return None if best is None else best[2]
 
 
 def session_id(session_record: Mapping[str, object]) -> str:
