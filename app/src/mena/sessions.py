@@ -260,6 +260,17 @@ def session_capture_metadata(
     return value
 
 
+def session_discovery(session_record: Mapping[str, object]) -> Mapping[str, object] | None:
+    """Return persisted audio discovery facts when present."""
+
+    value = session_record.get(SESSION_DISCOVERY_KEY)
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise SessionRecordError("Session field 'discovery' must be an object.")
+    return value
+
+
 def session_failures(session_record: Mapping[str, object]) -> tuple[Mapping[str, object], ...]:
     """Return persisted session failure facts."""
 

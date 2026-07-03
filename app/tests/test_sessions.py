@@ -26,6 +26,7 @@ from mena.sessions import (
     resolve_session,
     session_capture_metadata,
     session_degradations,
+    session_discovery,
     session_failures,
     session_id,
     session_language_or_default,
@@ -184,6 +185,8 @@ def test_session_typed_reads_reject_invalid_record_fields() -> None:
         session_recording_finalization_status({})
     with pytest.raises(SessionRecordError, match="capture_metadata"):
         session_capture_metadata({"capture_metadata": []})
+    with pytest.raises(SessionRecordError, match="discovery"):
+        session_discovery({"discovery": []})
     with pytest.raises(SessionRecordError, match="failures"):
         session_failures({"failures": {}})
     with pytest.raises(SessionRecordError, match="degradations"):
@@ -364,6 +367,7 @@ def test_update_session_discovery_writes_schema_valid_session_record(tmp_path: P
     )
 
     assert record["discovery"] == discovery
+    assert session_discovery(record) == discovery
     assert read_session_record(created_session.record_path)["discovery"] == discovery
     validator.validate(record)
 
