@@ -10,8 +10,10 @@ from mena.diarization import DiarizationProvider, DiarizationProviderUnavailable
 from mena.provider_validation import ProviderValidationError
 from mena.runtime_profile import (
     BoundProcessingRuntime,
+    BoundSummarizationRuntime,
     RuntimeFallbackUnavailable,
     RuntimeProfileSelection,
+    bind_summarization_runtime,
     bind_processing_runtime,
     run_processing_with_runtime_fallback,
     runtime_fallback_stage_for_provider_failure,
@@ -145,6 +147,21 @@ class _Semantic:
         raise AssertionError("not called")
 
 
+class _Summarization:
+    def __init__(self, label: str = "default") -> None:
+        self.metadata = SimpleNamespace(name=label, model="mock")
+
+    def summarize(self, _request: object) -> object:
+        raise AssertionError("not called")
+
+
+class _BadSummarization:
+    def __init__(self) -> None:
+        self.metadata = SimpleNamespace(name="bad", model="mock")
+
+    summarize = "not-callable"
+
+
 def test_runtime_fallback_stage_for_provider_failure_maps_provider_errors() -> None:
     assert (
         runtime_fallback_stage_for_provider_failure(
@@ -180,6 +197,34 @@ def test_bind_processing_runtime_constructs_bound_provider_set() -> None:
     assert isinstance(runtime.diarization_provider, _Diarization)
     assert runtime.semantic_coherence_provider is semantic
     assert runtime_stage_policy_payload(runtime.selection.actual)[0]["stage"] == "transcription"
+
+
+def test_bind_summarization_runtime_constructs_bound_summarization_provider() -> None:
+    runtime = bind_summarization_runtime(
+        selection=_selection("accepted"),
+        settings=cast(
+            AppSettings,
+            SimpleNamespace(local_llm=SimpleNamespace(ollama_endpoint="http://ollama")),
+        ),
+        summarization_provider_factory=_Summarization,
+    )
+    assert isinstance(runtime, BoundSummarizationRuntime)
+    assert isinstance(runtime.summarization_provider, _Summarization)
+
+
+def test_bind_summarization_runtime_validates_bound_summarization_provider() -> None:
+    with pytest.raises(
+        ProviderValidationError,
+        match="summarization provider must implement SummarizationProvider",
+    ):
+        bind_summarization_runtime(
+            selection=_selection("accepted"),
+            settings=cast(
+                AppSettings,
+                SimpleNamespace(local_llm=SimpleNamespace(ollama_endpoint="http://ollama")),
+            ),
+            summarization_provider_factory=_BadSummarization,
+        )
 
 
 def test_bind_processing_runtime_validates_bound_injected_providers() -> None:

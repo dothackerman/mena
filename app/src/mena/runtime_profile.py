@@ -34,7 +34,7 @@ from mena.setup import (
 )
 from mena.stage_policy import stage_device as lookup_stage_device
 from mena.stage_policy import stage_model as lookup_stage_model
-from mena.summarization import OllamaSummarizationProvider
+from mena.summarization import OllamaSummarizationProvider, SummarizationProvider
 from mena.transcription import (
     TRANSCRIPTION_STAGE,
     FasterWhisperTranscriptionProvider,
@@ -51,6 +51,10 @@ PROCESSING_REQUIRED_RUNTIME_STAGES = frozenset({"transcription", "diarization"})
 PROCESSING_OPTIONAL_RUNTIME_STAGES = frozenset({"semantic-review"})
 PROCESSING_RUNTIME_STAGES = PROCESSING_REQUIRED_RUNTIME_STAGES | PROCESSING_OPTIONAL_RUNTIME_STAGES
 SUMMARIZATION_RUNTIME_STAGES = frozenset({"summarization"})
+DEFAULT_TRANSCRIPTION_PROVIDER_FACTORY = FasterWhisperTranscriptionProvider
+DEFAULT_DIARIZATION_PROVIDER_FACTORY = PyannoteCommunityDiarizationProvider
+DEFAULT_SEMANTIC_COHERENCE_PROVIDER_FACTORY = OllamaSemanticCoherenceProvider
+DEFAULT_SUMMARIZATION_PROVIDER_FACTORY = OllamaSummarizationProvider
 
 
 @dataclass(frozen=True)
@@ -83,6 +87,12 @@ class BoundProcessingRuntime:
     transcription_provider: TranscriptionProvider
     diarization_provider: DiarizationProvider
     semantic_coherence_provider: SemanticCoherenceProvider
+
+
+@dataclass(frozen=True)
+class BoundSummarizationRuntime:
+    selection: RuntimeProfileSelection
+    summarization_provider: SummarizationProvider
 
 
 @dataclass(frozen=True)
@@ -363,6 +373,35 @@ def bind_processing_runtime(
     )
 
 
+def bind_summarization_runtime(
+    *,
+    selection: RuntimeProfileSelection,
+    settings: AppSettings,
+    summarization_provider: Any | None = None,
+    summarization_provider_factory: ProviderFactory = (
+        DEFAULT_SUMMARIZATION_PROVIDER_FACTORY
+    ),
+) -> BoundSummarizationRuntime:
+    validated_provider = cast(
+        SummarizationProvider,
+        require_provider(
+            provider_factory=runtime_summarization_factory(
+                summarization_provider_factory,
+                settings=settings,
+                runtime_state=selection.actual,
+            )
+            if summarization_provider is None
+            else (lambda: summarization_provider),
+            provider_type=SummarizationProvider,
+            provider_name="summarization",
+        ),
+    )
+    return BoundSummarizationRuntime(
+        selection=selection,
+        summarization_provider=validated_provider,
+    )
+
+
 def run_processing_with_runtime_fallback(
     *,
     runtime: BoundProcessingRuntime,
@@ -509,9 +548,9 @@ def production_runtime_required(
     semantic_coherence_provider_factory: ProviderFactory,
 ) -> bool:
     return (
-        transcription_provider_factory is FasterWhisperTranscriptionProvider
-        or diarization_provider_factory is PyannoteCommunityDiarizationProvider
-        or semantic_coherence_provider_factory is OllamaSemanticCoherenceProvider
+        transcription_provider_factory is DEFAULT_TRANSCRIPTION_PROVIDER_FACTORY
+        or diarization_provider_factory is DEFAULT_DIARIZATION_PROVIDER_FACTORY
+        or semantic_coherence_provider_factory is DEFAULT_SEMANTIC_COHERENCE_PROVIDER_FACTORY
     )
 
 
@@ -519,7 +558,7 @@ def runtime_transcription_factory(
     factory: ProviderFactory,
     runtime_state: RuntimeProfileState,
 ) -> ProviderFactory:
-    if factory is not FasterWhisperTranscriptionProvider:
+    if factory is not DEFAULT_TRANSCRIPTION_PROVIDER_FACTORY:
         return factory
     profile = runtime_state.selected_asr_profile
 
@@ -533,7 +572,7 @@ def runtime_diarization_factory(
     factory: ProviderFactory,
     runtime_state: RuntimeProfileState,
 ) -> ProviderFactory:
-    if factory is not PyannoteCommunityDiarizationProvider:
+    if factory is not DEFAULT_DIARIZATION_PROVIDER_FACTORY:
         return factory
     device = stage_device(runtime_state, "diarization") or "cpu"
 
@@ -549,7 +588,7 @@ def runtime_semantic_factory(
     settings: AppSettings,
     runtime_state: RuntimeProfileState,
 ) -> ProviderFactory:
-    if factory is not OllamaSemanticCoherenceProvider:
+    if factory is not DEFAULT_SEMANTIC_COHERENCE_PROVIDER_FACTORY:
         return factory
     model = _stage_model(runtime_state, "semantic-review")
 
@@ -562,15 +601,24 @@ def runtime_semantic_factory(
     return _factory
 
 
-def runtime_summarization_provider(
+def runtime_summarization_factory(
+    factory: ProviderFactory,
     *,
     settings: AppSettings,
     runtime_state: RuntimeProfileState,
-) -> OllamaSummarizationProvider:
-    return OllamaSummarizationProvider(
-        model=_stage_model(runtime_state, "summarization"),
-        endpoint=settings.local_llm.ollama_endpoint,
-    )
+) -> ProviderFactory:
+    if factory is not DEFAULT_SUMMARIZATION_PROVIDER_FACTORY:
+        return factory
+
+    model = _stage_model(runtime_state, "summarization")
+
+    def _factory() -> OllamaSummarizationProvider:
+        return OllamaSummarizationProvider(
+            model=model,
+            endpoint=settings.local_llm.ollama_endpoint,
+        )
+
+    return _factory
 
 
 def store_runtime_profile_provenance(

@@ -7,6 +7,7 @@ from typing import Any
 
 from mena.diarization import DiarizationProvider
 from mena.semantic_coherence import SemanticCoherenceProvider
+from mena.summarization import SummarizationProvider
 from mena.transcription import TranscriptionProvider
 
 ProviderFactory = Callable[[], Any]
@@ -44,12 +45,21 @@ def require_provider_instance(
         required = ("name", "config_id", "diarize")
     elif provider_type is SemanticCoherenceProvider:
         required = ("metadata", "check")
+    elif provider_type is SummarizationProvider:
+        required = ("metadata", "summarize")
 
     if required:
-        if not _provider_implements(provider, *required):
-            raise ProviderValidationError(
-                f"{provider_name} provider must implement {provider_type.__name__}."
-            )
+        for attr in required:
+            if not hasattr(provider, attr):
+                raise ProviderValidationError(
+                    f"{provider_name} provider must implement {provider_type.__name__}."
+                )
+            if attr in {"transcribe", "diarize", "check", "summarize"} and not callable(
+                getattr(provider, attr)
+            ):
+                raise ProviderValidationError(
+                    f"{provider_name} provider must implement {provider_type.__name__}."
+                )
         if provider_type is SemanticCoherenceProvider:
             metadata = provider.metadata
             config_id = getattr(metadata, "config_id", None)
@@ -63,13 +73,12 @@ def require_provider_instance(
                 )
         return provider
 
+    try:
+        valid = isinstance(provider, provider_type)
+    except TypeError:
+        valid = False
+    if not valid:
+        raise ProviderValidationError(
+            f"{provider_name} provider must implement {provider_type.__name__}."
+        )
     return provider
-
-
-def _provider_implements(provider: Any, *required_attrs: str) -> bool:
-    for attr in required_attrs:
-        if not hasattr(provider, attr):
-            return False
-        if attr in {"transcribe", "diarize", "check"} and not callable(getattr(provider, attr)):
-            return False
-    return True

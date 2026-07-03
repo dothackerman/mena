@@ -21,7 +21,7 @@ from mena.processing import ProcessingStageLedger
 from mena.runtime_profile import (
     SUMMARIZATION_RUNTIME_STAGES,
     RuntimeProfileSelection,
-    runtime_summarization_provider,
+    bind_summarization_runtime,
     select_runtime_profile,
     store_runtime_profile_provenance,
 )
@@ -64,7 +64,7 @@ def run_summarization_command(
     runtime_profile_selector_fn: RuntimeProfileSelector = select_runtime_profile,
     runtime_profile_store_fn: RuntimeProfileStoreFn = store_runtime_profile_provenance,
     runtime_summarization_provider_fn: RuntimeSummarizationProviderFn = (
-        runtime_summarization_provider
+        bind_summarization_runtime
     ),
     run_summarization_stage_fn: SummarizationStageFn = run_summarization_stage,
     resolve_session_fn: ResolveSessionFn | None = None,
@@ -125,8 +125,8 @@ def run_summarization_command(
 
     provider = runtime_summarization_provider_fn(
         settings=settings,
-        runtime_state=runtime_selection.actual,
-    )
+        selection=runtime_selection,
+    ).summarization_provider
 
     ledger = ProcessingStageLedger(store=store, session_id=session_id_value, run_id=run_id)
     try:
