@@ -209,7 +209,7 @@ def test_record_choice_and_data_root_adapter_branches(
     )
 
     assert selected.option_id == "two"
-    assert prompts == ["Select output sink routes [2]: "]
+    assert prompts == ["Select where do you hear the meeting? [2]: "]
     assert cli._record_choice_prompt_metadata("record.capture_route.playback_stream") == (
         "playback stream",
         "--playback-stream",
@@ -218,7 +218,7 @@ def test_record_choice_and_data_root_adapter_branches(
     assert cli._record_choice_prompt_metadata("record.capture_route.output_sink") == (
         "output sink",
         "--output-sink",
-        "Output sink routes",
+        "Where do you hear the meeting?",
     )
     assert cli._resolve_record_profile(None, input_fn=lambda _prompt: "2").id.value == (
         "in_person_single_mic"
