@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from hashlib import sha256
 from heapq import heappop, heappush
 from pathlib import Path
-from typing import Any, Protocol, Self, cast
+from typing import Any, Protocol, Self, cast, runtime_checkable
 
 from mena.artifacts import ArtifactRecord, ArtifactStore
 from mena.fields import (
@@ -399,6 +399,7 @@ class DiarizationResult:
     exclusive_segments: tuple[DiarizationSegment, ...]
 
 
+@runtime_checkable
 class DiarizationProvider(Protocol):
     """Port implemented by local diarization providers."""
 
