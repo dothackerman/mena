@@ -2316,6 +2316,44 @@ def test_main_process_without_session_path_reports_corrupt_completed_manifest(
     assert "Cannot run processing workflow: Unsupported artifact manifest version." in captured.out
 
 
+def test_main_process_without_session_path_reports_unreadable_completed_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    valid_unprocessed = _create_runtime_session(
+        settings,
+        status="recorded",
+        created_at="2026-05-19T10:00:00Z",
+    )
+    unreadable_completed = _create_runtime_session(
+        settings,
+        status="recorded",
+        created_at="2026-05-19T12:00:00Z",
+    )
+    _mark_processing_complete(unreadable_completed)
+    manifest_path = session_artifact_manifest_path(unreadable_completed.bundle_path)
+    manifest_path.unlink()
+    manifest_path.mkdir()
+    calls: list[Path] = []
+
+    def _fake_run_processing_command(**kwargs: object) -> int:
+        calls.append(cast(Path, kwargs["session_path"]))
+        return 0
+
+    monkeypatch.setattr("mena.cli._run_processing_command", _fake_run_processing_command)
+
+    exit_code = main(["process"], settings=settings)
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert calls == []
+    assert valid_unprocessed.record_path != unreadable_completed.record_path
+    assert "Cannot run processing workflow:" in captured.out
+    assert "artifact-manifest.v1.json" in captured.out
+
+
 def test_main_process_without_session_path_keeps_failed_processing_candidate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2607,6 +2645,32 @@ def test_main_process_prints_start_and_success_handoff(
     assert captured.out.rfind("Processing completed successfully.") > captured.out.rfind(
         "third-party dependency warning"
     )
+
+
+def test_main_process_omits_correction_handoff_after_semantic_provider_skip(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    session = _create_runtime_session(
+        settings,
+        status="recorded",
+        created_at="2026-05-19T10:00:00Z",
+    )
+
+    def _fake_run_processing_command(**_kwargs: object) -> int:
+        _mark_semantic_provider_unavailable_skip(session)
+        return 0
+
+    monkeypatch.setattr("mena.cli._run_processing_command", _fake_run_processing_command)
+
+    exit_code = main(["process"], settings=settings)
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Processing completed successfully." in captured.out
+    assert "Next command: mena correct" not in captured.out
 
 
 def test_main_process_does_not_print_success_handoff_on_failure(
