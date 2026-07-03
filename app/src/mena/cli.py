@@ -196,9 +196,9 @@ class ConsoleRecordInteraction:
                 raise ValueError(
                     "Playback stream confirmation is required; pass --playback-stream."
                 )
-            role, flag_name, title = _record_choice_prompt_metadata(request.topic)
+            role, flag_name, _header, _label = _record_choice_prompt_metadata(request.topic)
             raise ValueError(f"Multiple {role} routes were discovered; pass {flag_name}.")
-        _role, _flag_name, title = _record_choice_prompt_metadata(request.topic)
+        _role, _flag_name, header, label = _record_choice_prompt_metadata(request.topic)
         choices = request.options
         default_index = 1
         if request.default_option_id is not None:
@@ -207,7 +207,8 @@ class ConsoleRecordInteraction:
                     default_index = index
                     break
         return _prompt_choice(
-            title=title,
+            header=header,
+            label=label,
             choices=choices,
             formatter=lambda option: option.label,
             input_fn=reader,
@@ -398,13 +399,18 @@ def _recorded_capture_sources(record: Mapping[str, object]) -> frozenset[str]:
     return frozenset(recorded_sources)
 
 
-def _record_choice_prompt_metadata(topic: str) -> tuple[str, str, str]:
+def _record_choice_prompt_metadata(topic: str) -> tuple[str, str, str, str]:
     if topic == "record.capture_route.microphone":
-        return ("microphone", "--mic", "Microphone routes")
+        return ("microphone", "--mic", "Microphone routes:", "microphone routes")
     if topic == "record.capture_route.playback_stream":
-        return ("playback stream", "--playback-stream", "Playback streams")
+        return ("playback stream", "--playback-stream", "Playback streams:", "playback streams")
     if topic == "record.capture_route.output_sink":
-        return ("output sink", "--output-sink", "Output sink routes")
+        return (
+            "meeting audio output",
+            "--output-sink",
+            "Where do you hear the meeting?",
+            "meeting audio output",
+        )
     raise ValueError(f"Unsupported record choice topic '{topic}'.")
 
 
@@ -507,6 +513,65 @@ class ConsoleProcessingInteraction:
         raise ValueError(f"Unsupported processing notice topic '{notice.topic}'.")
 
 
+class ConsoleSummarizeInteraction:
+    """Console adapter for summarize workflow interaction topics."""
+
+    def __init__(self, input_fn: Callable[[str], str] | None) -> None:
+        self._input_fn = input_fn
+
+    def choose(self, request: ChoiceRequest) -> ChoiceOption:
+        if request.topic != "summarize.session":
+            raise ValueError(f"Unsupported summarize choice topic '{request.topic}'.")
+        if request.default_option_id is None:
+            raise ValueError("Summarize session choice requires a recommended default.")
+
+        reader = _record_input(self._input_fn)
+        default = request.option(request.default_option_id)
+        if reader is None:
+            print(
+                "Multiple ready sessions found for summarization."
+                f" Using newest session by default: {_format_summarize_choice(default)}"
+            )
+            print("Pass the session path argument to summarize a different session.")
+            return default
+
+        return _prompt_choice(
+            header="Ready session to summarize:",
+            label="ready session",
+            choices=request.options,
+            formatter=lambda option: _format_summarize_choice(
+                option,
+                recommended=option.option_id == request.default_option_id,
+            ),
+            input_fn=reader,
+            default_index=_choice_default_index(request),
+        )
+
+    def confirm(self, request: ConfirmationRequest) -> bool:
+        raise ValueError(f"Unsupported summarize confirmation topic '{request.topic}'.")
+
+    def request_text(self, request: TextRequest) -> str:
+        raise ValueError(f"Unsupported summarize text topic '{request.topic}'.")
+
+    def notify(self, notice: WorkflowNotice) -> None:
+        topic = notice.topic
+        context = notice.context
+        if topic == "summarize.session_selected":
+            print(f"Session path: {context['session_dir']}")
+        elif topic == "summarize.started":
+            print("Creating meeting notes...")
+        elif topic == "summarize.completed":
+            print(f"Notes created: {context['summary_path']}")
+            print(f"Session path: {context['session_dir']}")
+            print(
+                "Next command: "
+                f"mena export --summary-artifact-id {quote(str(context['summary_artifact_id']))} "
+                f"{quote(str(context['session_dir']))}"
+            )
+        else:
+            raise ValueError(f"Unsupported summarize notice topic '{topic}'.")
+
+
 def _correction_action_option_id(raw: str) -> str | None:
     if raw in {"p", "play", "playback"}:
         return "playback"
@@ -550,7 +615,7 @@ def build_parser() -> argparse.ArgumentParser:
     record_parser.add_argument(
         "--output-sink",
         default=None,
-        help="Output sink route id used to keep the meeting audible.",
+        help="Meeting audio output route id.",
     )
     record_parser.add_argument(
         "--dry-run",
@@ -601,6 +666,13 @@ def build_parser() -> argparse.ArgumentParser:
                         "Path to the session directory or session.json. "
                         "Defaults to the latest recorded session."
                     ),
+                )
+            elif command == "summarize":
+                subparser.add_argument(
+                    "session_path",
+                    nargs="?",
+                    help="Path to the session directory or session.json.",
+                    default=None,
                 )
             else:
                 subparser.add_argument(
@@ -678,6 +750,9 @@ def main(
 
     try:
         app_settings = settings or AppSettings.from_env(config_path=config_path)
+        sessions_root = (
+            data_root / "sessions" if data_root is not None else app_settings.paths.sessions_dir
+        )
     except SettingsError as exc:
         print(f"Cannot load configuration: {exc}")
         return 1
@@ -751,8 +826,14 @@ def main(
 
     if args.command == "summarize":
         try:
+            interaction = ConsoleSummarizeInteraction(input_fn)
+            resolved_session_path = summarize_workflow.resolve_summarize_session_path(
+                explicit_session_path=args.session_path,
+                sessions_root=sessions_root,
+                interaction=interaction,
+            )
             return _run_summarize_command(
-                session_path=Path(args.session_path),
+                session_path=resolved_session_path,
                 manual_notes=args.manual_notes,
                 language=(
                     None
@@ -764,6 +845,7 @@ def main(
                 setup_command_identity=setup_command_identity,
                 setup_hardware=setup_hardware,
                 allow_runtime_fallback=args.allow_runtime_fallback,
+                interaction=interaction,
             )
         except (
             ArtifactStoreError,
@@ -947,24 +1029,43 @@ def _resolve_record_language(
 
 def _prompt_choice(
     *,
-    title: str,
+    header: str,
+    label: str,
     choices: tuple[ChoiceT, ...],
     formatter: Callable[[ChoiceT], str],
     input_fn: Callable[[str], str],
     default_index: int = 1,
 ) -> ChoiceT:
     if default_index < 1 or default_index > len(choices):
-        raise ValueError(f"Invalid default {title.lower()} selection '{default_index}'.")
-    print(f"{title}:")
+        raise ValueError(f"Invalid default {label} selection '{default_index}'.")
+    print(header)
     for index, choice in enumerate(choices, start=1):
         print(f"  {index}. {formatter(choice)}")
-    answer = input_fn(f"Select {title.lower()} [{default_index}]: ").strip() or str(default_index)
+    answer = input_fn(f"Select {label} [{default_index}]: ").strip() or str(default_index)
     if not answer.isdigit():
-        raise ValueError(f"Invalid {title.lower()} selection '{answer}'.")
+        raise ValueError(f"Invalid {label} selection '{answer}'.")
     selected_index = int(answer)
     if selected_index < 1 or selected_index > len(choices):
-        raise ValueError(f"Invalid {title.lower()} selection '{answer}'.")
+        raise ValueError(f"Invalid {label} selection '{answer}'.")
     return choices[selected_index - 1]
+
+
+def _choice_default_index(request: ChoiceRequest) -> int:
+    if request.default_option_id is None:
+        return 1
+    for index, option in enumerate(request.options, start=1):
+        if option.option_id == request.default_option_id:
+            return index
+    raise ValueError(f"Unknown default option '{request.default_option_id}'.")
+
+
+def _format_summarize_choice(option: ChoiceOption, *, recommended: bool = False) -> str:
+    label = option.label
+    if option.detail:
+        label = f"{label} | {option.detail}"
+    if recommended:
+        label = f"{label} [recommended]"
+    return label
 
 
 def _record_input(input_fn: Callable[[str], str] | None) -> Callable[[str], str] | None:
@@ -992,7 +1093,8 @@ def _resolve_process_session_path(
     if reader is None:
         raise ValueError("multiple processable recordings found; pass an explicit session path.")
     return _prompt_choice(
-        title="Processable recordings",
+        header="Processable recordings:",
+        label="processable recordings",
         choices=candidates,
         formatter=_format_processable_session_candidate,
         input_fn=reader,
@@ -1185,6 +1287,7 @@ def _run_summarize_command(
     setup_command_identity: CommandIdentity | None = None,
     setup_hardware: HardwareFacts | None = None,
     allow_runtime_fallback: bool = False,
+    interaction: InteractionPort | None = None,
 ) -> int:
     return summarize_workflow.run_summarization_command(
         session_path=session_path,
@@ -1200,6 +1303,7 @@ def _run_summarize_command(
         runtime_summarization_binder_fn=bind_summarization_runtime,
         run_summarization_stage_fn=run_summarization_stage,
         terminal_llm_release_fn=_record_terminal_local_llm_release,
+        interaction=interaction,
     )
 
 
