@@ -1258,10 +1258,13 @@ def _session_summary_records(*, session_dir: Path) -> tuple[ArtifactRecord, ...]
         records: list[ArtifactRecord] = []
         for item in artifacts:
             if not isinstance(item, dict):
-                return None
-            record = ArtifactRecord.from_dict(cast(Mapping[str, object], item))
+                continue
+            try:
+                record = ArtifactRecord.from_dict(cast(Mapping[str, object], item))
+            except ArtifactStoreError:
+                continue
             if record.session_id != resolved_session_id:
-                return None
+                continue
             if record.artifact_type == SUMMARY_ARTIFACT_TYPE and record.status == "sealed":
                 records.append(record)
         return tuple(sorted(records, key=lambda record: record.path))
