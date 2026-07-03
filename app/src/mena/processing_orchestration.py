@@ -21,6 +21,7 @@ from mena.diarization import (
     run_diarization_stage,
 )
 from mena.fields import optional_str, required_int, required_str
+from mena.interaction import ConfirmationRequest, InteractionPort
 from mena.merge_timing import (
     run_merge_timing_stage,
     run_room_mic_merge_timing_stage,
@@ -108,7 +109,7 @@ def run_processing_command(
     setup_command_identity: Any | None = None,
     setup_hardware: Any | None = None,
     allow_runtime_fallback: bool = False,
-    runtime_fallback_input_fn: Callable[[str], str] | None = None,
+    interaction: InteractionPort | None = None,
     terminal_llm_release: Callable[..., object] | None = None,
     processing_stages_runner: ProcessingStagesRunner | None = None,
     transcription_stage_runner: ProviderRunner = run_transcription_stage,
@@ -164,11 +165,16 @@ def run_processing_command(
         effective_settings = settings or AppSettings.from_env()
         runtime_fallback_authorizer = (
             None
-            if runtime_fallback_input_fn is None
-            else lambda failure, fallback: _confirm_one_run_runtime_fallback(
-                accepted_failure=failure,
-                fallback_evaluation=fallback,
-                input_fn=runtime_fallback_input_fn,
+            if interaction is None
+            else lambda failure, fallback: interaction.confirm(
+                ConfirmationRequest(
+                    topic="runtime_fallback.one_run",
+                    context={
+                        "accepted_failure": failure,
+                        "fallback_evaluation": fallback,
+                    },
+                    default=False,
+                )
             )
         )
         runtime_bound = resolve_processing_runtime(
@@ -920,23 +926,6 @@ def _asr_language_from_session_language(language: str | None) -> str | None:
         return None
     normalized = language.replace("_", "-").split("-", 1)[0].lower()
     return normalized or None
-
-
-def _confirm_one_run_runtime_fallback(
-    *,
-    accepted_failure: str,
-    fallback_evaluation: Any,
-    input_fn: Callable[[str], str],
-) -> bool:
-    print(f"Accepted runtime profile is unavailable: {accepted_failure}")
-    print(
-        "One-run local runtime fallback is ready: "
-        f"{fallback_evaluation.profile.id} using "
-        f"{fallback_evaluation.selected_asr_profile.checkpoint}/"
-        f"{fallback_evaluation.selected_asr_profile.device}."
-    )
-    answer = input_fn("Use local runtime fallback for this run? [y/N] ")
-    return answer.strip().lower() in {"y", "yes"}
 
 
 def _store_runtime_profile_provenance(

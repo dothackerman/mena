@@ -24,6 +24,7 @@ from mena.cli import (
     COMMANDS,
     WORKER_EXIT_TIMEOUT_SECONDS,
     ConsoleCorrectionInteraction,
+    ConsoleProcessingInteraction,
     ConsoleRecordInteraction,
     SourceAudioInput,
     _collect_capture_segments,
@@ -3284,6 +3285,70 @@ def test_main_process_prompts_for_ready_one_run_runtime_fallback(
     assert "Processing completed" in captured.out
     assert "with explicit runtime fallback" in captured.out
     assert processing_calls["session_id"] == session.record.id
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [
+        ("y", True),
+        ("yes", True),
+        ("", False),
+        ("n", False),
+        ("no", False),
+        ("later", False),
+    ],
+)
+def test_console_processing_interaction_preserves_runtime_fallback_prompt(
+    answer: str,
+    expected: bool,
+    capsys: CaptureFixture[str],
+) -> None:
+    prompts: list[str] = []
+
+    def _input(prompt: str) -> str:
+        prompts.append(prompt)
+        return answer
+
+    interaction = ConsoleProcessingInteraction(_input)
+    fallback_evaluation = SimpleNamespace(
+        profile=SimpleNamespace(id="linux-alpha-local-cpu-fallback-v1"),
+        selected_asr_profile=SimpleNamespace(checkpoint="small", device="cpu"),
+    )
+
+    assert (
+        interaction.confirm(
+            ConfirmationRequest(
+                topic="runtime_fallback.one_run",
+                context={
+                    "accepted_failure": "CUDA out of memory",
+                    "fallback_evaluation": fallback_evaluation,
+                },
+                default=False,
+            )
+        )
+        is expected
+    )
+
+    captured = capsys.readouterr()
+    assert prompts == ["Use local runtime fallback for this run? [y/N] "]
+    assert "Accepted runtime profile is unavailable: CUDA out of memory" in captured.out
+    assert (
+        "One-run local runtime fallback is ready: "
+        "linux-alpha-local-cpu-fallback-v1 using small/cpu."
+    ) in captured.out
+
+
+def test_console_processing_interaction_rejects_unsupported_confirmation_topic() -> None:
+    def _input(_prompt: str) -> str:
+        raise AssertionError("not called")
+
+    interaction = ConsoleProcessingInteraction(_input)
+
+    with pytest.raises(
+        ValueError,
+        match="Unsupported processing confirmation topic 'record.capture_route.microphone'",
+    ):
+        interaction.confirm(ConfirmationRequest(topic="record.capture_route.microphone"))
 
 
 def test_runtime_provider_factories_use_selected_profile_state(tmp_path: Path) -> None:
