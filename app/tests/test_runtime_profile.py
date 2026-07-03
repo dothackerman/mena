@@ -276,6 +276,26 @@ def test_bind_summarization_runtime_wraps_bound_factory_type_errors() -> None:
         )
 
 
+def test_bind_summarization_runtime_validates_bound_injected_provider_methods() -> None:
+    provider = SimpleNamespace(
+        metadata=SimpleNamespace(config_id="cfg", to_dict=lambda: {}),
+        summarize="not-callable",
+    )
+
+    with pytest.raises(
+        ProviderValidationError,
+        match="summarization provider must implement SummarizationProvider",
+    ):
+        bind_summarization_runtime(
+            selection=_selection("accepted"),
+            settings=cast(
+                AppSettings,
+                SimpleNamespace(local_llm=SimpleNamespace(ollama_endpoint="http://ollama")),
+            ),
+            summarization_provider_factory=lambda: provider,
+        )
+
+
 def test_bind_processing_runtime_validates_bound_injected_providers() -> None:
     class InvalidTranscription:
         name = "invalid-transcription"
