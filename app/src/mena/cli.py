@@ -6,7 +6,7 @@ import argparse
 import json
 import os
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from shlex import quote
@@ -116,6 +116,7 @@ from mena.session_integrity import (
 from mena.sessions import (
     ProcessableSessionCandidate,
     processable_session_candidates,
+    read_session_record,
     resolve_session,
     session_id,
 )
@@ -261,10 +262,7 @@ class ConsoleRecordInteraction:
                 f"{context['sealed_segment_count']} sealed segment(s)."
             )
         elif topic == "record.capture_route_event":
-            label = (
-                "Capture recovered" if context.get("event") == "recovered" else "Capture degraded"
-            )
-            print(f"{label}: {context['message']}")
+            print(_format_capture_route_event(context))
         elif topic == "record.worker_teardown_interrupted":
             print("Worker teardown interrupted after capture finalization.")
         elif topic == "record.stop_interrupted":
@@ -277,12 +275,92 @@ class ConsoleRecordInteraction:
             print("Recording saved and ready to process.")
             print(f"Next command: {_format_process_handoff_command(context.get('data_root'))}")
             print(f"Session record: {context['record_path']}")
+            summary = _format_capture_route_handoff_summary(context)
+            if summary is not None:
+                print(summary)
         elif topic == "record.finalized_status_error":
             print(f"Capture finalized as {context['status']}: {context['error']}")
         elif topic == "record.finalized_status":
             print(f"Capture finalized as {context['status']}.")
         else:
             raise ValueError(f"Unsupported record notice topic '{topic}'.")
+
+
+def _format_capture_route_event(context: Mapping[str, object]) -> str:
+    event = context.get("event")
+    message = cast(str, context.get("message", ""))
+    if event == "recovered":
+        return f"Capture recovered: {message}"
+    if not isinstance(message, str) or message.strip() == "":
+        message = "capture route changed."
+    source_id = context.get("source_id")
+    code = context.get("code")
+    selected_sources = context.get("selected_sources", ())
+    if not isinstance(selected_sources, (list, tuple)):
+        selected_sources = ()
+    continued_capture_summary = _format_continued_capture_summary(selected_sources)
+    playback_route_failed = (
+        event == "degraded"
+        and source_id == "system_audio"
+        and code == "dedicated_route_runtime_failed"
+    )
+    if playback_route_failed:
+        return (
+            f"Selected playback stream ended during capture; {continued_capture_summary}. {message}"
+        )
+    if source_id == "system_audio":
+        local_mic_selected = "local_mic" in selected_sources
+        continuity = (
+            "continued local microphone capture" if local_mic_selected else "check source setup"
+        )
+        return f"Capture degraded (system audio): {continuity}. {message}"
+    return f"Capture degraded: {message}"
+
+
+def _format_continued_capture_summary(selected_sources: Sequence[object]) -> str:
+    selected_source_ids = tuple(source for source in selected_sources if isinstance(source, str))
+    continuing_sources = tuple(source for source in selected_source_ids if source != "system_audio")
+    if "local_mic" in continuing_sources:
+        return "local microphone capture continued"
+    if continuing_sources:
+        return "other selected source capture may have continued"
+    return "no other selected source was active"
+
+
+def _format_capture_route_handoff_summary(context: Mapping[str, object]) -> str | None:
+    record_path_value = context.get("record_path")
+    if not isinstance(record_path_value, (str, Path)):
+        return None
+    record_path = Path(record_path_value)
+    try:
+        record = read_session_record(record_path)
+    except (OSError, ValueError):
+        return None
+    capture_plan = record.get("capture_plan")
+    selected_sources: tuple[str, ...] = ()
+    if isinstance(capture_plan, Mapping):
+        selected = cast(
+            object,
+            capture_plan.get("selected_sources") if isinstance(capture_plan, Mapping) else None,
+        )
+        if isinstance(selected, (list, tuple)):
+            selected_sources = tuple(item for item in selected if isinstance(item, str))
+    continued_capture_summary = _format_continued_capture_summary(selected_sources)
+    degradations = record.get("degradations")
+    if not isinstance(degradations, list):
+        return None
+    for event in degradations:
+        if not isinstance(event, Mapping):
+            continue
+        if (
+            event.get("source_id") == "system_audio"
+            and event.get("code") == "dedicated_route_runtime_failed"
+        ):
+            return (
+                "Finalization note: selected playback stream ended during recording; "
+                f"{continued_capture_summary}."
+            )
+    return None
 
 
 def _record_choice_prompt_metadata(topic: str) -> tuple[str, str, str]:
