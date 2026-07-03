@@ -183,9 +183,12 @@ provenance."
 ### Output language
 
 Each product prompt sets the output language explicitly (small local models drift
-to English). A lightweight, deterministic output guard asserts the result is
-non-empty in the requested-language path; robust statistical language detection
-is **not** added (no new heavy dependency). The German-fixture acceptance is
+to English). A lightweight, deterministic output guard (`_assert_output_language`)
+then asserts on the generated note package itself: for a non-English request it
+raises `SummarizationContractError` when the combined output reads as English
+drift (several distinct English function words at meaningful density, using a
+stopword set curated to avoid German homographs). Robust statistical language
+detection is **not** added (no new heavy dependency). The German-fixture acceptance is
 verified in tests via a Fake provider returning German content and asserting the
 export renders German section labels (already driven by `policy.language` in
 `summary_markdown.py`) and that policy language threads end-to-end. See Open
@@ -290,8 +293,11 @@ moves with it, which is acceptable per #107.
 3. **Legacy prompt-policy read-compat:** keep old ids in
    `SUPPORTED_PROMPT_POLICIES` for reading old artifacts, or hard-cut? Default:
    keep for read, write only the new id.
-4. **Runtime language guard strictness:** non-empty check only (recommended) vs.
-   a heuristic English-drift flag. Default: non-empty + fixture-test coverage.
+4. **Runtime language guard strictness:** RESOLVED — implemented a conservative
+   heuristic English-drift guard on the generated output (`_assert_output_language`)
+   in addition to fixture-test coverage, so AC #7 is asserted at runtime, not only
+   in tests. Thresholds are tuned to avoid false positives on embedded English
+   technical nouns.
 5. **Provenance shape:** `request_records` list on the artifact (recommended) vs.
    separate provenance artifact. Default: inline list on the summary artifact.
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -118,6 +119,54 @@ OLLAMA_DETERMINISTIC_OPTIONS: dict[str, object] = {
     "seed": OLLAMA_SUMMARIZATION_SEED,
     "num_ctx": OLLAMA_SUMMARIZATION_NUM_CTX,
 }
+
+# Output-language guard (#112). Small local models drift into English despite an
+# explicit prompt instruction, so the generated note package is asserted on the
+# way out. Robust statistical language detection would add a heavy dependency; we
+# stay deterministic and dependency-free with a conservative English-drift check.
+# The stopword set is intentionally limited to English function words that do not
+# collide with German homographs (e.g. "was"/"will"/"in"/"so" are excluded), and
+# the thresholds require several distinct hits at meaningful density so a few
+# embedded English technical nouns never trip the guard.
+_ENGLISH_DRIFT_STOPWORDS = frozenset(
+    {
+        "the",
+        "and",
+        "is",
+        "are",
+        "of",
+        "to",
+        "for",
+        "with",
+        "this",
+        "that",
+        "these",
+        "those",
+        "on",
+        "at",
+        "by",
+        "it",
+        "we",
+        "have",
+        "has",
+        "been",
+        "from",
+        "about",
+        "which",
+        "would",
+        "should",
+        "they",
+        "their",
+        "our",
+        "your",
+        "its",
+        "before",
+        "after",
+    }
+)
+_ENGLISH_DRIFT_MIN_TOKENS = 5
+_ENGLISH_DRIFT_MIN_DISTINCT = 3
+_ENGLISH_DRIFT_MIN_RATIO = 0.15
 
 
 class SummarizationError(RuntimeError):
@@ -396,7 +445,9 @@ class OllamaSummarizationProvider:
             "general_summary": summary_payload.get("general_summary"),
             "request_records": [record.to_dict() for record in records],
         }
-        return SummaryResult.from_dict(combined)
+        result = SummaryResult.from_dict(combined)
+        _assert_output_language(result, request.policy.language)
+        return result
 
     def _run_product(
         self,
@@ -979,6 +1030,44 @@ def _validate_product_payload(product: str, payload: Mapping[str, object]) -> No
             SummaryActionItem.from_dict(action)
     else:
         _required_str(payload, "general_summary", "Summary result")
+
+
+def _assert_output_language(result: SummaryResult, language: str) -> None:
+    """Fail loudly when a non-English request produced English-drifted output."""
+
+    if _is_english_language(language):
+        return
+    if _looks_like_english_drift(_note_package_text(result)):
+        raise SummarizationContractError(
+            f"Note-package output drifted to English but '{language}' was requested; "
+            "refusing to persist off-language notes (small local models drift to English)."
+        )
+
+
+def _is_english_language(language: str) -> bool:
+    return language.replace("_", "-").split("-", 1)[0].lower() == "en"
+
+
+def _note_package_text(result: SummaryResult) -> str:
+    parts = list(result.timeline)
+    for action in result.action_items:
+        parts.append(action.text)
+        if action.owner:
+            parts.append(action.owner)
+        if action.due:
+            parts.append(action.due)
+    parts.append(result.general_summary)
+    return " ".join(parts)
+
+
+def _looks_like_english_drift(text: str) -> bool:
+    tokens = re.findall(r"[^\W\d_]+", text.lower())
+    if len(tokens) < _ENGLISH_DRIFT_MIN_TOKENS:
+        return False
+    hits = [token for token in tokens if token in _ENGLISH_DRIFT_STOPWORDS]
+    if len(set(hits)) < _ENGLISH_DRIFT_MIN_DISTINCT:
+        return False
+    return len(hits) / len(tokens) >= _ENGLISH_DRIFT_MIN_RATIO
 
 
 def _estimate_prompt_tokens(text: str) -> int:

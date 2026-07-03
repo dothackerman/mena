@@ -732,6 +732,26 @@ def _fake_product_responses(
     }
 
 
+def _german_product_responses(
+    *, general_summary: str = "Die Besprechung behandelte das Risiko der Datenbankmigration."
+) -> dict[str, dict[str, object]]:
+    """Per-product Ollama envelopes whose user-facing strings are in German."""
+
+    payloads: dict[str, dict[str, object]] = {
+        "timeline": {"timeline": ["Diskussion über die Datenbankmigration vor Freitag."]},
+        "action_items": {
+            "action_items": [
+                {"text": "Datenbankmigration bis Freitag abschließen.", "owner": "Du", "due": None}
+            ]
+        },
+        "general_summary": {"general_summary": general_summary},
+    }
+    return {
+        product: {"message": {"content": json.dumps(payload, ensure_ascii=False)}}
+        for product, payload in payloads.items()
+    }
+
+
 def _product_key(payload: dict[str, object]) -> str:
     schema = cast(dict[str, object], payload["format"])
     return cast(list[str], schema["required"])[0]
@@ -804,7 +824,7 @@ def test_ollama_summarization_provider_instructs_non_english_output_language(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = OllamaSummarizationProvider(model="test-model")
-    responses = _fake_product_responses()
+    responses = _german_product_responses()
 
     def fake_post_json(path: str, payload: object) -> dict[str, object]:
         assert isinstance(payload, dict)
@@ -822,7 +842,63 @@ def test_ollama_summarization_provider_instructs_non_english_output_language(
     request = replace(_summary_request(), policy=SummarizationPolicy(language="de"))
     result = provider.summarize(request)
 
-    assert result.general_summary == "The meeting focused on database migration risk."
+    assert result.general_summary == "Die Besprechung behandelte das Risiko der Datenbankmigration."
+
+
+def test_ollama_summarization_provider_hard_fails_on_english_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OllamaSummarizationProvider(model="test-model")
+    responses = _fake_product_responses()  # English content for a German request.
+
+    def fake_post_json(path: str, payload: object) -> dict[str, object]:
+        assert isinstance(payload, dict)
+        return responses[_product_key(payload)]
+
+    monkeypatch.setattr(provider, "_post_json", fake_post_json)
+
+    request = replace(_summary_request(), policy=SummarizationPolicy(language="de"))
+    with pytest.raises(SummarizationContractError, match="drifted to English"):
+        provider.summarize(request)
+
+
+def test_ollama_summarization_provider_accepts_german_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OllamaSummarizationProvider(model="test-model")
+    responses = _german_product_responses()
+
+    def fake_post_json(path: str, payload: object) -> dict[str, object]:
+        assert isinstance(payload, dict)
+        return responses[_product_key(payload)]
+
+    monkeypatch.setattr(provider, "_post_json", fake_post_json)
+
+    request = replace(_summary_request(), policy=SummarizationPolicy(language="de-CH"))
+    result = provider.summarize(request)
+
+    assert result.timeline[0].startswith("Diskussion")
+
+
+def test_ollama_summarization_provider_accepts_german_output_with_english_terms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A few embedded English technical nouns must not trip the drift guard.
+    provider = OllamaSummarizationProvider(model="test-model")
+    responses = _german_product_responses(
+        general_summary="Das Team migriert den Cloud Service und den API Gateway bis Freitag."
+    )
+
+    def fake_post_json(path: str, payload: object) -> dict[str, object]:
+        assert isinstance(payload, dict)
+        return responses[_product_key(payload)]
+
+    monkeypatch.setattr(provider, "_post_json", fake_post_json)
+
+    request = replace(_summary_request(), policy=SummarizationPolicy(language="de"))
+    result = provider.summarize(request)
+
+    assert "Cloud Service" in result.general_summary
 
 
 def test_ollama_summarization_provider_hard_fails_over_token_budget(
