@@ -24,7 +24,6 @@ def format_summary_markdown(summary: SummaryMarkdownSource) -> str:
     labels = _labels_for_language(_payload_language(payload))
     sections = (
         (labels.timeline, _bullet_list(payload.timeline)),
-        (labels.important_points, _bullet_list(payload.important_points)),
         (
             labels.action_items,
             _bullet_list(
@@ -74,7 +73,6 @@ def _indent_continuation(text: str) -> str:
 
 class _Labels(Protocol):
     timeline: str
-    important_points: str
     action_items: str
     general_summary: str
     owner: str
@@ -83,7 +81,6 @@ class _Labels(Protocol):
 
 class _EnglishLabels:
     timeline = "Timeline"
-    important_points = "Important points"
     action_items = "Action items"
     general_summary = "General summary"
     owner = "Owner"
@@ -92,7 +89,6 @@ class _EnglishLabels:
 
 class _GermanLabels:
     timeline = "Zeitverlauf"
-    important_points = "Wichtige Punkte"
     action_items = "Aufgaben"
     general_summary = "Zusammenfassung"
     owner = "Verantwortlich"

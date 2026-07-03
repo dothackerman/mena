@@ -188,7 +188,7 @@ def test_export_summary_markdown_ignores_old_v1_export_for_localized_renderer(
     export_payload = store.retrieve(export_result.export_record.id).decode("utf-8")
 
     assert export_result.export_record.id != old_export.id
-    assert export_result.export_record.version == 2
+    assert export_result.export_record.version == 3
     assert export_result.export_record.metadata["contract"] == SUMMARY_MARKDOWN_EXPORT_CONTRACT
     assert f"summary_markdown/{SUMMARY_MARKDOWN_EXPORT_CONTRACT}/" in (
         export_result.export_record.path
@@ -226,7 +226,6 @@ def test_export_summary_markdown_rejects_existing_export_metadata_drift(
 def _summary_result_for_export() -> SummaryResult:
     return SummaryResult(
         timeline=("Discussed milestones.", "Aligned on deliverables."),
-        important_points=("Release blocked until review.",),
         action_items=(),
         general_summary="The meeting was productive.",
     )
@@ -241,7 +240,7 @@ def _persist_summary_artifact(
 ) -> tuple[ArtifactRecord, SummaryArtifact]:
     summary_result = _summary_result_for_export()
     summary_artifact = SummaryArtifact(
-        version=1,
+        version=2,
         session_id=SESSION_ID,
         merged_transcript_artifact=ArtifactRef(
             id=f"{SESSION_ID}:artifacts/merged_transcript/merged.json",
@@ -253,7 +252,6 @@ def _persist_summary_artifact(
         policy=SummarizationPolicy(language=language).to_dict(),
         provider=FakeSummarizationProvider(result=summary_result).metadata,
         timeline=summary_result.timeline,
-        important_points=summary_result.important_points,
         action_items=summary_result.action_items,
         general_summary=summary_result.general_summary,
         created_at=created_at,

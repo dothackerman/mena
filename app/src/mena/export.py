@@ -18,8 +18,8 @@ from mena.summary_markdown import format_summary_markdown
 from mena.timestamps import parse_utc_timestamp, utc_timestamp
 
 SUMMARY_MARKDOWN_EXPORT_ARTIFACT_TYPE = "summary_markdown_export"
-SUMMARY_MARKDOWN_EXPORT_ARTIFACT_VERSION = 2
-SUMMARY_MARKDOWN_EXPORT_CONTRACT = "summary-markdown-language-chrome-v2"
+SUMMARY_MARKDOWN_EXPORT_ARTIFACT_VERSION = 3
+SUMMARY_MARKDOWN_EXPORT_CONTRACT = "summary-markdown-note-package-v3"
 
 
 class SummaryMarkdownExportError(RuntimeError):
@@ -108,7 +108,7 @@ def resolve_summary_markdown_input(
         )
 
     if not candidates:
-        raise SummaryMarkdownExportError("No valid summary.v1 artifact was found for export.")
+        raise SummaryMarkdownExportError("No valid summary.v2 artifact was found for export.")
 
     _, _, _, selected_record, selected_summary = max(candidates)
     return selected_record, selected_summary
@@ -143,7 +143,7 @@ def _load_summary_artifact(
         summary = SummaryArtifact.from_dict(payload)
     except SummarizationContractError as exc:
         raise SummaryMarkdownExportError(
-            f"Summary artifact {record.id} is not a valid summary.v1 payload."
+            f"Summary artifact {record.id} is not a valid summary.v2 payload."
         ) from exc
 
     if summary.session_id != record.session_id:

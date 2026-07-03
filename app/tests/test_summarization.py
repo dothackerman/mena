@@ -29,6 +29,8 @@ from mena.merge_timing import (
 from mena.processing import ArtifactRef, ProcessingStageLedger
 from mena.runtime_stewardship import RuntimeLease
 from mena.summarization import (
+    OLLAMA_SUMMARIZATION_NUM_CTX,
+    OLLAMA_SUMMARIZATION_SEED,
     PROMPT_POLICY,
     SCHEMA_PROMPT_POLICY,
     SUMMARIZATION_STAGE,
@@ -39,6 +41,7 @@ from mena.summarization import (
     SummarizationPolicy,
     SummarizationProviderUnavailable,
     SummarizationRequest,
+    SummarizationTokenBudgetError,
     SummaryActionItem,
     SummaryArtifact,
     SummaryResult,
@@ -49,6 +52,47 @@ from mena.summarization import (
 SESSION_ID = "00000000-0000-0000-0000-000000000001"
 RUN_ID = "run-20260518-summary"
 NOW = datetime(2026, 5, 18, 17, 0, 0, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    ("language", "expected_headings", "forbidden_heading"),
+    [
+        ("en", ["## Timeline", "## Action items", "## General summary"], "## Zeitverlauf"),
+        ("de", ["## Zeitverlauf", "## Aufgaben", "## Zusammenfassung"], "## Timeline"),
+    ],
+)
+def test_summarize_to_export_path_renders_three_product_package(
+    tmp_path: Path,
+    language: str,
+    expected_headings: list[str],
+    forbidden_heading: str,
+) -> None:
+    from mena.export import export_summary_markdown
+
+    store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=tmp_path)
+    merged_record = _persist_merged_transcript(store=store)
+    provider = FakeSummarizationProvider(result=_summary_result())
+    ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+
+    stage_result = run_summarization_stage(
+        store=store,
+        ledger=ledger,
+        merged_transcript_record=merged_record,
+        provider=provider,
+        policy=SummarizationPolicy(language=language),
+        now=NOW,
+    )
+
+    export_result = export_summary_markdown(store=store)
+    markdown = store.retrieve(export_result.export_record.id).decode("utf-8")
+    headings = [line for line in markdown.splitlines() if line.startswith("## ")]
+
+    assert stage_result.summary.version == 2
+    assert not hasattr(stage_result.summary, "important_points")
+    assert headings == expected_headings
+    assert forbidden_heading not in markdown
+    assert "Important points" not in markdown
+    assert "Wichtige Punkte" not in markdown
 
 
 def test_summarization_stage_persists_summary_and_checkpoint(tmp_path: Path) -> None:
@@ -71,7 +115,7 @@ def test_summarization_stage_persists_summary_and_checkpoint(tmp_path: Path) -> 
     assert result.skipped is False
     assert result.state.status == "completed"
     assert result.summary_record.artifact_type == "summary"
-    assert result.summary_record.metadata["contract"] == "summary.v1"
+    assert result.summary_record.metadata["contract"] == "summary.v2"
     payload = json.loads(store.retrieve(result.summary_record.id))
     Draft202012Validator(_load_summary_schema(), format_checker=FormatChecker()).validate(payload)
     artifact = SummaryArtifact.from_dict(payload)
@@ -224,7 +268,7 @@ def test_summarization_stage_does_not_reuse_old_prompt_policy_completed_output()
         prompt_policy=SCHEMA_PROMPT_POLICY,
     )
     old_artifact = SummaryArtifact(
-        version=1,
+        version=2,
         session_id=SESSION_ID,
         merged_transcript_artifact=ArtifactRef.from_record(merged_record),
         manual_notes_artifact=None,
@@ -236,7 +280,6 @@ def test_summarization_stage_does_not_reuse_old_prompt_policy_completed_output()
         },
         provider=old_provider_metadata,
         timeline=old_result.timeline,
-        important_points=old_result.important_points,
         action_items=old_result.action_items,
         general_summary=old_result.general_summary,
         created_at="2026-05-18T17:00:00Z",
@@ -668,63 +711,110 @@ def test_summarization_stage_sanitizes_raw_provider_output_in_failed_checkpoint(
     assert "confidential transcript text" not in failed.error.message
 
 
-def test_ollama_summarization_provider_parses_strict_json_response(
+def _fake_product_responses(
+    *, extra: dict[str, object] | None = None
+) -> dict[str, dict[str, object]]:
+    """Per-product Ollama response envelopes keyed by the schema's required field."""
+
+    result = _summary_result()
+    payloads: dict[str, dict[str, object]] = {
+        "timeline": {"timeline": list(result.timeline)},
+        "action_items": {"action_items": [action.to_dict() for action in result.action_items]},
+        "general_summary": {"general_summary": result.general_summary},
+    }
+    return {
+        product: {
+            "message": {"content": json.dumps(payload)},
+            **(extra or {}),
+        }
+        for product, payload in payloads.items()
+    }
+
+
+def _product_key(payload: dict[str, object]) -> str:
+    schema = cast(dict[str, object], payload["format"])
+    return cast(list[str], schema["required"])[0]
+
+
+def test_ollama_summarization_provider_runs_one_shot_per_product(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = OllamaSummarizationProvider(model="test-model")
+    responses = _fake_product_responses()
+    seen: list[str] = []
 
     def fake_post_json(path: str, payload: object) -> dict[str, object]:
         assert path == "/api/chat"
         assert isinstance(payload, dict)
         assert payload["model"] == "test-model"
         assert payload["stream"] is False
-        assert payload["options"] == {"temperature": 0}
+        assert payload["options"] == {
+            "temperature": 0,
+            "seed": OLLAMA_SUMMARIZATION_SEED,
+            "num_ctx": OLLAMA_SUMMARIZATION_NUM_CTX,
+        }
         schema = cast(dict[str, object], payload["format"])
-        assert schema["type"] == "object"
         assert schema["additionalProperties"] is False
-        assert schema["required"] == [
-            "timeline",
-            "important_points",
-            "action_items",
-            "general_summary",
-        ]
-        properties = cast(dict[str, dict[str, object]], schema["properties"])
-        assert properties["general_summary"] == {"type": "string", "minLength": 1}
-        action_items = properties["action_items"]
-        action_item_schema = cast(dict[str, object], action_items["items"])
-        action_properties = cast(dict[str, dict[str, object]], action_item_schema["properties"])
-        assert action_properties["owner"] == {
-            "anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}]
-        }
-        assert action_properties["due"] == {
-            "anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}]
-        }
+        product = _product_key(payload)
+        seen.append(product)
         messages = cast(list[dict[str, str]], payload["messages"])
-        assert "meeting_summary" in messages[1]["content"]
-        return {"message": {"content": json.dumps(_summary_result().to_dict())}}
+        assert "meeting_notes" in messages[1]["content"]
+        return responses[product]
 
     monkeypatch.setattr(provider, "_post_json", fake_post_json)
 
     result = provider.summarize(_summary_request())
 
+    assert seen == ["timeline", "action_items", "general_summary"]
+    assert result.timeline == ("Discussed database migration before Friday.",)
+    assert result.action_items[0].owner == "You"
     assert result.general_summary == "The meeting focused on database migration risk."
+
+
+def test_ollama_summarization_provider_records_request_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OllamaSummarizationProvider(model="test-model")
+    responses = _fake_product_responses(extra={"prompt_eval_count": 321, "eval_count": 42})
+
+    def fake_post_json(path: str, payload: object) -> dict[str, object]:
+        assert isinstance(payload, dict)
+        return responses[_product_key(payload)]
+
+    monkeypatch.setattr(provider, "_post_json", fake_post_json)
+
+    result = provider.summarize(_summary_request())
+
+    assert [record.product for record in result.request_records] == [
+        "timeline",
+        "action_items",
+        "general_summary",
+    ]
+    for record in result.request_records:
+        assert record.model == "test-model"
+        assert record.num_ctx == OLLAMA_SUMMARIZATION_NUM_CTX
+        assert record.temperature == 0
+        assert record.seed == OLLAMA_SUMMARIZATION_SEED
+        assert record.prompt_eval_count == 321
+        assert record.eval_count == 42
 
 
 def test_ollama_summarization_provider_instructs_non_english_output_language(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = OllamaSummarizationProvider(model="test-model")
+    responses = _fake_product_responses()
 
     def fake_post_json(path: str, payload: object) -> dict[str, object]:
         assert isinstance(payload, dict)
         messages = cast(list[dict[str, str]], payload["messages"])
-        assert "Write every user-facing summary field in de." in messages[0]["content"]
-        instructions = json.loads(messages[1]["content"])["instructions"]
-        assert instructions["output_language"] == (
-            "Write all user-facing strings in de: timeline entries, important points, "
+        assert "Write every user-facing string in de." in messages[0]["content"]
+        user_payload = json.loads(messages[1]["content"])
+        assert user_payload["output_language"] == (
+            "Write all user-facing strings in de: timeline entries, "
             "action item text, generated owner/due wording, and the general summary."
         )
-        return {"message": {"content": json.dumps(_summary_result().to_dict())}}
+        return responses[_product_key(payload)]
 
     monkeypatch.setattr(provider, "_post_json", fake_post_json)
 
@@ -732,6 +822,26 @@ def test_ollama_summarization_provider_instructs_non_english_output_language(
     result = provider.summarize(request)
 
     assert result.general_summary == "The meeting focused on database migration risk."
+
+
+def test_ollama_summarization_provider_hard_fails_over_token_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OllamaSummarizationProvider(model="test-model")
+    calls: list[str] = []
+
+    def fake_post_json(path: str, payload: object) -> dict[str, object]:
+        calls.append(path)
+        return {"message": {"content": "{}"}}
+
+    monkeypatch.setattr(provider, "_post_json", fake_post_json)
+    oversized = "word " * (OLLAMA_SUMMARIZATION_NUM_CTX * 4)
+    request = replace(_summary_request(), manual_notes=oversized)
+
+    with pytest.raises(SummarizationTokenBudgetError, match="num_ctx budget"):
+        provider.summarize(request)
+
+    assert calls == []
 
 
 def test_ollama_summarization_provider_rejects_invalid_json_response(
@@ -748,7 +858,7 @@ def test_ollama_summarization_provider_rejects_invalid_json_response(
         provider.summarize(_summary_request())
 
     message = str(exc_info.value)
-    assert "not valid JSON" in message
+    assert "timeline response was not valid JSON" in message
     assert "Raw Ollama message content: not-json" in message
 
 
@@ -756,17 +866,13 @@ def test_ollama_summarization_provider_preserves_raw_output_on_contract_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = OllamaSummarizationProvider(model="test-model")
-    raw_content = json.dumps(
-        {
-            "timeline": ["Discussed migration risk."],
-            "important_points": ["Database migration needs rollback coverage."],
-            "action_items": [],
-            "general_summary": None,
-        }
-    )
+    responses = _fake_product_responses()
+    raw_content = json.dumps({"general_summary": None})
+    responses["general_summary"] = {"message": {"content": raw_content}}
 
     def fake_post_json(path: str, payload: object) -> dict[str, object]:
-        return {"message": {"content": raw_content}}
+        assert isinstance(payload, dict)
+        return responses[_product_key(payload)]
 
     monkeypatch.setattr(provider, "_post_json", fake_post_json)
 
@@ -797,7 +903,6 @@ def test_summarization_policy_and_result_validate_contract() -> None:
         SummaryResult.from_dict(
             {
                 "timeline": [],
-                "important_points": ["Important"],
                 "action_items": [],
                 "general_summary": "Summary",
             }
@@ -806,7 +911,7 @@ def test_summarization_policy_and_result_validate_contract() -> None:
 
 def test_summary_artifact_from_dict_validates_contract() -> None:
     artifact = SummaryArtifact(
-        version=1,
+        version=2,
         session_id=SESSION_ID,
         merged_transcript_artifact=ArtifactRef(
             id=f"{SESSION_ID}:artifacts/merged_transcript/merged.json",
@@ -818,7 +923,6 @@ def test_summary_artifact_from_dict_validates_contract() -> None:
         policy=SummarizationPolicy(language="en").to_dict(),
         provider=FakeSummarizationProvider(result=_summary_result()).metadata,
         timeline=_summary_result().timeline,
-        important_points=_summary_result().important_points,
         action_items=_summary_result().action_items,
         general_summary=_summary_result().general_summary,
         created_at="2026-05-18T17:00:00Z",
@@ -837,7 +941,7 @@ def test_summary_artifact_from_dict_validates_contract() -> None:
 
 def test_summary_artifact_from_dict_accepts_legacy_prompt_policy() -> None:
     artifact = SummaryArtifact(
-        version=1,
+        version=2,
         session_id=SESSION_ID,
         merged_transcript_artifact=ArtifactRef(
             id=f"{SESSION_ID}:artifacts/merged_transcript/merged.json",
@@ -849,7 +953,6 @@ def test_summary_artifact_from_dict_accepts_legacy_prompt_policy() -> None:
         policy=SummarizationPolicy(language="en").to_dict(),
         provider=FakeSummarizationProvider(result=_summary_result()).metadata,
         timeline=_summary_result().timeline,
-        important_points=_summary_result().important_points,
         action_items=_summary_result().action_items,
         general_summary=_summary_result().general_summary,
         created_at="2026-05-18T17:00:00Z",
@@ -876,7 +979,7 @@ def test_summary_artifact_from_dict_accepts_legacy_prompt_policy() -> None:
 
 def test_summary_schema_validates_contract() -> None:
     artifact = SummaryArtifact(
-        version=1,
+        version=2,
         session_id=SESSION_ID,
         merged_transcript_artifact=ArtifactRef(
             id=f"{SESSION_ID}:artifacts/merged_transcript/merged.json",
@@ -888,7 +991,6 @@ def test_summary_schema_validates_contract() -> None:
         policy=SummarizationPolicy(language="en").to_dict(),
         provider=FakeSummarizationProvider(result=_summary_result()).metadata,
         timeline=_summary_result().timeline,
-        important_points=_summary_result().important_points,
         action_items=_summary_result().action_items,
         general_summary=_summary_result().general_summary,
         created_at="2026-05-18T17:00:00Z",
@@ -901,7 +1003,7 @@ def test_summary_schema_validates_contract() -> None:
 
 def test_summary_schema_rejects_legacy_provider_config_inside_policy() -> None:
     artifact = SummaryArtifact(
-        version=1,
+        version=2,
         session_id=SESSION_ID,
         merged_transcript_artifact=ArtifactRef(
             id=f"{SESSION_ID}:artifacts/merged_transcript/merged.json",
@@ -913,7 +1015,6 @@ def test_summary_schema_rejects_legacy_provider_config_inside_policy() -> None:
         policy=SummarizationPolicy(language="en").to_dict(),
         provider=FakeSummarizationProvider(result=_summary_result()).metadata,
         timeline=_summary_result().timeline,
-        important_points=_summary_result().important_points,
         action_items=_summary_result().action_items,
         general_summary=_summary_result().general_summary,
         created_at="2026-05-18T17:00:00Z",
@@ -1060,7 +1161,6 @@ def _summary_request() -> SummarizationRequest:
 def _summary_result() -> SummaryResult:
     return SummaryResult(
         timeline=("Discussed database migration before Friday.",),
-        important_points=("Release is blocked until migration is complete.",),
         action_items=(
             SummaryActionItem(text="Finish database migration.", owner="You", due="Friday"),
         ),
@@ -1155,5 +1255,5 @@ def _word_confidence() -> SegmentConfidence:
 
 
 def _load_summary_schema() -> dict[str, object]:
-    schema_path = files("mena.schemas").joinpath("summary.v1.schema.json")
+    schema_path = files("mena.schemas").joinpath("summary.v2.schema.json")
     return cast(dict[str, object], json.loads(schema_path.read_text(encoding="utf-8")))

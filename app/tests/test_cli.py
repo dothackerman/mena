@@ -363,7 +363,7 @@ def test_setup_yes_executes_planned_actions_through_runner(
 
     captured = capsys.readouterr()
     assert exit_code == 0
-    assert ("ollama", "pull", "llama3.2:3b") in runner.run_calls
+    assert ("ollama", "pull", "llama3.1:8b") in runner.run_calls
     assert any(call[1] == "-c" and "faster_whisper" in call[2] for call in runner.run_calls)
     assert any(call[1] == "-c" and "pyannote.audio" in call[2] for call in runner.run_calls)
     assert "Setup action results:" in captured.out
@@ -2022,7 +2022,7 @@ model = "semantic-model:latest"
     exit_code = main(["process", str(session_dir)], config_path=config_path)
 
     assert exit_code == 0
-    assert captured["model"] == "llama3.2:3b"
+    assert captured["model"] == "llama3.1:8b"
     assert captured["endpoint"] == "http://localhost:11434"
 
 
@@ -2297,7 +2297,7 @@ def test_main_export_command_exports_latest_summary_markdown(
 
     assert exit_code == 0
     assert "Export written to:" in captured.out
-    assert "Export contract: summary-markdown-language-chrome-v2" in captured.out
+    assert "Export contract: summary-markdown-note-package-v3" in captured.out
     assert '"summary_artifact_id"' in captured.out
     assert '"merged_transcript_artifact_id"' in captured.out
     assert '"manual_notes_artifact_id"' in captured.out
@@ -5131,7 +5131,6 @@ def _create_session_record(tmp_path: Path) -> Path:
 def _summary_result_for_export() -> SummaryResult:
     return SummaryResult(
         timeline=("Agenda covered.",),
-        important_points=("A decision was made.",),
         action_items=(),
         general_summary="The team aligned on the plan.",
     )
@@ -5157,14 +5156,13 @@ def _persist_summary_artifact_for_cli(
     return persist_summary_artifact(
         store=store,
         artifact=SummaryArtifact(
-            version=1,
+            version=2,
             session_id=SESSION_ID,
             merged_transcript_artifact=merged_artifact_ref,
             manual_notes_artifact=None,
             policy=SummarizationPolicy(language="en").to_dict(),
             provider=FakeSummarizationProvider(result=summary_result).metadata,
             timeline=summary_result.timeline,
-            important_points=summary_result.important_points,
             action_items=summary_result.action_items,
             general_summary=summary_result.general_summary,
             created_at="2026-05-20T10:00:00Z",
