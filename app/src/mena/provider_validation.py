@@ -44,7 +44,7 @@ def require_provider_instance(
         SemanticCoherenceProvider,
         SummarizationProvider,
     }:
-        if not isinstance(provider, provider_type) or not _provider_methods_callable(
+        if not isinstance(provider, provider_type) or not _protocol_methods_callable(
             provider, provider_type
         ):
             raise ProviderValidationError(
@@ -67,16 +67,12 @@ def require_provider_instance(
     return provider
 
 
-def _provider_methods_callable(provider: Any, provider_type: type[Any]) -> bool:
-    method_names: tuple[str, ...] = ()
-    if provider_type is TranscriptionProvider:
-        method_names = ("transcribe",)
-    elif provider_type is DiarizationProvider:
-        method_names = ("diarize",)
-    elif provider_type is SemanticCoherenceProvider:
-        method_names = ("check",)
-    elif provider_type is SummarizationProvider:
-        method_names = ("summarize",)
+def _protocol_methods_callable(provider: Any, provider_type: type[Any]) -> bool:
+    method_names = (
+        name
+        for name, member in vars(provider_type).items()
+        if not name.startswith("_") and callable(member)
+    )
     return all(callable(getattr(provider, method_name, None)) for method_name in method_names)
 
 
