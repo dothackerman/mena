@@ -6,7 +6,7 @@ import argparse
 import json
 import os
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from shlex import quote
@@ -114,6 +114,7 @@ from mena.session_integrity import (
 from mena.sessions import (
     ProcessableSessionCandidate,
     processable_session_candidates,
+    read_session_record,
     resolve_session,
     session_id,
 )
@@ -193,9 +194,9 @@ class ConsoleRecordInteraction:
                 raise ValueError(
                     "Playback stream confirmation is required; pass --playback-stream."
                 )
-            role, flag_name, title = _record_choice_prompt_metadata(request.topic)
+            role, flag_name, _header, _label = _record_choice_prompt_metadata(request.topic)
             raise ValueError(f"Multiple {role} routes were discovered; pass {flag_name}.")
-        _role, _flag_name, title = _record_choice_prompt_metadata(request.topic)
+        _role, _flag_name, header, label = _record_choice_prompt_metadata(request.topic)
         choices = request.options
         default_index = 1
         if request.default_option_id is not None:
@@ -204,7 +205,8 @@ class ConsoleRecordInteraction:
                     default_index = index
                     break
         return _prompt_choice(
-            title=title,
+            header=header,
+            label=label,
             choices=choices,
             formatter=lambda option: option.label,
             input_fn=reader,
@@ -259,10 +261,7 @@ class ConsoleRecordInteraction:
                 f"{context['sealed_segment_count']} sealed segment(s)."
             )
         elif topic == "record.capture_route_event":
-            label = (
-                "Capture recovered" if context.get("event") == "recovered" else "Capture degraded"
-            )
-            print(f"{label}: {context['message']}")
+            print(_format_capture_route_event(context))
         elif topic == "record.worker_teardown_interrupted":
             print("Worker teardown interrupted after capture finalization.")
         elif topic == "record.stop_interrupted":
@@ -275,6 +274,9 @@ class ConsoleRecordInteraction:
             print("Recording saved and ready to process.")
             print(f"Next command: {_format_process_handoff_command(context.get('data_root'))}")
             print(f"Session record: {context['record_path']}")
+            summary = _format_capture_route_handoff_summary(context)
+            if summary is not None:
+                print(summary)
         elif topic == "record.finalized_status_error":
             print(f"Capture finalized as {context['status']}: {context['error']}")
         elif topic == "record.finalized_status":
@@ -283,13 +285,130 @@ class ConsoleRecordInteraction:
             raise ValueError(f"Unsupported record notice topic '{topic}'.")
 
 
-def _record_choice_prompt_metadata(topic: str) -> tuple[str, str, str]:
+def _format_capture_route_event(context: Mapping[str, object]) -> str:
+    event = context.get("event")
+    message = cast(str, context.get("message", ""))
+    if event == "recovered":
+        return f"Capture recovered: {message}"
+    if not isinstance(message, str) or message.strip() == "":
+        message = "capture route changed."
+    source_id = context.get("source_id")
+    code = context.get("code")
+    selected_sources = context.get("selected_sources", ())
+    if not isinstance(selected_sources, (list, tuple)):
+        selected_sources = ()
+    continued_capture_summary = _format_continued_capture_summary(selected_sources)
+    playback_route_failed = (
+        event == "degraded"
+        and source_id == "system_audio"
+        and code == "dedicated_route_runtime_failed"
+    )
+    if playback_route_failed:
+        return (
+            f"Selected playback stream ended during capture; {continued_capture_summary}. {message}"
+        )
+    if source_id == "system_audio":
+        return f"Capture degraded (system audio): {message}"
+    return f"Capture degraded: {message}"
+
+
+def _format_continued_capture_summary(selected_sources: Sequence[object]) -> str:
+    selected_source_ids = tuple(source for source in selected_sources if isinstance(source, str))
+    continuing_sources = tuple(source for source in selected_source_ids if source != "system_audio")
+    if "local_mic" in continuing_sources:
+        return "local microphone capture may have continued"
+    if continuing_sources:
+        return "other selected source capture may have continued"
+    return "no other selected source was active"
+
+
+def _format_capture_route_handoff_summary(context: Mapping[str, object]) -> str | None:
+    record_path_value = context.get("record_path")
+    if not isinstance(record_path_value, (str, Path)):
+        return None
+    record_path = Path(record_path_value)
+    try:
+        record = read_session_record(record_path)
+    except (OSError, ValueError):
+        return None
+    continued_capture_summary = _format_handoff_continued_capture_summary(record)
+    degradations = record.get("degradations")
+    if not isinstance(degradations, list):
+        return None
+    for event in degradations:
+        if not isinstance(event, Mapping):
+            continue
+        if (
+            event.get("source_id") == "system_audio"
+            and event.get("code") == "dedicated_route_runtime_failed"
+        ):
+            return (
+                "Finalization note: selected playback stream ended during recording; "
+                f"{continued_capture_summary}."
+            )
+    return None
+
+
+def _format_handoff_continued_capture_summary(record: Mapping[str, object]) -> str:
+    selected_sources = _selected_capture_sources(record)
+    continuing_sources = tuple(source for source in selected_sources if source != "system_audio")
+    recorded_sources = _recorded_capture_sources(record)
+    recorded_continuing_sources = tuple(
+        source for source in continuing_sources if source in recorded_sources
+    )
+    if "local_mic" in recorded_continuing_sources:
+        return "local microphone segments were recorded"
+    if recorded_continuing_sources:
+        return "other selected source segments were recorded"
+    if "local_mic" in continuing_sources:
+        return (
+            "local microphone capture was selected, but no local microphone segments were recorded"
+        )
+    if continuing_sources:
+        return "other selected source capture was selected, but no matching segments were recorded"
+    return "no other selected source was active"
+
+
+def _selected_capture_sources(record: Mapping[str, object]) -> tuple[str, ...]:
+    capture_plan = record.get("capture_plan")
+    if not isinstance(capture_plan, Mapping):
+        return ()
+    selected = cast(object, capture_plan.get("selected_sources"))
+    if not isinstance(selected, (list, tuple)):
+        return ()
+    return tuple(item for item in selected if isinstance(item, str))
+
+
+def _recorded_capture_sources(record: Mapping[str, object]) -> frozenset[str]:
+    capture_metadata = record.get("capture_metadata")
+    if not isinstance(capture_metadata, Mapping):
+        return frozenset()
+    sources = capture_metadata.get("sources")
+    if not isinstance(sources, list):
+        return frozenset()
+    recorded_sources: set[str] = set()
+    for source in sources:
+        if not isinstance(source, Mapping):
+            continue
+        source_id = source.get("source_id")
+        segment_count = source.get("segment_count")
+        if isinstance(source_id, str) and isinstance(segment_count, int) and segment_count > 0:
+            recorded_sources.add(source_id)
+    return frozenset(recorded_sources)
+
+
+def _record_choice_prompt_metadata(topic: str) -> tuple[str, str, str, str]:
     if topic == "record.capture_route.microphone":
-        return ("microphone", "--mic", "Microphone routes")
+        return ("microphone", "--mic", "Microphone routes:", "microphone routes")
     if topic == "record.capture_route.playback_stream":
-        return ("playback stream", "--playback-stream", "Playback streams")
+        return ("playback stream", "--playback-stream", "Playback streams:", "playback streams")
     if topic == "record.capture_route.output_sink":
-        return ("output sink", "--output-sink", "Output sink routes")
+        return (
+            "meeting audio output",
+            "--output-sink",
+            "Where do you hear the meeting?",
+            "meeting audio output",
+        )
     raise ValueError(f"Unsupported record choice topic '{topic}'.")
 
 
@@ -392,6 +511,65 @@ class ConsoleProcessingInteraction:
         raise ValueError(f"Unsupported processing notice topic '{notice.topic}'.")
 
 
+class ConsoleSummarizeInteraction:
+    """Console adapter for summarize workflow interaction topics."""
+
+    def __init__(self, input_fn: Callable[[str], str] | None) -> None:
+        self._input_fn = input_fn
+
+    def choose(self, request: ChoiceRequest) -> ChoiceOption:
+        if request.topic != "summarize.session":
+            raise ValueError(f"Unsupported summarize choice topic '{request.topic}'.")
+        if request.default_option_id is None:
+            raise ValueError("Summarize session choice requires a recommended default.")
+
+        reader = _record_input(self._input_fn)
+        default = request.option(request.default_option_id)
+        if reader is None:
+            print(
+                "Multiple ready sessions found for summarization."
+                f" Using newest session by default: {_format_summarize_choice(default)}"
+            )
+            print("Pass the session path argument to summarize a different session.")
+            return default
+
+        return _prompt_choice(
+            header="Ready session to summarize:",
+            label="ready session",
+            choices=request.options,
+            formatter=lambda option: _format_summarize_choice(
+                option,
+                recommended=option.option_id == request.default_option_id,
+            ),
+            input_fn=reader,
+            default_index=_choice_default_index(request),
+        )
+
+    def confirm(self, request: ConfirmationRequest) -> bool:
+        raise ValueError(f"Unsupported summarize confirmation topic '{request.topic}'.")
+
+    def request_text(self, request: TextRequest) -> str:
+        raise ValueError(f"Unsupported summarize text topic '{request.topic}'.")
+
+    def notify(self, notice: WorkflowNotice) -> None:
+        topic = notice.topic
+        context = notice.context
+        if topic == "summarize.session_selected":
+            print(f"Session path: {context['session_dir']}")
+        elif topic == "summarize.started":
+            print("Creating meeting notes...")
+        elif topic == "summarize.completed":
+            print(f"Notes created: {context['summary_path']}")
+            print(f"Session path: {context['session_dir']}")
+            print(
+                "Next command: "
+                f"mena export --summary-artifact-id {quote(str(context['summary_artifact_id']))} "
+                f"{quote(str(context['session_dir']))}"
+            )
+        else:
+            raise ValueError(f"Unsupported summarize notice topic '{topic}'.")
+
+
 class ConsoleExportInteraction:
     """Console adapter for export workflow interaction topics."""
 
@@ -470,7 +648,7 @@ def build_parser() -> argparse.ArgumentParser:
     record_parser.add_argument(
         "--output-sink",
         default=None,
-        help="Output sink route id used to keep the meeting audible.",
+        help="Meeting audio output route id.",
     )
     record_parser.add_argument(
         "--dry-run",
@@ -527,6 +705,13 @@ def build_parser() -> argparse.ArgumentParser:
                         "Path to the session directory or session.json. "
                         "Defaults to the latest recorded session."
                     ),
+                )
+            elif command == "summarize":
+                subparser.add_argument(
+                    "session_path",
+                    nargs="?",
+                    help="Path to the session directory or session.json.",
+                    default=None,
                 )
             else:
                 subparser.add_argument(
@@ -611,6 +796,9 @@ def main(
 
     try:
         app_settings = settings or AppSettings.from_env(config_path=config_path)
+        sessions_root = (
+            data_root / "sessions" if data_root is not None else app_settings.paths.sessions_dir
+        )
     except SettingsError as exc:
         print(f"Cannot load configuration: {exc}")
         return 1
@@ -684,8 +872,14 @@ def main(
 
     if args.command == "summarize":
         try:
+            interaction = ConsoleSummarizeInteraction(input_fn)
+            resolved_session_path = summarize_workflow.resolve_summarize_session_path(
+                explicit_session_path=args.session_path,
+                sessions_root=sessions_root,
+                interaction=interaction,
+            )
             return _run_summarize_command(
-                session_path=Path(args.session_path),
+                session_path=resolved_session_path,
                 manual_notes=args.manual_notes,
                 language=(
                     None
@@ -697,6 +891,7 @@ def main(
                 setup_command_identity=setup_command_identity,
                 setup_hardware=setup_hardware,
                 allow_runtime_fallback=args.allow_runtime_fallback,
+                interaction=interaction,
             )
         except (
             ArtifactStoreError,
@@ -886,24 +1081,43 @@ def _resolve_record_language(
 
 def _prompt_choice(
     *,
-    title: str,
+    header: str,
+    label: str,
     choices: tuple[ChoiceT, ...],
     formatter: Callable[[ChoiceT], str],
     input_fn: Callable[[str], str],
     default_index: int = 1,
 ) -> ChoiceT:
     if default_index < 1 or default_index > len(choices):
-        raise ValueError(f"Invalid default {title.lower()} selection '{default_index}'.")
-    print(f"{title}:")
+        raise ValueError(f"Invalid default {label} selection '{default_index}'.")
+    print(header)
     for index, choice in enumerate(choices, start=1):
         print(f"  {index}. {formatter(choice)}")
-    answer = input_fn(f"Select {title.lower()} [{default_index}]: ").strip() or str(default_index)
+    answer = input_fn(f"Select {label} [{default_index}]: ").strip() or str(default_index)
     if not answer.isdigit():
-        raise ValueError(f"Invalid {title.lower()} selection '{answer}'.")
+        raise ValueError(f"Invalid {label} selection '{answer}'.")
     selected_index = int(answer)
     if selected_index < 1 or selected_index > len(choices):
-        raise ValueError(f"Invalid {title.lower()} selection '{answer}'.")
+        raise ValueError(f"Invalid {label} selection '{answer}'.")
     return choices[selected_index - 1]
+
+
+def _choice_default_index(request: ChoiceRequest) -> int:
+    if request.default_option_id is None:
+        return 1
+    for index, option in enumerate(request.options, start=1):
+        if option.option_id == request.default_option_id:
+            return index
+    raise ValueError(f"Unknown default option '{request.default_option_id}'.")
+
+
+def _format_summarize_choice(option: ChoiceOption, *, recommended: bool = False) -> str:
+    label = option.label
+    if option.detail:
+        label = f"{label} | {option.detail}"
+    if recommended:
+        label = f"{label} [recommended]"
+    return label
 
 
 def _record_input(input_fn: Callable[[str], str] | None) -> Callable[[str], str] | None:
@@ -931,7 +1145,8 @@ def _resolve_process_session_path(
     if reader is None:
         raise ValueError("multiple processable recordings found; pass an explicit session path.")
     return _prompt_choice(
-        title="Processable recordings",
+        header="Processable recordings:",
+        label="processable recordings",
         choices=candidates,
         formatter=_format_processable_session_candidate,
         input_fn=reader,
@@ -1124,6 +1339,7 @@ def _run_summarize_command(
     setup_command_identity: CommandIdentity | None = None,
     setup_hardware: HardwareFacts | None = None,
     allow_runtime_fallback: bool = False,
+    interaction: InteractionPort | None = None,
 ) -> int:
     return summarize_workflow.run_summarization_command(
         session_path=session_path,
@@ -1139,6 +1355,7 @@ def _run_summarize_command(
         runtime_summarization_binder_fn=bind_summarization_runtime,
         run_summarization_stage_fn=run_summarization_stage,
         terminal_llm_release_fn=_record_terminal_local_llm_release,
+        interaction=interaction,
     )
 
 

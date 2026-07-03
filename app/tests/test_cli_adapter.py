@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -53,6 +54,26 @@ def test_console_record_interaction_reports_adapter_notices(
         ),
         WorkflowNotice(
             topic="record.capture_route_event",
+            context={
+                "event": "degraded",
+                "source_id": "system_audio",
+                "code": "dedicated_route_runtime_failed",
+                "message": "Selected playback stream ended",
+                "selected_sources": ["local_mic", "system_audio"],
+            },
+        ),
+        WorkflowNotice(
+            topic="record.capture_route_event",
+            context={
+                "event": "degraded",
+                "source_id": "system_audio",
+                "code": "dedicated_route_unavailable",
+                "message": "Dedicated route unavailable",
+                "selected_sources": ["local_mic", "system_audio"],
+            },
+        ),
+        WorkflowNotice(
+            topic="record.capture_route_event",
             context={"event": "lost", "message": "route missing"},
         ),
         WorkflowNotice(topic="record.worker_teardown_interrupted"),
@@ -74,12 +95,171 @@ def test_console_record_interaction_reports_adapter_notices(
     output = capsys.readouterr().out
     assert "Created session session-1" in output
     assert "Capture recovered: route restored" in output
+    assert (
+        "Selected playback stream ended during capture; "
+        "local microphone capture may have continued. "
+        "Selected playback stream ended"
+    ) in output
+    assert "Capture degraded (system audio): Dedicated route unavailable" in output
     assert "Capture degraded: route missing" in output
     assert "Next command: mena process" in output
     assert "Capture finalized as failed: finalization failed" in output
 
     with pytest.raises(ValueError, match="Unsupported record notice topic"):
         interaction.notify(WorkflowNotice(topic="record.unknown"))
+
+
+def test_console_record_interaction_reports_handoff_playback_loss_summary(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    record_path = tmp_path / "session.json"
+    record_path.write_text(
+        json.dumps(
+            {
+                "capture_plan": {"selected_sources": ["local_mic", "system_audio"]},
+                "capture_metadata": {
+                    "sources": [
+                        {
+                            "source_id": "local_mic",
+                            "segment_count": 1,
+                        },
+                        {
+                            "source_id": "system_audio",
+                            "segment_count": 1,
+                        },
+                    ]
+                },
+                "degradations": [
+                    {
+                        "event": "degraded",
+                        "code": "dedicated_route_runtime_failed",
+                        "source_id": "system_audio",
+                        "message": "Dedicated meeting route failed during capture.",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    interaction = cli.ConsoleRecordInteraction(lambda _prompt: "q")
+    interaction.notify(
+        WorkflowNotice(
+            topic="record.process_handoff",
+            context={"record_path": str(record_path)},
+        )
+    )
+
+    output = capsys.readouterr().out
+    assert (
+        "Finalization note: selected playback stream ended during recording; "
+        "local microphone segments were recorded."
+    ) in output
+
+
+def test_console_record_interaction_handoff_does_not_overstate_unrecorded_mic(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    record_path = tmp_path / "session.json"
+    record_path.write_text(
+        json.dumps(
+            {
+                "capture_plan": {"selected_sources": ["local_mic", "system_audio"]},
+                "capture_metadata": {
+                    "sources": [
+                        {
+                            "source_id": "system_audio",
+                            "segment_count": 1,
+                        }
+                    ]
+                },
+                "degradations": [
+                    {
+                        "event": "degraded",
+                        "code": "dedicated_route_runtime_failed",
+                        "source_id": "system_audio",
+                        "message": "Dedicated meeting route failed during capture.",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    interaction = cli.ConsoleRecordInteraction(lambda _prompt: "q")
+    interaction.notify(
+        WorkflowNotice(
+            topic="record.process_handoff",
+            context={"record_path": str(record_path)},
+        )
+    )
+
+    output = capsys.readouterr().out
+    assert (
+        "Finalization note: selected playback stream ended during recording; "
+        "local microphone capture was selected, but no local microphone segments were recorded."
+    ) in output
+
+
+def test_console_record_interaction_reports_playback_loss_without_other_source(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    record_path = tmp_path / "session.json"
+    record_path.write_text(
+        json.dumps(
+            {
+                "capture_plan": {"selected_sources": ["system_audio"]},
+                "capture_metadata": {
+                    "sources": [
+                        {
+                            "source_id": "system_audio",
+                            "segment_count": 1,
+                        }
+                    ]
+                },
+                "degradations": [
+                    {
+                        "event": "degraded",
+                        "code": "dedicated_route_runtime_failed",
+                        "source_id": "system_audio",
+                        "message": "Dedicated meeting route failed during capture.",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    interaction = cli.ConsoleRecordInteraction(lambda _prompt: "q")
+
+    interaction.notify(
+        WorkflowNotice(
+            topic="record.capture_route_event",
+            context={
+                "event": "degraded",
+                "source_id": "system_audio",
+                "code": "dedicated_route_runtime_failed",
+                "message": "Selected playback stream ended",
+                "selected_sources": ["system_audio"],
+            },
+        )
+    )
+    interaction.notify(
+        WorkflowNotice(
+            topic="record.process_handoff",
+            context={"record_path": str(record_path)},
+        )
+    )
+
+    output = capsys.readouterr().out
+    assert (
+        "Selected playback stream ended during capture; no other selected source was active. "
+        "Selected playback stream ended"
+    ) in output
+    assert (
+        "Finalization note: selected playback stream ended during recording; "
+        "no other selected source was active."
+    ) in output
 
 
 def test_console_record_interaction_rejects_noninteractive_choices_and_text() -> None:
@@ -98,6 +278,17 @@ def test_console_record_interaction_rejects_noninteractive_choices_and_text() ->
             ChoiceRequest(
                 topic="record.capture_route.playback_stream",
                 options=(ChoiceOption(option_id="playback-1", label="Call"),),
+            )
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="Multiple meeting audio output routes were discovered; pass --output-sink.",
+    ):
+        interaction.choose(
+            ChoiceRequest(
+                topic="record.capture_route.output_sink",
+                options=(ChoiceOption(option_id="sink-1", label="Headphones"),),
             )
         )
 
@@ -126,7 +317,8 @@ def test_prompt_and_runtime_adapter_helpers(
 
     assert (
         cli._prompt_choice(
-            title="Choices",
+            header="Choices:",
+            label="choices",
             choices=choices,
             formatter=lambda choice: choice.label,
             input_fn=lambda _prompt: "",
@@ -136,7 +328,8 @@ def test_prompt_and_runtime_adapter_helpers(
     )
     with pytest.raises(ValueError, match="Invalid default"):
         cli._prompt_choice(
-            title="Choices",
+            header="Choices:",
+            label="choices",
             choices=choices,
             formatter=lambda choice: choice.label,
             input_fn=lambda _prompt: "1",
@@ -144,14 +337,16 @@ def test_prompt_and_runtime_adapter_helpers(
         )
     with pytest.raises(ValueError, match="Invalid choices selection 'x'"):
         cli._prompt_choice(
-            title="Choices",
+            header="Choices:",
+            label="choices",
             choices=choices,
             formatter=lambda choice: choice.label,
             input_fn=lambda _prompt: "x",
         )
     with pytest.raises(ValueError, match="Invalid choices selection '3'"):
         cli._prompt_choice(
-            title="Choices",
+            header="Choices:",
+            label="choices",
             choices=choices,
             formatter=lambda choice: choice.label,
             input_fn=lambda _prompt: "3",
@@ -209,17 +404,32 @@ def test_record_choice_and_data_root_adapter_branches(
     )
 
     assert selected.option_id == "two"
-    assert prompts == ["Select output sink routes [2]: "]
+    assert prompts == ["Select meeting audio output [2]: "]
     assert cli._record_choice_prompt_metadata("record.capture_route.playback_stream") == (
         "playback stream",
         "--playback-stream",
-        "Playback streams",
+        "Playback streams:",
+        "playback streams",
     )
     assert cli._record_choice_prompt_metadata("record.capture_route.output_sink") == (
-        "output sink",
+        "meeting audio output",
         "--output-sink",
-        "Output sink routes",
+        "Where do you hear the meeting?",
+        "meeting audio output",
     )
+
+    invalid_selection = cli.ConsoleRecordInteraction(lambda _prompt: "x")
+    with pytest.raises(ValueError, match="Invalid meeting audio output selection 'x'"):
+        invalid_selection.choose(
+            ChoiceRequest(
+                topic="record.capture_route.output_sink",
+                options=(
+                    ChoiceOption(option_id="one", label="One"),
+                    ChoiceOption(option_id="two", label="Two"),
+                ),
+                default_option_id=None,
+            )
+        )
     assert cli._resolve_record_profile(None, input_fn=lambda _prompt: "2").id.value == (
         "in_person_single_mic"
     )

@@ -343,11 +343,11 @@ def test_capture_event_monitor_records_notices_and_degradations(tmp_path: Path) 
                 session_id=SESSION_ID,
                 payload={
                     "event": "degraded",
-                    "code": "dedicated_route_unavailable",
-                    "message": "Using selected output sink monitor.",
+                    "code": "dedicated_route_runtime_failed",
+                    "message": "Selected playback stream ended.",
                     "source_id": "system_audio",
                     "occurred_at": None,
-                    "elapsed_seconds": 0.0,
+                    "elapsed_seconds": 54.0,
                     "segment_index": 1,
                     "route_id": "pipewire:node:42",
                     "route_label": "Headphones",
@@ -372,12 +372,18 @@ def test_capture_event_monitor_records_notices_and_degradations(tmp_path: Path) 
     assert finalized.type == "capture_finalized"
     assert record["capture_metadata"]["segment_count"] == 2
     assert record["degradations"][0]["capture_mode"] == "system_mix_remote"
+    assert record["degradations"][0]["code"] == "dedicated_route_runtime_failed"
     assert [notice.topic for notice in interaction.notices] == [
         "record.segment_flushed",
         "record.segment_flushed",
         "record.capture_status",
         "record.capture_route_event",
     ]
+    route_event = interaction.notices[-1]
+    assert route_event.context["event"] == "degraded"
+    assert route_event.context["code"] == "dedicated_route_runtime_failed"
+    assert route_event.context["source_id"] == "system_audio"
+    assert route_event.context["selected_sources"] == ["local_mic", "system_audio"]
 
 
 def test_wait_for_record_stop_continues_after_invalid_command() -> None:
