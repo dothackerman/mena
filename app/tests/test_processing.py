@@ -18,6 +18,7 @@ from mena.processing import (
     ProcessingStageLedger,
     ProcessingStageState,
     ProcessingStateError,
+    has_completed_processing_pipeline,
     latest_non_retryable_processing_failure,
     latest_resumable_processing_state,
     latest_retryable_processing_state,
@@ -259,6 +260,24 @@ def test_processing_state_queries_treat_final_completion_as_not_resumable(
     )
 
     assert latest_resumable_processing_state(store, SESSION_ID) is None
+
+
+def test_completed_pipeline_requires_verified_final_outputs(tmp_path: Path) -> None:
+    store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=tmp_path)
+    output = store.store(artifact_type="semantic_review", name="review.json", data=b"{}")
+    ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+    ledger.mark_completed(
+        stage="semantic_coherence",
+        input_artifacts=(),
+        output_artifacts=(ArtifactRef.from_record(output),),
+        now=NOW,
+    )
+
+    assert has_completed_processing_pipeline(store, SESSION_ID) is True
+
+    (tmp_path / output.path).write_bytes(b"{")
+
+    assert has_completed_processing_pipeline(store, SESSION_ID) is False
 
 
 def test_processing_ledger_rejects_cross_session_state(tmp_path: Path) -> None:
