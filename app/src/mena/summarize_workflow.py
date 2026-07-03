@@ -60,7 +60,6 @@ def run_summarization_command(
     setup_command_identity: CommandIdentity | None = None,
     setup_hardware: HardwareFacts | None = None,
     allow_runtime_fallback: bool = False,
-    runtime_fallback_input_fn: Callable[[str], str] | None = None,
     runtime_profile_selector_fn: RuntimeProfileSelector = select_runtime_profile,
     runtime_profile_store_fn: RuntimeProfileStoreFn = store_runtime_profile_provenance,
     runtime_summarization_binder_fn: RuntimeSummarizationBinderFn = bind_summarization_runtime,
@@ -70,10 +69,6 @@ def run_summarization_command(
 ) -> int:
     if resolve_session_fn is None:
         resolve_session_fn = resolve_session
-
-    # Accept for API parity with processing orchestration; summarize currently
-    # does not use this prompt hook directly.
-    _ = runtime_fallback_input_fn
 
     resolved_session = resolve_session_fn(session_path)
     session_dir = resolved_session.session_dir
