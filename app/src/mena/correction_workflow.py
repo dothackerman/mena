@@ -21,6 +21,14 @@ from mena.correction_overlay import (
     create_correction_overlay,
     persist_correction_overlay_artifact,
 )
+from mena.interaction import (
+    ChoiceOption,
+    ChoiceRequest,
+    ConfirmationRequest,
+    InteractionPort,
+    TextRequest,
+    WorkflowNotice,
+)
 from mena.merge_timing import (
     MERGED_TRANSCRIPT_ARTIFACT_TYPE,
     MergedTranscriptArtifact,
@@ -185,7 +193,7 @@ def run_correction_workflow(
     session_path: str | Path,
     *,
     now: datetime | None = None,
-    input_fn: Callable[[str], str] = input,
+    interaction: InteractionPort,
     playback_player: PlaybackPlayer | None = None,
 ) -> CorrectionWorkflowResult:
     """Run an interactive correction session and persist a correction overlay."""
@@ -241,7 +249,7 @@ def run_correction_workflow(
             )
 
             while True:
-                action = _prompt_action(input_fn=input_fn)
+                action = _choose_action(interaction)
                 if action != "playback":
                     break
 
@@ -253,17 +261,22 @@ def run_correction_workflow(
                         session_id=session_id_value,
                     )
                 except CorrectionWorkflowError as exc:
-                    print(f"Playback failed: {exc}")
+                    _notify_playback_failed(interaction, str(exc))
                     continue
                 try:
                     player(request)
                 except PlaybackError as exc:
-                    print(f"Playback failed: {exc}")
+                    _notify_playback_failed(interaction, str(exc))
                 else:
-                    print(
-                        "Playback completed for "
-                        f"{request.source_id} "
-                        f"{request.start_seconds:.2f}-{request.end_seconds:.2f}s."
+                    interaction.notify(
+                        WorkflowNotice(
+                            topic="correction.playback_completed",
+                            context={
+                                "source_id": request.source_id,
+                                "start_seconds": request.start_seconds,
+                                "end_seconds": request.end_seconds,
+                            },
+                        )
                     )
 
             reviewed += 1
@@ -281,8 +294,8 @@ def run_correction_workflow(
                 continue
 
             if action == "speaker_reassignment":
-                speaker_id, speaker_label = _prompt_speaker_assignment(
-                    input_fn=input_fn,
+                speaker_id, speaker_label = _request_speaker_assignment(
+                    interaction=interaction,
                     candidates=speaker_catalog,
                 )
                 entry = _make_speaker_entry(
@@ -294,7 +307,7 @@ def run_correction_workflow(
                     now=_timestamp(now, index=index),
                 )
             elif action == "text_edit":
-                corrected_text = _prompt_text_edit(input_fn=input_fn)
+                corrected_text = _request_text_edit(interaction)
                 entry = _make_text_entry(
                     entry_id=f"entry_{index:04d}",
                     segment_id=segment.id,
@@ -303,7 +316,7 @@ def run_correction_workflow(
                     now=_timestamp(now, index=index),
                 )
             else:
-                overlap_marked = _prompt_overlap_mark(input_fn=input_fn)
+                overlap_marked = _request_overlap_mark(interaction)
                 entry = _make_overlap_entry(
                     entry_id=f"entry_{index:04d}",
                     segment_id=segment.id,
@@ -351,7 +364,12 @@ def run_correction_workflow(
         },
     )
 
-    print(f"Correction completed. reviewed={reviewed}, skipped={skipped}, corrected={corrected}.")
+    interaction.notify(
+        WorkflowNotice(
+            topic="correction.completed",
+            context={"reviewed": reviewed, "skipped": skipped, "corrected": corrected},
+        )
+    )
     return CorrectionWorkflowResult(
         reviewed=reviewed,
         skipped=skipped,
@@ -663,41 +681,57 @@ def _ordered_speaker_catalog(source_transcript: MergedTranscriptArtifact) -> lis
     return ordered
 
 
-def _prompt_action(input_fn: Callable[[str], str]) -> str:
-    while True:
-        raw = (
-            input_fn("Action [p]lay, [s]kip, [r]eassign speaker, [t]ext edit, or [o]verlap: ")
-            .strip()
-            .lower()
+def _choose_action(interaction: InteractionPort) -> str:
+    return interaction.choose(
+        ChoiceRequest(
+            topic="correction.action",
+            options=(
+                ChoiceOption(option_id="playback", label="play"),
+                ChoiceOption(option_id="skip", label="skip"),
+                ChoiceOption(option_id="speaker_reassignment", label="reassign speaker"),
+                ChoiceOption(option_id="text_edit", label="text edit"),
+                ChoiceOption(option_id="overlap_mark", label="overlap"),
+            ),
         )
-        if raw in {"p", "play", "playback"}:
-            return "playback"
-        if raw in {"s", "skip"}:
-            return "skip"
-        if raw in {"r", "speaker", "reassign", "speaker_reassignment"}:
-            return "speaker_reassignment"
-        if raw in {"t", "text", "text_edit", "edit"}:
-            return "text_edit"
-        if raw in {"o", "overlap", "overlap_mark"}:
-            return "overlap_mark"
-        print("Invalid action. Use [p]lay, [s]kip, [r]eassign, [t]ext, or [o]verlap.")
+    ).option_id
 
 
-def _prompt_speaker_assignment(
+def _request_speaker_assignment(
     *,
-    input_fn: Callable[[str], str],
+    interaction: InteractionPort,
     candidates: list[tuple[str, str]],
 ) -> tuple[str, str]:
     while True:
-        raw = input_fn("Choose existing speaker number or enter a new speaker label: ").strip()
+        raw = interaction.request_text(
+            TextRequest(
+                topic="correction.speaker_assignment",
+                context={
+                    "candidates": tuple(
+                        {"speaker_id": speaker_id, "speaker_label": speaker_label}
+                        for speaker_id, speaker_label in candidates
+                    )
+                },
+            )
+        ).strip()
         if raw.isdigit():
             index = int(raw) - 1
             if 0 <= index < len(candidates):
                 return candidates[index]
-            print("Choose a valid number from the list.")
+            interaction.notify(
+                WorkflowNotice(
+                    topic="correction.speaker_assignment.invalid_number",
+                    severity="warning",
+                    context={"candidate_count": len(candidates)},
+                )
+            )
             continue
         if not raw:
-            print("Enter a speaker id or a label.")
+            interaction.notify(
+                WorkflowNotice(
+                    topic="correction.speaker_assignment.empty",
+                    severity="warning",
+                )
+            )
             continue
 
         lower_raw = raw.lower()
@@ -712,18 +746,22 @@ def _prompt_speaker_assignment(
         return speaker_id, speaker_label
 
 
-def _prompt_text_edit(input_fn: Callable[[str], str]) -> str:
-    return input_fn("Corrected text: ")
+def _request_text_edit(interaction: InteractionPort) -> str:
+    return interaction.request_text(TextRequest(topic="correction.text_edit"))
 
 
-def _prompt_overlap_mark(input_fn: Callable[[str], str]) -> bool:
-    while True:
-        raw = input_fn("Mark overlap? [y/N]: ").strip().lower()
-        if raw in {"", "n", "no"}:
-            return False
-        if raw in {"y", "yes"}:
-            return True
-        print("Please answer y or n.")
+def _request_overlap_mark(interaction: InteractionPort) -> bool:
+    return interaction.confirm(ConfirmationRequest(topic="correction.overlap_mark", default=False))
+
+
+def _notify_playback_failed(interaction: InteractionPort, error: str) -> None:
+    interaction.notify(
+        WorkflowNotice(
+            topic="correction.playback_failed",
+            severity="warning",
+            context={"error": error},
+        )
+    )
 
 
 def _make_speaker_entry(
