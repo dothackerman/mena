@@ -309,11 +309,7 @@ def _format_capture_route_event(context: Mapping[str, object]) -> str:
             f"Selected playback stream ended during capture; {continued_capture_summary}. {message}"
         )
     if source_id == "system_audio":
-        local_mic_selected = "local_mic" in selected_sources
-        continuity = (
-            "continued local microphone capture" if local_mic_selected else "check source setup"
-        )
-        return f"Capture degraded (system audio): {continuity}. {message}"
+        return f"Capture degraded (system audio): {message}"
     return f"Capture degraded: {message}"
 
 
@@ -336,16 +332,7 @@ def _format_capture_route_handoff_summary(context: Mapping[str, object]) -> str 
         record = read_session_record(record_path)
     except (OSError, ValueError):
         return None
-    capture_plan = record.get("capture_plan")
-    selected_sources: tuple[str, ...] = ()
-    if isinstance(capture_plan, Mapping):
-        selected = cast(
-            object,
-            capture_plan.get("selected_sources") if isinstance(capture_plan, Mapping) else None,
-        )
-        if isinstance(selected, (list, tuple)):
-            selected_sources = tuple(item for item in selected if isinstance(item, str))
-    continued_capture_summary = _format_continued_capture_summary(selected_sources)
+    continued_capture_summary = _format_handoff_continued_capture_summary(record)
     degradations = record.get("degradations")
     if not isinstance(degradations, list):
         return None
@@ -361,6 +348,54 @@ def _format_capture_route_handoff_summary(context: Mapping[str, object]) -> str 
                 f"{continued_capture_summary}."
             )
     return None
+
+
+def _format_handoff_continued_capture_summary(record: Mapping[str, object]) -> str:
+    selected_sources = _selected_capture_sources(record)
+    continuing_sources = tuple(source for source in selected_sources if source != "system_audio")
+    recorded_sources = _recorded_capture_sources(record)
+    recorded_continuing_sources = tuple(
+        source for source in continuing_sources if source in recorded_sources
+    )
+    if "local_mic" in recorded_continuing_sources:
+        return "local microphone segments were recorded"
+    if recorded_continuing_sources:
+        return "other selected source segments were recorded"
+    if "local_mic" in continuing_sources:
+        return (
+            "local microphone capture was selected, but no local microphone segments were recorded"
+        )
+    if continuing_sources:
+        return "other selected source capture was selected, but no matching segments were recorded"
+    return "no other selected source was active"
+
+
+def _selected_capture_sources(record: Mapping[str, object]) -> tuple[str, ...]:
+    capture_plan = record.get("capture_plan")
+    if not isinstance(capture_plan, Mapping):
+        return ()
+    selected = cast(object, capture_plan.get("selected_sources"))
+    if not isinstance(selected, (list, tuple)):
+        return ()
+    return tuple(item for item in selected if isinstance(item, str))
+
+
+def _recorded_capture_sources(record: Mapping[str, object]) -> frozenset[str]:
+    capture_metadata = record.get("capture_metadata")
+    if not isinstance(capture_metadata, Mapping):
+        return frozenset()
+    sources = capture_metadata.get("sources")
+    if not isinstance(sources, list):
+        return frozenset()
+    recorded_sources: set[str] = set()
+    for source in sources:
+        if not isinstance(source, Mapping):
+            continue
+        source_id = source.get("source_id")
+        segment_count = source.get("segment_count")
+        if isinstance(source_id, str) and isinstance(segment_count, int) and segment_count > 0:
+            recorded_sources.add(source_id)
+    return frozenset(recorded_sources)
 
 
 def _record_choice_prompt_metadata(topic: str) -> tuple[str, str, str]:
