@@ -195,9 +195,9 @@ class ConsoleRecordInteraction:
                 raise ValueError(
                     "Playback stream confirmation is required; pass --playback-stream."
                 )
-            role, flag_name, title = _record_choice_prompt_metadata(request.topic)
+            role, flag_name, _header, _label = _record_choice_prompt_metadata(request.topic)
             raise ValueError(f"Multiple {role} routes were discovered; pass {flag_name}.")
-        _role, _flag_name, title = _record_choice_prompt_metadata(request.topic)
+        _role, _flag_name, header, label = _record_choice_prompt_metadata(request.topic)
         choices = request.options
         default_index = 1
         if request.default_option_id is not None:
@@ -206,7 +206,8 @@ class ConsoleRecordInteraction:
                     default_index = index
                     break
         return _prompt_choice(
-            title=title,
+            header=header,
+            label=label,
             choices=choices,
             formatter=lambda option: option.label,
             input_fn=reader,
@@ -285,13 +286,18 @@ class ConsoleRecordInteraction:
             raise ValueError(f"Unsupported record notice topic '{topic}'.")
 
 
-def _record_choice_prompt_metadata(topic: str) -> tuple[str, str, str]:
+def _record_choice_prompt_metadata(topic: str) -> tuple[str, str, str, str]:
     if topic == "record.capture_route.microphone":
-        return ("microphone", "--mic", "Microphone routes")
+        return ("microphone", "--mic", "Microphone routes:", "microphone routes")
     if topic == "record.capture_route.playback_stream":
-        return ("playback stream", "--playback-stream", "Playback streams")
+        return ("playback stream", "--playback-stream", "Playback streams:", "playback streams")
     if topic == "record.capture_route.output_sink":
-        return ("output sink", "--output-sink", "Output sink routes")
+        return (
+            "meeting audio output",
+            "--output-sink",
+            "Where do you hear the meeting?",
+            "meeting audio output",
+        )
     raise ValueError(f"Unsupported record choice topic '{topic}'.")
 
 
@@ -437,7 +443,7 @@ def build_parser() -> argparse.ArgumentParser:
     record_parser.add_argument(
         "--output-sink",
         default=None,
-        help="Output sink route id used to keep the meeting audible.",
+        help="Meeting audio output route id.",
     )
     record_parser.add_argument(
         "--dry-run",
@@ -834,23 +840,24 @@ def _resolve_record_language(
 
 def _prompt_choice(
     *,
-    title: str,
+    header: str,
+    label: str,
     choices: tuple[ChoiceT, ...],
     formatter: Callable[[ChoiceT], str],
     input_fn: Callable[[str], str],
     default_index: int = 1,
 ) -> ChoiceT:
     if default_index < 1 or default_index > len(choices):
-        raise ValueError(f"Invalid default {title.lower()} selection '{default_index}'.")
-    print(f"{title}:")
+        raise ValueError(f"Invalid default {label} selection '{default_index}'.")
+    print(header)
     for index, choice in enumerate(choices, start=1):
         print(f"  {index}. {formatter(choice)}")
-    answer = input_fn(f"Select {title.lower()} [{default_index}]: ").strip() or str(default_index)
+    answer = input_fn(f"Select {label} [{default_index}]: ").strip() or str(default_index)
     if not answer.isdigit():
-        raise ValueError(f"Invalid {title.lower()} selection '{answer}'.")
+        raise ValueError(f"Invalid {label} selection '{answer}'.")
     selected_index = int(answer)
     if selected_index < 1 or selected_index > len(choices):
-        raise ValueError(f"Invalid {title.lower()} selection '{answer}'.")
+        raise ValueError(f"Invalid {label} selection '{answer}'.")
     return choices[selected_index - 1]
 
 
@@ -879,7 +886,8 @@ def _resolve_process_session_path(
     if reader is None:
         raise ValueError("multiple processable recordings found; pass an explicit session path.")
     return _prompt_choice(
-        title="Processable recordings",
+        header="Processable recordings:",
+        label="processable recordings",
         choices=candidates,
         formatter=_format_processable_session_candidate,
         input_fn=reader,
