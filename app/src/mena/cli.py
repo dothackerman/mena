@@ -6,22 +6,19 @@ import argparse
 import json
 import os
 import sys
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
-from datetime import UTC, datetime
+from collections.abc import Callable, Sequence
+from datetime import datetime
 from pathlib import Path
 from shlex import quote
 from typing import Any, TypeVar, cast
 from uuid import uuid4
 
-from mena import processing, processing_orchestration, summarize_workflow
+from mena import export_workflow, processing, processing_orchestration, summarize_workflow
 from mena.artifacts import (
-    ARTIFACT_MANIFEST_VERSION,
     ArtifactRecord,
     ArtifactStore,
     ArtifactStoreError,
     FileSystemArtifactStore,
-    session_artifact_manifest_path,
 )
 from mena.correction_overlay import (
     CorrectionOverlayContractError,
@@ -45,7 +42,6 @@ from mena.discovery import (
 )
 from mena.export import (
     SummaryMarkdownExportError,
-    export_summary_markdown,
 )
 from mena.fields import optional_str, required_int, required_str
 from mena.interaction import (
@@ -113,7 +109,6 @@ from mena.semantic_coherence import (
 )
 from mena.session_integrity import (
     SessionIntegrityError,
-    load_verified_session_bundle,
     verify_session_bundle,
 )
 from mena.sessions import (
@@ -137,8 +132,6 @@ from mena.setup_workflow import (
     run_setup_workflow,
 )
 from mena.summarization import (
-    SUMMARY_ARTIFACT_TYPE,
-    SUMMARY_SCHEMA_VERSION,
     SummarizationError,
     run_summarization_stage,
 )
@@ -180,16 +173,6 @@ ChoiceT = TypeVar("ChoiceT")
 
 
 ProviderValidationError = processing_orchestration.ProviderValidationError
-
-_INVALID_SUMMARY_CREATED_AT = datetime.max.replace(tzinfo=UTC)
-
-
-@dataclass(frozen=True)
-class _SummaryManifestRecord:
-    id: str | None
-    path: str | None
-    metadata: Mapping[str, object]
-    record: ArtifactRecord | None = None
 
 
 SourceAudioInput = processing_orchestration.SourceAudioInput
@@ -407,6 +390,41 @@ class ConsoleProcessingInteraction:
 
     def notify(self, notice: WorkflowNotice) -> None:
         raise ValueError(f"Unsupported processing notice topic '{notice.topic}'.")
+
+
+class ConsoleExportInteraction:
+    """Console adapter for export workflow interaction topics."""
+
+    def __init__(self, input_fn: Callable[[str], str] | None) -> None:
+        self._input_fn = input_fn
+
+    def choose(self, request: ChoiceRequest) -> ChoiceOption:
+        raise ValueError(f"Unsupported export choice topic '{request.topic}'.")
+
+    def confirm(self, request: ConfirmationRequest) -> bool:
+        if request.topic != "export.format.markdown":
+            raise ValueError(f"Unsupported export confirmation topic '{request.topic}'.")
+        if self._input_fn is None:
+            return True
+        print("Available export format:")
+        print("  1) Markdown (.md)")
+        answer = self._input_fn("Export as Markdown notes? [Y/n]: ")
+        return answer.strip().lower() in {"", "1", "y", "yes"}
+
+    def request_text(self, request: TextRequest) -> str:
+        raise ValueError(f"Unsupported export text topic '{request.topic}'.")
+
+    def notify(self, notice: WorkflowNotice) -> None:
+        topic = notice.topic
+        context = notice.context
+        if topic == "export.session_selected.latest":
+            print(f"Using latest summarized session: {context['session_path']}")
+        elif topic == "export.session_selected.summary_artifact":
+            print(f"Using session containing requested summary artifact: {context['session_path']}")
+        elif topic == "export.completed":
+            print(f"Markdown notes exported to: {context['export_path']}")
+        else:
+            raise ValueError(f"Unsupported export notice topic '{topic}'.")
 
 
 def _correction_action_option_id(raw: str) -> str | None:
@@ -1132,251 +1150,25 @@ def _run_export_command(
     settings: AppSettings,
     input_fn: Callable[[str], str] | None,
 ) -> int:
-    resolved_session_path = _resolve_export_session_path(
-        session_path=session_path,
-        summary_artifact_id=summary_artifact_id,
+    result = export_workflow.run_export_workflow(
+        export_workflow.ExportCommandInput(
+            session_path=session_path,
+            summary_artifact_id=summary_artifact_id,
+            export_format=export_format,
+        ),
         settings=settings,
+        interaction=_resolve_export_interaction(input_fn),
     )
-    verified = load_verified_session_bundle(resolved_session_path)
-    if session_path is None:
-        if summary_artifact_id is not None:
-            print(f"Using session containing requested summary artifact: {resolved_session_path}")
-        else:
-            print(f"Using latest summarized session: {resolved_session_path}")
-
-    selected_format = _resolve_export_format(export_format=export_format, input_fn=input_fn)
-    if selected_format is None:
+    if result.status == "cancelled":
         print("Export cancelled.")
         return 1
-
-    session_record = dict(verified.record)
-    session_id_value = session_id(session_record)
-
-    export_result = export_summary_markdown(
-        store=FileSystemArtifactStore(
-            session_id=session_id_value,
-            session_dir=verified.session_dir,
-        ),
-        summary_record_id=summary_artifact_id,
-    )
-
-    export_path = verified.session_dir / export_result.export_record.path
-    print(f"Markdown notes exported to: {export_path}")
     return 0
 
 
-def _resolve_export_format(
-    *,
-    export_format: str | None,
+def _resolve_export_interaction(
     input_fn: Callable[[str], str] | None,
-) -> str | None:
-    if export_format is None:
-        input_reader = _record_input(input_fn)
-        if input_reader is None:
-            return "markdown"
-        print("Available export format:")
-        print("  1) Markdown (.md)")
-        try:
-            answer = input_reader("Export as Markdown notes? [Y/n]: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            return None
-        if answer in {"", "1", "y", "yes"}:
-            return "markdown"
-        return None
-    return export_format
-
-
-def _resolve_export_session_path(
-    *,
-    session_path: Path | None,
-    summary_artifact_id: str | None,
-    settings: AppSettings,
-) -> Path:
-    if session_path is not None:
-        return session_path
-
-    resolved = _resolve_default_export_session(
-        sessions_root=settings.paths.sessions_dir,
-        summary_artifact_id=summary_artifact_id,
-    )
-    if resolved is None:
-        if summary_artifact_id is not None:
-            raise ValueError(f"Summary artifact not found: {summary_artifact_id}.")
-        raise ValueError("No summarized sessions were found. Run `mena summarize` first.")
-
-    return resolved
-
-
-def _resolve_default_export_session(
-    *,
-    sessions_root: Path,
-    summary_artifact_id: str | None,
-) -> Path | None:
-    if not sessions_root.is_dir():
-        return None
-
-    if summary_artifact_id is not None:
-        for session_dir in _iter_session_directories(sessions_root):
-            records = _session_summary_records(session_dir=session_dir)
-            if records is None:
-                if _session_id_matches_artifact_id(
-                    session_dir=session_dir,
-                    artifact_id=summary_artifact_id,
-                ):
-                    return session_dir
-                continue
-            if all(record.id != summary_artifact_id for record in records):
-                continue
-            return session_dir
-        return None
-
-    newest: tuple[datetime, Path] | None = None
-    for session_dir in _iter_session_directories(sessions_root):
-        summary_key = _session_summary_created_at(session_dir=session_dir)
-        if summary_key is None:
-            continue
-        if newest is None or summary_key > newest:
-            newest = summary_key
-
-    return newest[1] if newest is not None else None
-
-
-def _session_summary_created_at(session_dir: Path) -> tuple[datetime, Path] | None:
-    records = _session_summary_records(session_dir=session_dir)
-    if not records:
-        return None
-
-    newest: tuple[datetime, str, str] | None = None
-    for record in records:
-        summary_created_at = _summary_record_created_at(session_dir=session_dir, record=record)
-        if summary_created_at is None:
-            continue
-        summary_key = (summary_created_at, record.path or "", record.id or "")
-        if newest is None or summary_key > newest:
-            newest = summary_key
-    return (newest[0], session_dir) if newest is not None else None
-
-
-def _session_summary_records(*, session_dir: Path) -> tuple[_SummaryManifestRecord, ...] | None:
-    try:
-        resolved = resolve_session(session_dir)
-        resolved_session_id = session_id(dict(resolved.record))
-        data = json.loads(
-            session_artifact_manifest_path(resolved.session_dir).read_text(encoding="utf-8")
-        )
-        if not isinstance(data, dict):
-            return None
-        if data.get("version") != ARTIFACT_MANIFEST_VERSION:
-            return None
-        if data.get("session_id") != resolved_session_id:
-            return None
-        artifacts = data.get("artifacts")
-        if not isinstance(artifacts, list):
-            return None
-        records: list[_SummaryManifestRecord] = []
-        for item in artifacts:
-            if not isinstance(item, dict):
-                continue
-            raw_record = cast(Mapping[str, object], item)
-            try:
-                record = ArtifactRecord.from_dict(raw_record)
-            except ArtifactStoreError:
-                invalid_record = _invalid_summary_manifest_record(
-                    item=raw_record,
-                    resolved_session_id=resolved_session_id,
-                )
-                if invalid_record is not None:
-                    records.append(invalid_record)
-                continue
-            if record.session_id != resolved_session_id:
-                continue
-            if record.artifact_type == SUMMARY_ARTIFACT_TYPE and record.status == "sealed":
-                records.append(
-                    _SummaryManifestRecord(
-                        id=record.id,
-                        path=record.path,
-                        metadata=record.metadata,
-                        record=record,
-                    )
-                )
-        return tuple(sorted(records, key=lambda record: record.path or ""))
-    except (
-        ArtifactStoreError,
-        FileNotFoundError,
-        OSError,
-        UnicodeDecodeError,
-        json.JSONDecodeError,
-        ValueError,
-    ):
-        return None
-
-
-def _session_id_matches_artifact_id(*, session_dir: Path, artifact_id: str) -> bool:
-    try:
-        resolved = resolve_session(session_dir)
-    except (ArtifactStoreError, FileNotFoundError, OSError, UnicodeDecodeError, ValueError):
-        return False
-    resolved_session_id = session_id(dict(resolved.record))
-    return artifact_id.startswith(f"{resolved_session_id}:")
-
-
-def _invalid_summary_manifest_record(
-    *,
-    item: Mapping[str, object],
-    resolved_session_id: str,
-) -> _SummaryManifestRecord | None:
-    if item.get("session_id") != resolved_session_id:
-        return None
-    if item.get("artifact_type") != SUMMARY_ARTIFACT_TYPE:
-        return None
-    if item.get("status") != "sealed":
-        return None
-    metadata = item.get("metadata", {})
-    artifact_id = item.get("id")
-    path = item.get("path")
-    return _SummaryManifestRecord(
-        id=artifact_id if isinstance(artifact_id, str) else None,
-        path=path if isinstance(path, str) else None,
-        metadata=metadata if isinstance(metadata, Mapping) else {},
-    )
-
-
-def _summary_record_created_at(
-    *,
-    session_dir: Path,
-    record: _SummaryManifestRecord,
-) -> datetime | None:
-    metadata_created_at = record.metadata.get("summary_created_at")
-    if isinstance(metadata_created_at, str):
-        parsed_metadata_created_at = _parse_iso_timestamp(metadata_created_at)
-        if parsed_metadata_created_at is not None:
-            return parsed_metadata_created_at
-    if record.record is None:
-        return _INVALID_SUMMARY_CREATED_AT
-    if record.path is None:
-        return _INVALID_SUMMARY_CREATED_AT
-
-    try:
-        data = json.loads((session_dir / record.path).read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            return _INVALID_SUMMARY_CREATED_AT
-        if data.get("version") != SUMMARY_SCHEMA_VERSION:
-            return _INVALID_SUMMARY_CREATED_AT
-        created_at = data.get("created_at")
-        if not isinstance(created_at, str):
-            return _INVALID_SUMMARY_CREATED_AT
-        return _parse_iso_timestamp(created_at) or _INVALID_SUMMARY_CREATED_AT
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return _INVALID_SUMMARY_CREATED_AT
-
-
-def _iter_session_directories(sessions_root: Path) -> tuple[Path, ...]:
-    try:
-        return tuple(
-            sorted(session_dir for session_dir in sessions_root.iterdir() if session_dir.is_dir())
-        )
-    except OSError:
-        return ()
+) -> InteractionPort:
+    return ConsoleExportInteraction(_record_input(input_fn))
 
 
 def _record_terminal_local_llm_release(
