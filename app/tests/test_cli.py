@@ -2131,6 +2131,56 @@ def test_main_export_command_rejects_unverified_bundle(
     )
 
 
+def test_main_export_command_declined_confirmation_cancels_cleanly(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    session_dir, store, merged_record = _build_verified_export_session_bundle(tmp_path)
+    _persist_summary_artifact_for_cli(store=store, merged_transcript_record=merged_record)
+
+    exit_code = main(["export", str(session_dir)], input_fn=lambda _prompt: "n")
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "Export cancelled." in captured.out
+    assert "Cannot export session summary markdown" not in captured.out
+    assert "Markdown notes exported to:" not in captured.out
+
+
+def test_main_export_command_interrupt_during_confirmation_cancels_cleanly(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    session_dir, store, merged_record = _build_verified_export_session_bundle(tmp_path)
+    _persist_summary_artifact_for_cli(store=store, merged_transcript_record=merged_record)
+
+    def _interrupt(_prompt: str) -> str:
+        raise EOFError
+
+    exit_code = main(["export", str(session_dir)], input_fn=_interrupt)
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "Export cancelled." in captured.out
+    assert "Cannot export session summary markdown" not in captured.out
+
+
+def test_main_export_command_announces_default_session_before_format_prompt(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    _, store, merged_record = _build_verified_export_session_bundle_at(
+        settings.paths.sessions_dir / "session-2026-07-03"
+    )
+    _persist_summary_artifact_for_cli(store=store, merged_transcript_record=merged_record)
+
+    exit_code = main(["export"], settings=settings, input_fn=lambda _prompt: "y")
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    session_index = captured.out.index("Using latest summarized session:")
+    format_index = captured.out.index("Available export format:")
+    assert session_index < format_index
+
+
 def test_main_inspect_command_reports_bundle_integrity(
     tmp_path: Path, capsys: CaptureFixture[str]
 ) -> None:

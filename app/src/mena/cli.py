@@ -698,6 +698,9 @@ def main(
         ) as exc:
             print(f"Cannot export session summary markdown: {exc}")
             return 1
+        except (EOFError, KeyboardInterrupt):
+            print("Export cancelled.")
+            return 1
 
     if args.command == "inspect":
         try:
@@ -1116,19 +1119,19 @@ def _run_export_command(
     settings: AppSettings,
     input_fn: Callable[[str], str] | None,
 ) -> int:
-    selected_format = _resolve_export_format(export_format=export_format, input_fn=input_fn)
     resolved_session_path = _resolve_export_session_path(
         session_path=session_path,
         summary_artifact_id=summary_artifact_id,
         settings=settings,
     )
+    selected_format = _resolve_export_format(export_format=export_format, input_fn=input_fn)
+    if selected_format is None:
+        print("Export cancelled.")
+        return 1
 
     verified = load_verified_session_bundle(resolved_session_path)
     session_record = dict(verified.record)
     session_id_value = session_id(session_record)
-
-    if selected_format != "markdown":
-        raise ValueError(f"Unsupported export format: {selected_format}")
 
     export_result = export_summary_markdown(
         store=FileSystemArtifactStore(
@@ -1147,7 +1150,7 @@ def _resolve_export_format(
     *,
     export_format: str | None,
     input_fn: Callable[[str], str] | None,
-) -> str:
+) -> str | None:
     if export_format is None:
         input_reader = _record_input(input_fn)
         if input_reader is None:
@@ -1157,7 +1160,7 @@ def _resolve_export_format(
         answer = input_reader("Export as Markdown notes? [Y/n]: ").strip().lower()
         if answer in {"", "y", "yes"}:
             return "markdown"
-        raise ValueError("Export format was not confirmed.")
+        return None
     return export_format
 
 
