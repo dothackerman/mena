@@ -51,16 +51,9 @@ def require_provider_instance(
                 f"{provider_name} provider must implement {provider_type.__name__}."
             )
         if provider_type is SemanticCoherenceProvider:
-            metadata = provider.metadata
-            config_id = getattr(metadata, "config_id", None)
-            if not isinstance(config_id, str) or not config_id:
-                raise ProviderValidationError(
-                    f"{provider_name} provider must expose semantic metadata config_id."
-                )
-            if not callable(getattr(metadata, "to_dict", None)):
-                raise ProviderValidationError(
-                    f"{provider_name} provider must expose semantic metadata to_dict."
-                )
+            _require_provider_metadata(provider, provider_name, "semantic")
+        if provider_type is SummarizationProvider:
+            _require_provider_metadata(provider, provider_name, "summarization")
         return provider
 
     try:
@@ -85,3 +78,16 @@ def _provider_methods_callable(provider: Any, provider_type: type[Any]) -> bool:
     elif provider_type is SummarizationProvider:
         method_names = ("summarize",)
     return all(callable(getattr(provider, method_name, None)) for method_name in method_names)
+
+
+def _require_provider_metadata(provider: Any, provider_name: str, metadata_name: str) -> None:
+    metadata = provider.metadata
+    config_id = getattr(metadata, "config_id", None)
+    if not isinstance(config_id, str) or not config_id:
+        raise ProviderValidationError(
+            f"{provider_name} provider must expose {metadata_name} metadata config_id."
+        )
+    if not callable(getattr(metadata, "to_dict", None)):
+        raise ProviderValidationError(
+            f"{provider_name} provider must expose {metadata_name} metadata to_dict."
+        )

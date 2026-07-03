@@ -258,6 +258,24 @@ def test_bind_summarization_runtime_uses_selected_runtime_state(
     assert captured == {"model": "llama3.2:3b", "endpoint": "http://ollama"}
 
 
+def test_bind_summarization_runtime_wraps_bound_factory_type_errors() -> None:
+    def broken_factory() -> object:
+        raise TypeError("missing constructor argument")
+
+    with pytest.raises(
+        ProviderValidationError,
+        match="summarization provider must implement SummarizationProvider",
+    ):
+        bind_summarization_runtime(
+            selection=_selection("accepted"),
+            settings=cast(
+                AppSettings,
+                SimpleNamespace(local_llm=SimpleNamespace(ollama_endpoint="http://ollama")),
+            ),
+            summarization_provider_factory=broken_factory,
+        )
+
+
 def test_bind_processing_runtime_validates_bound_injected_providers() -> None:
     class InvalidTranscription:
         name = "invalid-transcription"

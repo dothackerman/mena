@@ -138,6 +138,7 @@ from mena.summarization import (
     FakeSummarizationProvider,
     SummarizationError,
     SummarizationPolicy,
+    SummarizationProvider,
     SummaryArtifact,
     SummaryResult,
     persist_summary_artifact,
@@ -6559,6 +6560,27 @@ def test_require_provider_type_requirements() -> None:
             ),
             provider_type=SemanticCoherenceProvider,
             provider_name="semantic_coherence",
+        )
+
+    with pytest.raises(
+        TypeError, match="summarization provider must expose summarization metadata config_id"
+    ):
+        _require_provider(
+            provider_factory=lambda: SimpleNamespace(metadata={}, summarize=lambda *_args: None),
+            provider_type=SummarizationProvider,
+            provider_name="summarization",
+        )
+
+    with pytest.raises(
+        TypeError, match="summarization provider must expose summarization metadata to_dict"
+    ):
+        _require_provider(
+            provider_factory=lambda: SimpleNamespace(
+                metadata=SimpleNamespace(config_id="cfg"),
+                summarize=lambda *_args: None,
+            ),
+            provider_type=SummarizationProvider,
+            provider_name="summarization",
         )
 
     with pytest.raises(

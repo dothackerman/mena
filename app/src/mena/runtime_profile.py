@@ -600,7 +600,10 @@ def runtime_summarization_provider(
 ) -> SummarizationProvider:
     factory = default_summarization_provider_factory(summarization_provider_factory)
     if factory is not OllamaSummarizationProvider:
-        return cast(SummarizationProvider, factory())
+        return cast(
+            SummarizationProvider,
+            require_provider(factory, SummarizationProvider, "summarization"),
+        )
     return OllamaSummarizationProvider(
         model=_stage_model(runtime_state, "summarization"),
         endpoint=settings.local_llm.ollama_endpoint,
