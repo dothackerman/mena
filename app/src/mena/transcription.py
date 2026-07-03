@@ -9,7 +9,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol, Self, cast
+from typing import Any, Protocol, Self, cast, runtime_checkable
 
 from mena.artifacts import ArtifactRecord, ArtifactStore
 from mena.fields import optional_number, optional_str, required_int, required_number, required_str
@@ -271,6 +271,7 @@ class TranscriptionRequest:
     created_at: str | None = None
 
 
+@runtime_checkable
 class TranscriptionProvider(Protocol):
     """Port implemented by ASR providers."""
 

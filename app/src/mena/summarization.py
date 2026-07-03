@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
-from typing import Protocol, Self
+from typing import Protocol, Self, runtime_checkable
 
 from mena.artifacts import ArtifactRecord, ArtifactStore
 from mena.correction_overlay import (
@@ -226,6 +226,7 @@ class SummarizationRequest:
     policy: SummarizationPolicy
 
 
+@runtime_checkable
 class SummarizationProvider(Protocol):
     """Provider port for meeting summarization."""
 

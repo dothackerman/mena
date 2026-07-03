@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
-from typing import Protocol, Self
+from typing import Protocol, Self, runtime_checkable
 
 from mena.artifacts import ArtifactRecord, ArtifactStore
 from mena.fields import (
@@ -176,6 +176,7 @@ class SemanticCoherenceResult:
         return result
 
 
+@runtime_checkable
 class SemanticCoherenceProvider(Protocol):
     """Provider port for transcript-context coherence checks."""
 

@@ -28,7 +28,11 @@ from mena.recording_control import (
 from mena.sessions import create_session
 from test_cli import (
     SESSION_ID,
+    FailingWorkerProcess,
     FakeWorkerProcess,
+    IdenticalHashWorkerProcess,
+    NonzeroExitWorkerProcess,
+    SilentIdenticalHashWorkerProcess,
     _ambiguous_default_discoverer,
     _ambiguous_discoverer,
     _available_discoverer,
@@ -427,6 +431,156 @@ def test_wait_for_record_stop_surfaces_background_capture_error(tmp_path: Path) 
     with pytest.raises(ProtocolError, match="disk full"):
         _wait_for_record_stop(interaction, capture_monitor=monitor)
     assert interaction.prompt_started.is_set()
+
+
+def test_recording_control_finalizes_failed_on_identical_online_source_hashes(
+    tmp_path: Path,
+) -> None:
+    interaction = ScriptedInteraction(
+        [ScriptedResponse(kind="text", topic="record.stop_command", value="q")]
+    )
+
+    result = run_recording_control_workflow(
+        RecordCommandInput(
+            profile=parse_capture_profile("online"),
+            language="en",
+            playback_stream_route_id="pulse:sink-input:151",
+        ),
+        data_root=tmp_path,
+        discoverer=_available_discoverer,
+        worker_factory=IdenticalHashWorkerProcess,
+        interaction=interaction,
+        now=None,
+    )
+
+    assert result.exit_code == 1
+    assert result.record_path is not None
+    record = json.loads(result.record_path.read_text(encoding="utf-8"))
+    assert record["status"] == "failed"
+    assert record["recording"]["finalization"]["status"] == "failed"
+    assert "source independence failed" in record["recording"]["finalization"]["error"]
+    notices = [notice.topic for notice in interaction.notices]
+    assert notices[-1] == "record.finalized_status_error"
+    assert "record.process_handoff" not in notices
+
+
+def test_recording_control_allows_identical_silent_online_source_hashes(
+    tmp_path: Path,
+) -> None:
+    interaction = ScriptedInteraction(
+        [ScriptedResponse(kind="text", topic="record.stop_command", value="q")]
+    )
+
+    result = run_recording_control_workflow(
+        RecordCommandInput(
+            profile=parse_capture_profile("online"),
+            language="en",
+            playback_stream_route_id="pulse:sink-input:151",
+        ),
+        data_root=tmp_path,
+        discoverer=_available_discoverer,
+        worker_factory=SilentIdenticalHashWorkerProcess,
+        interaction=interaction,
+        now=None,
+    )
+
+    assert result.exit_code == 0
+    assert result.record_path is not None
+    record = json.loads(result.record_path.read_text(encoding="utf-8"))
+    assert record["status"] == "recorded"
+    assert record["recording"]["finalization"]["status"] == "finalized"
+    assert "source independence failed" not in json.dumps(record)
+    assert [notice.topic for notice in interaction.notices][-1] == "record.process_handoff"
+
+
+def test_recording_control_persists_worker_spawn_failure(tmp_path: Path) -> None:
+    def _spawn_fails(*, session_id: str, session_dir: Path) -> FakeWorkerProcess:
+        raise OSError("worker process limit reached")
+
+    interaction = ScriptedInteraction()
+
+    result = run_recording_control_workflow(
+        RecordCommandInput(
+            profile=parse_capture_profile("online"),
+            language="en",
+            playback_stream_route_id="pulse:sink-input:151",
+        ),
+        data_root=tmp_path,
+        discoverer=_available_discoverer,
+        worker_factory=_spawn_fails,
+        interaction=interaction,
+        now=None,
+    )
+
+    assert result.exit_code == 1
+    assert result.record_path is not None
+    record = json.loads(result.record_path.read_text(encoding="utf-8"))
+    assert record["status"] == "failed"
+    assert record["recording"]["stop_reason"] == "error"
+    assert record["recording"]["finalization"]["status"] == "failed"
+    assert record["recording"]["finalization"]["error"] == "worker process limit reached"
+    assert record["failures"][0]["message"] == "worker process limit reached"
+    assert record["failures"][0]["code"] == "capture_failed"
+    assert "capture_metadata" not in record
+    last = interaction.notices[-1]
+    assert last.topic == "record.capture_failed"
+    assert last.context["error"] == "worker process limit reached"
+
+
+def test_recording_control_rejects_nonzero_worker_exit(tmp_path: Path) -> None:
+    interaction = ScriptedInteraction(
+        [ScriptedResponse(kind="text", topic="record.stop_command", value="q")]
+    )
+
+    result = run_recording_control_workflow(
+        RecordCommandInput(
+            profile=parse_capture_profile("online"),
+            language="en",
+            playback_stream_route_id="pulse:sink-input:151",
+        ),
+        data_root=tmp_path,
+        discoverer=_available_discoverer,
+        worker_factory=NonzeroExitWorkerProcess,
+        interaction=interaction,
+        now=None,
+    )
+
+    assert result.exit_code == 1
+    assert result.record_path is not None
+    record = json.loads(result.record_path.read_text(encoding="utf-8"))
+    assert record["status"] == "failed"
+    assert record["recording"]["finalization"]["error"] == "Worker exited with status 3."
+    assert record["failures"][0]["code"] == "capture_failed"
+    assert "capture_metadata" not in record
+    assert interaction.notices[-1].topic == "record.capture_failed"
+
+
+def test_recording_control_reports_worker_handshake_failure(tmp_path: Path) -> None:
+    interaction = ScriptedInteraction()
+
+    result = run_recording_control_workflow(
+        RecordCommandInput(
+            profile=parse_capture_profile("online"),
+            language="en",
+            playback_stream_route_id="pulse:sink-input:151",
+        ),
+        data_root=tmp_path,
+        discoverer=_available_discoverer,
+        worker_factory=FailingWorkerProcess,
+        interaction=interaction,
+        now=None,
+    )
+
+    assert result.exit_code == 1
+    assert result.record_path is not None
+    record = json.loads(result.record_path.read_text(encoding="utf-8"))
+    assert record["status"] == "failed"
+    assert record["recording"]["finalization"]["error"] == "worker refused handshake"
+    assert record["failures"][0]["message"] == "worker refused handshake"
+    assert "capture_metadata" not in record
+    last = interaction.notices[-1]
+    assert last.topic == "record.capture_failed"
+    assert last.context["error"] == "worker refused handshake"
 
 
 def test_capture_event_monitor_surfaces_background_error(tmp_path: Path) -> None:

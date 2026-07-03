@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
+from shlex import quote
 from typing import Any, TypeVar, cast
 from uuid import uuid4
 
@@ -31,7 +33,6 @@ from mena.diarization import (
     DiarizationError,
     DiarizationProvider,
     DiarizationProviderUnavailable,
-    PyannoteCommunityDiarizationProvider,
     run_diarization_stage,
 )
 from mena.discovery import (
@@ -63,6 +64,7 @@ from mena.merge_timing import (
     run_room_mic_merge_timing_stage,
 )
 from mena.processing import (
+    PROCESSING_STATE_ARTIFACT_TYPE,
     ProcessingStageLedger,
     ProcessingStageState,
     ProcessingStateError,
@@ -89,8 +91,8 @@ from mena.review_flagging import (
 )
 from mena.runtime_profile import (
     RuntimeFallbackUnavailable,
+    bind_summarization_runtime,
     production_runtime_required,
-    runtime_summarization_provider,
     select_runtime_profile,
     store_runtime_profile_provenance,
 )
@@ -101,7 +103,6 @@ from mena.runtime_stewardship import (
 )
 from mena.semantic_coherence import (
     SEMANTIC_COHERENCE_STAGE,
-    OllamaSemanticCoherenceProvider,
     SemanticCoherenceError,
     SemanticCoherenceProvider,
     SemanticCoherenceStageResult,
@@ -112,8 +113,13 @@ from mena.session_integrity import (
     load_verified_session_bundle,
     verify_session_bundle,
 )
-from mena.sessions import resolve_session, session_id
-from mena.settings import AppSettings, SettingsError, validate_summary_language
+from mena.sessions import (
+    ProcessableSessionCandidate,
+    processable_session_candidates,
+    resolve_session,
+    session_id,
+)
+from mena.settings import DATA_ROOT_ENV_VAR, AppSettings, SettingsError, validate_summary_language
 from mena.setup import (
     CommandIdentity,
     CommandRunner,
@@ -134,7 +140,6 @@ from mena.summarization import (
 from mena.timestamps import parse_utc_timestamp
 from mena.transcription import (
     TRANSCRIPTION_STAGE,
-    FasterWhisperTranscriptionProvider,
     TranscriptionError,
     TranscriptionProvider,
     TranscriptionProviderUnavailable,
@@ -269,7 +274,9 @@ class ConsoleRecordInteraction:
         elif topic == "record.capture_finalized":
             print("Capture finalized")
         elif topic == "record.process_handoff":
-            print(f"To process this recording, run: mena process {context['record_path']}")
+            print("Recording saved and ready to process.")
+            print(f"Next command: {_format_process_handoff_command(context.get('data_root'))}")
+            print(f"Session record: {context['record_path']}")
         elif topic == "record.finalized_status_error":
             print(f"Capture finalized as {context['status']}: {context['error']}")
         elif topic == "record.finalized_status":
@@ -354,6 +361,37 @@ class ConsoleCorrectionInteraction:
             )
         else:
             raise ValueError(f"Unsupported correction notice topic '{topic}'.")
+
+
+class ConsoleProcessingInteraction:
+    """Console adapter for processing workflow interaction topics."""
+
+    def __init__(self, input_fn: Callable[[str], str]) -> None:
+        self._input_fn = input_fn
+
+    def choose(self, request: ChoiceRequest) -> ChoiceOption:
+        raise ValueError(f"Unsupported processing choice topic '{request.topic}'.")
+
+    def confirm(self, request: ConfirmationRequest) -> bool:
+        if request.topic != "runtime_fallback.one_run":
+            raise ValueError(f"Unsupported processing confirmation topic '{request.topic}'.")
+        accepted_failure = str(request.context["accepted_failure"])
+        fallback_evaluation = cast(SetupEvaluation, request.context["fallback_evaluation"])
+        print(f"Accepted runtime profile is unavailable: {accepted_failure}")
+        print(
+            "One-run local runtime fallback is ready: "
+            f"{fallback_evaluation.profile.id} using "
+            f"{fallback_evaluation.selected_asr_profile.checkpoint}/"
+            f"{fallback_evaluation.selected_asr_profile.device}."
+        )
+        answer = self._input_fn("Use local runtime fallback for this run? [y/N] ")
+        return answer.strip().lower() in {"y", "yes"}
+
+    def request_text(self, request: TextRequest) -> str:
+        raise ValueError(f"Unsupported processing text topic '{request.topic}'.")
+
+    def notify(self, notice: WorkflowNotice) -> None:
+        raise ValueError(f"Unsupported processing notice topic '{notice.topic}'.")
 
 
 def _correction_action_option_id(raw: str) -> str | None:
@@ -442,10 +480,20 @@ def build_parser() -> argparse.ArgumentParser:
             continue
         subparser = subparsers.add_parser(command)
         if command in {"correct", "process", "resume", "summarize", "export", "inspect"}:
-            subparser.add_argument(
-                "session_path",
-                help="Path to the session directory or session.json.",
-            )
+            if command == "process":
+                subparser.add_argument(
+                    "session_path",
+                    nargs="?",
+                    help=(
+                        "Path to the session directory or session.json. "
+                        "Defaults to the latest recorded session."
+                    ),
+                )
+            else:
+                subparser.add_argument(
+                    "session_path",
+                    help="Path to the session directory or session.json.",
+                )
         if command in {"process", "resume", "summarize"}:
             subparser.add_argument(
                 "--allow-runtime-fallback",
@@ -491,9 +539,9 @@ def main(
     worker_factory: WorkerFactory = WorkerProcess,
     now: datetime | None = None,
     run_id: str | None = None,
-    transcription_provider_factory: ProviderFactory = FasterWhisperTranscriptionProvider,
-    diarization_provider_factory: ProviderFactory = PyannoteCommunityDiarizationProvider,
-    semantic_coherence_provider_factory: ProviderFactory = OllamaSemanticCoherenceProvider,
+    transcription_provider_factory: ProviderFactory | None = None,
+    diarization_provider_factory: ProviderFactory | None = None,
+    semantic_coherence_provider_factory: ProviderFactory | None = None,
     settings: AppSettings | None = None,
     config_path: Path | None = None,
     input_fn: Callable[[str], str] | None = None,
@@ -564,7 +612,7 @@ def main(
                 worker_exit_timeout=args.worker_exit_timeout,
                 stop_input_available=_record_input(input_fn) is not None,
             ),
-            data_root=data_root,
+            data_root=_effective_record_data_root(data_root, app_settings),
             discoverer=discoverer,
             worker_factory=worker_factory,
             interaction=ConsoleRecordInteraction(input_fn),
@@ -603,7 +651,6 @@ def main(
                 setup_command_identity=setup_command_identity,
                 setup_hardware=setup_hardware,
                 allow_runtime_fallback=args.allow_runtime_fallback,
-                runtime_fallback_input_fn=_resolve_runtime_fallback_input(input_fn),
             )
         except (
             ArtifactStoreError,
@@ -650,8 +697,14 @@ def main(
             if args.command == "process":
                 invocation_run_id = run_id or str(uuid4())
                 invocation_attempt = 1
+                session_path = _resolve_process_session_path(
+                    args.session_path,
+                    app_settings,
+                    input_fn=input_fn,
+                )
             else:
-                resolved_session = resolve_session(Path(args.session_path))
+                session_path = Path(args.session_path)
+                resolved_session = resolve_session(session_path)
                 session_id_value = session_id(resolved_session.record)
                 store = FileSystemArtifactStore(
                     session_id=session_id_value,
@@ -690,8 +743,10 @@ def main(
                 invocation_run_id = resumable.run_id
                 invocation_attempt = resumable.attempt + 1
 
-            return _run_processing_command(
-                session_path=Path(args.session_path),
+            if args.command == "process":
+                print(f"Processing recording: {session_path}")
+            exit_code = _run_processing_command(
+                session_path=session_path,
                 run_id=invocation_run_id,
                 attempt=invocation_attempt,
                 now=now,
@@ -703,8 +758,13 @@ def main(
                 setup_command_identity=setup_command_identity,
                 setup_hardware=setup_hardware,
                 allow_runtime_fallback=args.allow_runtime_fallback,
-                runtime_fallback_input_fn=_resolve_runtime_fallback_input(input_fn),
+                interaction=_resolve_runtime_fallback_interaction(input_fn),
             )
+            if args.command == "process" and exit_code == 0:
+                print("Processing completed successfully.")
+                if _correction_handoff_available(session_path):
+                    print(f"Next command: mena correct {quote(str(session_path))}")
+            return exit_code
         except RuntimeFallbackUnavailable as exc:
             # Recoverable: a GPU stage failed and a CPU fallback exists but is not
             # authorized. Distinct exit code 3 lets an automated caller re-invoke
@@ -802,6 +862,103 @@ def _record_input(input_fn: Callable[[str], str] | None) -> Callable[[str], str]
     return None
 
 
+def _resolve_process_session_path(
+    session_path: str | None,
+    settings: AppSettings,
+    *,
+    input_fn: Callable[[str], str] | None = None,
+) -> Path:
+    if session_path is not None:
+        return Path(session_path)
+    candidates = processable_session_candidates(settings.paths.sessions_dir)
+    if not candidates:
+        raise ValueError("no recorded sessions found.")
+    if len(candidates) == 1:
+        return candidates[0].record_path
+    reader = _record_input(input_fn)
+    if reader is None:
+        raise ValueError("multiple processable recordings found; pass an explicit session path.")
+    return _prompt_choice(
+        title="Processable recordings",
+        choices=candidates,
+        formatter=_format_processable_session_candidate,
+        input_fn=reader,
+        default_index=1,
+    ).record_path
+
+
+def _format_processable_session_candidate(candidate: ProcessableSessionCandidate) -> str:
+    label_parts = [
+        candidate.name or "Untitled recording",
+        f"completed {candidate.completed_at}",
+        candidate.profile,
+        f"id {candidate.session_id[:8]}",
+    ]
+    return f"{' | '.join(label_parts)} | {candidate.record_path}"
+
+
+def _correction_handoff_available(session_path: Path) -> bool:
+    resolved_session = resolve_session(session_path)
+    session_id_value = session_id(resolved_session.record)
+    store = FileSystemArtifactStore(
+        session_id=session_id_value,
+        session_dir=resolved_session.session_dir,
+    )
+    latest_semantic = _latest_semantic_processing_state(
+        store=store,
+        session_id_value=session_id_value,
+    )
+    return not (
+        latest_semantic is not None
+        and latest_semantic.status == "skipped"
+        and latest_semantic.skip_reason == "provider_unavailable"
+    )
+
+
+def _latest_semantic_processing_state(
+    *,
+    store: ArtifactStore,
+    session_id_value: str,
+) -> ProcessingStageState | None:
+    matches: list[tuple[int, ProcessingStageState]] = []
+    for state_record in store.list(artifact_type=PROCESSING_STATE_ARTIFACT_TYPE):
+        state = ProcessingStageState.from_dict(json.loads(store.retrieve(state_record.id)))
+        if state.session_id != session_id_value or state.stage != SEMANTIC_COHERENCE_STAGE:
+            continue
+        try:
+            sequence = int(Path(state_record.path).stem.split("-", 1)[0])
+        except ValueError as exc:
+            raise ProcessingStateError(
+                "Processing state artifact name must start with sequence."
+            ) from exc
+        matches.append((sequence, state))
+    if not matches:
+        return None
+    return max(matches, key=lambda item: item[0])[1]
+
+
+def _effective_record_data_root(
+    data_root: Path | None,
+    settings: AppSettings,
+) -> Path | None:
+    if data_root is not None:
+        return data_root
+    sessions_root = settings.paths.sessions_dir.parent
+    if sessions_root != settings.paths.data_home:
+        return sessions_root
+    if xdg_data_home := os.environ.get("XDG_DATA_HOME"):
+        xdg_data_root = Path(xdg_data_home).expanduser() / "mena"
+        if sessions_root == xdg_data_root:
+            return sessions_root
+    return None
+
+
+def _format_process_handoff_command(data_root: object) -> str:
+    if isinstance(data_root, Path):
+        return f"{DATA_ROOT_ENV_VAR}={quote(str(data_root))} mena process"
+    return "mena process"
+
+
 def _run_setup_command(
     *,
     check_only: bool,
@@ -876,21 +1033,13 @@ def _resolve_runtime_fallback_input(
     return input if sys.stdin.isatty() else None
 
 
-def _confirm_one_run_runtime_fallback(
-    *,
-    accepted_failure: str,
-    fallback_evaluation: SetupEvaluation,
-    input_fn: Callable[[str], str],
-) -> bool:
-    print(f"Accepted runtime profile is unavailable: {accepted_failure}")
-    print(
-        "One-run local runtime fallback is ready: "
-        f"{fallback_evaluation.profile.id} using "
-        f"{fallback_evaluation.selected_asr_profile.checkpoint}/"
-        f"{fallback_evaluation.selected_asr_profile.device}."
-    )
-    answer = input_fn("Use local runtime fallback for this run? [y/N] ")
-    return answer.strip().lower() in {"y", "yes"}
+def _resolve_runtime_fallback_interaction(
+    input_fn: Callable[[str], str] | None,
+) -> InteractionPort | None:
+    reader = _resolve_runtime_fallback_input(input_fn)
+    if reader is None:
+        return None
+    return ConsoleProcessingInteraction(reader)
 
 
 def _print_semantic_review_skip_notice(result: SemanticCoherenceStageResult) -> None:
@@ -902,9 +1051,9 @@ def _print_semantic_review_skip_notice(result: SemanticCoherenceStageResult) -> 
 
 
 def _requires_runtime_profile(
-    transcription_provider_factory: ProviderFactory,
-    diarization_provider_factory: ProviderFactory,
-    semantic_coherence_provider_factory: ProviderFactory,
+    transcription_provider_factory: ProviderFactory | None,
+    diarization_provider_factory: ProviderFactory | None,
+    semantic_coherence_provider_factory: ProviderFactory | None,
 ) -> bool:
     return production_runtime_required(
         transcription_provider_factory=transcription_provider_factory,
@@ -923,7 +1072,6 @@ def _run_summarize_command(
     setup_command_identity: CommandIdentity | None = None,
     setup_hardware: HardwareFacts | None = None,
     allow_runtime_fallback: bool = False,
-    runtime_fallback_input_fn: Callable[[str], str] | None = None,
 ) -> int:
     return summarize_workflow.run_summarization_command(
         session_path=session_path,
@@ -934,10 +1082,9 @@ def _run_summarize_command(
         setup_command_identity=setup_command_identity,
         setup_hardware=setup_hardware,
         allow_runtime_fallback=allow_runtime_fallback,
-        runtime_fallback_input_fn=runtime_fallback_input_fn,
         runtime_profile_selector_fn=select_runtime_profile,
         runtime_profile_store_fn=store_runtime_profile_provenance,
-        runtime_summarization_provider_fn=runtime_summarization_provider,
+        runtime_summarization_binder_fn=bind_summarization_runtime,
         run_summarization_stage_fn=run_summarization_stage,
         terminal_llm_release_fn=_record_terminal_local_llm_release,
     )
@@ -1035,15 +1182,15 @@ def _run_processing_command(
     run_id: str,
     attempt: int,
     now: datetime | None,
-    transcription_provider_factory: ProviderFactory,
-    diarization_provider_factory: ProviderFactory,
-    semantic_coherence_provider_factory: ProviderFactory,
+    transcription_provider_factory: ProviderFactory | None,
+    diarization_provider_factory: ProviderFactory | None,
+    semantic_coherence_provider_factory: ProviderFactory | None,
     settings: AppSettings | None = None,
     setup_runner: CommandRunner | None = None,
     setup_command_identity: CommandIdentity | None = None,
     setup_hardware: HardwareFacts | None = None,
     allow_runtime_fallback: bool = False,
-    runtime_fallback_input_fn: Callable[[str], str] | None = None,
+    interaction: InteractionPort | None = None,
 ) -> int:
     def _processing_stages_adapter(
         *,
@@ -1087,7 +1234,7 @@ def _run_processing_command(
         setup_command_identity=setup_command_identity,
         setup_hardware=setup_hardware,
         allow_runtime_fallback=allow_runtime_fallback,
-        runtime_fallback_input_fn=runtime_fallback_input_fn,
+        interaction=interaction,
         terminal_llm_release=_record_terminal_local_llm_release,
         processing_stages_runner=_processing_stages_adapter,
         transcription_stage_runner=run_transcription_stage,
@@ -1407,58 +1554,13 @@ def _optional_metadata_str(payload: dict[str, object], key: str) -> str | None:
     )
 
 
-def _provider_implements(provider: Any, *required_attrs: str) -> bool:
-    for attr in required_attrs:
-        if not hasattr(provider, attr):
-            return False
-        if attr in {"transcribe", "diarize", "check"} and not callable(getattr(provider, attr)):
-            return False
-    return True
-
-
 def _require_provider(
     provider_factory: ProviderFactory,
     provider_type: type[Any],
     provider_name: str,
 ) -> Any:
-    try:
-        provider = provider_factory()
-    except TypeError as exc:
-        raise ProviderValidationError(
-            f"{provider_name} provider must implement {provider_type.__name__}."
-        ) from exc
-    required: tuple[str, ...] = ()
-    if provider_type is TranscriptionProvider:
-        required = ("name", "transcribe")
-    elif provider_type is DiarizationProvider:
-        required = ("name", "config_id", "diarize")
-    elif provider_type is SemanticCoherenceProvider:
-        required = ("metadata", "check")
-
-    if required:
-        if not _provider_implements(provider, *required):
-            raise ProviderValidationError(
-                f"{provider_name} provider must implement {provider_type.__name__}."
-            )
-        if provider_type is SemanticCoherenceProvider:
-            metadata = provider.metadata
-            config_id = getattr(metadata, "config_id", None)
-            if not isinstance(config_id, str) or not config_id:
-                raise ProviderValidationError(
-                    f"{provider_name} provider must expose semantic metadata config_id."
-                )
-            if not callable(getattr(metadata, "to_dict", None)):
-                raise ProviderValidationError(
-                    f"{provider_name} provider must expose semantic metadata to_dict."
-                )
-        return provider
-
-    try:
-        valid = isinstance(provider, provider_type)
-    except TypeError:
-        valid = False
-    if not valid:
-        raise ProviderValidationError(
-            f"{provider_name} provider must implement {provider_type.__name__}."
-        )
-    return provider
+    return processing_orchestration._require_provider(
+        provider_factory,
+        provider_type,
+        provider_name,
+    )

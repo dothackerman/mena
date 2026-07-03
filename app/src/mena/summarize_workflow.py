@@ -21,7 +21,7 @@ from mena.processing import ProcessingStageLedger
 from mena.runtime_profile import (
     SUMMARIZATION_RUNTIME_STAGES,
     RuntimeProfileSelection,
-    runtime_summarization_provider,
+    bind_summarization_runtime,
     select_runtime_profile,
     store_runtime_profile_provenance,
 )
@@ -44,7 +44,7 @@ from mena.timestamps import parse_utc_timestamp
 
 RuntimeProfileSelector = Callable[..., RuntimeProfileSelection]
 RuntimeProfileStoreFn = Callable[..., object]
-RuntimeSummarizationProviderFn = Callable[..., object]
+RuntimeSummarizationBinderFn = Callable[..., object]
 SummarizationStageFn = Callable[..., object]
 TerminalReleaseFn = Callable[..., RuntimeReleaseResult | None]
 ResolveSessionFn = Callable[[Path], ResolvedSession]
@@ -60,22 +60,15 @@ def run_summarization_command(
     setup_command_identity: CommandIdentity | None = None,
     setup_hardware: HardwareFacts | None = None,
     allow_runtime_fallback: bool = False,
-    runtime_fallback_input_fn: Callable[[str], str] | None = None,
     runtime_profile_selector_fn: RuntimeProfileSelector = select_runtime_profile,
     runtime_profile_store_fn: RuntimeProfileStoreFn = store_runtime_profile_provenance,
-    runtime_summarization_provider_fn: RuntimeSummarizationProviderFn = (
-        runtime_summarization_provider
-    ),
+    runtime_summarization_binder_fn: RuntimeSummarizationBinderFn = bind_summarization_runtime,
     run_summarization_stage_fn: SummarizationStageFn = run_summarization_stage,
     resolve_session_fn: ResolveSessionFn | None = None,
     terminal_llm_release_fn: TerminalReleaseFn | None = None,
 ) -> int:
     if resolve_session_fn is None:
         resolve_session_fn = resolve_session
-
-    # Accept for API parity with processing orchestration; summarize currently
-    # does not use this prompt hook directly.
-    _ = runtime_fallback_input_fn
 
     resolved_session = resolve_session_fn(session_path)
     session_dir = resolved_session.session_dir
@@ -123,9 +116,9 @@ def run_summarization_command(
         selection=runtime_selection,
     )
 
-    provider = runtime_summarization_provider_fn(
+    provider = runtime_summarization_binder_fn(
+        selection=runtime_selection,
         settings=settings,
-        runtime_state=runtime_selection.actual,
     )
 
     ledger = ProcessingStageLedger(store=store, session_id=session_id_value, run_id=run_id)
