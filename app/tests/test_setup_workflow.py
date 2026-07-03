@@ -77,6 +77,10 @@ def test_setup_workflow_executes_primary_actions_then_persists_ready_state(
     assert accepted.fallback_authorization.local_status == "configured_unauthorized"
     assert accepted.fallback_authorization.automatic_local_fallback_authorized is False
     assert any(isinstance(event, SetupReportEvent) for event in result.events)
+    messages = _messages(result.events)
+    assert "Setup is complete. Mena is ready to record." in messages
+    assert "Next command: mena record" in messages
+    assert "Optional local fallback policy: not enabled; rerun setup with" in messages
 
 
 def test_setup_workflow_executes_fallback_actions_before_authorizing(
@@ -109,6 +113,8 @@ def test_setup_workflow_executes_fallback_actions_before_authorizing(
     assert accepted.fallback_authorization.local_status == "authorized"
     assert accepted.fallback_authorization.automatic_local_fallback_authorized is True
     assert "Automatic local runtime fallback authorized for:" in _messages(result.events)
+    assert "Setup is complete. Mena is ready to record." in _messages(result.events)
+    assert "Optional local fallback policy: enabled" in _messages(result.events)
 
 
 def test_setup_workflow_fallback_decline_persists_unavailable_authorization(

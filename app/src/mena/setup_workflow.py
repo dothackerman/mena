@@ -199,6 +199,7 @@ def _persist_ready_setup(
         authorize_local_fallback=options.authorize_local_fallback,
     )
     state_path = persist_runtime_profile_state(accepted_state, paths=settings.paths)
+    _append_setup_completion_notice(events, accepted_state)
     _append_runtime_fallback_authorization_notice(events, accepted_state)
     events.append(SetupMessageEvent(f"Accepted runtime profile state: {state_path}"))
     return SetupWorkflowResult(
@@ -314,6 +315,27 @@ def _append_runtime_fallback_authorization_notice(
         )
         for reason in authorization.blocking_reasons:
             events.append(SetupMessageEvent(f"Fallback blocker: {reason}"))
+
+
+def _append_setup_completion_notice(
+    events: list[SetupWorkflowEvent],
+    state: RuntimeProfileState,
+) -> None:
+    events.append(SetupMessageEvent("Setup is complete. Mena is ready to record."))
+    events.append(SetupMessageEvent("Next command: mena record"))
+    if state.fallback_authorization.local_status == "authorized":
+        events.append(SetupMessageEvent("Optional local fallback policy: enabled"))
+    elif state.fallback_authorization.local_status == "configured_unauthorized":
+        events.append(
+            SetupMessageEvent(
+                "Optional local fallback policy: not enabled; rerun setup with "
+                "`--authorize-local-fallback` to enable it."
+            )
+        )
+    elif state.fallback_authorization.local_status == "unavailable":
+        events.append(SetupMessageEvent("Optional local fallback policy: unavailable"))
+    else:
+        events.append(SetupMessageEvent("Optional local fallback policy: not configured"))
 
 
 def _interrupted(events: list[SetupWorkflowEvent]) -> SetupWorkflowResult:

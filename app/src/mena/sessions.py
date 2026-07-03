@@ -9,10 +9,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
+from mena.artifacts import FileSystemArtifactStore
 from mena.fileops import write_json_atomically
+from mena.processing import has_completed_processing_pipeline
 from mena.profiles import CaptureProfileSelection
 from mena.settings import AppSettings
-from mena.timestamps import utc_timestamp, utc_timestamp_for_filename
+from mena.timestamps import parse_utc_timestamp, utc_timestamp, utc_timestamp_for_filename
 
 SESSION_RECORD_VERSION = 1
 SESSION_RECORD_FILENAME = "session.json"
@@ -76,6 +78,20 @@ class CreatedSession:
     bundle_path: Path
     record_path: Path
     record: SessionRecord
+
+
+@dataclass(frozen=True)
+class ProcessableSessionCandidate:
+    """A recorded runtime session that `mena process` can process by default."""
+
+    session_dir: Path
+    record_path: Path
+    session_id: str
+    name: str | None
+    profile: str
+    created_at: str
+    completed_at: str
+    sort_completed_at: datetime
 
 
 class SessionRecordError(ValueError):
@@ -160,6 +176,97 @@ def resolve_session_paths(session_path: Path) -> tuple[Path, Path]:
     return session_path, session_path / SESSION_RECORD_FILENAME
 
 
+def latest_recorded_session_record_path(sessions_root: Path) -> Path | None:
+    """Return the newest successfully recorded session record under a sessions root."""
+
+    candidates = processable_session_candidates(sessions_root, include_processed=True)
+    if not candidates:
+        return None
+    newest = candidates[0]
+    tied = [
+        candidate
+        for candidate in candidates
+        if candidate.sort_completed_at == newest.sort_completed_at
+    ]
+    if len(tied) > 1:
+        raise SessionRecordError(
+            "latest recorded session is ambiguous; pass an explicit session path."
+        )
+    return newest.record_path
+
+
+def processable_session_candidates(
+    sessions_root: Path,
+    *,
+    include_processed: bool = False,
+) -> tuple[ProcessableSessionCandidate, ...]:
+    """Return recorded runtime sessions that are candidates for pathless processing."""
+
+    candidates: list[ProcessableSessionCandidate] = []
+    try:
+        session_dirs = tuple(sessions_root.iterdir())
+    except OSError:
+        return ()
+    for session_dir in session_dirs:
+        try:
+            if not session_dir.is_dir():
+                continue
+            record_path = session_dir / SESSION_RECORD_FILENAME
+            if not record_path.is_file():
+                continue
+            record = read_session_record(record_path)
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+        if record.get("status") != "recorded":
+            continue
+        try:
+            completed_at = _recording_completed_at(record)
+        except ValueError as exc:
+            raise SessionRecordError(
+                "recorded session has invalid recording.finalization.completed_at; "
+                "pass an explicit session path."
+            ) from exc
+        if completed_at is None:
+            raise SessionRecordError(
+                "recorded session is missing recording.finalization.completed_at; "
+                "pass an explicit session path."
+            )
+        try:
+            record_session_id = session_id(record)
+            record_profile = session_profile(record)
+            record_created_at = _required_record_str(record, "created_at")
+            record_completed_at = _required_completed_at(record)
+        except SessionRecordError:
+            continue
+        if not include_processed and _processing_is_complete(session_dir, record):
+            continue
+        try:
+            candidates.append(
+                ProcessableSessionCandidate(
+                    session_dir=session_dir,
+                    record_path=record_path,
+                    session_id=record_session_id,
+                    name=_optional_record_str(record, "name"),
+                    profile=record_profile,
+                    created_at=record_created_at,
+                    completed_at=record_completed_at,
+                    sort_completed_at=completed_at,
+                )
+            )
+        except SessionRecordError:
+            continue
+    return tuple(
+        sorted(
+            candidates,
+            key=lambda candidate: (
+                candidate.sort_completed_at,
+                str(candidate.record_path),
+            ),
+            reverse=True,
+        )
+    )
+
+
 def session_id(session_record: Mapping[str, object]) -> str:
     """Return the required session id from a session record."""
 
@@ -192,6 +299,39 @@ def session_profile(session_record: Mapping[str, object]) -> str:
     return value
 
 
+def _processing_is_complete(
+    session_dir: Path,
+    session_record: Mapping[str, object],
+) -> bool:
+    session_id_value = session_id(session_record)
+    store = FileSystemArtifactStore(session_id=session_id_value, session_dir=session_dir)
+    return has_completed_processing_pipeline(store, session_id_value)
+
+
+def _required_record_str(session_record: Mapping[str, object], key: str) -> str:
+    value = session_record.get(key)
+    if not isinstance(value, str) or not value:
+        raise SessionRecordError(f"Session field '{key}' is required and must be a string.")
+    return value
+
+
+def _optional_record_str(session_record: Mapping[str, object], key: str) -> str | None:
+    value = session_record.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise SessionRecordError(f"Session field '{key}' must be a string or null.")
+    return value
+
+
+def _required_completed_at(session_record: Mapping[str, object]) -> str:
+    finalization = session_recording_finalization(session_record)
+    value = finalization.get("completed_at")
+    if not isinstance(value, str) or not value:
+        raise SessionRecordError("Session field 'recording.finalization.completed_at' is required.")
+    return value
+
+
 def session_recording(session_record: Mapping[str, object]) -> Mapping[str, object]:
     """Return the recording lifecycle object from a session record."""
 
@@ -213,6 +353,21 @@ def session_recording_finalization(
             "Session field 'recording.finalization' is required and must be an object."
         )
     return value
+
+
+def _recording_completed_at(session_record: Mapping[str, object]) -> datetime | None:
+    recording = session_record.get("recording")
+    if not isinstance(recording, Mapping):
+        return None
+    finalization = recording.get("finalization")
+    if not isinstance(finalization, Mapping):
+        return None
+    if finalization.get("status") != "finalized":
+        return None
+    completed_at = finalization.get("completed_at")
+    if not isinstance(completed_at, str):
+        return None
+    return parse_utc_timestamp(completed_at)
 
 
 def session_recording_finalization_status(

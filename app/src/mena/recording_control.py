@@ -447,7 +447,7 @@ def run_recording_control_workflow(
         interaction.notify(
             WorkflowNotice(
                 topic="record.process_handoff",
-                context={"record_path": created_session.record_path},
+                context={"data_root": data_root, "record_path": created_session.record_path},
             )
         )
     elif final_error:
