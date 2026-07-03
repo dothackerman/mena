@@ -2135,6 +2135,7 @@ def test_main_process_without_session_path_uses_latest_recorded_session(
 ) -> None:
     settings = AppSettings.from_env(env={}, home=tmp_path)
     older = _create_runtime_session(settings, status="recorded", created_at="2026-05-19T10:00:00Z")
+    _mark_processing_complete(older)
     _create_runtime_session(settings, status="failed", created_at="2026-05-19T11:00:00Z")
     latest = _create_runtime_session(
         settings,
@@ -2156,6 +2157,125 @@ def test_main_process_without_session_path_uses_latest_recorded_session(
     assert older.record_path != latest.record_path
 
 
+def test_main_process_without_session_path_prefers_unprocessed_recording(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    unprocessed = _create_runtime_session(
+        settings,
+        status="recorded",
+        created_at="2026-05-19T10:00:00Z",
+    )
+    processed = _create_runtime_session(
+        settings,
+        status="recorded",
+        created_at="2026-05-19T12:00:00Z",
+    )
+    _mark_processing_complete(processed)
+    calls: list[Path] = []
+
+    def _fake_run_processing_command(**kwargs: object) -> int:
+        calls.append(cast(Path, kwargs["session_path"]))
+        return 0
+
+    monkeypatch.setattr("mena.cli._run_processing_command", _fake_run_processing_command)
+
+    exit_code = main(["process"], settings=settings)
+
+    assert exit_code == 0
+    assert calls == [unprocessed.record_path]
+
+
+def test_main_process_without_session_path_prompts_for_multiple_candidates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    older = _create_runtime_session(
+        settings,
+        status="recorded",
+        created_at="2026-05-19T10:00:00Z",
+    )
+    latest = _create_runtime_session(
+        settings,
+        status="recorded",
+        created_at="2026-05-19T12:00:00Z",
+    )
+    calls: list[Path] = []
+
+    def _fake_run_processing_command(**kwargs: object) -> int:
+        calls.append(cast(Path, kwargs["session_path"]))
+        return 0
+
+    monkeypatch.setattr("mena.cli._run_processing_command", _fake_run_processing_command)
+
+    exit_code = main(["process"], settings=settings, input_fn=lambda _prompt: "")
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert calls == [latest.record_path]
+    assert "Processable recordings:" in captured.out
+    assert str(latest.record_path) in captured.out
+    assert str(older.record_path) in captured.out
+
+
+def test_main_process_without_session_path_can_select_older_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    older = _create_runtime_session(
+        settings,
+        status="recorded",
+        created_at="2026-05-19T10:00:00Z",
+    )
+    _create_runtime_session(
+        settings,
+        status="recorded",
+        created_at="2026-05-19T12:00:00Z",
+    )
+    calls: list[Path] = []
+
+    def _fake_run_processing_command(**kwargs: object) -> int:
+        calls.append(cast(Path, kwargs["session_path"]))
+        return 0
+
+    monkeypatch.setattr("mena.cli._run_processing_command", _fake_run_processing_command)
+
+    exit_code = main(["process"], settings=settings, input_fn=lambda _prompt: "2")
+
+    assert exit_code == 0
+    assert calls == [older.record_path]
+
+
+def test_main_process_without_session_path_rejects_multiple_candidates_noninteractive(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    _create_runtime_session(
+        settings,
+        status="recorded",
+        created_at="2026-05-19T10:00:00Z",
+    )
+    _create_runtime_session(
+        settings,
+        status="recorded",
+        created_at="2026-05-19T12:00:00Z",
+    )
+
+    exit_code = main(["process"], settings=settings)
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert (
+        "Cannot run processing workflow: multiple processable recordings found; "
+        "pass an explicit session path."
+    ) in captured.out
+
+
 def test_main_process_without_session_path_uses_latest_completed_recording(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2167,6 +2287,7 @@ def test_main_process_without_session_path_uses_latest_completed_recording(
         created_at="2026-05-19T11:00:00Z",
         completed_at="2026-05-19T11:30:00Z",
     )
+    _mark_processing_complete(short)
     long = _create_runtime_session(
         settings,
         status="recorded",
@@ -2211,7 +2332,7 @@ def test_main_process_without_session_path_rejects_ambiguous_latest_recording(
 
     assert exit_code == 1
     assert (
-        "Cannot run processing workflow: latest recorded session is ambiguous; "
+        "Cannot run processing workflow: multiple processable recordings found; "
         "pass an explicit session path."
     ) in captured.out
 
@@ -2301,6 +2422,63 @@ def test_main_process_explicit_session_path_overrides_latest_recorded_session(
     assert exit_code == 0
     assert calls == [explicit.record_path]
     assert explicit.record_path != latest.record_path
+
+
+def test_main_process_prints_start_and_success_handoff(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    session = _create_runtime_session(
+        settings,
+        status="recorded",
+        created_at="2026-05-19T10:00:00Z",
+    )
+
+    def _fake_run_processing_command(**_kwargs: object) -> int:
+        print("third-party dependency warning")
+        return 0
+
+    monkeypatch.setattr("mena.cli._run_processing_command", _fake_run_processing_command)
+
+    exit_code = main(["process"], settings=settings)
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert f"Processing recording: {session.record_path}" in captured.out
+    assert "third-party dependency warning" in captured.out
+    assert "Processing completed successfully." in captured.out
+    assert f"Next command: mena correct {session.record_path}" in captured.out
+    assert captured.out.rfind("Processing completed successfully.") > captured.out.rfind(
+        "third-party dependency warning"
+    )
+
+
+def test_main_process_does_not_print_success_handoff_on_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    _create_runtime_session(
+        settings,
+        status="recorded",
+        created_at="2026-05-19T10:00:00Z",
+    )
+
+    def _fake_run_processing_command(**_kwargs: object) -> int:
+        raise ValueError("processing failed")
+
+    monkeypatch.setattr("mena.cli._run_processing_command", _fake_run_processing_command)
+
+    exit_code = main(["process"], settings=settings)
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "Cannot run processing workflow: processing failed" in captured.out
+    assert "Processing completed successfully." not in captured.out
+    assert "Next command: mena correct" not in captured.out
 
 
 def test_main_summarize_accepts_session_json_file(
@@ -3861,6 +4039,47 @@ def test_main_process_executes_full_pipeline_with_stubbed_stages(
     assert processing_calls["run_id"] == "manual-run-001"
     assert processing_calls["attempt"] == 1
     assert "Processing completed for run 'manual-run-001' (attempt 1)." in captured.out
+
+
+def test_main_process_without_path_executes_full_pipeline_with_stubbed_stages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    session = _build_processing_session(settings.paths.sessions_dir.parent)
+    persist_session_recording_lifecycle(
+        session.record_path,
+        status="recorded",
+        recording={
+            "started_at": "2026-05-19T09:59:00Z",
+            "stopped_at": "2026-05-19T10:00:00Z",
+            "stop_reason": "user_stop",
+            "finalization": {
+                "status": "finalized",
+                "completed_at": "2026-05-19T10:00:00Z",
+                "error": None,
+            },
+        },
+    )
+    processing_calls = _patch_processing_stages(monkeypatch)
+
+    exit_code = main(
+        ["process"],
+        settings=settings,
+        run_id="manual-run-pathless",
+        transcription_provider_factory=FakeTranscriptionProvider,
+        diarization_provider_factory=FakeDiarizationProvider,
+        semantic_coherence_provider_factory=lambda: FakeSemanticCoherenceProvider(results={}),
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert processing_calls["session_id"] == session.record.id
+    assert processing_calls["run_id"] == "manual-run-pathless"
+    assert f"Processing recording: {session.record_path}" in captured.out
+    assert "Processing completed successfully." in captured.out
+    assert f"Next command: mena correct {session.record_path}" in captured.out
 
 
 def test_main_process_stores_runtime_profile_provenance_before_processing_stages(
@@ -5433,6 +5652,33 @@ def _create_runtime_session(
         },
     )
     return session
+
+
+def _mark_processing_complete(session: CreatedSession) -> None:
+    record = json.loads(session.record_path.read_text(encoding="utf-8"))
+    store = FileSystemArtifactStore(
+        session_id=cast(str, record["id"]),
+        session_dir=session.bundle_path,
+    )
+    output = store.store(
+        artifact_type="semantic_review",
+        name="semantic-review.json",
+        data=b"{}",
+        version=1,
+        metadata={},
+    )
+    ledger = ProcessingStageLedger(
+        store=store,
+        session_id=cast(str, record["id"]),
+        run_id="completed-process-run",
+    )
+    ledger.mark_completed(
+        stage="semantic_coherence",
+        input_artifacts=(),
+        output_artifacts=(ArtifactRef.from_record(output),),
+        attempt=1,
+        now=datetime(2026, 5, 19, 13, 0, 0, tzinfo=UTC),
+    )
 
 
 def _summary_result_for_export() -> SummaryResult:

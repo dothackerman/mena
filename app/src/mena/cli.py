@@ -112,7 +112,12 @@ from mena.session_integrity import (
     load_verified_session_bundle,
     verify_session_bundle,
 )
-from mena.sessions import latest_recorded_session_record_path, resolve_session, session_id
+from mena.sessions import (
+    ProcessableSessionCandidate,
+    processable_session_candidates,
+    resolve_session,
+    session_id,
+)
 from mena.settings import DATA_ROOT_ENV_VAR, AppSettings, SettingsError, validate_summary_language
 from mena.setup import (
     CommandIdentity,
@@ -661,7 +666,11 @@ def main(
             if args.command == "process":
                 invocation_run_id = run_id or str(uuid4())
                 invocation_attempt = 1
-                session_path = _resolve_process_session_path(args.session_path, app_settings)
+                session_path = _resolve_process_session_path(
+                    args.session_path,
+                    app_settings,
+                    input_fn=input_fn,
+                )
             else:
                 session_path = Path(args.session_path)
                 resolved_session = resolve_session(session_path)
@@ -703,7 +712,9 @@ def main(
                 invocation_run_id = resumable.run_id
                 invocation_attempt = resumable.attempt + 1
 
-            return _run_processing_command(
+            if args.command == "process":
+                print(f"Processing recording: {session_path}")
+            exit_code = _run_processing_command(
                 session_path=session_path,
                 run_id=invocation_run_id,
                 attempt=invocation_attempt,
@@ -718,6 +729,10 @@ def main(
                 allow_runtime_fallback=args.allow_runtime_fallback,
                 runtime_fallback_input_fn=_resolve_runtime_fallback_input(input_fn),
             )
+            if args.command == "process" and exit_code == 0:
+                print("Processing completed successfully.")
+                print(f"Next command: mena correct {quote(str(session_path))}")
+            return exit_code
         except RuntimeFallbackUnavailable as exc:
             # Recoverable: a GPU stage failed and a CPU fallback exists but is not
             # authorized. Distinct exit code 3 lets an automated caller re-invoke
@@ -815,13 +830,39 @@ def _record_input(input_fn: Callable[[str], str] | None) -> Callable[[str], str]
     return None
 
 
-def _resolve_process_session_path(session_path: str | None, settings: AppSettings) -> Path:
+def _resolve_process_session_path(
+    session_path: str | None,
+    settings: AppSettings,
+    *,
+    input_fn: Callable[[str], str] | None = None,
+) -> Path:
     if session_path is not None:
         return Path(session_path)
-    latest = latest_recorded_session_record_path(settings.paths.sessions_dir)
-    if latest is None:
+    candidates = processable_session_candidates(settings.paths.sessions_dir)
+    if not candidates:
         raise ValueError("no recorded sessions found.")
-    return latest
+    if len(candidates) == 1:
+        return candidates[0].record_path
+    reader = _record_input(input_fn)
+    if reader is None:
+        raise ValueError("multiple processable recordings found; pass an explicit session path.")
+    return _prompt_choice(
+        title="Processable recordings",
+        choices=candidates,
+        formatter=_format_processable_session_candidate,
+        input_fn=reader,
+        default_index=1,
+    ).record_path
+
+
+def _format_processable_session_candidate(candidate: ProcessableSessionCandidate) -> str:
+    label_parts = [
+        candidate.name or "Untitled recording",
+        f"completed {candidate.completed_at}",
+        candidate.profile,
+        f"id {candidate.session_id[:8]}",
+    ]
+    return f"{' | '.join(label_parts)} | {candidate.record_path}"
 
 
 def _effective_record_data_root(
