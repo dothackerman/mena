@@ -369,6 +369,9 @@ def test_setup_yes_executes_planned_actions_through_runner(
     assert "Setup action results:" in captured.out
     assert "Local provider readiness: complete" in captured.out
     assert "Automatic local runtime fallback is not authorized" in captured.out
+    assert "Setup is complete. Mena is ready to record." in captured.out
+    assert "Next command: mena record" in captured.out
+    assert "Optional local fallback policy: not enabled; rerun setup with" in captured.out
     assert "Accepted runtime profile state:" in captured.out
     assert (settings.paths.state_home / "setup-state.json").is_file()
     accepted = load_runtime_profile_state(settings.paths)
@@ -404,6 +407,9 @@ def test_setup_authorize_local_fallback_flag_persists_automatic_authorization(
     accepted = load_runtime_profile_state(settings.paths)
     assert exit_code == 0
     assert "Automatic local runtime fallback authorized for:" in captured.out
+    assert "Setup is complete. Mena is ready to record." in captured.out
+    assert "Next command: mena record" in captured.out
+    assert "Optional local fallback policy: enabled" in captured.out
     assert accepted.fallback_authorization.local_status == "authorized"
     assert accepted.fallback_authorization.automatic_local_fallback_authorized is True
 
@@ -441,6 +447,9 @@ def test_setup_authorize_local_fallback_reports_unavailable_blockers(
     assert accepted.fallback_authorization.local_status == "unavailable"
     assert accepted.fallback_authorization.automatic_local_fallback_authorized is False
     assert "Automatic local runtime fallback is unavailable and remains disabled." in captured.out
+    assert "Setup is complete. Mena is ready to record." in captured.out
+    assert "Next command: mena record" in captured.out
+    assert "Optional local fallback policy: unavailable" in captured.out
     assert "Fallback blocker:" in captured.out
     assert "selected faster-whisper model" in captured.out
 
