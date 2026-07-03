@@ -2289,6 +2289,28 @@ def test_main_export_command_defaults_to_latest_session_with_markdown_confirmati
     assert str(export_path).startswith(str(session_dir))
 
 
+def test_main_export_command_honors_data_root_for_pathless_export(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    session_dir, store, merged_record = _build_verified_export_session_bundle_at(
+        tmp_path / "sessions" / "session-2026-07-03"
+    )
+    _persist_summary_artifact_for_cli(store=store, merged_transcript_record=merged_record)
+
+    exit_code = main(["export", "--format", "markdown"], data_root=tmp_path)
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Using latest summarized session:" in captured.out
+    assert "Markdown notes exported to:" in captured.out
+    export_line = next(
+        line for line in captured.out.splitlines() if line.startswith("Markdown notes exported to:")
+    )
+    export_path = Path(export_line.removeprefix("Markdown notes exported to:").strip())
+    assert export_path.exists()
+    assert str(export_path).startswith(str(session_dir))
+
+
 def test_main_export_command_accepts_numbered_markdown_confirmation(
     tmp_path: Path, capsys: CaptureFixture[str]
 ) -> None:

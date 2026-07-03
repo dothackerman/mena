@@ -615,6 +615,87 @@ def test_export_workflow_reports_requested_summary_artifact_with_malformed_statu
         )
 
 
+def test_export_workflow_reports_requested_summary_artifact_with_session_id_mismatch(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    malformed_dir, malformed_store, malformed_merged = _build_export_session(
+        settings.paths.sessions_dir / "session-malformed"
+    )
+    malformed_summary = _persist_summary(
+        store=malformed_store,
+        merged_transcript_record=malformed_merged,
+        summary_name="summary/requested.json",
+    )
+    mismatched_session_id = "00000000-0000-0000-0000-000000000099"
+    mismatched_summary_id = f"{mismatched_session_id}:{malformed_summary.path}"
+    _update_artifact_manifest_record(
+        malformed_dir,
+        artifact_id=malformed_summary.id,
+        updates={
+            "id": mismatched_summary_id,
+            "session_id": mismatched_session_id,
+        },
+    )
+    _, valid_store, valid_merged = _build_export_session(
+        settings.paths.sessions_dir / "session-valid"
+    )
+    _persist_summary(
+        store=valid_store,
+        merged_transcript_record=valid_merged,
+        summary_name="summary/valid.json",
+    )
+
+    with pytest.raises(SessionIntegrityError, match="artifact_record_session_mismatch"):
+        run_export_workflow(
+            ExportCommandInput(
+                session_path=None,
+                summary_artifact_id=mismatched_summary_id,
+                export_format="markdown",
+            ),
+            settings=settings,
+            interaction=ScriptedInteraction(()),
+        )
+
+
+def test_export_workflow_reports_requested_summary_artifact_with_non_string_status(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    malformed_dir, malformed_store, malformed_merged = _build_export_session(
+        settings.paths.sessions_dir / "session-malformed"
+    )
+    malformed_summary = _persist_summary(
+        store=malformed_store,
+        merged_transcript_record=malformed_merged,
+        summary_name="summary/requested.json",
+    )
+    _update_artifact_manifest_record(
+        malformed_dir,
+        artifact_id=malformed_summary.id,
+        updates={"status": ["sealed"]},
+    )
+    _, valid_store, valid_merged = _build_export_session(
+        settings.paths.sessions_dir / "session-valid"
+    )
+    _persist_summary(
+        store=valid_store,
+        merged_transcript_record=valid_merged,
+        summary_name="summary/valid.json",
+    )
+
+    with pytest.raises(SessionIntegrityError, match="artifact_record_invalid"):
+        run_export_workflow(
+            ExportCommandInput(
+                session_path=None,
+                summary_artifact_id=malformed_summary.id,
+                export_format="markdown",
+            ),
+            settings=settings,
+            interaction=ScriptedInteraction(()),
+        )
+
+
 def test_export_workflow_reports_corrupt_requested_summary_artifact(
     tmp_path: Path,
 ) -> None:

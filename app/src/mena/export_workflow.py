@@ -152,7 +152,10 @@ def resolve_default_export_session(
 
     if summary_artifact_id is not None:
         for session_dir in _iter_session_directories(sessions_root):
-            records = _session_summary_records(session_dir=session_dir)
+            records = _session_summary_records(
+                session_dir=session_dir,
+                requested_summary_artifact_id=summary_artifact_id,
+            )
             if records is None:
                 if _manifest_contains_summary_artifact_id(
                     session_dir=session_dir,
@@ -197,7 +200,11 @@ def _session_summary_created_at(session_dir: Path) -> tuple[datetime, Path] | No
     return (newest[0], session_dir) if newest is not None else None
 
 
-def _session_summary_records(*, session_dir: Path) -> tuple[_SummaryManifestRecord, ...] | None:
+def _session_summary_records(
+    *,
+    session_dir: Path,
+    requested_summary_artifact_id: str | None = None,
+) -> tuple[_SummaryManifestRecord, ...] | None:
     try:
         resolved = resolve_session(session_dir)
         resolved_session_id = session_id(dict(resolved.record))
@@ -229,6 +236,17 @@ def _session_summary_records(*, session_dir: Path) -> tuple[_SummaryManifestReco
                     records.append(invalid_record)
                 continue
             if record.session_id != resolved_session_id:
+                if (
+                    record.id == requested_summary_artifact_id
+                    and record.artifact_type == SUMMARY_ARTIFACT_TYPE
+                ):
+                    records.append(
+                        _SummaryManifestRecord(
+                            id=record.id,
+                            path=record.path,
+                            metadata=record.metadata,
+                        )
+                    )
                 continue
             if record.artifact_type == SUMMARY_ARTIFACT_TYPE and record.status == "sealed":
                 records.append(
@@ -277,7 +295,7 @@ def _invalid_summary_manifest_record(
     if item.get("artifact_type") != SUMMARY_ARTIFACT_TYPE:
         return None
     raw_status = item.get("status")
-    if raw_status in ARTIFACT_STATUSES and raw_status != "sealed":
+    if isinstance(raw_status, str) and raw_status in ARTIFACT_STATUSES and raw_status != "sealed":
         return None
     metadata = item.get("metadata", {})
     artifact_id = item.get("id")

@@ -7,6 +7,7 @@ import json
 import os
 import sys
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from shlex import quote
@@ -912,7 +913,7 @@ def main(
                 session_path=Path(args.session_path) if args.session_path else None,
                 summary_artifact_id=args.summary_artifact_id,
                 export_format=args.export_format,
-                settings=app_settings,
+                settings=_settings_with_sessions_root(app_settings, sessions_root),
                 input_fn=input_fn,
             )
         except (
@@ -1380,6 +1381,13 @@ def _run_export_command(
         print("Export cancelled.")
         return 1
     return 0
+
+
+def _settings_with_sessions_root(settings: AppSettings, sessions_root: Path) -> AppSettings:
+    return replace(
+        settings,
+        paths=replace(settings.paths, sessions_dir=sessions_root),
+    )
 
 
 def _resolve_export_interaction(
