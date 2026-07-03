@@ -12,6 +12,7 @@ from mena.artifacts import ArtifactRecord, ArtifactStore
 from mena.processing import ProcessingStateError
 from mena.summarization import (
     SUMMARY_ARTIFACT_TYPE,
+    SUMMARY_ARTIFACT_VERSION,
     SummarizationContractError,
     SummaryArtifact,
 )
@@ -25,6 +26,10 @@ SUMMARY_MARKDOWN_EXPORT_CONTRACT = "summary-markdown-note-package-v3"
 
 class SummaryMarkdownExportError(RuntimeError):
     """Raised when markdown export cannot be produced."""
+
+
+class _IncompatibleSummaryMarkdownInput(SummaryMarkdownExportError):
+    """Raised when a sealed summary payload is not compatible with markdown export."""
 
 
 @dataclass(frozen=True)
@@ -97,9 +102,11 @@ def resolve_summary_markdown_input(
 
     candidates: list[tuple[datetime, str, str, ArtifactRecord, SummaryArtifact]] = []
     for record in records:
+        if record.version != SUMMARY_ARTIFACT_VERSION:
+            continue
         try:
             _, summary = _load_summary_artifact(record=record, store=store)
-        except SummaryMarkdownExportError:
+        except _IncompatibleSummaryMarkdownInput:
             # Old summary.v1 artifacts (and any payload that no longer satisfies the
             # strict summary.v2 contract) remain sealed in the manifest by design.
             # When auto-selecting export input, skip incompatible payloads so a valid
@@ -150,7 +157,7 @@ def _load_summary_artifact(
     try:
         summary = SummaryArtifact.from_dict(payload)
     except (SummarizationContractError, ProcessingStateError) as exc:
-        raise SummaryMarkdownExportError(
+        raise _IncompatibleSummaryMarkdownInput(
             f"Summary artifact {record.id} is not a valid summary.v2 payload."
         ) from exc
 

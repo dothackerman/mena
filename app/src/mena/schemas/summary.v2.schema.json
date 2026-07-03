@@ -220,9 +220,43 @@
       "$ref": "#/$defs/provider"
     },
     "request_records": {
+      "allOf": [
+        {
+          "contains": {
+            "properties": {
+              "product": {
+                "const": "timeline"
+              }
+            },
+            "required": ["product"]
+          }
+        },
+        {
+          "contains": {
+            "properties": {
+              "product": {
+                "const": "action_items"
+              }
+            },
+            "required": ["product"]
+          }
+        },
+        {
+          "contains": {
+            "properties": {
+              "product": {
+                "const": "general_summary"
+              }
+            },
+            "required": ["product"]
+          }
+        }
+      ],
       "items": {
         "$ref": "#/$defs/request_record"
       },
+      "maxItems": 3,
+      "minItems": 3,
       "type": "array"
     },
     "session_id": {

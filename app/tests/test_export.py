@@ -14,7 +14,11 @@ from mena.export import (
 )
 from mena.processing import ArtifactRef
 from mena.summarization import (
+    OLLAMA_SUMMARIZATION_NUM_CTX,
+    OLLAMA_SUMMARIZATION_SEED,
+    REQUIRED_NOTE_PRODUCTS,
     FakeSummarizationProvider,
+    ProductRequestRecord,
     SummarizationPolicy,
     SummaryArtifact,
     SummaryResult,
@@ -99,6 +103,29 @@ def test_resolve_summary_markdown_input_skips_incompatible_payloads(
 
     assert selected_record.id == valid_record.id
     assert selected_summary.created_at == "2026-05-18T17:00:00Z"
+
+
+def test_resolve_summary_markdown_input_rejects_corrupt_current_payloads(
+    tmp_path: Path,
+) -> None:
+    store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=tmp_path)
+    _persist_summary_artifact(
+        store=store,
+        created_at="2026-05-18T17:00:00Z",
+        name="summary/valid.json",
+    )
+    corrupt_record = store.store(
+        artifact_type="summary",
+        name="summary/new-corrupt-v2.json",
+        data=b"not-json",
+        version=2,
+        status="sealed",
+    )
+
+    with pytest.raises(SummaryMarkdownExportError, match="not valid JSON"):
+        resolve_summary_markdown_input(store=store)
+
+    assert corrupt_record.version == 2
 
 
 def test_resolve_summary_markdown_input_selects_v2_over_sealed_legacy_v1(
@@ -279,6 +306,7 @@ def _summary_result_for_export() -> SummaryResult:
         timeline=("Discussed milestones.", "Aligned on deliverables."),
         action_items=(),
         general_summary="The meeting was productive.",
+        request_records=_request_records_for_products(REQUIRED_NOTE_PRODUCTS),
     )
 
 
@@ -306,6 +334,7 @@ def _persist_summary_artifact(
         action_items=summary_result.action_items,
         general_summary=summary_result.general_summary,
         created_at=created_at,
+        request_records=summary_result.request_records,
     )
     record = persist_summary_artifact(
         store=store,
@@ -314,3 +343,18 @@ def _persist_summary_artifact(
         correction_overlay_record=None,
     )
     return record, summary_artifact
+
+
+def _request_records_for_products(products: tuple[str, ...]) -> tuple[ProductRequestRecord, ...]:
+    return tuple(
+        ProductRequestRecord(
+            product=product,
+            model="fake-summarizer",
+            num_ctx=OLLAMA_SUMMARIZATION_NUM_CTX,
+            temperature=0,
+            seed=OLLAMA_SUMMARIZATION_SEED,
+            prompt_eval_count=None,
+            eval_count=None,
+        )
+        for product in products
+    )

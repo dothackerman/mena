@@ -58,6 +58,7 @@ SUPPORTED_PROMPT_POLICIES = frozenset(
     {LEGACY_PROMPT_POLICY, SCHEMA_PROMPT_POLICY, LANGUAGE_PROMPT_POLICY, PROMPT_POLICY}
 )
 DEFAULT_LANGUAGE = "en"
+REQUIRED_NOTE_PRODUCTS = ("timeline", "action_items", "general_summary")
 
 # One small per-product schema each. Constrained decoding (`format`) guarantees
 # shape, never content; a large multi-field schema measurably degrades small
@@ -1071,8 +1072,10 @@ def _looks_like_english_drift(text: str) -> bool:
 
 
 def _estimate_prompt_tokens(text: str) -> int:
-    # Conservative chars/4 estimate; deliberately over-counts to fail early.
-    return (len(text) + 3) // 4
+    # Ollama does not expose a preflight tokenizer here. Counting UTF-8 bytes is
+    # a hard upper bound for byte-fallback tokenizers and avoids len(text)/4
+    # undercounts for short words, IDs, and punctuation-heavy notes.
+    return len(text.encode("utf-8"))
 
 
 def _guard_token_budget(
@@ -1261,7 +1264,21 @@ def _request_records(
         return ()
     if not isinstance(value, list):
         raise SummarizationContractError("Field 'request_records' must be an array.")
-    return tuple(ProductRequestRecord.from_dict(record) for record in value)
+    records = tuple(ProductRequestRecord.from_dict(record) for record in value)
+    if required:
+        products = tuple(record.product for record in records)
+        expected = set(REQUIRED_NOTE_PRODUCTS)
+        actual = set(products)
+        if len(records) != len(REQUIRED_NOTE_PRODUCTS) or actual != expected:
+            raise SummarizationContractError(
+                "Field 'request_records' must contain exactly one record for each "
+                "note product: timeline, action_items, general_summary."
+            )
+        if len(actual) != len(products):
+            raise SummarizationContractError(
+                "Field 'request_records' must not contain duplicate note products."
+            )
+    return records
 
 
 def _timestamp(now: datetime | None) -> str:

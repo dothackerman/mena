@@ -2,7 +2,11 @@ from dataclasses import replace
 
 from mena.processing import ArtifactRef
 from mena.summarization import (
+    OLLAMA_SUMMARIZATION_NUM_CTX,
+    OLLAMA_SUMMARIZATION_SEED,
+    REQUIRED_NOTE_PRODUCTS,
     FakeSummarizationProvider,
+    ProductRequestRecord,
     SummarizationPolicy,
     SummaryActionItem,
     SummaryArtifact,
@@ -143,6 +147,7 @@ def _summary_artifact(
         action_items=result.action_items,
         general_summary=result.general_summary,
         created_at="2026-05-18T17:00:00Z",
+        request_records=result.request_records,
     )
 
 
@@ -164,4 +169,20 @@ def _summary_result(
             )
         ),
         general_summary="The meeting focused on database migration risk.",
+        request_records=_request_records_for_products(REQUIRED_NOTE_PRODUCTS),
+    )
+
+
+def _request_records_for_products(products: tuple[str, ...]) -> tuple[ProductRequestRecord, ...]:
+    return tuple(
+        ProductRequestRecord(
+            product=product,
+            model="fake-summarizer",
+            num_ctx=OLLAMA_SUMMARIZATION_NUM_CTX,
+            temperature=0,
+            seed=OLLAMA_SUMMARIZATION_SEED,
+            prompt_eval_count=None,
+            eval_count=None,
+        )
+        for product in products
     )

@@ -127,7 +127,11 @@ from mena.setup import (
     persist_runtime_profile_state,
 )
 from mena.summarization import (
+    OLLAMA_SUMMARIZATION_NUM_CTX,
+    OLLAMA_SUMMARIZATION_SEED,
+    REQUIRED_NOTE_PRODUCTS,
     FakeSummarizationProvider,
+    ProductRequestRecord,
     SummarizationError,
     SummarizationPolicy,
     SummarizationProvider,
@@ -4165,6 +4169,7 @@ def _summary_result_for_export() -> SummaryResult:
         timeline=("Agenda covered.",),
         action_items=(),
         general_summary="The team aligned on the plan.",
+        request_records=_request_records_for_products(REQUIRED_NOTE_PRODUCTS),
     )
 
 
@@ -4198,9 +4203,25 @@ def _persist_summary_artifact_for_cli(
             action_items=summary_result.action_items,
             general_summary=summary_result.general_summary,
             created_at="2026-05-20T10:00:00Z",
+            request_records=summary_result.request_records,
         ),
         name="summary/final.json",
         correction_overlay_record=None,
+    )
+
+
+def _request_records_for_products(products: tuple[str, ...]) -> tuple[ProductRequestRecord, ...]:
+    return tuple(
+        ProductRequestRecord(
+            product=product,
+            model="fake-summarizer",
+            num_ctx=OLLAMA_SUMMARIZATION_NUM_CTX,
+            temperature=0,
+            seed=OLLAMA_SUMMARIZATION_SEED,
+            prompt_eval_count=None,
+            eval_count=None,
+        )
+        for product in products
     )
 
 

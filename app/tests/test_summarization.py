@@ -32,10 +32,12 @@ from mena.summarization import (
     OLLAMA_SUMMARIZATION_NUM_CTX,
     OLLAMA_SUMMARIZATION_SEED,
     PROMPT_POLICY,
+    REQUIRED_NOTE_PRODUCTS,
     SCHEMA_PROMPT_POLICY,
     SUMMARIZATION_STAGE,
     FakeSummarizationProvider,
     OllamaSummarizationProvider,
+    ProductRequestRecord,
     SummarizationContractError,
     SummarizationError,
     SummarizationPolicy,
@@ -284,6 +286,7 @@ def test_summarization_stage_does_not_reuse_old_prompt_policy_completed_output()
         action_items=old_result.action_items,
         general_summary=old_result.general_summary,
         created_at="2026-05-18T17:00:00Z",
+        request_records=old_result.request_records,
     )
     old_record = persist_summary_artifact(
         store=store,
@@ -820,6 +823,33 @@ def test_ollama_summarization_provider_records_request_provenance(
         assert record.eval_count == 42
 
 
+def test_ollama_summarization_provider_rejects_short_word_prompt_over_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OllamaSummarizationProvider(model="test-model")
+    merged_transcript = _summary_request().merged_transcript
+    request = replace(
+        _summary_request(),
+        merged_transcript=replace(
+            merged_transcript,
+            segments=(
+                replace(
+                    merged_transcript.segments[0],
+                    text=" ".join(["a"] * OLLAMA_SUMMARIZATION_NUM_CTX),
+                ),
+            ),
+        ),
+    )
+
+    def fail_if_called(_path: str, _payload: object) -> dict[str, object]:
+        raise AssertionError("oversized prompt should fail before provider call")
+
+    monkeypatch.setattr(provider, "_post_json", fail_if_called)
+
+    with pytest.raises(SummarizationTokenBudgetError, match="exceed the configured"):
+        provider.summarize(request)
+
+
 def test_ollama_summarization_provider_instructs_non_english_output_language(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1003,6 +1033,7 @@ def test_summary_artifact_from_dict_validates_contract() -> None:
         action_items=_summary_result().action_items,
         general_summary=_summary_result().general_summary,
         created_at="2026-05-18T17:00:00Z",
+        request_records=_summary_result().request_records,
     )
     payload = artifact.to_dict()
     payload["version"] = 99
@@ -1033,6 +1064,7 @@ def test_summary_artifact_from_dict_requires_request_records() -> None:
         action_items=_summary_result().action_items,
         general_summary=_summary_result().general_summary,
         created_at="2026-05-18T17:00:00Z",
+        request_records=_summary_result().request_records,
     )
 
     payload = artifact.to_dict()
@@ -1044,6 +1076,63 @@ def test_summary_artifact_from_dict_requires_request_records() -> None:
     payload["request_records"] = None
     with pytest.raises(SummarizationContractError, match="request_records' is required"):
         SummaryArtifact.from_dict(payload)
+
+
+@pytest.mark.parametrize(
+    ("records", "message"),
+    [
+        ((), "exactly one record for each note product"),
+        (
+            (
+                "timeline",
+                "action_items",
+            ),
+            "exactly one record for each note product",
+        ),
+        (
+            (
+                "timeline",
+                "timeline",
+                "general_summary",
+            ),
+            "exactly one record for each note product",
+        ),
+        (
+            (
+                "timeline",
+                "action_items",
+                "general_summary",
+                "other",
+            ),
+            "exactly one record for each note product",
+        ),
+    ],
+)
+def test_summary_artifact_from_dict_requires_complete_request_records(
+    records: tuple[str, ...],
+    message: str,
+) -> None:
+    artifact = SummaryArtifact(
+        version=2,
+        session_id=SESSION_ID,
+        merged_transcript_artifact=ArtifactRef(
+            id=f"{SESSION_ID}:artifacts/merged_transcript/merged.json",
+            artifact_type="merged_transcript",
+            version=1,
+            sha256="1" * 64,
+        ),
+        manual_notes_artifact=None,
+        policy=SummarizationPolicy(language="en").to_dict(),
+        provider=FakeSummarizationProvider(result=_summary_result()).metadata,
+        timeline=_summary_result().timeline,
+        action_items=_summary_result().action_items,
+        general_summary=_summary_result().general_summary,
+        created_at="2026-05-18T17:00:00Z",
+        request_records=_request_records_for_products(records),
+    )
+
+    with pytest.raises(SummarizationContractError, match=message):
+        SummaryArtifact.from_dict(artifact.to_dict())
 
 
 def test_provider_request_options_participate_in_reuse_identity() -> None:
@@ -1090,6 +1179,7 @@ def test_summary_artifact_from_dict_accepts_legacy_prompt_policy() -> None:
         action_items=_summary_result().action_items,
         general_summary=_summary_result().general_summary,
         created_at="2026-05-18T17:00:00Z",
+        request_records=_summary_result().request_records,
     )
     payload = artifact.to_dict()
     cast(dict[str, object], payload["policy"])["prompt_policy"] = "meeting-summary-json-v1"
@@ -1128,11 +1218,49 @@ def test_summary_schema_validates_contract() -> None:
         action_items=_summary_result().action_items,
         general_summary=_summary_result().general_summary,
         created_at="2026-05-18T17:00:00Z",
+        request_records=_summary_result().request_records,
     )
     payload = artifact.to_dict()
 
     Draft202012Validator.check_schema(_load_summary_schema())
     Draft202012Validator(_load_summary_schema(), format_checker=FormatChecker()).validate(payload)
+
+
+@pytest.mark.parametrize(
+    "records",
+    [
+        [],
+        [
+            "timeline",
+            "timeline",
+            "general_summary",
+        ],
+    ],
+)
+def test_summary_schema_rejects_incomplete_request_records(records: list[str]) -> None:
+    artifact = SummaryArtifact(
+        version=2,
+        session_id=SESSION_ID,
+        merged_transcript_artifact=ArtifactRef(
+            id=f"{SESSION_ID}:artifacts/merged_transcript/merged.json",
+            artifact_type="merged_transcript",
+            version=1,
+            sha256="1" * 64,
+        ),
+        manual_notes_artifact=None,
+        policy=SummarizationPolicy(language="en").to_dict(),
+        provider=FakeSummarizationProvider(result=_summary_result()).metadata,
+        timeline=_summary_result().timeline,
+        action_items=_summary_result().action_items,
+        general_summary=_summary_result().general_summary,
+        created_at="2026-05-18T17:00:00Z",
+        request_records=_request_records_for_products(tuple(records)),
+    )
+    payload = artifact.to_dict()
+
+    validator = Draft202012Validator(_load_summary_schema(), format_checker=FormatChecker())
+    with pytest.raises(ValidationError):
+        validator.validate(payload)
 
 
 def test_summary_schema_rejects_legacy_provider_config_inside_policy() -> None:
@@ -1152,6 +1280,7 @@ def test_summary_schema_rejects_legacy_provider_config_inside_policy() -> None:
         action_items=_summary_result().action_items,
         general_summary=_summary_result().general_summary,
         created_at="2026-05-18T17:00:00Z",
+        request_records=_summary_result().request_records,
     )
     payload = artifact.to_dict()
     cast(dict[str, object], payload["policy"])["provider_config_id"] = "provider"
@@ -1299,6 +1428,22 @@ def _summary_result() -> SummaryResult:
             SummaryActionItem(text="Finish database migration.", owner="You", due="Friday"),
         ),
         general_summary="The meeting focused on database migration risk.",
+        request_records=_request_records_for_products(REQUIRED_NOTE_PRODUCTS),
+    )
+
+
+def _request_records_for_products(products: tuple[str, ...]) -> tuple[ProductRequestRecord, ...]:
+    return tuple(
+        ProductRequestRecord(
+            product=product,
+            model="fake-summarizer",
+            num_ctx=OLLAMA_SUMMARIZATION_NUM_CTX,
+            temperature=0,
+            seed=OLLAMA_SUMMARIZATION_SEED,
+            prompt_eval_count=None,
+            eval_count=None,
+        )
+        for product in products
     )
 
 
