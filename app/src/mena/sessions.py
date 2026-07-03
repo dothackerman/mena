@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from mena.artifacts import FileSystemArtifactStore
 from mena.fileops import write_json_atomically
-from mena.processing import latest_resumable_processing_state
+from mena.processing import has_completed_processing_pipeline
 from mena.profiles import CaptureProfileSelection
 from mena.settings import AppSettings
 from mena.timestamps import parse_utc_timestamp, utc_timestamp, utc_timestamp_for_filename
@@ -298,9 +298,7 @@ def _processing_is_complete(
     try:
         session_id_value = session_id(session_record)
         store = FileSystemArtifactStore(session_id=session_id_value, session_dir=session_dir)
-        return latest_resumable_processing_state(store, session_id_value) is None and bool(
-            tuple(store.list(artifact_type="processing_state"))
-        )
+        return has_completed_processing_pipeline(store, session_id_value)
     except Exception:
         return False
 

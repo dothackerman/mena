@@ -2187,6 +2187,31 @@ def test_main_process_without_session_path_prefers_unprocessed_recording(
     assert calls == [unprocessed.record_path]
 
 
+def test_main_process_without_session_path_keeps_failed_processing_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    session = _create_runtime_session(
+        settings,
+        status="recorded",
+        created_at="2026-05-19T10:00:00Z",
+    )
+    _mark_processing_failed(session)
+    calls: list[Path] = []
+
+    def _fake_run_processing_command(**kwargs: object) -> int:
+        calls.append(cast(Path, kwargs["session_path"]))
+        return 0
+
+    monkeypatch.setattr("mena.cli._run_processing_command", _fake_run_processing_command)
+
+    exit_code = main(["process"], settings=settings)
+
+    assert exit_code == 0
+    assert calls == [session.record_path]
+
+
 def test_main_process_without_session_path_prompts_for_multiple_candidates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -5676,6 +5701,26 @@ def _mark_processing_complete(session: CreatedSession) -> None:
         stage="semantic_coherence",
         input_artifacts=(),
         output_artifacts=(ArtifactRef.from_record(output),),
+        attempt=1,
+        now=datetime(2026, 5, 19, 13, 0, 0, tzinfo=UTC),
+    )
+
+
+def _mark_processing_failed(session: CreatedSession) -> None:
+    record = json.loads(session.record_path.read_text(encoding="utf-8"))
+    store = FileSystemArtifactStore(
+        session_id=cast(str, record["id"]),
+        session_dir=session.bundle_path,
+    )
+    ledger = ProcessingStageLedger(
+        store=store,
+        session_id=cast(str, record["id"]),
+        run_id="failed-process-run",
+    )
+    ledger.mark_failed(
+        stage="semantic_coherence",
+        input_artifacts=(),
+        error=ProcessingErrorInfo(message="processing failed", retryable=False),
         attempt=1,
         now=datetime(2026, 5, 19, 13, 0, 0, tzinfo=UTC),
     )

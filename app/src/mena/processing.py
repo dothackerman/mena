@@ -461,6 +461,21 @@ def latest_resumable_processing_state(
     return None
 
 
+def has_completed_processing_pipeline(store: ArtifactStore, session_id: str) -> bool:
+    """Return True when the latest processing checkpoint completed the pipeline."""
+
+    latest = _latest_processing_state(
+        store=store,
+        session_id=session_id,
+        allowed_statuses=frozenset({"running", "completed", "failed", "skipped"}),
+    )
+    return (
+        latest is not None
+        and latest.status in {"completed", "skipped"}
+        and _is_final_processing_stage(latest)
+    )
+
+
 def _is_final_processing_stage(state: ProcessingStageState) -> bool:
     return state.stage == "semantic_coherence"
 
