@@ -2269,6 +2269,44 @@ def test_main_export_command_reports_newest_summary_session_with_malformed_unrel
     assert "Markdown notes exported to:" not in captured.out
 
 
+def test_main_export_command_reports_newest_summary_session_with_malformed_summary_record(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    _, older_store, older_merged = _build_verified_export_session_bundle_at(
+        settings.paths.sessions_dir / "session-older"
+    )
+    _persist_summary_artifact_for_cli(
+        store=older_store,
+        merged_transcript_record=older_merged,
+        summary_created_at="2026-07-03T08:00:00Z",
+        summary_name="summary/older.json",
+    )
+    malformed_dir, malformed_store, malformed_merged = _build_verified_export_session_bundle_at(
+        settings.paths.sessions_dir / "session-newer-malformed"
+    )
+    malformed_summary = _persist_summary_artifact_for_cli(
+        store=malformed_store,
+        merged_transcript_record=malformed_merged,
+        summary_created_at="2026-07-03T09:00:00Z",
+        summary_name="summary/newer.json",
+    )
+    _update_artifact_manifest_record(
+        malformed_dir,
+        artifact_id=malformed_summary.id,
+        updates={"sha256": "not-a-digest"},
+    )
+
+    exit_code = main(["export"], settings=settings, input_fn=lambda _prompt: "y")
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "Session bundle failed integrity verification" in captured.out
+    assert "artifact_record_invalid" in captured.out
+    assert "Using latest summarized session:" not in captured.out
+    assert "Markdown notes exported to:" not in captured.out
+
+
 def test_main_export_command_skips_corrupt_non_selected_summary_during_default_discovery(
     tmp_path: Path, capsys: CaptureFixture[str]
 ) -> None:
@@ -2299,6 +2337,44 @@ def test_main_export_command_skips_corrupt_non_selected_summary_during_default_d
     assert exit_code == 0
     assert f"Using latest summarized session: {valid_dir}" in captured.out
     assert "Markdown notes exported to:" in captured.out
+
+
+def test_main_export_command_reports_corrupt_legacy_summary_during_default_discovery(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    _, older_store, older_merged = _build_verified_export_session_bundle_at(
+        settings.paths.sessions_dir / "session-older"
+    )
+    _persist_summary_artifact_for_cli(
+        store=older_store,
+        merged_transcript_record=older_merged,
+        summary_created_at="2026-07-03T08:00:00Z",
+        summary_name="summary/older.json",
+    )
+    corrupt_dir, corrupt_store, corrupt_merged = _build_verified_export_session_bundle_at(
+        settings.paths.sessions_dir / "session-legacy-corrupt"
+    )
+    corrupt_summary = _persist_summary_artifact_for_cli(
+        store=corrupt_store,
+        merged_transcript_record=corrupt_merged,
+        summary_created_at="2026-07-03T09:00:00Z",
+        summary_name="summary/legacy.json",
+    )
+    _update_artifact_manifest_record(
+        corrupt_dir,
+        artifact_id=corrupt_summary.id,
+        metadata_updates={"summary_created_at": None},
+    )
+    (corrupt_dir / corrupt_summary.path).write_text("{", encoding="utf-8")
+
+    exit_code = main(["export"], settings=settings, input_fn=lambda _prompt: "y")
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "Session bundle failed integrity verification" in captured.out
+    assert "Using latest summarized session:" not in captured.out
+    assert "Markdown notes exported to:" not in captured.out
 
 
 def test_main_export_command_default_discovery_does_not_create_unsummarized_artifacts_dir(
@@ -2375,6 +2451,46 @@ def test_main_export_command_reports_requested_summary_session_with_malformed_un
         summary_name="summary/requested.json",
     )
     _append_malformed_artifact_manifest_record(malformed_dir)
+    _, valid_store, valid_merged = _build_verified_export_session_bundle_at(
+        settings.paths.sessions_dir / "session-valid"
+    )
+    _persist_summary_artifact_for_cli(
+        store=valid_store,
+        merged_transcript_record=valid_merged,
+        summary_name="summary/valid.json",
+    )
+
+    exit_code = main(
+        ["export", "--summary-artifact-id", requested_summary.id],
+        settings=settings,
+        input_fn=lambda _prompt: "y",
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "Session bundle failed integrity verification" in captured.out
+    assert "artifact_record_invalid" in captured.out
+    assert "Summary artifact not found" not in captured.out
+    assert "Markdown notes exported to:" not in captured.out
+
+
+def test_main_export_command_reports_requested_summary_session_with_malformed_summary_record(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    malformed_dir, malformed_store, malformed_merged = _build_verified_export_session_bundle_at(
+        settings.paths.sessions_dir / "session-malformed"
+    )
+    requested_summary = _persist_summary_artifact_for_cli(
+        store=malformed_store,
+        merged_transcript_record=malformed_merged,
+        summary_name="summary/requested.json",
+    )
+    _update_artifact_manifest_record(
+        malformed_dir,
+        artifact_id=requested_summary.id,
+        updates={"sha256": "not-a-digest"},
+    )
     _, valid_store, valid_merged = _build_verified_export_session_bundle_at(
         settings.paths.sessions_dir / "session-valid"
     )
@@ -4457,6 +4573,33 @@ def _append_malformed_artifact_manifest_record(session_dir: Path) -> None:
             "status": "sealed",
         }
     )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+
+def _update_artifact_manifest_record(
+    session_dir: Path,
+    *,
+    artifact_id: str,
+    updates: Mapping[str, object] | None = None,
+    metadata_updates: Mapping[str, object | None] | None = None,
+) -> None:
+    manifest_path = session_artifact_manifest_path(session_dir)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for item in manifest["artifacts"]:
+        if item["id"] != artifact_id:
+            continue
+        if updates is not None:
+            item.update(updates)
+        if metadata_updates is not None:
+            metadata = item.setdefault("metadata", {})
+            for key, value in metadata_updates.items():
+                if value is None:
+                    metadata.pop(key, None)
+                else:
+                    metadata[key] = value
+        break
+    else:
+        raise AssertionError(f"Artifact record not found: {artifact_id}")
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
 

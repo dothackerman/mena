@@ -7,7 +7,8 @@ import json
 import os
 import sys
 from collections.abc import Callable, Mapping, Sequence
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from shlex import quote
 from typing import Any, TypeVar, cast
@@ -179,6 +180,16 @@ ChoiceT = TypeVar("ChoiceT")
 
 
 ProviderValidationError = processing_orchestration.ProviderValidationError
+
+_INVALID_SUMMARY_CREATED_AT = datetime.max.replace(tzinfo=UTC)
+
+
+@dataclass(frozen=True)
+class _SummaryManifestRecord:
+    id: str | None
+    path: str | None
+    metadata: Mapping[str, object]
+    record: ArtifactRecord | None = None
 
 
 SourceAudioInput = processing_orchestration.SourceAudioInput
@@ -1233,13 +1244,13 @@ def _session_summary_created_at(session_dir: Path) -> tuple[datetime, Path] | No
         summary_created_at = _summary_record_created_at(session_dir=session_dir, record=record)
         if summary_created_at is None:
             continue
-        summary_key = (summary_created_at, record.path, record.id)
+        summary_key = (summary_created_at, record.path or "", record.id or "")
         if newest is None or summary_key > newest:
             newest = summary_key
     return (newest[0], session_dir) if newest is not None else None
 
 
-def _session_summary_records(*, session_dir: Path) -> tuple[ArtifactRecord, ...] | None:
+def _session_summary_records(*, session_dir: Path) -> tuple[_SummaryManifestRecord, ...] | None:
     try:
         resolved = resolve_session(session_dir)
         resolved_session_id = session_id(dict(resolved.record))
@@ -1255,19 +1266,33 @@ def _session_summary_records(*, session_dir: Path) -> tuple[ArtifactRecord, ...]
         artifacts = data.get("artifacts")
         if not isinstance(artifacts, list):
             return None
-        records: list[ArtifactRecord] = []
+        records: list[_SummaryManifestRecord] = []
         for item in artifacts:
             if not isinstance(item, dict):
                 continue
+            raw_record = cast(Mapping[str, object], item)
             try:
-                record = ArtifactRecord.from_dict(cast(Mapping[str, object], item))
+                record = ArtifactRecord.from_dict(raw_record)
             except ArtifactStoreError:
+                invalid_record = _invalid_summary_manifest_record(
+                    item=raw_record,
+                    resolved_session_id=resolved_session_id,
+                )
+                if invalid_record is not None:
+                    records.append(invalid_record)
                 continue
             if record.session_id != resolved_session_id:
                 continue
             if record.artifact_type == SUMMARY_ARTIFACT_TYPE and record.status == "sealed":
-                records.append(record)
-        return tuple(sorted(records, key=lambda record: record.path))
+                records.append(
+                    _SummaryManifestRecord(
+                        id=record.id,
+                        path=record.path,
+                        metadata=record.metadata,
+                        record=record,
+                    )
+                )
+        return tuple(sorted(records, key=lambda record: record.path or ""))
     except (
         ArtifactStoreError,
         FileNotFoundError,
@@ -1279,25 +1304,52 @@ def _session_summary_records(*, session_dir: Path) -> tuple[ArtifactRecord, ...]
         return None
 
 
+def _invalid_summary_manifest_record(
+    *,
+    item: Mapping[str, object],
+    resolved_session_id: str,
+) -> _SummaryManifestRecord | None:
+    if item.get("session_id") != resolved_session_id:
+        return None
+    if item.get("artifact_type") != SUMMARY_ARTIFACT_TYPE:
+        return None
+    if item.get("status") != "sealed":
+        return None
+    metadata = item.get("metadata", {})
+    artifact_id = item.get("id")
+    path = item.get("path")
+    return _SummaryManifestRecord(
+        id=artifact_id if isinstance(artifact_id, str) else None,
+        path=path if isinstance(path, str) else None,
+        metadata=metadata if isinstance(metadata, Mapping) else {},
+    )
+
+
 def _summary_record_created_at(
     *,
     session_dir: Path,
-    record: ArtifactRecord,
+    record: _SummaryManifestRecord,
 ) -> datetime | None:
     metadata_created_at = record.metadata.get("summary_created_at")
     if isinstance(metadata_created_at, str):
-        return _parse_iso_timestamp(metadata_created_at)
+        return _parse_iso_timestamp(metadata_created_at) or _INVALID_SUMMARY_CREATED_AT
+    if record.record is None:
+        return _INVALID_SUMMARY_CREATED_AT
+    if record.path is None:
+        return _INVALID_SUMMARY_CREATED_AT
 
     try:
         data = json.loads((session_dir / record.path).read_text(encoding="utf-8"))
         if not isinstance(data, dict):
-            return None
+            return _INVALID_SUMMARY_CREATED_AT
         if data.get("version") != SUMMARY_SCHEMA_VERSION:
-            return None
+            return _INVALID_SUMMARY_CREATED_AT
         created_at = data.get("created_at")
-        return _parse_iso_timestamp(created_at) if isinstance(created_at, str) else None
+        if not isinstance(created_at, str):
+            return _INVALID_SUMMARY_CREATED_AT
+        return _parse_iso_timestamp(created_at) or _INVALID_SUMMARY_CREATED_AT
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return None
+        return _INVALID_SUMMARY_CREATED_AT
 
 
 def _iter_session_directories(sessions_root: Path) -> tuple[Path, ...]:
