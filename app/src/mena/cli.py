@@ -1156,8 +1156,11 @@ def _resolve_export_format(
             return "markdown"
         print("Available export format:")
         print("  1) Markdown (.md)")
-        answer = input_reader("Export as Markdown notes? [Y/n]: ").strip().lower()
-        if answer in {"", "y", "yes"}:
+        try:
+            answer = input_reader("Export as Markdown notes? [Y/n]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return None
+        if answer in {"", "1", "y", "yes"}:
             return "markdown"
         return None
     return export_format
@@ -1181,7 +1184,10 @@ def _resolve_export_session_path(
             raise ValueError(f"Summary artifact not found: {summary_artifact_id}.")
         raise ValueError("No summarized sessions were found. Run `mena summarize` first.")
 
-    print(f"Using latest summarized session: {resolved}")
+    if summary_artifact_id is not None:
+        print(f"Using session containing requested summary artifact: {resolved}")
+    else:
+        print(f"Using latest summarized session: {resolved}")
     return resolved
 
 
