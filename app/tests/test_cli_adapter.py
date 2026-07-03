@@ -96,7 +96,8 @@ def test_console_record_interaction_reports_adapter_notices(
     assert "Created session session-1" in output
     assert "Capture recovered: route restored" in output
     assert (
-        "Selected playback stream ended during capture; local microphone capture continued. "
+        "Selected playback stream ended during capture; "
+        "local microphone capture may have continued. "
         "Selected playback stream ended"
     ) in output
     assert "Capture degraded (system audio): Dedicated route unavailable" in output

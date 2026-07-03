@@ -317,7 +317,7 @@ def _format_continued_capture_summary(selected_sources: Sequence[object]) -> str
     selected_source_ids = tuple(source for source in selected_sources if isinstance(source, str))
     continuing_sources = tuple(source for source in selected_source_ids if source != "system_audio")
     if "local_mic" in continuing_sources:
-        return "local microphone capture continued"
+        return "local microphone capture may have continued"
     if continuing_sources:
         return "other selected source capture may have continued"
     return "no other selected source was active"
