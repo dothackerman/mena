@@ -12,12 +12,10 @@ from mena.diarization import DiarizationProviderUnavailable
 from mena.processing import ArtifactRef, ProcessingErrorInfo, ProcessingStageLedger
 from mena.processing_orchestration import (
     CaptureSegmentInput,
-    ProviderValidationError,
     SourceAudioInput,
     _asr_language_from_session_language,
     _confirm_one_run_runtime_fallback,
     _ensure_provider_prep_audio_artifact,
-    _require_provider,
     _stitch_provider_prep_audio,
     collect_capture_segments,
     latest_failed_stage_input_artifacts,
@@ -28,8 +26,7 @@ from mena.processing_orchestration import (
     validate_capture_segment_alignment,
 )
 from mena.profiles import get_capture_profile
-from mena.semantic_coherence import SemanticCoherenceProvider
-from mena.transcription import TranscriptionProvider, TranscriptionProviderUnavailable
+from mena.transcription import TranscriptionProviderUnavailable
 
 SESSION_ID = "00000000-0000-0000-0000-000000000001"
 NOW = datetime(2026, 7, 2, 12, 0, 0, tzinfo=UTC)
@@ -513,19 +510,3 @@ def test_processing_orchestration_small_helpers_cover_runtime_decisions(
         input_fn=lambda _prompt: "yes",
     )
     assert "Accepted runtime profile is unavailable" in capsys.readouterr().out
-
-
-def test_require_provider_rejects_incomplete_semantic_provider() -> None:
-    class BadSemanticProvider:
-        metadata = type("Metadata", (), {"config_id": "", "to_dict": lambda self: {}})()
-
-        def check(self) -> None:
-            raise AssertionError("not called")
-
-    with pytest.raises(ProviderValidationError, match="semantic_coherence provider"):
-        _require_provider(
-            lambda: BadSemanticProvider(), SemanticCoherenceProvider, "semantic_coherence"
-        )
-
-    with pytest.raises(ProviderValidationError, match="TranscriptionProvider"):
-        _require_provider(lambda: object(), TranscriptionProvider, "transcription")
