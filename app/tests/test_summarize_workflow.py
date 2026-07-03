@@ -209,6 +209,47 @@ def test_summarize_workflow_uses_unique_runtime_profile_provenance_per_run(
     assert all(run_id.startswith("summarize-") for run_id in run_ids)
 
 
+def test_summarize_workflow_releases_terminal_runtime_after_successful_run(
+    tmp_path: Path,
+) -> None:
+    session_dir, _, _, _ = _build_summarize_session_bundle(tmp_path)
+    releases: list[dict[str, object]] = []
+
+    def _release(**kwargs: object) -> None:
+        releases.append(kwargs)
+
+    def _stage(**kwargs: object) -> SimpleNamespace:
+        store = cast(ArtifactStore, kwargs["store"])
+        return SimpleNamespace(
+            summary_record=store.store(
+                artifact_type="summary",
+                name="summary/final.json",
+                data=b"{}",
+                version=1,
+            ),
+        )
+
+    assert (
+        run_summarization_command(
+            session_path=session_dir,
+            manual_notes=None,
+            language=None,
+            settings=AppSettings.from_env(env={}, home=tmp_path),
+            runtime_profile_selector_fn=_runtime_selection,
+            runtime_profile_store_fn=lambda **_kwargs: None,
+            runtime_summarization_binder_fn=lambda **_kwargs: SimpleNamespace(),
+            run_summarization_stage_fn=_stage,
+            terminal_llm_release_fn=_release,
+        )
+        == 0
+    )
+
+    assert len(releases) == 1
+    assert releases[0]["stage"] == "summarization"
+    assert releases[0]["boundary"] == "summarize"
+    assert releases[0]["attempt"] == 1
+
+
 def test_summarize_workflow_releases_terminal_runtime_after_stage_failure(
     tmp_path: Path,
 ) -> None:
