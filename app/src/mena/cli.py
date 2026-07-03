@@ -6,7 +6,7 @@ import argparse
 import json
 import os
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from shlex import quote
@@ -15,10 +15,12 @@ from uuid import uuid4
 
 from mena import processing, processing_orchestration, summarize_workflow
 from mena.artifacts import (
+    ARTIFACT_MANIFEST_VERSION,
     ArtifactRecord,
     ArtifactStore,
     ArtifactStoreError,
     FileSystemArtifactStore,
+    session_artifact_manifest_path,
 )
 from mena.correction_overlay import (
     CorrectionOverlayContractError,
@@ -43,7 +45,6 @@ from mena.discovery import (
 from mena.export import (
     SummaryMarkdownExportError,
     export_summary_markdown,
-    resolve_summary_markdown_input,
 )
 from mena.fields import optional_str, required_int, required_str
 from mena.interaction import (
@@ -136,6 +137,7 @@ from mena.setup_workflow import (
 )
 from mena.summarization import (
     SUMMARY_ARTIFACT_TYPE,
+    SUMMARY_SCHEMA_VERSION,
     SummarizationError,
     run_summarization_stage,
 )
@@ -1124,12 +1126,18 @@ def _run_export_command(
         summary_artifact_id=summary_artifact_id,
         settings=settings,
     )
+    verified = load_verified_session_bundle(resolved_session_path)
+    if session_path is None:
+        if summary_artifact_id is not None:
+            print(f"Using session containing requested summary artifact: {resolved_session_path}")
+        else:
+            print(f"Using latest summarized session: {resolved_session_path}")
+
     selected_format = _resolve_export_format(export_format=export_format, input_fn=input_fn)
     if selected_format is None:
         print("Export cancelled.")
         return 1
 
-    verified = load_verified_session_bundle(resolved_session_path)
     session_record = dict(verified.record)
     session_id_value = session_id(session_record)
 
@@ -1185,10 +1193,6 @@ def _resolve_export_session_path(
             raise ValueError(f"Summary artifact not found: {summary_artifact_id}.")
         raise ValueError("No summarized sessions were found. Run `mena summarize` first.")
 
-    if summary_artifact_id is not None:
-        print(f"Using session containing requested summary artifact: {resolved}")
-    else:
-        print(f"Using latest summarized session: {resolved}")
     return resolved
 
 
@@ -1202,13 +1206,9 @@ def _resolve_default_export_session(
 
     if summary_artifact_id is not None:
         for session_dir in _iter_session_directories(sessions_root):
-            store = _export_summary_store(session_dir=session_dir)
-            if store is None:
-                continue
-            records = _list_export_summary_records(store=store)
+            records = _session_summary_records(session_dir=session_dir)
             if records is None or all(record.id != summary_artifact_id for record in records):
                 continue
-            resolve_summary_markdown_input(store=store, summary_record_id=summary_artifact_id)
             return session_dir
         return None
 
@@ -1224,52 +1224,76 @@ def _resolve_default_export_session(
 
 
 def _session_summary_created_at(session_dir: Path) -> tuple[datetime, Path] | None:
-    store = _export_summary_store(session_dir=session_dir)
-    if store is None:
-        return None
-
-    records = _list_export_summary_records(store=store)
+    records = _session_summary_records(session_dir=session_dir)
     if not records:
         return None
 
-    _, summary = resolve_summary_markdown_input(store=store)
-    summary_created_at = _parse_iso_timestamp(summary.created_at)
-    if summary_created_at is None:
-        return None
-    return summary_created_at, session_dir
+    newest: tuple[datetime, str, str] | None = None
+    for record in records:
+        summary_created_at = _summary_record_created_at(session_dir=session_dir, record=record)
+        if summary_created_at is None:
+            continue
+        summary_key = (summary_created_at, record.path, record.id)
+        if newest is None or summary_key > newest:
+            newest = summary_key
+    return (newest[0], session_dir) if newest is not None else None
 
 
-def _list_export_summary_records(
-    *,
-    store: ArtifactStore,
-) -> tuple[ArtifactRecord, ...] | None:
+def _session_summary_records(*, session_dir: Path) -> tuple[ArtifactRecord, ...] | None:
     try:
-        return tuple(store.list(artifact_type=SUMMARY_ARTIFACT_TYPE, status="sealed"))
+        resolved = resolve_session(session_dir)
+        resolved_session_id = session_id(dict(resolved.record))
+        data = json.loads(
+            session_artifact_manifest_path(resolved.session_dir).read_text(encoding="utf-8")
+        )
+        if not isinstance(data, dict):
+            return None
+        if data.get("version") != ARTIFACT_MANIFEST_VERSION:
+            return None
+        if data.get("session_id") != resolved_session_id:
+            return None
+        artifacts = data.get("artifacts")
+        if not isinstance(artifacts, list):
+            return None
+        records: list[ArtifactRecord] = []
+        for item in artifacts:
+            if not isinstance(item, dict):
+                return None
+            record = ArtifactRecord.from_dict(cast(Mapping[str, object], item))
+            if record.session_id != resolved_session_id:
+                return None
+            if record.artifact_type == SUMMARY_ARTIFACT_TYPE and record.status == "sealed":
+                records.append(record)
+        return tuple(sorted(records, key=lambda record: record.path))
     except (
         ArtifactStoreError,
+        FileNotFoundError,
         OSError,
         UnicodeDecodeError,
         json.JSONDecodeError,
+        ValueError,
     ):
         return None
 
 
-def _export_summary_store(*, session_dir: Path) -> FileSystemArtifactStore | None:
-    """Resolve a session directory into an artifact store for summary lookup.
+def _summary_record_created_at(
+    *,
+    session_dir: Path,
+    record: ArtifactRecord,
+) -> datetime | None:
+    metadata_created_at = record.metadata.get("summary_created_at")
+    if isinstance(metadata_created_at, str):
+        return _parse_iso_timestamp(metadata_created_at)
 
-    Reads only ``session.json`` (via ``resolve_session``) so scanning every
-    candidate to pick the newest summarized session stays cheap. Full integrity
-    verification is deferred to the single selected session in
-    ``_run_export_command``; re-verifying every candidate would re-hash all
-    artifacts and captured audio on each pathless ``mena export``.
-    """
     try:
-        resolved = resolve_session(session_dir)
-        return FileSystemArtifactStore(
-            session_id=session_id(dict(resolved.record)),
-            session_dir=resolved.session_dir,
-        )
-    except (OSError, ValueError):
+        data = json.loads((session_dir / record.path).read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return None
+        if data.get("version") != SUMMARY_SCHEMA_VERSION:
+            return None
+        created_at = data.get("created_at")
+        return _parse_iso_timestamp(created_at) if isinstance(created_at, str) else None
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
 
 

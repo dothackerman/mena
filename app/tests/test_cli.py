@@ -2235,6 +2235,64 @@ def test_main_export_command_skips_malformed_artifact_manifest_during_default_di
     assert "Markdown notes exported to:" in captured.out
 
 
+def test_main_export_command_skips_corrupt_non_selected_summary_during_default_discovery(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    corrupt_dir, corrupt_store, corrupt_merged = _build_verified_export_session_bundle_at(
+        settings.paths.sessions_dir / "session-older-corrupt"
+    )
+    corrupt_summary = _persist_summary_artifact_for_cli(
+        store=corrupt_store,
+        merged_transcript_record=corrupt_merged,
+        summary_created_at="2026-07-03T08:00:00Z",
+        summary_name="summary/older.json",
+    )
+    (corrupt_dir / corrupt_summary.path).write_text("{", encoding="utf-8")
+    valid_dir, valid_store, valid_merged = _build_verified_export_session_bundle_at(
+        settings.paths.sessions_dir / "session-newer-valid"
+    )
+    _persist_summary_artifact_for_cli(
+        store=valid_store,
+        merged_transcript_record=valid_merged,
+        summary_created_at="2026-07-03T09:00:00Z",
+        summary_name="summary/newer.json",
+    )
+
+    exit_code = main(["export"], settings=settings, input_fn=lambda _prompt: "y")
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert f"Using latest summarized session: {valid_dir}" in captured.out
+    assert "Markdown notes exported to:" in captured.out
+
+
+def test_main_export_command_default_discovery_does_not_create_unsummarized_artifacts_dir(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    unsummarized_dir = _create_session_record(
+        session_dir=settings.paths.sessions_dir / "session-unsummarized"
+    )
+    valid_dir, valid_store, valid_merged = _build_verified_export_session_bundle_at(
+        settings.paths.sessions_dir / "session-valid"
+    )
+    _persist_summary_artifact_for_cli(
+        store=valid_store,
+        merged_transcript_record=valid_merged,
+        summary_created_at="2026-07-03T09:00:00Z",
+    )
+
+    assert not (unsummarized_dir / "artifacts").exists()
+
+    exit_code = main(["export"], settings=settings, input_fn=lambda _prompt: "y")
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert f"Using latest summarized session: {valid_dir}" in captured.out
+    assert not (unsummarized_dir / "artifacts").exists()
+
+
 def test_main_export_command_reports_corrupt_requested_summary_artifact(
     tmp_path: Path, capsys: CaptureFixture[str]
 ) -> None:
@@ -2265,7 +2323,7 @@ def test_main_export_command_reports_corrupt_requested_summary_artifact(
     captured = capsys.readouterr()
 
     assert exit_code == 1
-    assert f"Summary artifact {corrupt_summary.id} failed integrity verification." in captured.out
+    assert "Session bundle failed integrity verification" in captured.out
     assert "Summary artifact not found" not in captured.out
     assert "Markdown notes exported to:" not in captured.out
 
@@ -2298,7 +2356,7 @@ def test_main_export_command_reports_corrupt_summarized_session_during_default_d
     captured = capsys.readouterr()
 
     assert exit_code == 1
-    assert f"Summary artifact {corrupt_summary.id} failed integrity verification." in captured.out
+    assert "Session bundle failed integrity verification" in captured.out
     assert "Using latest summarized session:" not in captured.out
     assert "Markdown notes exported to:" not in captured.out
 
