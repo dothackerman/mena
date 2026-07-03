@@ -111,7 +111,6 @@ from mena.semantic_coherence import (
 )
 from mena.session_integrity import (
     SessionIntegrityError,
-    VerifiedSessionBundle,
     load_verified_session_bundle,
     verify_session_bundle,
 )
@@ -1196,11 +1195,14 @@ def _resolve_default_export_session(
 
     if summary_artifact_id is not None:
         for session_dir in _iter_session_directories(sessions_root):
-            if _session_has_matching_summary(
-                session_dir=session_dir,
-                summary_artifact_id=summary_artifact_id,
-            ):
-                return session_dir
+            store = _export_summary_store(session_dir=session_dir)
+            if store is None:
+                continue
+            try:
+                resolve_summary_markdown_input(store=store, summary_record_id=summary_artifact_id)
+            except SummaryMarkdownExportError:
+                continue
+            return session_dir
         return None
 
     newest: tuple[datetime, Path] | None = None
@@ -1214,37 +1216,11 @@ def _resolve_default_export_session(
     return newest[1] if newest is not None else None
 
 
-def _session_has_matching_summary(
-    *,
-    session_dir: Path,
-    summary_artifact_id: str,
-) -> bool:
-    resolved = _load_verified_session_for_export(session_dir=session_dir)
-    if resolved is None:
-        return False
-
-    record = dict(resolved.record)
-    store = FileSystemArtifactStore(
-        session_id=session_id(record),
-        session_dir=session_dir,
-    )
-    try:
-        resolve_summary_markdown_input(store=store, summary_record_id=summary_artifact_id)
-    except SummaryMarkdownExportError:
-        return False
-    return True
-
-
 def _session_summary_created_at(session_dir: Path) -> tuple[datetime, Path] | None:
-    resolved = _load_verified_session_for_export(session_dir=session_dir)
-    if resolved is None:
+    store = _export_summary_store(session_dir=session_dir)
+    if store is None:
         return None
 
-    record = dict(resolved.record)
-    store = FileSystemArtifactStore(
-        session_id=session_id(record),
-        session_dir=session_dir,
-    )
     try:
         _, summary = resolve_summary_markdown_input(store=store)
     except SummaryMarkdownExportError:
@@ -1256,11 +1232,23 @@ def _session_summary_created_at(session_dir: Path) -> tuple[datetime, Path] | No
     return summary_created_at, session_dir
 
 
-def _load_verified_session_for_export(session_dir: Path) -> VerifiedSessionBundle | None:
+def _export_summary_store(*, session_dir: Path) -> FileSystemArtifactStore | None:
+    """Resolve a session directory into an artifact store for summary lookup.
+
+    Reads only ``session.json`` (via ``resolve_session``) so scanning every
+    candidate to pick the newest summarized session stays cheap. Full integrity
+    verification is deferred to the single selected session in
+    ``_run_export_command``; re-verifying every candidate would re-hash all
+    artifacts and captured audio on each pathless ``mena export``.
+    """
     try:
-        return load_verified_session_bundle(session_dir)
-    except (ArtifactStoreError, SessionIntegrityError, OSError, ValueError):
+        resolved = resolve_session(session_dir)
+    except (OSError, ValueError):
         return None
+    return FileSystemArtifactStore(
+        session_id=session_id(dict(resolved.record)),
+        session_dir=resolved.session_dir,
+    )
 
 
 def _iter_session_directories(sessions_root: Path) -> tuple[Path, ...]:

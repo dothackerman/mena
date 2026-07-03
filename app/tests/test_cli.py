@@ -2086,6 +2086,39 @@ def test_main_export_command_defaults_to_latest_session_with_markdown_confirmati
     assert str(export_path).startswith(str(session_dir))
 
 
+def test_main_export_command_defaults_to_newest_of_multiple_summarized_sessions(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    _, older_store, older_merged = _build_verified_export_session_bundle_at(
+        settings.paths.sessions_dir / "session-older"
+    )
+    _persist_summary_artifact_for_cli(
+        store=older_store,
+        merged_transcript_record=older_merged,
+        summary_created_at="2026-05-20T10:00:00Z",
+    )
+    newer_dir, newer_store, newer_merged = _build_verified_export_session_bundle_at(
+        settings.paths.sessions_dir / "session-newer"
+    )
+    _persist_summary_artifact_for_cli(
+        store=newer_store,
+        merged_transcript_record=newer_merged,
+        summary_created_at="2026-06-15T10:00:00Z",
+    )
+
+    exit_code = main(["export"], settings=settings, input_fn=lambda _prompt: "y")
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert f"Using latest summarized session: {newer_dir}" in captured.out
+    export_line = next(
+        line for line in captured.out.splitlines() if line.startswith("Markdown notes exported to:")
+    )
+    export_path = Path(export_line.removeprefix("Markdown notes exported to:").strip())
+    assert str(export_path).startswith(str(newer_dir))
+
+
 def test_main_export_command_rejects_unknown_summary_artifact(
     tmp_path: Path,
     capsys: CaptureFixture[str],
@@ -4027,6 +4060,7 @@ def _persist_summary_artifact_for_cli(
     *,
     store: FileSystemArtifactStore,
     merged_transcript_record: ArtifactRecord | None,
+    summary_created_at: str = "2026-05-20T10:00:00Z",
 ) -> ArtifactRecord:
     summary_result = _summary_result_for_export()
     merged_artifact_ref = (
@@ -4053,7 +4087,7 @@ def _persist_summary_artifact_for_cli(
             important_points=summary_result.important_points,
             action_items=summary_result.action_items,
             general_summary=summary_result.general_summary,
-            created_at="2026-05-20T10:00:00Z",
+            created_at=summary_created_at,
         ),
         name="summary/final.json",
         correction_overlay_record=None,
