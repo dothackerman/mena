@@ -7,6 +7,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from shlex import quote
 from typing import cast
 from uuid import uuid4
 
@@ -100,13 +101,17 @@ def find_ready_summarize_sessions(
     *,
     sessions_root: Path,
 ) -> tuple[SummarizeSessionOption, ...]:
-    if not sessions_root.exists():
+    try:
+        if not sessions_root.exists():
+            return ()
+        session_dirs = sorted(
+            session_dir for session_dir in sessions_root.iterdir() if session_dir.is_dir()
+        )
+    except OSError:
         return ()
 
     options: list[SummarizeSessionOption] = []
-    for session_dir in sorted(
-        session_dir for session_dir in sessions_root.iterdir() if session_dir.is_dir()
-    ):
+    for session_dir in session_dirs:
         if not (session_dir / SESSION_RECORD_FILENAME).is_file():
             continue
         option = _resolve_summarize_session_candidate(session_dir=session_dir)
@@ -242,7 +247,9 @@ def run_summarization_command(
         fallback=(
             f"Notes created: {result.summary_record.path}\n"
             f"Session path: {resolved_session.session_dir}\n"
-            f"Next command: mena export {resolved_session.session_dir}"
+            "Next command: "
+            f"mena export --summary-artifact-id {quote(result.summary_record.id)} "
+            f"{quote(str(resolved_session.session_dir))}"
         ),
     )
     return 0
@@ -321,7 +328,7 @@ def _resolve_summarize_session_candidate(
             is None
         ):
             return None
-    except (CorrectionOverlayContractError, ArtifactStoreError, ValueError):
+    except (CorrectionOverlayContractError, ArtifactStoreError, OSError, ValueError):
         return None
 
     raw_name = session_record.get("name")
@@ -368,13 +375,13 @@ def _merged_transcript_timestamp_key(
     store: ArtifactStore,
     record: ArtifactRecord,
 ) -> tuple[datetime, str, str] | None:
-    if not store.verify(record.id).ok:
-        return None
     try:
+        if not store.verify(record.id).ok:
+            return None
         merged = MergedTranscriptArtifact.from_dict(
             json.loads(store.retrieve(record.id).decode("utf-8"))
         )
-    except (json.JSONDecodeError, UnicodeDecodeError, MergeTimingContractError):
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, MergeTimingContractError):
         return None
     created_at = _parse_iso_timestamp(merged.created_at)
     if created_at is None:
