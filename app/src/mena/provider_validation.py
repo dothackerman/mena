@@ -7,6 +7,7 @@ from typing import Any
 
 from mena.diarization import DiarizationProvider
 from mena.semantic_coherence import SemanticCoherenceProvider
+from mena.summarization import SummarizationProvider
 from mena.transcription import TranscriptionProvider
 
 ProviderFactory = Callable[[], Any]
@@ -37,16 +38,15 @@ def require_provider_instance(
     provider_type: type[Any],
     provider_name: str,
 ) -> Any:
-    required: tuple[str, ...] = ()
-    if provider_type is TranscriptionProvider:
-        required = ("name", "transcribe")
-    elif provider_type is DiarizationProvider:
-        required = ("name", "config_id", "diarize")
-    elif provider_type is SemanticCoherenceProvider:
-        required = ("metadata", "check")
-
-    if required:
-        if not _provider_implements(provider, *required):
+    if provider_type in {
+        TranscriptionProvider,
+        DiarizationProvider,
+        SemanticCoherenceProvider,
+        SummarizationProvider,
+    }:
+        if not isinstance(provider, provider_type) or not _provider_methods_callable(
+            provider, provider_type
+        ):
             raise ProviderValidationError(
                 f"{provider_name} provider must implement {provider_type.__name__}."
             )
@@ -63,13 +63,25 @@ def require_provider_instance(
                 )
         return provider
 
+    try:
+        valid = isinstance(provider, provider_type)
+    except TypeError:
+        valid = False
+    if not valid:
+        raise ProviderValidationError(
+            f"{provider_name} provider must implement {provider_type.__name__}."
+        )
     return provider
 
 
-def _provider_implements(provider: Any, *required_attrs: str) -> bool:
-    for attr in required_attrs:
-        if not hasattr(provider, attr):
-            return False
-        if attr in {"transcribe", "diarize", "check"} and not callable(getattr(provider, attr)):
-            return False
-    return True
+def _provider_methods_callable(provider: Any, provider_type: type[Any]) -> bool:
+    method_names: tuple[str, ...] = ()
+    if provider_type is TranscriptionProvider:
+        method_names = ("transcribe",)
+    elif provider_type is DiarizationProvider:
+        method_names = ("diarize",)
+    elif provider_type is SemanticCoherenceProvider:
+        method_names = ("check",)
+    elif provider_type is SummarizationProvider:
+        method_names = ("summarize",)
+    return all(callable(getattr(provider, method_name, None)) for method_name in method_names)

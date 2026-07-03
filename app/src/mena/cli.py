@@ -31,7 +31,6 @@ from mena.diarization import (
     DiarizationError,
     DiarizationProvider,
     DiarizationProviderUnavailable,
-    PyannoteCommunityDiarizationProvider,
     run_diarization_stage,
 )
 from mena.discovery import (
@@ -89,8 +88,8 @@ from mena.review_flagging import (
 )
 from mena.runtime_profile import (
     RuntimeFallbackUnavailable,
+    bind_summarization_runtime,
     production_runtime_required,
-    runtime_summarization_provider,
     select_runtime_profile,
     store_runtime_profile_provenance,
 )
@@ -101,7 +100,6 @@ from mena.runtime_stewardship import (
 )
 from mena.semantic_coherence import (
     SEMANTIC_COHERENCE_STAGE,
-    OllamaSemanticCoherenceProvider,
     SemanticCoherenceError,
     SemanticCoherenceProvider,
     SemanticCoherenceStageResult,
@@ -134,7 +132,6 @@ from mena.summarization import (
 from mena.timestamps import parse_utc_timestamp
 from mena.transcription import (
     TRANSCRIPTION_STAGE,
-    FasterWhisperTranscriptionProvider,
     TranscriptionError,
     TranscriptionProvider,
     TranscriptionProviderUnavailable,
@@ -491,9 +488,9 @@ def main(
     worker_factory: WorkerFactory = WorkerProcess,
     now: datetime | None = None,
     run_id: str | None = None,
-    transcription_provider_factory: ProviderFactory = FasterWhisperTranscriptionProvider,
-    diarization_provider_factory: ProviderFactory = PyannoteCommunityDiarizationProvider,
-    semantic_coherence_provider_factory: ProviderFactory = OllamaSemanticCoherenceProvider,
+    transcription_provider_factory: ProviderFactory | None = None,
+    diarization_provider_factory: ProviderFactory | None = None,
+    semantic_coherence_provider_factory: ProviderFactory | None = None,
     settings: AppSettings | None = None,
     config_path: Path | None = None,
     input_fn: Callable[[str], str] | None = None,
@@ -902,9 +899,9 @@ def _print_semantic_review_skip_notice(result: SemanticCoherenceStageResult) -> 
 
 
 def _requires_runtime_profile(
-    transcription_provider_factory: ProviderFactory,
-    diarization_provider_factory: ProviderFactory,
-    semantic_coherence_provider_factory: ProviderFactory,
+    transcription_provider_factory: ProviderFactory | None,
+    diarization_provider_factory: ProviderFactory | None,
+    semantic_coherence_provider_factory: ProviderFactory | None,
 ) -> bool:
     return production_runtime_required(
         transcription_provider_factory=transcription_provider_factory,
@@ -937,7 +934,7 @@ def _run_summarize_command(
         runtime_fallback_input_fn=runtime_fallback_input_fn,
         runtime_profile_selector_fn=select_runtime_profile,
         runtime_profile_store_fn=store_runtime_profile_provenance,
-        runtime_summarization_provider_fn=runtime_summarization_provider,
+        runtime_summarization_binder_fn=bind_summarization_runtime,
         run_summarization_stage_fn=run_summarization_stage,
         terminal_llm_release_fn=_record_terminal_local_llm_release,
     )
@@ -1035,9 +1032,9 @@ def _run_processing_command(
     run_id: str,
     attempt: int,
     now: datetime | None,
-    transcription_provider_factory: ProviderFactory,
-    diarization_provider_factory: ProviderFactory,
-    semantic_coherence_provider_factory: ProviderFactory,
+    transcription_provider_factory: ProviderFactory | None,
+    diarization_provider_factory: ProviderFactory | None,
+    semantic_coherence_provider_factory: ProviderFactory | None,
     settings: AppSettings | None = None,
     setup_runner: CommandRunner | None = None,
     setup_command_identity: CommandIdentity | None = None,
@@ -1407,58 +1404,13 @@ def _optional_metadata_str(payload: dict[str, object], key: str) -> str | None:
     )
 
 
-def _provider_implements(provider: Any, *required_attrs: str) -> bool:
-    for attr in required_attrs:
-        if not hasattr(provider, attr):
-            return False
-        if attr in {"transcribe", "diarize", "check"} and not callable(getattr(provider, attr)):
-            return False
-    return True
-
-
 def _require_provider(
     provider_factory: ProviderFactory,
     provider_type: type[Any],
     provider_name: str,
 ) -> Any:
-    try:
-        provider = provider_factory()
-    except TypeError as exc:
-        raise ProviderValidationError(
-            f"{provider_name} provider must implement {provider_type.__name__}."
-        ) from exc
-    required: tuple[str, ...] = ()
-    if provider_type is TranscriptionProvider:
-        required = ("name", "transcribe")
-    elif provider_type is DiarizationProvider:
-        required = ("name", "config_id", "diarize")
-    elif provider_type is SemanticCoherenceProvider:
-        required = ("metadata", "check")
-
-    if required:
-        if not _provider_implements(provider, *required):
-            raise ProviderValidationError(
-                f"{provider_name} provider must implement {provider_type.__name__}."
-            )
-        if provider_type is SemanticCoherenceProvider:
-            metadata = provider.metadata
-            config_id = getattr(metadata, "config_id", None)
-            if not isinstance(config_id, str) or not config_id:
-                raise ProviderValidationError(
-                    f"{provider_name} provider must expose semantic metadata config_id."
-                )
-            if not callable(getattr(metadata, "to_dict", None)):
-                raise ProviderValidationError(
-                    f"{provider_name} provider must expose semantic metadata to_dict."
-                )
-        return provider
-
-    try:
-        valid = isinstance(provider, provider_type)
-    except TypeError:
-        valid = False
-    if not valid:
-        raise ProviderValidationError(
-            f"{provider_name} provider must implement {provider_type.__name__}."
-        )
-    return provider
+    return processing_orchestration._require_provider(
+        provider_factory,
+        provider_type,
+        provider_name,
+    )

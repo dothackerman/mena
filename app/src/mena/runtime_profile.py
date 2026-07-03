@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, cast
 
 from mena.artifacts import ArtifactRecord, FileSystemArtifactStore
 from mena.diarization import (
@@ -34,7 +34,7 @@ from mena.setup import (
 )
 from mena.stage_policy import stage_device as lookup_stage_device
 from mena.stage_policy import stage_model as lookup_stage_model
-from mena.summarization import OllamaSummarizationProvider
+from mena.summarization import OllamaSummarizationProvider, SummarizationProvider
 from mena.transcription import (
     TRANSCRIPTION_STAGE,
     FasterWhisperTranscriptionProvider,
@@ -43,6 +43,7 @@ from mena.transcription import (
 )
 
 ProviderFactory = Callable[[], Any]
+ProviderFactoryInput = ProviderFactory | None
 RuntimeProfileStore = Callable[..., Any]
 ProcessingRuntimeRunner = Callable[["BoundProcessingRuntime"], Any]
 FailedInputArtifactsResolver = Callable[[str], tuple[str, ...]]
@@ -271,9 +272,9 @@ def resolve_processing_runtime(
     store: FileSystemArtifactStore,
     run_id: str,
     attempt: int,
-    transcription_provider_factory: ProviderFactory,
-    diarization_provider_factory: ProviderFactory,
-    semantic_coherence_provider_factory: ProviderFactory,
+    transcription_provider_factory: ProviderFactoryInput = None,
+    diarization_provider_factory: ProviderFactoryInput = None,
+    semantic_coherence_provider_factory: ProviderFactoryInput = None,
     runner: CommandRunner | None,
     command_identity: CommandIdentity | None,
     hardware: HardwareFacts | None,
@@ -314,9 +315,9 @@ def bind_processing_runtime(
     *,
     selection: RuntimeProfileSelection,
     settings: AppSettings,
-    transcription_provider_factory: ProviderFactory,
-    diarization_provider_factory: ProviderFactory,
-    semantic_coherence_provider_factory: ProviderFactory,
+    transcription_provider_factory: ProviderFactoryInput = None,
+    diarization_provider_factory: ProviderFactoryInput = None,
+    semantic_coherence_provider_factory: ProviderFactoryInput = None,
     semantic_coherence_provider: SemanticCoherenceProvider | None = None,
 ) -> BoundProcessingRuntime:
     """Construct providers bound to a selected runtime profile."""
@@ -376,9 +377,9 @@ def run_processing_with_runtime_fallback(
     hardware: HardwareFacts | None,
     allow_runtime_fallback: bool,
     authorize_runtime_fallback: Callable[[str, SetupEvaluation], bool] | None,
-    transcription_provider_factory: ProviderFactory,
-    diarization_provider_factory: ProviderFactory,
-    semantic_coherence_provider_factory: ProviderFactory,
+    transcription_provider_factory: ProviderFactoryInput = None,
+    diarization_provider_factory: ProviderFactoryInput = None,
+    semantic_coherence_provider_factory: ProviderFactoryInput = None,
     failed_input_artifacts: FailedInputArtifactsResolver,
     runtime_profile_selector_after_failure_fn: Callable[..., RuntimeProfileSelection] = (
         select_runtime_profile_after_stage_failure
@@ -504,10 +505,19 @@ def _resolve_authorized_fallback(
 
 def production_runtime_required(
     *,
-    transcription_provider_factory: ProviderFactory,
-    diarization_provider_factory: ProviderFactory,
-    semantic_coherence_provider_factory: ProviderFactory,
+    transcription_provider_factory: ProviderFactoryInput = None,
+    diarization_provider_factory: ProviderFactoryInput = None,
+    semantic_coherence_provider_factory: ProviderFactoryInput = None,
 ) -> bool:
+    transcription_provider_factory = default_transcription_provider_factory(
+        transcription_provider_factory
+    )
+    diarization_provider_factory = default_diarization_provider_factory(
+        diarization_provider_factory
+    )
+    semantic_coherence_provider_factory = default_semantic_coherence_provider_factory(
+        semantic_coherence_provider_factory
+    )
     return (
         transcription_provider_factory is FasterWhisperTranscriptionProvider
         or diarization_provider_factory is PyannoteCommunityDiarizationProvider
@@ -516,9 +526,10 @@ def production_runtime_required(
 
 
 def runtime_transcription_factory(
-    factory: ProviderFactory,
+    factory: ProviderFactoryInput,
     runtime_state: RuntimeProfileState,
 ) -> ProviderFactory:
+    factory = default_transcription_provider_factory(factory)
     if factory is not FasterWhisperTranscriptionProvider:
         return factory
     profile = runtime_state.selected_asr_profile
@@ -530,9 +541,10 @@ def runtime_transcription_factory(
 
 
 def runtime_diarization_factory(
-    factory: ProviderFactory,
+    factory: ProviderFactoryInput,
     runtime_state: RuntimeProfileState,
 ) -> ProviderFactory:
+    factory = default_diarization_provider_factory(factory)
     if factory is not PyannoteCommunityDiarizationProvider:
         return factory
     device = stage_device(runtime_state, "diarization") or "cpu"
@@ -544,11 +556,12 @@ def runtime_diarization_factory(
 
 
 def runtime_semantic_factory(
-    factory: ProviderFactory,
+    factory: ProviderFactoryInput,
     *,
     settings: AppSettings,
     runtime_state: RuntimeProfileState,
 ) -> ProviderFactory:
+    factory = default_semantic_coherence_provider_factory(factory)
     if factory is not OllamaSemanticCoherenceProvider:
         return factory
     model = _stage_model(runtime_state, "semantic-review")
@@ -562,15 +575,54 @@ def runtime_semantic_factory(
     return _factory
 
 
+def bind_summarization_runtime(
+    *,
+    selection: RuntimeProfileSelection,
+    settings: AppSettings,
+    summarization_provider_factory: ProviderFactoryInput = None,
+) -> SummarizationProvider:
+    provider = runtime_summarization_provider(
+        settings=settings,
+        runtime_state=selection.actual,
+        summarization_provider_factory=summarization_provider_factory,
+    )
+    return cast(
+        SummarizationProvider,
+        require_provider_instance(provider, SummarizationProvider, "summarization"),
+    )
+
+
 def runtime_summarization_provider(
     *,
     settings: AppSettings,
     runtime_state: RuntimeProfileState,
-) -> OllamaSummarizationProvider:
+    summarization_provider_factory: ProviderFactoryInput = None,
+) -> SummarizationProvider:
+    factory = default_summarization_provider_factory(summarization_provider_factory)
+    if factory is not OllamaSummarizationProvider:
+        return cast(SummarizationProvider, factory())
     return OllamaSummarizationProvider(
         model=_stage_model(runtime_state, "summarization"),
         endpoint=settings.local_llm.ollama_endpoint,
     )
+
+
+def default_transcription_provider_factory(factory: ProviderFactoryInput = None) -> ProviderFactory:
+    return FasterWhisperTranscriptionProvider if factory is None else factory
+
+
+def default_diarization_provider_factory(factory: ProviderFactoryInput = None) -> ProviderFactory:
+    return PyannoteCommunityDiarizationProvider if factory is None else factory
+
+
+def default_semantic_coherence_provider_factory(
+    factory: ProviderFactoryInput = None,
+) -> ProviderFactory:
+    return OllamaSemanticCoherenceProvider if factory is None else factory
+
+
+def default_summarization_provider_factory(factory: ProviderFactoryInput = None) -> ProviderFactory:
+    return OllamaSummarizationProvider if factory is None else factory
 
 
 def store_runtime_profile_provenance(
