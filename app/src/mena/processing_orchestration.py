@@ -15,7 +15,6 @@ from uuid import uuid4
 
 from mena.artifacts import ArtifactRecord, FileSystemArtifactStore
 from mena.diarization import (
-    DIARIZATION_STAGE,
     DiarizationContext,
     DiarizationProvider,
     DiarizationProviderUnavailable,
@@ -30,12 +29,12 @@ from mena.processing import (
     ProcessingStageLedger,
 )
 from mena.profiles import CaptureProfile, DiarisationPolicy
+from mena.provider_validation import ProviderValidationError as ProviderValidationError
+from mena.provider_validation import require_provider
 from mena.runtime_profile import (
-    PROCESSING_REQUIRED_RUNTIME_STAGES,
     RuntimeProfileSelection,
-    runtime_diarization_factory,
-    runtime_semantic_factory,
-    runtime_transcription_factory,
+    resolve_processing_runtime,
+    run_processing_with_runtime_fallback,
     select_runtime_profile,
     select_runtime_profile_after_stage_failure,
 )
@@ -52,7 +51,6 @@ from mena.sessions import (
 )
 from mena.settings import AppSettings
 from mena.transcription import (
-    TRANSCRIPTION_STAGE,
     TranscriptionProvider,
     TranscriptionProviderUnavailable,
     run_transcription_stage,
@@ -60,16 +58,11 @@ from mena.transcription import (
 
 ProviderFactory = Callable[[], Any]
 ProviderRunner = Callable[..., Any]
-RuntimeProfileFactory = Callable[..., ProviderFactory]
 ProcessingStagesRunner = Callable[..., Any]
 RuntimeFallbackAuthorizer = Callable[[str, Any], bool]
 RuntimeProfileSelector = Callable[..., RuntimeProfileSelection]
 RuntimeProfileSelectorAfterFailure = Callable[..., RuntimeProfileSelection]
 RuntimeProfileStore = Callable[..., Any]
-
-
-class ProviderValidationError(TypeError):
-    """Raised when a configured processing provider does not satisfy its protocol."""
 
 
 @dataclass(frozen=True)
@@ -120,9 +113,6 @@ def run_processing_command(
     room_mic_merge_timing_stage_runner: ProviderRunner = run_room_mic_merge_timing_stage,
     confidence_flagging_stage_runner: ProviderRunner | None = None,
     semantic_coherence_stage_runner: ProviderRunner = run_semantic_coherence_stage,
-    runtime_transcription_provider_factory: RuntimeProfileFactory | None = None,
-    runtime_diarization_provider_factory: RuntimeProfileFactory | None = None,
-    runtime_semantic_provider_factory: RuntimeProfileFactory | None = None,
     runtime_selection_fn: RuntimeProfileSelector | None = None,
     runtime_profile_selector_after_failure_fn: RuntimeProfileSelectorAfterFailure | None = None,
     runtime_profile_provenance_store_fn: RuntimeProfileStore | None = None,
@@ -147,12 +137,6 @@ def run_processing_command(
         session_record=session_record,
         store=store,
     )
-    if runtime_transcription_provider_factory is None:
-        runtime_transcription_provider_factory = runtime_transcription_factory
-    if runtime_diarization_provider_factory is None:
-        runtime_diarization_provider_factory = runtime_diarization_factory
-    if runtime_semantic_provider_factory is None:
-        runtime_semantic_provider_factory = runtime_semantic_factory
     if runtime_selection_fn is None:
         runtime_selection_fn = select_runtime_profile
     if runtime_profile_selector_after_failure_fn is None:
@@ -177,52 +161,55 @@ def run_processing_command(
                 input_fn=runtime_fallback_input_fn,
             )
         )
-        runtime_selection = runtime_selection_fn(
+        runtime_bound = resolve_processing_runtime(
             settings=effective_settings,
+            store=store,
+            run_id=run_id,
+            attempt=attempt,
+            transcription_provider_factory=base_transcription_provider_factory,
+            diarization_provider_factory=base_diarization_provider_factory,
+            semantic_coherence_provider_factory=base_semantic_coherence_provider_factory,
             runner=setup_runner,
             command_identity=setup_command_identity,
             hardware=setup_hardware,
             allow_runtime_fallback=allow_runtime_fallback,
             authorize_runtime_fallback=runtime_fallback_authorizer,
-            required_stages=PROCESSING_REQUIRED_RUNTIME_STAGES,
+            runtime_selection_fn=runtime_selection_fn,
+            runtime_profile_store_fn=runtime_profile_provenance_store_fn,
         )
-        runtime_profile_provenance_store_fn(
-            store=store,
-            run_id=run_id,
-            attempt=attempt,
-            selection=runtime_selection,
+        runtime_selection = runtime_bound.selection
+        transcription_provider = runtime_bound.transcription_provider
+        diarization_provider = runtime_bound.diarization_provider
+        semantic_coherence_provider = runtime_bound.semantic_coherence_provider
+    else:
+        runtime_bound = None
+        transcription_provider = cast(
+            TranscriptionProvider,
+            _require_provider(
+                transcription_provider_factory,
+                TranscriptionProvider,
+                "transcription",
+            ),
         )
-        transcription_provider_factory = runtime_transcription_provider_factory(
-            base_transcription_provider_factory,
-            runtime_selection.actual,
+        diarization_provider = cast(
+            DiarizationProvider,
+            _require_provider(
+                diarization_provider_factory,
+                DiarizationProvider,
+                "diarization",
+            ),
         )
-        diarization_provider_factory = runtime_diarization_provider_factory(
-            base_diarization_provider_factory,
-            runtime_selection.actual,
-        )
-        semantic_coherence_provider_factory = runtime_semantic_provider_factory(
-            base_semantic_coherence_provider_factory,
-            settings=effective_settings,
-            runtime_state=runtime_selection.accepted,
+        semantic_coherence_provider = cast(
+            SemanticCoherenceProvider,
+            _require_provider(
+                semantic_coherence_provider_factory,
+                SemanticCoherenceProvider,
+                "semantic_coherence",
+            ),
         )
 
     pipeline_timestamp = now if now is not None else datetime.now(UTC)
     ledger = ProcessingStageLedger(store=store, session_id=session_id_value, run_id=run_id)
-    transcription_provider = _require_provider(
-        transcription_provider_factory,
-        TranscriptionProvider,
-        "transcription",
-    )
-    diarization_provider = _require_provider(
-        diarization_provider_factory,
-        DiarizationProvider,
-        "diarization",
-    )
-    semantic_coherence_provider = _require_provider(
-        semantic_coherence_provider_factory,
-        SemanticCoherenceProvider,
-        "semantic_coherence",
-    )
 
     def _run_stages(
         *,
@@ -251,69 +238,49 @@ def run_processing_command(
         )
 
     try:
-        try:
+        if runtime_bound is None:
             pipeline_result = _run_stages(
                 transcription_provider=transcription_provider,
                 diarization_provider=diarization_provider,
                 semantic_coherence_provider=semantic_coherence_provider,
             )
-        except (TranscriptionProviderUnavailable, DiarizationProviderUnavailable) as exc:
-            if (
-                runtime_selection is None
-                or runtime_selection.fallback_used
-                or effective_settings is None
-            ):
-                raise
-            failed_stage = runtime_fallback_stage_for_provider_failure(exc)
-            fallback_selection = runtime_profile_selector_after_failure_fn(
-                settings=effective_settings,
-                runner=setup_runner,
-                command_identity=setup_command_identity,
-                hardware=setup_hardware,
-                accepted=runtime_selection.accepted,
-                failed_stage=failed_stage,
-                failure_reason=str(exc),
-                failure_class=exc.__class__.__name__,
-                failed_input_artifacts=latest_failed_stage_input_artifacts(
-                    ledger=ledger,
-                    stage=failed_stage,
+        elif effective_settings is not None:
+            runtime_result = run_processing_with_runtime_fallback(
+                runtime=runtime_bound,
+                run=lambda runtime: _run_stages(
+                    transcription_provider=runtime.transcription_provider,
+                    diarization_provider=runtime.diarization_provider,
+                    semantic_coherence_provider=runtime.semantic_coherence_provider,
                 ),
-                allow_runtime_fallback=allow_runtime_fallback,
-                authorize_runtime_fallback=runtime_fallback_authorizer,
-                # A CUDA failure in either GPU stage means the shared GPU is
-                # unreliable, so re-probe and carry both GPU-coupled stages into
-                # the fallback state.
-                revalidation_stages=PROCESSING_REQUIRED_RUNTIME_STAGES,
-            )
-            runtime_profile_provenance_store_fn(
+                settings=effective_settings,
                 store=store,
                 run_id=run_id,
                 attempt=attempt,
-                selection=fallback_selection,
-                name_suffix="stage-fallback",
-            )
-            runtime_selection = fallback_selection
-            transcription_provider = _require_provider(
-                runtime_transcription_provider_factory(
-                    base_transcription_provider_factory,
-                    fallback_selection.actual,
+                runner=setup_runner,
+                command_identity=setup_command_identity,
+                hardware=setup_hardware,
+                allow_runtime_fallback=allow_runtime_fallback,
+                authorize_runtime_fallback=runtime_fallback_authorizer,
+                transcription_provider_factory=base_transcription_provider_factory,
+                diarization_provider_factory=base_diarization_provider_factory,
+                semantic_coherence_provider_factory=base_semantic_coherence_provider_factory,
+                failed_input_artifacts=lambda stage: latest_failed_stage_input_artifacts(
+                    ledger=ledger,
+                    stage=stage,
                 ),
-                TranscriptionProvider,
-                "transcription",
-            )
-            diarization_provider = _require_provider(
-                runtime_diarization_provider_factory(
-                    base_diarization_provider_factory,
-                    fallback_selection.actual,
+                runtime_profile_selector_after_failure_fn=(
+                    runtime_profile_selector_after_failure_fn
                 ),
-                DiarizationProvider,
-                "diarization",
+                runtime_profile_store_fn=runtime_profile_provenance_store_fn,
             )
-            pipeline_result = _run_stages(
-                transcription_provider=transcription_provider,
-                diarization_provider=diarization_provider,
-                semantic_coherence_provider=semantic_coherence_provider,
-            )
+            pipeline_result = runtime_result.value
+            runtime_bound = runtime_result.runtime
+            runtime_selection = runtime_bound.selection
+            transcription_provider = runtime_bound.transcription_provider
+            diarization_provider = runtime_bound.diarization_provider
+            semantic_coherence_provider = runtime_bound.semantic_coherence_provider
+        else:
+            raise RuntimeError("Runtime settings were not initialized for runtime processing.")
     finally:
         if runtime_selection is not None and terminal_llm_release is not None:
             terminal_llm_release(
@@ -490,9 +457,9 @@ def run_processing_stages(
 def runtime_fallback_stage_for_provider_failure(
     exc: TranscriptionProviderUnavailable | DiarizationProviderUnavailable,
 ) -> str:
-    if isinstance(exc, TranscriptionProviderUnavailable):
-        return TRANSCRIPTION_STAGE
-    return DIARIZATION_STAGE
+    from mena.runtime_profile import runtime_fallback_stage_for_provider_failure as _resolver_stage
+
+    return _resolver_stage(exc)
 
 
 def latest_failed_stage_input_artifacts(
@@ -986,56 +953,7 @@ def _require_provider(
     provider_type: type[Any],
     provider_name: str,
 ) -> Any:
-    try:
-        provider = provider_factory()
-    except TypeError as exc:
-        raise ProviderValidationError(
-            f"{provider_name} provider must implement {provider_type.__name__}."
-        ) from exc
-    required: tuple[str, ...] = ()
-    if provider_type is TranscriptionProvider:
-        required = ("name", "transcribe")
-    elif provider_type is DiarizationProvider:
-        required = ("name", "config_id", "diarize")
-    elif provider_type is SemanticCoherenceProvider:
-        required = ("metadata", "check")
-
-    if required:
-        if not _provider_implements(provider, *required):
-            raise ProviderValidationError(
-                f"{provider_name} provider must implement {provider_type.__name__}."
-            )
-        if provider_type is SemanticCoherenceProvider:
-            metadata = provider.metadata
-            config_id = getattr(metadata, "config_id", None)
-            if not isinstance(config_id, str) or not config_id:
-                raise ProviderValidationError(
-                    f"{provider_name} provider must expose semantic metadata config_id."
-                )
-            if not callable(getattr(metadata, "to_dict", None)):
-                raise ProviderValidationError(
-                    f"{provider_name} provider must expose semantic metadata to_dict."
-                )
-        return provider
-
-    try:
-        valid = isinstance(provider, provider_type)
-    except TypeError:
-        valid = False
-    if not valid:
-        raise ProviderValidationError(
-            f"{provider_name} provider must implement {provider_type.__name__}."
-        )
-    return provider
-
-
-def _provider_implements(provider: Any, *required_attrs: str) -> bool:
-    for attr in required_attrs:
-        if not hasattr(provider, attr):
-            return False
-        if attr in {"transcribe", "diarize", "check"} and not callable(getattr(provider, attr)):
-            return False
-    return True
+    return require_provider(provider_factory, provider_type, provider_name)
 
 
 def _required_str(payload: dict[str, object], key: str) -> str:
