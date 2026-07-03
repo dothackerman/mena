@@ -6,9 +6,8 @@ import argparse
 import json
 import os
 import sys
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
-from datetime import UTC, datetime
+from collections.abc import Callable, Sequence
+from datetime import datetime
 from pathlib import Path
 from shlex import quote
 from typing import Any, TypeVar, cast
@@ -23,7 +22,6 @@ from mena.artifacts import (
 )
 from mena.correction_overlay import (
     CorrectionOverlayContractError,
-    resolve_active_correction_overlay,
 )
 from mena.correction_workflow import (
     CorrectionWorkflowError,
@@ -116,7 +114,6 @@ from mena.session_integrity import (
     verify_session_bundle,
 )
 from mena.sessions import (
-    SESSION_RECORD_FILENAME,
     ProcessableSessionCandidate,
     processable_session_candidates,
     resolve_session,
@@ -397,6 +394,60 @@ class ConsoleProcessingInteraction:
         raise ValueError(f"Unsupported processing notice topic '{notice.topic}'.")
 
 
+class ConsoleSummarizeInteraction:
+    """Console adapter for summarize workflow interaction topics."""
+
+    def __init__(self, input_fn: Callable[[str], str] | None) -> None:
+        self._input_fn = input_fn
+
+    def choose(self, request: ChoiceRequest) -> ChoiceOption:
+        if request.topic != "summarize.session":
+            raise ValueError(f"Unsupported summarize choice topic '{request.topic}'.")
+        if request.default_option_id is None:
+            raise ValueError("Summarize session choice requires a recommended default.")
+
+        reader = _record_input(self._input_fn)
+        default = request.option(request.default_option_id)
+        if reader is None:
+            print(
+                "Multiple ready sessions found for summarization."
+                f" Using newest session by default: {_format_summarize_choice(default)}"
+            )
+            print("Pass the session path argument to summarize a different session.")
+            return default
+
+        return _prompt_choice(
+            title="Ready session to summarize",
+            choices=request.options,
+            formatter=lambda option: _format_summarize_choice(
+                option,
+                recommended=option.option_id == request.default_option_id,
+            ),
+            input_fn=reader,
+            default_index=_choice_default_index(request),
+        )
+
+    def confirm(self, request: ConfirmationRequest) -> bool:
+        raise ValueError(f"Unsupported summarize confirmation topic '{request.topic}'.")
+
+    def request_text(self, request: TextRequest) -> str:
+        raise ValueError(f"Unsupported summarize text topic '{request.topic}'.")
+
+    def notify(self, notice: WorkflowNotice) -> None:
+        topic = notice.topic
+        context = notice.context
+        if topic == "summarize.session_selected":
+            print(f"Session path: {context['session_dir']}")
+        elif topic == "summarize.started":
+            print("Creating meeting notes...")
+        elif topic == "summarize.completed":
+            print(f"Notes created: {context['summary_path']}")
+            print(f"Session path: {context['session_dir']}")
+            print(f"Next command: mena export {context['session_dir']}")
+        else:
+            raise ValueError(f"Unsupported summarize notice topic '{topic}'.")
+
+
 def _correction_action_option_id(raw: str) -> str | None:
     if raw in {"p", "play", "playback"}:
         return "playback"
@@ -651,10 +702,11 @@ def main(
 
     if args.command == "summarize":
         try:
-            resolved_session_path = _resolve_summarize_session_path(
+            interaction = ConsoleSummarizeInteraction(input_fn)
+            resolved_session_path = summarize_workflow.resolve_summarize_session_path(
                 explicit_session_path=args.session_path,
                 sessions_root=sessions_root,
-                input_fn=input_fn,
+                interaction=interaction,
             )
             return _run_summarize_command(
                 session_path=resolved_session_path,
@@ -669,6 +721,7 @@ def main(
                 setup_command_identity=setup_command_identity,
                 setup_hardware=setup_hardware,
                 allow_runtime_fallback=args.allow_runtime_fallback,
+                interaction=interaction,
             )
         except (
             ArtifactStoreError,
@@ -870,6 +923,24 @@ def _prompt_choice(
     if selected_index < 1 or selected_index > len(choices):
         raise ValueError(f"Invalid {title.lower()} selection '{answer}'.")
     return choices[selected_index - 1]
+
+
+def _choice_default_index(request: ChoiceRequest) -> int:
+    if request.default_option_id is None:
+        return 1
+    for index, option in enumerate(request.options, start=1):
+        if option.option_id == request.default_option_id:
+            return index
+    raise ValueError(f"Unknown default option '{request.default_option_id}'.")
+
+
+def _format_summarize_choice(option: ChoiceOption, *, recommended: bool = False) -> str:
+    label = option.label
+    if option.detail:
+        label = f"{label} | {option.detail}"
+    if recommended:
+        label = f"{label} [recommended]"
+    return label
 
 
 def _record_input(input_fn: Callable[[str], str] | None) -> Callable[[str], str] | None:
@@ -1080,148 +1151,6 @@ def _requires_runtime_profile(
     )
 
 
-@dataclass(frozen=True)
-class _SummarizeSessionOption:
-    session_dir: Path
-    created_at: datetime | None
-    name: str | None
-
-
-def _select_summarize_session(
-    *,
-    options: tuple[_SummarizeSessionOption, ...],
-    input_fn: Callable[[str], str] | None,
-) -> Path:
-    newest = options[0]
-    reader = _record_input(input_fn)
-    if reader is None:
-        print(
-            "Multiple ready sessions found for summarization."
-            " Using newest session by default:"
-            f" {_summarize_session_label(newest)}"
-        )
-        print("Pass the session path argument to summarize a different session.")
-        print(f"Session path: {newest.session_dir}")
-        return newest.session_dir
-
-    selected = _prompt_choice(
-        title="Ready session to summarize",
-        choices=options,
-        formatter=lambda option: (
-            _summarize_session_label(option) + (" [recommended]" if option == newest else "")
-        ),
-        input_fn=reader,
-        default_index=1,
-    )
-    print(f"Session path: {selected.session_dir}")
-    return selected.session_dir
-
-
-def _summarize_session_label(option: _SummarizeSessionOption) -> str:
-    created_at = (
-        option.created_at.isoformat(timespec="seconds") if option.created_at is not None else "?"
-    )
-    if option.name:
-        return f"{option.session_dir.name} ({option.name}, {created_at})"
-    return f"{option.session_dir.name} ({created_at})"
-
-
-def _resolve_summarize_session_path(
-    *,
-    explicit_session_path: str | None,
-    sessions_root: Path,
-    input_fn: Callable[[str], str] | None = None,
-) -> Path:
-    if explicit_session_path is not None:
-        return Path(explicit_session_path)
-
-    candidates = _find_ready_summarize_sessions(sessions_root=sessions_root)
-    if len(candidates) == 0:
-        raise ValueError(
-            "No ready sessions were found for summarization. "
-            "Run process and correction first, then retry with an explicit session path."
-        )
-    if len(candidates) == 1:
-        session_dir = candidates[0].session_dir
-        print(f"Session path: {session_dir}")
-        return session_dir
-
-    return _select_summarize_session(options=candidates, input_fn=input_fn)
-
-
-def _find_ready_summarize_sessions(
-    *,
-    sessions_root: Path,
-) -> tuple[_SummarizeSessionOption, ...]:
-    if not sessions_root.exists():
-        return ()
-
-    options: list[_SummarizeSessionOption] = []
-    for session_dir in sorted(
-        session_dir for session_dir in sessions_root.iterdir() if session_dir.is_dir()
-    ):
-        if not (session_dir / SESSION_RECORD_FILENAME).is_file():
-            continue
-        option = _resolve_summarize_session_candidate(session_dir=session_dir)
-        if option is not None:
-            options.append(option)
-    return tuple(
-        sorted(
-            options,
-            key=lambda option: (
-                option.created_at or datetime.min.replace(tzinfo=UTC),
-                option.session_dir.name,
-            ),
-            reverse=True,
-        )
-    )
-
-
-def _resolve_summarize_session_candidate(
-    *,
-    session_dir: Path,
-) -> _SummarizeSessionOption | None:
-    try:
-        resolved_session = resolve_session(session_dir)
-    except ValueError:
-        return None
-
-    try:
-        session_record = resolved_session.record
-        session_id_value = session_id(session_record)
-        store = FileSystemArtifactStore(session_id=session_id_value, session_dir=session_dir)
-        merged_record = _resolve_latest_merged_transcript_record(store=store)
-        if merged_record is None:
-            return None
-        if (
-            resolve_active_correction_overlay(
-                store=store,
-                source_transcript_record=merged_record,
-            )
-            is None
-        ):
-            return None
-    except (CorrectionOverlayContractError, ArtifactStoreError, ValueError):
-        return None
-
-    raw_name = session_record.get("name")
-    if not isinstance(raw_name, str):
-        raw_name = None
-
-    return _SummarizeSessionOption(
-        session_dir=session_dir,
-        created_at=_parse_session_created_at(session_record=session_record),
-        name=raw_name,
-    )
-
-
-def _parse_session_created_at(*, session_record: Mapping[str, object]) -> datetime | None:
-    raw = session_record.get("created_at")
-    if not isinstance(raw, str):
-        return None
-    return _parse_iso_timestamp(raw)
-
-
 def _run_summarize_command(
     *,
     session_path: Path,
@@ -1232,6 +1161,7 @@ def _run_summarize_command(
     setup_command_identity: CommandIdentity | None = None,
     setup_hardware: HardwareFacts | None = None,
     allow_runtime_fallback: bool = False,
+    interaction: InteractionPort | None = None,
 ) -> int:
     return summarize_workflow.run_summarization_command(
         session_path=session_path,
@@ -1247,6 +1177,7 @@ def _run_summarize_command(
         runtime_summarization_binder_fn=bind_summarization_runtime,
         run_summarization_stage_fn=run_summarization_stage,
         terminal_llm_release_fn=_record_terminal_local_llm_release,
+        interaction=interaction,
     )
 
 
