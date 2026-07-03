@@ -42,6 +42,7 @@ from mena.discovery import (
 from mena.export import (
     SummaryMarkdownExportError,
     export_summary_markdown,
+    resolve_summary_markdown_input,
 )
 from mena.fields import optional_str, required_int, required_str
 from mena.interaction import (
@@ -109,6 +110,7 @@ from mena.semantic_coherence import (
 )
 from mena.session_integrity import (
     SessionIntegrityError,
+    VerifiedSessionBundle,
     load_verified_session_bundle,
     verify_session_bundle,
 )
@@ -442,10 +444,17 @@ def build_parser() -> argparse.ArgumentParser:
             continue
         subparser = subparsers.add_parser(command)
         if command in {"correct", "process", "resume", "summarize", "export", "inspect"}:
-            subparser.add_argument(
-                "session_path",
-                help="Path to the session directory or session.json.",
-            )
+            if command == "export":
+                subparser.add_argument(
+                    "session_path",
+                    nargs="?",
+                    help="Path to the session directory or session.json.",
+                )
+            else:
+                subparser.add_argument(
+                    "session_path",
+                    help="Path to the session directory or session.json.",
+                )
         if command in {"process", "resume", "summarize"}:
             subparser.add_argument(
                 "--allow-runtime-fallback",
@@ -457,6 +466,13 @@ def build_parser() -> argparse.ArgumentParser:
             )
 
         if command == "export":
+            subparser.add_argument(
+                "--format",
+                choices=("markdown",),
+                dest="export_format",
+                default=None,
+                help="Export output format.",
+            )
             subparser.add_argument(
                 "--summary-artifact-id",
                 dest="summary_artifact_id",
@@ -621,8 +637,11 @@ def main(
     if args.command == "export":
         try:
             return _run_export_command(
-                session_path=Path(args.session_path),
+                session_path=Path(args.session_path) if args.session_path else None,
                 summary_artifact_id=args.summary_artifact_id,
+                export_format=args.export_format,
+                settings=app_settings,
+                input_fn=input_fn,
             )
         except (
             ArtifactStoreError,
@@ -945,12 +964,25 @@ def _run_summarize_command(
 
 def _run_export_command(
     *,
-    session_path: Path,
+    session_path: Path | None,
     summary_artifact_id: str | None,
+    export_format: str | None,
+    settings: AppSettings,
+    input_fn: Callable[[str], str] | None,
 ) -> int:
-    verified = load_verified_session_bundle(session_path)
+    selected_format = _resolve_export_format(export_format=export_format, input_fn=input_fn)
+    resolved_session_path = _resolve_export_session_path(
+        session_path=session_path,
+        summary_artifact_id=summary_artifact_id,
+        settings=settings,
+    )
+
+    verified = load_verified_session_bundle(resolved_session_path)
     session_record = dict(verified.record)
     session_id_value = session_id(session_record)
+
+    if selected_format != "markdown":
+        raise ValueError(f"Unsupported export format: {selected_format}")
 
     export_result = export_summary_markdown(
         store=FileSystemArtifactStore(
@@ -960,25 +992,135 @@ def _run_export_command(
         summary_record_id=summary_artifact_id,
     )
 
-    print(f"Export written to: {export_result.export_record.path}")
-    print(f"Export contract: {export_result.export_record.metadata.get('contract', '(unknown)')}")
-    print(
-        f"Summary artifact: {export_result.summary_record.path} ({export_result.summary_record.id})"
-    )
-    provenance = {
-        key: value
-        for key, value in export_result.export_record.metadata.items()
-        if key
-        in {
-            "summary_artifact_id",
-            "summary_created_at",
-            "merged_transcript_artifact_id",
-            "manual_notes_artifact_id",
-            "correction_overlay_artifact_id",
-        }
-    }
-    print(f"Export provenance: {json.dumps(provenance, sort_keys=True)}")
+    export_path = verified.session_dir / export_result.export_record.path
+    print(f"Markdown notes exported to: {export_path}")
     return 0
+
+
+def _resolve_export_format(
+    *,
+    export_format: str | None,
+    input_fn: Callable[[str], str] | None,
+) -> str:
+    if export_format is None:
+        input_reader = _record_input(input_fn)
+        if input_reader is None:
+            return "markdown"
+        print("Available export format:")
+        print("  1) Markdown (.md)")
+        answer = input_reader("Export as Markdown notes? [Y/n]: ").strip().lower()
+        if answer in {"", "y", "yes"}:
+            return "markdown"
+        raise ValueError("Export format was not confirmed.")
+    return export_format
+
+
+def _resolve_export_session_path(
+    *,
+    session_path: Path | None,
+    summary_artifact_id: str | None,
+    settings: AppSettings,
+) -> Path:
+    if session_path is not None:
+        return session_path
+
+    resolved = _resolve_default_export_session(
+        sessions_root=settings.paths.sessions_dir,
+        summary_artifact_id=summary_artifact_id,
+    )
+    if resolved is None:
+        if summary_artifact_id is not None:
+            raise ValueError(f"Summary artifact not found: {summary_artifact_id}.")
+        raise ValueError("No summarized sessions were found. Run `mena summarize` first.")
+
+    print(f"Using latest summarized session: {resolved}")
+    return resolved
+
+
+def _resolve_default_export_session(
+    *,
+    sessions_root: Path,
+    summary_artifact_id: str | None,
+) -> Path | None:
+    if not sessions_root.is_dir():
+        return None
+
+    if summary_artifact_id is not None:
+        for session_dir in _iter_session_directories(sessions_root):
+            if _session_has_matching_summary(
+                session_dir=session_dir,
+                summary_artifact_id=summary_artifact_id,
+            ):
+                return session_dir
+        return None
+
+    newest: tuple[datetime, Path] | None = None
+    for session_dir in _iter_session_directories(sessions_root):
+        summary_key = _session_summary_created_at(session_dir=session_dir)
+        if summary_key is None:
+            continue
+        if newest is None or summary_key > newest:
+            newest = summary_key
+
+    return newest[1] if newest is not None else None
+
+
+def _session_has_matching_summary(
+    *,
+    session_dir: Path,
+    summary_artifact_id: str,
+) -> bool:
+    resolved = _load_verified_session_for_export(session_dir=session_dir)
+    if resolved is None:
+        return False
+
+    record = dict(resolved.record)
+    store = FileSystemArtifactStore(
+        session_id=session_id(record),
+        session_dir=session_dir,
+    )
+    try:
+        resolve_summary_markdown_input(store=store, summary_record_id=summary_artifact_id)
+    except SummaryMarkdownExportError:
+        return False
+    return True
+
+
+def _session_summary_created_at(session_dir: Path) -> tuple[datetime, Path] | None:
+    resolved = _load_verified_session_for_export(session_dir=session_dir)
+    if resolved is None:
+        return None
+
+    record = dict(resolved.record)
+    store = FileSystemArtifactStore(
+        session_id=session_id(record),
+        session_dir=session_dir,
+    )
+    try:
+        _, summary = resolve_summary_markdown_input(store=store)
+    except SummaryMarkdownExportError:
+        return None
+
+    summary_created_at = _parse_iso_timestamp(summary.created_at)
+    if summary_created_at is None:
+        return None
+    return summary_created_at, session_dir
+
+
+def _load_verified_session_for_export(session_dir: Path) -> VerifiedSessionBundle | None:
+    try:
+        return load_verified_session_bundle(session_dir)
+    except (ArtifactStoreError, SessionIntegrityError, OSError, ValueError):
+        return None
+
+
+def _iter_session_directories(sessions_root: Path) -> tuple[Path, ...]:
+    try:
+        return tuple(
+            sorted(session_dir for session_dir in sessions_root.iterdir() if session_dir.is_dir())
+        )
+    except OSError:
+        return ()
 
 
 def _record_terminal_local_llm_release(

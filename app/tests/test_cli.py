@@ -2287,19 +2287,37 @@ def test_main_export_command_exports_latest_summary_markdown(
     captured = capsys.readouterr()
 
     assert exit_code == 0
-    assert "Export written to:" in captured.out
-    assert "Export contract: summary-markdown-language-chrome-v2" in captured.out
-    assert '"summary_artifact_id"' in captured.out
-    assert '"merged_transcript_artifact_id"' in captured.out
-    assert '"manual_notes_artifact_id"' in captured.out
-    assert '"correction_overlay_artifact_id"' in captured.out
-
+    assert "Markdown notes exported to:" in captured.out
     export_line = next(
-        line for line in captured.out.splitlines() if line.startswith("Export written to:")
+        line for line in captured.out.splitlines() if line.startswith("Markdown notes exported to:")
     )
-    export_path = Path(export_line.removeprefix("Export written to: ").strip())
-    assert export_path.as_posix().startswith("artifacts/")
-    assert (session_dir / export_path).exists()
+    export_path = Path(export_line.removeprefix("Markdown notes exported to:").strip())
+    assert export_path.exists()
+    assert str(export_path).startswith(str(session_dir))
+
+
+def test_main_export_command_defaults_to_latest_session_with_markdown_confirmation(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    session_dir, store, merged_record = _build_verified_export_session_bundle_at(
+        settings.paths.sessions_dir / "session-2026-07-03"
+    )
+    _persist_summary_artifact_for_cli(store=store, merged_transcript_record=merged_record)
+
+    exit_code = main(["export"], settings=settings, input_fn=lambda _prompt: "y")
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Available export format:" in captured.out
+    assert "Using latest summarized session:" in captured.out
+    assert "Markdown notes exported to:" in captured.out
+    export_line = next(
+        line for line in captured.out.splitlines() if line.startswith("Markdown notes exported to:")
+    )
+    export_path = Path(export_line.removeprefix("Markdown notes exported to:").strip())
+    assert export_path.exists()
+    assert str(export_path).startswith(str(session_dir))
 
 
 def test_main_export_command_rejects_unknown_summary_artifact(
@@ -4938,7 +4956,13 @@ def _build_summarize_session_bundle(
 def _build_verified_export_session_bundle(
     tmp_path: Path,
 ) -> tuple[Path, FileSystemArtifactStore, ArtifactRecord]:
-    session_dir = _create_session_record(tmp_path)
+    return _build_verified_export_session_bundle_at(tmp_path / "session")
+
+
+def _build_verified_export_session_bundle_at(
+    session_dir: Path,
+) -> tuple[Path, FileSystemArtifactStore, ArtifactRecord]:
+    session_dir = _create_session_record(session_dir=session_dir)
     store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=session_dir)
     merged_record = store.store(
         artifact_type=MERGED_TRANSCRIPT_ARTIFACT_TYPE,
@@ -5084,9 +5108,19 @@ def _cli_merged_transcript_with_refs(
     )
 
 
-def _create_session_record(tmp_path: Path) -> Path:
-    session_dir = tmp_path / "session"
-    session_dir.mkdir()
+def _create_session_record(
+    tmp_path: Path | None = None,
+    *,
+    session_dir: Path | None = None,
+) -> Path:
+    if tmp_path is not None and session_dir is not None:
+        raise ValueError("Provide either tmp_path or session_dir, not both.")
+    if session_dir is None:
+        if tmp_path is None:
+            raise ValueError("Provide either tmp_path or session_dir.")
+        session_dir = tmp_path / "session"
+
+    session_dir.mkdir(parents=True)
     (session_dir / SESSION_RECORD_FILENAME).write_text(
         json.dumps(
             {
