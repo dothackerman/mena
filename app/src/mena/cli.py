@@ -284,7 +284,7 @@ def _record_choice_prompt_metadata(topic: str) -> tuple[str, str, str]:
     if topic == "record.capture_route.playback_stream":
         return ("playback stream", "--playback-stream", "Playback streams")
     if topic == "record.capture_route.output_sink":
-        return ("output sink", "--output-sink", "Output sink routes")
+        return ("output sink", "--output-sink", "Where do you hear the meeting?")
     raise ValueError(f"Unsupported record choice topic '{topic}'.")
 
 
@@ -399,7 +399,7 @@ def build_parser() -> argparse.ArgumentParser:
     record_parser.add_argument(
         "--output-sink",
         default=None,
-        help="Output sink route id used to keep the meeting audible.",
+        help="Meeting audio output route id.",
     )
     record_parser.add_argument(
         "--dry-run",
