@@ -8,6 +8,7 @@ import sys
 from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
+from shlex import quote
 from typing import Any, TypeVar, cast
 from uuid import uuid4
 
@@ -113,7 +114,7 @@ from mena.session_integrity import (
     verify_session_bundle,
 )
 from mena.sessions import latest_recorded_session_record_path, resolve_session, session_id
-from mena.settings import AppSettings, SettingsError, validate_summary_language
+from mena.settings import DATA_ROOT_ENV_VAR, AppSettings, SettingsError, validate_summary_language
 from mena.setup import (
     CommandIdentity,
     CommandRunner,
@@ -270,7 +271,7 @@ class ConsoleRecordInteraction:
             print("Capture finalized")
         elif topic == "record.process_handoff":
             print("Recording saved and ready to process.")
-            print("Next command: mena process")
+            print(f"Next command: {_format_process_handoff_command(context.get('data_root'))}")
             print(f"Session record: {context['record_path']}")
         elif topic == "record.finalized_status_error":
             print(f"Capture finalized as {context['status']}: {context['error']}")
@@ -576,7 +577,7 @@ def main(
                 worker_exit_timeout=args.worker_exit_timeout,
                 stop_input_available=_record_input(input_fn) is not None,
             ),
-            data_root=data_root,
+            data_root=_effective_record_data_root(data_root, app_settings),
             discoverer=discoverer,
             worker_factory=worker_factory,
             interaction=ConsoleRecordInteraction(input_fn),
@@ -823,6 +824,24 @@ def _resolve_process_session_path(session_path: str | None, settings: AppSetting
     if latest is None:
         raise ValueError("no recorded sessions found.")
     return latest
+
+
+def _effective_record_data_root(
+    data_root: Path | None,
+    settings: AppSettings,
+) -> Path | None:
+    if data_root is not None:
+        return data_root
+    sessions_root = settings.paths.sessions_dir.parent
+    if sessions_root != settings.paths.data_home:
+        return sessions_root
+    return None
+
+
+def _format_process_handoff_command(data_root: object) -> str:
+    if isinstance(data_root, Path):
+        return f"{DATA_ROOT_ENV_VAR}={quote(str(data_root))} mena process"
+    return "mena process"
 
 
 def _run_setup_command(

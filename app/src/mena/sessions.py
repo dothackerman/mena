@@ -163,7 +163,8 @@ def resolve_session_paths(session_path: Path) -> tuple[Path, Path]:
 def latest_recorded_session_record_path(sessions_root: Path) -> Path | None:
     """Return the newest successfully recorded session record under a sessions root."""
 
-    best: tuple[datetime, str, Path] | None = None
+    best_completed_at: datetime | None = None
+    best_paths: list[Path] = []
     try:
         for session_dir in sessions_root.iterdir():
             if not session_dir.is_dir():
@@ -175,18 +176,25 @@ def latest_recorded_session_record_path(sessions_root: Path) -> Path | None:
                 record = read_session_record(record_path)
                 if record.get("status") != "recorded":
                     continue
-                created_at = record.get("created_at")
-                if not isinstance(created_at, str):
+                completed_at = _recording_completed_at(record)
+                if completed_at is None:
                     continue
-                created_at_time = parse_utc_timestamp(created_at)
             except (OSError, ValueError, json.JSONDecodeError):
                 continue
-            item = (created_at_time, str(record_path), record_path)
-            if best is None or item > best:
-                best = item
+            if best_completed_at is None or completed_at > best_completed_at:
+                best_completed_at = completed_at
+                best_paths = [record_path]
+            elif completed_at == best_completed_at:
+                best_paths.append(record_path)
     except OSError:
         return None
-    return None if best is None else best[2]
+    if best_completed_at is None:
+        return None
+    if len(best_paths) > 1:
+        raise SessionRecordError(
+            "latest recorded session is ambiguous; pass an explicit session path."
+        )
+    return best_paths[0]
 
 
 def session_id(session_record: Mapping[str, object]) -> str:
@@ -242,6 +250,21 @@ def session_recording_finalization(
             "Session field 'recording.finalization' is required and must be an object."
         )
     return value
+
+
+def _recording_completed_at(session_record: Mapping[str, object]) -> datetime | None:
+    recording = session_record.get("recording")
+    if not isinstance(recording, Mapping):
+        return None
+    finalization = recording.get("finalization")
+    if not isinstance(finalization, Mapping):
+        return None
+    if finalization.get("status") != "finalized":
+        return None
+    completed_at = finalization.get("completed_at")
+    if not isinstance(completed_at, str):
+        return None
+    return parse_utc_timestamp(completed_at)
 
 
 def session_recording_finalization_status(

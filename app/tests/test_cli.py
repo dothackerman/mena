@@ -768,7 +768,7 @@ def test_record_creates_session_bundle_and_record(
     assert "Recording notice: you are responsible for obtaining consent" in captured.out
     assert len(sessions) == 1
     assert "Recording saved and ready to process." in captured.out
-    assert "Next command: mena process" in captured.out
+    assert f"Next command: {DATA_ROOT_ENV_VAR}={tmp_path} mena process" in captured.out
     assert f"Session record: {sessions[0] / 'session.json'}" in captured.out
 
     record_path = sessions[0] / "session.json"
@@ -2097,6 +2097,66 @@ def test_main_process_without_session_path_uses_latest_recorded_session(
     assert exit_code == 0
     assert calls == [latest.record_path]
     assert older.record_path != latest.record_path
+
+
+def test_main_process_without_session_path_uses_latest_completed_recording(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    short = _create_runtime_session(
+        settings,
+        status="recorded",
+        created_at="2026-05-19T11:00:00Z",
+        completed_at="2026-05-19T11:30:00Z",
+    )
+    long = _create_runtime_session(
+        settings,
+        status="recorded",
+        created_at="2026-05-19T10:00:00Z",
+        completed_at="2026-05-19T12:00:00Z",
+    )
+    calls: list[Path] = []
+
+    def _fake_run_processing_command(**kwargs: object) -> int:
+        calls.append(cast(Path, kwargs["session_path"]))
+        return 0
+
+    monkeypatch.setattr("mena.cli._run_processing_command", _fake_run_processing_command)
+
+    exit_code = main(["process"], settings=settings)
+
+    assert exit_code == 0
+    assert calls == [long.record_path]
+    assert short.record_path != long.record_path
+
+
+def test_main_process_without_session_path_rejects_ambiguous_latest_recording(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    _create_runtime_session(
+        settings,
+        status="recorded",
+        created_at="2026-05-19T10:00:00Z",
+        completed_at="2026-05-19T12:00:00Z",
+    )
+    _create_runtime_session(
+        settings,
+        status="recorded",
+        created_at="2026-05-19T11:00:00Z",
+        completed_at="2026-05-19T12:00:00Z",
+    )
+
+    exit_code = main(["process"], settings=settings)
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert (
+        "Cannot run processing workflow: latest recorded session is ambiguous; "
+        "pass an explicit session path."
+    ) in captured.out
 
 
 def test_main_process_without_session_path_reports_missing_recorded_session(
@@ -5263,7 +5323,9 @@ def _create_runtime_session(
     *,
     status: str,
     created_at: str,
+    completed_at: str | None = None,
 ) -> CreatedSession:
+    final_completed_at = completed_at or created_at
     session = create_session(
         profile=parse_capture_profile("online"),
         data_root=settings.paths.sessions_dir.parent,
@@ -5274,11 +5336,11 @@ def _create_runtime_session(
         status=status,
         recording={
             "started_at": "2026-05-19T09:59:00Z",
-            "stopped_at": created_at,
+            "stopped_at": final_completed_at,
             "stop_reason": "user_stop",
             "finalization": {
                 "status": "finalized" if status == "recorded" else status,
-                "completed_at": created_at,
+                "completed_at": final_completed_at,
                 "error": None if status == "recorded" else "capture failed",
             },
         },
