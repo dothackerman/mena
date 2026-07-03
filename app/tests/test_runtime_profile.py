@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import json
+from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 
 from mena.artifacts import FileSystemArtifactStore
-from mena.diarization import DiarizationProvider, DiarizationProviderUnavailable
+from mena.diarization import (
+    DiarizationProvider,
+    DiarizationProviderUnavailable,
+    PyannoteCommunityDiarizationProvider,
+)
 from mena.provider_validation import ProviderValidationError
 from mena.runtime_profile import (
     BoundProcessingRuntime,
@@ -15,20 +22,37 @@ from mena.runtime_profile import (
     bind_processing_runtime,
     bind_summarization_runtime,
     run_processing_with_runtime_fallback,
+    runtime_diarization_factory,
     runtime_fallback_stage_for_provider_failure,
+    runtime_semantic_factory,
     runtime_stage_policy_payload,
+    runtime_transcription_factory,
+    select_runtime_profile,
+    select_runtime_profile_after_stage_failure,
+    store_runtime_profile_provenance,
 )
-from mena.semantic_coherence import SemanticCoherenceProvider
+from mena.semantic_coherence import OllamaSemanticCoherenceProvider, SemanticCoherenceProvider
 from mena.settings import AppSettings
 from mena.setup import (
+    CommandCheck,
     CommandIdentity,
+    HardwareFacts,
+    LocalInstallationState,
+    OllamaState,
+    PythonSurfaceCheck,
     RuntimeFallbackAuthorization,
     RuntimeProfileState,
     SetupEvaluation,
     StageProfile,
+    build_runtime_profile_state,
+    default_profile_catalog,
+    evaluate_setup,
+    get_alpha_local_profile,
+    persist_runtime_profile_state,
 )
 from mena.transcription import (
     FasterWhisperModelProfile,
+    FasterWhisperTranscriptionProvider,
     TranscriptionProvider,
     TranscriptionProviderUnavailable,
 )
@@ -121,6 +145,104 @@ def _selection(
     )
 
 
+def _setup_state(
+    *,
+    settings: AppSettings,
+    command_identity: CommandIdentity | None = None,
+    hardware: HardwareFacts | None = None,
+    ollama_model_present: bool = True,
+    asr_model_present: bool | None = True,
+    diarization_model_present: bool | None = True,
+    pyannote_token_present: bool = False,
+    python_surfaces: dict[str, bool] | None = None,
+) -> LocalInstallationState:
+    profile = get_alpha_local_profile(settings.local_llm.ollama_model)
+    surface_presence = python_surfaces or {
+        "faster_whisper": True,
+        "pyannote.audio": True,
+    }
+    return LocalInstallationState(
+        command_identity=command_identity
+        or CommandIdentity(
+            current_executable=Path("/home/user/.local/bin/mena"),
+            plain_mena_path=Path("/home/user/.local/bin/mena"),
+            version="0.1.0",
+            invocation_mode="installed-product",
+        ),
+        runtime_paths=settings.paths,
+        hardware=hardware
+        or HardwareFacts(
+            system="Linux",
+            ram_gb=32.0,
+            cuda_available=True,
+            vram_gb=12.0,
+            avx2_available=True,
+        ),
+        commands=tuple(
+            CommandCheck(name=command, path=Path("/usr/bin") / command)
+            for command in profile.required_commands
+        ),
+        playback_commands=tuple(
+            CommandCheck(
+                name=command,
+                path=Path("/usr/bin") / command if command == "ffplay" else None,
+            )
+            for command in profile.playback_commands
+        ),
+        python_surfaces=tuple(
+            PythonSurfaceCheck(
+                requirement=requirement,
+                installed=surface_presence[requirement.import_name],
+            )
+            for requirement in profile.python_surfaces
+        ),
+        ollama=OllamaState(
+            endpoint=settings.local_llm.ollama_endpoint,
+            model=settings.local_llm.ollama_model,
+            command=CommandCheck("ollama", Path("/usr/bin/ollama")),
+            reachable=True,
+            model_present=ollama_model_present,
+            detail=(
+                "model present"
+                if ollama_model_present
+                else f"model {settings.local_llm.ollama_model} is not listed by Ollama"
+            ),
+        ),
+        asr_model_present=asr_model_present,
+        diarization_model_present=diarization_model_present,
+        pyannote_token_present=pyannote_token_present,
+        python_executable=Path("/usr/bin/python3"),
+    )
+
+
+def _runtime_profile_state_with_evaluated_fallback(
+    *,
+    settings: AppSettings,
+    setup_state: LocalInstallationState,
+) -> RuntimeProfileState:
+    primary_profile = get_alpha_local_profile(settings.local_llm.ollama_model)
+    fallback_profile = default_profile_catalog(settings.local_llm.ollama_model)[1]
+    return build_runtime_profile_state(
+        evaluate_setup(primary_profile, setup_state),
+        fallback_evaluation=evaluate_setup(fallback_profile, setup_state),
+        authorize_local_fallback=True,
+    )
+
+
+def _stage_failure_accepted_state(
+    *,
+    settings: AppSettings,
+    setup_state: LocalInstallationState,
+    authorize_local_fallback: bool,
+) -> RuntimeProfileState:
+    primary_profile, fallback_profile = default_profile_catalog(settings.local_llm.ollama_model)
+    return build_runtime_profile_state(
+        evaluate_setup(primary_profile, setup_state),
+        fallback_evaluation=evaluate_setup(fallback_profile, setup_state),
+        authorize_local_fallback=authorize_local_fallback,
+    )
+
+
 class _Transcription:
     name = "transcription"
 
@@ -174,6 +296,544 @@ def test_runtime_fallback_stage_for_provider_failure_maps_provider_errors() -> N
         )
         == "diarization"
     )
+
+
+def test_runtime_provider_factories_use_selected_profile_state(tmp_path: Path) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    setup_state = _setup_state(settings=settings, pyannote_token_present=True)
+    evaluation = evaluate_setup(get_alpha_local_profile(), setup_state)
+    runtime_state = build_runtime_profile_state(evaluation)
+
+    transcription_provider = runtime_transcription_factory(
+        FasterWhisperTranscriptionProvider,
+        runtime_state,
+    )()
+    diarization_provider = runtime_diarization_factory(
+        PyannoteCommunityDiarizationProvider,
+        runtime_state,
+    )()
+    semantic_provider = runtime_semantic_factory(
+        OllamaSemanticCoherenceProvider,
+        settings=settings,
+        runtime_state=runtime_state,
+    )()
+
+    assert transcription_provider.profile.id == evaluation.selected_asr_profile.id
+    assert transcription_provider.profile.device == "cuda"
+    assert transcription_provider.local_files_only
+    assert diarization_provider.device == "cuda"
+    assert semantic_provider.metadata.model == settings.local_llm.ollama_model
+    assert semantic_provider.metadata.endpoint == settings.local_llm.ollama_endpoint
+
+
+def test_runtime_profile_selection_uses_accepted_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    setup_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = _runtime_profile_state_with_evaluated_fallback(
+        settings=settings,
+        setup_state=setup_state,
+    )
+    persist_runtime_profile_state(accepted, paths=settings.paths)
+    monkeypatch.setattr(
+        "mena.runtime_profile.detect_local_installation_state",
+        lambda *_args, **_kwargs: setup_state,
+    )
+
+    selection = select_runtime_profile(
+        settings=settings,
+        runner=None,
+        command_identity=None,
+        hardware=None,
+        allow_runtime_fallback=False,
+    )
+
+    assert selection.accepted.accepted_profile_id == accepted.accepted_profile_id
+    assert selection.actual.accepted_profile_id == accepted.accepted_profile_id
+    assert not selection.fallback_used
+
+
+def test_runtime_profile_selection_revalidates_accepted_model_after_config_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    setup_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted_profile = get_alpha_local_profile(settings.local_llm.ollama_model)
+    accepted = build_runtime_profile_state(evaluate_setup(accepted_profile, setup_state))
+    persist_runtime_profile_state(accepted, paths=settings.paths)
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+[ollama]
+model = "mistral:7b"
+""".strip(),
+        encoding="utf-8",
+    )
+    drifted_settings = AppSettings.from_env(env={}, home=tmp_path, config_path=config_path)
+    observed_models: list[str] = []
+
+    def _detect_state(_settings: AppSettings, **kwargs: object) -> LocalInstallationState:
+        profile = cast(Any, kwargs["profile"])
+        model = next(stage.model for stage in profile.stages if stage.stage == "summarization")
+        observed_models.append(model)
+        return replace(
+            _setup_state(settings=drifted_settings, pyannote_token_present=True),
+            ollama=OllamaState(
+                endpoint=drifted_settings.local_llm.ollama_endpoint,
+                model=model,
+                command=CommandCheck("ollama", Path("/usr/bin/ollama")),
+                reachable=True,
+                model_present=True,
+                detail="model present",
+            ),
+        )
+
+    monkeypatch.setattr("mena.runtime_profile.detect_local_installation_state", _detect_state)
+
+    selection = select_runtime_profile(
+        settings=drifted_settings,
+        runner=None,
+        command_identity=None,
+        hardware=None,
+        allow_runtime_fallback=False,
+    )
+
+    assert observed_models == [settings.local_llm.ollama_model]
+    assert selection.actual.accepted_profile_id == accepted.accepted_profile_id
+
+
+def test_runtime_profile_selection_uses_setup_authorized_local_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    accepted_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = _runtime_profile_state_with_evaluated_fallback(
+        settings=settings,
+        setup_state=accepted_state,
+    )
+    persist_runtime_profile_state(accepted, paths=settings.paths)
+    stale_state = _setup_state(
+        settings=settings,
+        hardware=HardwareFacts(
+            system="Linux",
+            ram_gb=32.0,
+            cuda_available=False,
+            vram_gb=None,
+            avx2_available=True,
+        ),
+        pyannote_token_present=True,
+    )
+    monkeypatch.setattr(
+        "mena.runtime_profile.detect_local_installation_state",
+        lambda *_args, **_kwargs: stale_state,
+    )
+
+    selection = select_runtime_profile(
+        settings=settings,
+        runner=None,
+        command_identity=None,
+        hardware=None,
+        allow_runtime_fallback=False,
+    )
+
+    assert selection.fallback_used
+    assert selection.actual.accepted_profile_id.endswith("cpu-fallback-v1")
+    assert selection.fallback_reason is not None
+
+
+def test_runtime_profile_selection_requires_authorization_when_setup_did_not_authorize_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    accepted_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = build_runtime_profile_state(
+        evaluate_setup(get_alpha_local_profile(), accepted_state)
+    )
+    payload = accepted.to_dict()
+    cast(dict[str, object], payload["fallback_authorization"])["local_status"] = (
+        "configured_unauthorized"
+    )
+    cast(dict[str, object], payload["fallback_authorization"])[
+        "automatic_local_fallback_authorized"
+    ] = False
+    settings.paths.state_home.mkdir(parents=True)
+    (settings.paths.state_home / "setup-state.json").write_text(
+        json.dumps(payload),
+        encoding="utf-8",
+    )
+    stale_state = _setup_state(
+        settings=settings,
+        hardware=HardwareFacts(
+            system="Linux",
+            ram_gb=32.0,
+            cuda_available=False,
+            vram_gb=None,
+            avx2_available=True,
+        ),
+        pyannote_token_present=True,
+    )
+    monkeypatch.setattr(
+        "mena.runtime_profile.detect_local_installation_state",
+        lambda *_args, **_kwargs: stale_state,
+    )
+
+    with pytest.raises(ValueError, match="authorize local fallback"):
+        select_runtime_profile(
+            settings=settings,
+            runner=None,
+            command_identity=None,
+            hardware=None,
+            allow_runtime_fallback=False,
+        )
+
+    observed_consent: dict[str, object] = {}
+
+    def _authorize_once(failure: str, evaluation: object) -> bool:
+        observed_consent["failure"] = failure
+        observed_consent["profile_id"] = cast(Any, evaluation).profile.id
+        return True
+
+    callback_selection = select_runtime_profile(
+        settings=settings,
+        runner=None,
+        command_identity=None,
+        hardware=None,
+        allow_runtime_fallback=False,
+        authorize_runtime_fallback=_authorize_once,
+    )
+
+    selection = select_runtime_profile(
+        settings=settings,
+        runner=None,
+        command_identity=None,
+        hardware=None,
+        allow_runtime_fallback=True,
+    )
+
+    assert callback_selection.fallback_used
+    assert callback_selection.actual.accepted_profile_id.endswith("cpu-fallback-v1")
+    assert "current ASR runtime selection" in cast(str, observed_consent["failure"])
+    assert observed_consent["profile_id"] == "linux-alpha-cpu-fallback-v1"
+    assert selection.fallback_used
+    assert selection.actual.accepted_profile_id.endswith("cpu-fallback-v1")
+
+
+def test_runtime_profile_stage_failure_selection_allows_explicit_one_run_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    setup_state = _setup_state(settings=settings, pyannote_token_present=True)
+    primary_profile, fallback_profile = default_profile_catalog(settings.local_llm.ollama_model)
+    accepted = build_runtime_profile_state(
+        evaluate_setup(primary_profile, setup_state),
+        fallback_evaluation=evaluate_setup(fallback_profile, setup_state),
+        authorize_local_fallback=False,
+    )
+    observed_profiles: list[tuple[str, tuple[str, ...]]] = []
+
+    def _detect_state(_settings: AppSettings, **kwargs: object) -> LocalInstallationState:
+        profile = cast(Any, kwargs["profile"])
+        observed_profiles.append((profile.id, tuple(stage.stage for stage in profile.stages)))
+        return setup_state
+
+    monkeypatch.setattr("mena.runtime_profile.detect_local_installation_state", _detect_state)
+
+    selection = select_runtime_profile_after_stage_failure(
+        settings=settings,
+        runner=None,
+        command_identity=None,
+        hardware=None,
+        accepted=accepted,
+        failed_stage="diarization",
+        failure_reason="CUDA out of memory during pyannote diarization",
+        failure_class="DiarizationProviderUnavailable",
+        failed_input_artifacts=("session:artifacts/source_audio/system.wav",),
+        allow_runtime_fallback=True,
+    )
+
+    assert observed_profiles == [("linux-alpha-cpu-fallback-v1", ("diarization",))]
+    assert selection.fallback_used
+    assert selection.fallback_status == "used_after_stage_failure"
+    assert selection.fallback_authorization_source == "explicit_one_run"
+    assert selection.fallback_failed_stage == "diarization"
+    assert selection.fallback_failed_input_artifacts == (
+        "session:artifacts/source_audio/system.wav",
+    )
+    assert selection.actual.accepted_profile_id == "linux-alpha-cpu-fallback-v1"
+
+
+def test_runtime_profile_stage_failure_selection_rejects_unready_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    setup_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = _runtime_profile_state_with_evaluated_fallback(
+        settings=settings,
+        setup_state=setup_state,
+    )
+    missing_asr_state = _setup_state(
+        settings=settings,
+        asr_model_present=False,
+        pyannote_token_present=True,
+    )
+
+    monkeypatch.setattr(
+        "mena.runtime_profile.detect_local_installation_state",
+        lambda *_args, **_kwargs: missing_asr_state,
+    )
+
+    with pytest.raises(ValueError, match="fallback is not currently viable"):
+        select_runtime_profile_after_stage_failure(
+            settings=settings,
+            runner=None,
+            command_identity=None,
+            hardware=None,
+            accepted=accepted,
+            failed_stage="transcription",
+            failure_reason="CUDA out of memory during faster-whisper transcription",
+            failure_class="TranscriptionProviderUnavailable",
+            failed_input_artifacts=("session:artifacts/source_audio/local.wav",),
+            allow_runtime_fallback=False,
+        )
+
+
+def test_runtime_profile_stage_failure_selection_uses_setup_authorized_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    setup_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = _stage_failure_accepted_state(
+        settings=settings, setup_state=setup_state, authorize_local_fallback=True
+    )
+    monkeypatch.setattr(
+        "mena.runtime_profile.detect_local_installation_state",
+        lambda *_args, **_kwargs: setup_state,
+    )
+
+    selection = select_runtime_profile_after_stage_failure(
+        settings=settings,
+        runner=None,
+        command_identity=None,
+        hardware=None,
+        accepted=accepted,
+        failed_stage="diarization",
+        failure_reason="CUDA out of memory during pyannote diarization",
+        failure_class="DiarizationProviderUnavailable",
+        failed_input_artifacts=(),
+        allow_runtime_fallback=False,
+    )
+
+    assert selection.fallback_authorization_source == "setup_authorized"
+    assert selection.actual.accepted_profile_id == "linux-alpha-cpu-fallback-v1"
+
+
+def test_runtime_profile_stage_failure_selection_accepts_interactive_authorization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    setup_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = _stage_failure_accepted_state(
+        settings=settings, setup_state=setup_state, authorize_local_fallback=False
+    )
+    monkeypatch.setattr(
+        "mena.runtime_profile.detect_local_installation_state",
+        lambda *_args, **_kwargs: setup_state,
+    )
+
+    selection = select_runtime_profile_after_stage_failure(
+        settings=settings,
+        runner=None,
+        command_identity=None,
+        hardware=None,
+        accepted=accepted,
+        failed_stage="diarization",
+        failure_reason="CUDA out of memory during pyannote diarization",
+        failure_class="DiarizationProviderUnavailable",
+        failed_input_artifacts=(),
+        allow_runtime_fallback=False,
+        authorize_runtime_fallback=lambda *_args: True,
+    )
+
+    assert selection.fallback_authorization_source == "interactive"
+
+
+def test_runtime_profile_stage_failure_selection_raises_when_fallback_declined(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    setup_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = _stage_failure_accepted_state(
+        settings=settings, setup_state=setup_state, authorize_local_fallback=False
+    )
+    monkeypatch.setattr(
+        "mena.runtime_profile.detect_local_installation_state",
+        lambda *_args, **_kwargs: setup_state,
+    )
+
+    with pytest.raises(RuntimeFallbackUnavailable, match="fallback was declined"):
+        select_runtime_profile_after_stage_failure(
+            settings=settings,
+            runner=None,
+            command_identity=None,
+            hardware=None,
+            accepted=accepted,
+            failed_stage="diarization",
+            failure_reason="CUDA out of memory during pyannote diarization",
+            failure_class="DiarizationProviderUnavailable",
+            failed_input_artifacts=(),
+            allow_runtime_fallback=False,
+            authorize_runtime_fallback=lambda *_args: False,
+        )
+
+
+def test_runtime_profile_stage_failure_selection_raises_when_authorizer_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    setup_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = _stage_failure_accepted_state(
+        settings=settings, setup_state=setup_state, authorize_local_fallback=False
+    )
+    monkeypatch.setattr(
+        "mena.runtime_profile.detect_local_installation_state",
+        lambda *_args, **_kwargs: setup_state,
+    )
+
+    with pytest.raises(RuntimeFallbackUnavailable, match="Re-run setup"):
+        select_runtime_profile_after_stage_failure(
+            settings=settings,
+            runner=None,
+            command_identity=None,
+            hardware=None,
+            accepted=accepted,
+            failed_stage="diarization",
+            failure_reason="CUDA out of memory during pyannote diarization",
+            failure_class="DiarizationProviderUnavailable",
+            failed_input_artifacts=(),
+            allow_runtime_fallback=False,
+        )
+
+
+def test_runtime_profile_selection_revalidates_fallback_against_fallback_profile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    accepted_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = build_runtime_profile_state(
+        evaluate_setup(get_alpha_local_profile(), accepted_state)
+    )
+    persist_runtime_profile_state(accepted, paths=settings.paths)
+    observed_profiles: list[str] = []
+
+    def _detect_state(_settings: AppSettings, **kwargs: object) -> LocalInstallationState:
+        profile = cast(Any, kwargs["profile"])
+        observed_profiles.append(profile.id)
+        return _setup_state(
+            settings=settings,
+            hardware=HardwareFacts(
+                system="Linux",
+                ram_gb=32.0,
+                cuda_available=False,
+                vram_gb=None,
+                avx2_available=True,
+            ),
+            pyannote_token_present=True,
+        )
+
+    monkeypatch.setattr("mena.runtime_profile.detect_local_installation_state", _detect_state)
+
+    selection = select_runtime_profile(
+        settings=settings,
+        runner=None,
+        command_identity=None,
+        hardware=None,
+        allow_runtime_fallback=True,
+    )
+
+    assert observed_profiles == ["linux-alpha-local-v1", "linux-alpha-cpu-fallback-v1"]
+    assert selection.fallback_used
+    assert selection.actual.selected_asr_profile.device == "cpu"
+
+
+def test_runtime_profile_selection_rejects_stale_catalog_state(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    setup_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = _runtime_profile_state_with_evaluated_fallback(
+        settings=settings,
+        setup_state=setup_state,
+    )
+    payload = accepted.to_dict()
+    payload["catalog_version"] = "stale-catalog"
+    settings.paths.state_home.mkdir(parents=True)
+    (settings.paths.state_home / "setup-state.json").write_text(
+        json.dumps(payload),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="incompatible"):
+        select_runtime_profile(
+            settings=settings,
+            runner=None,
+            command_identity=None,
+            hardware=None,
+            allow_runtime_fallback=False,
+        )
+
+
+def test_runtime_profile_provenance_records_accepted_actual_and_fallback(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    setup_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = _runtime_profile_state_with_evaluated_fallback(
+        settings=settings,
+        setup_state=setup_state,
+    )
+    selection = SimpleNamespace(
+        accepted=accepted,
+        actual=accepted,
+        current_command_identity=setup_state.command_identity,
+        fallback_used=False,
+        fallback_reason=None,
+        fallback_status="not_needed",
+        revalidation=evaluate_setup(get_alpha_local_profile(), setup_state),
+    )
+    store = FileSystemArtifactStore(session_id="session", session_dir=tmp_path)
+
+    record = store_runtime_profile_provenance(
+        store=store,
+        run_id="run-001",
+        attempt=3,
+        selection=cast(Any, selection),
+    )
+    payload = json.loads(store.retrieve(record.id))
+
+    assert payload["attempt"] == 3
+    assert payload["accepted_profile"]["id"] == accepted.accepted_profile_id
+    assert payload["actual_profile"]["id"] == accepted.accepted_profile_id
+    assert payload["actual_profile"]["stages"][0]["device"] == "cuda"
+    assert payload["fallback"]["used"] is False
+    assert payload["fallback"]["status"] == "not_needed"
+    assert payload["fallback"]["authorization"]["local_status"] == "authorized"
+    assert payload["fallback"]["authorization"]["local_profile_id"].endswith("cpu-fallback-v1")
+    assert payload["contract"] == "runtime-profile-provenance.v1"
+    assert payload["current_product"]["version"] == setup_state.command_identity.version
+    assert record.metadata["attempt"] == 3
+    assert record.metadata["actual_profile_id"] == accepted.accepted_profile_id
 
 
 def test_bind_processing_runtime_constructs_bound_provider_set() -> None:

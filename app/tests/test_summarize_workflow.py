@@ -1,18 +1,29 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
-from mena.artifacts import FileSystemArtifactStore, InMemoryArtifactStore
+from mena.artifacts import ArtifactStore, FileSystemArtifactStore, InMemoryArtifactStore
 from mena.merge_timing import MERGED_TRANSCRIPT_ARTIFACT_TYPE
+from mena.runtime_profile import RuntimeProfileSelection
 from mena.sessions import resolve_session, session_language_or_default
+from mena.settings import AppSettings
+from mena.summarization import SummarizationError, SummarizationPolicy
 from mena.summarize_workflow import (
     _merged_transcript_timestamp_key,
     _parse_iso_timestamp,
     _resolve_latest_merged_transcript_record,
+    run_summarization_command,
 )
+from test_cli import _build_summarize_session_bundle
 
 SESSION_ID = "00000000-0000-0000-0000-000000000001"
+
+
+def _runtime_selection(**_kwargs: object) -> RuntimeProfileSelection:
+    return cast(RuntimeProfileSelection, SimpleNamespace())
 
 
 def test_summarize_workflow_resolves_session_directory_and_record_path(
@@ -66,3 +77,162 @@ def test_summarize_workflow_filters_invalid_merged_transcripts(tmp_path: Path) -
     (tmp_path / corrupt.path).write_bytes(b"changed")
 
     assert _merged_transcript_timestamp_key(store=file_store, record=corrupt) is None
+
+
+def test_summarize_workflow_applies_active_overlay_and_manual_notes(
+    tmp_path: Path,
+) -> None:
+    session_dir, _, merged_record, overlay_record = _build_summarize_session_bundle(tmp_path)
+    notes_path = tmp_path / "notes.md"
+    notes_path.write_text("- manual note from workflow", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    def _fake_run_summarization_stage(**kwargs: object) -> SimpleNamespace:
+        captured.update(kwargs)
+        store = cast(ArtifactStore, kwargs["store"])
+        return SimpleNamespace(
+            summary_record=store.store(
+                artifact_type="summary",
+                name="summary/final.json",
+                data=b"{}",
+                version=1,
+            ),
+        )
+
+    assert (
+        run_summarization_command(
+            session_path=session_dir,
+            manual_notes=str(notes_path),
+            language="de-CH",
+            settings=AppSettings.from_env(env={}, home=tmp_path),
+            runtime_profile_selector_fn=_runtime_selection,
+            runtime_profile_store_fn=lambda **_kwargs: None,
+            runtime_summarization_binder_fn=lambda **_kwargs: SimpleNamespace(),
+            run_summarization_stage_fn=_fake_run_summarization_stage,
+        )
+        == 0
+    )
+
+    assert captured["merged_transcript_record"] == merged_record
+    assert captured["correction_overlay_record"] == overlay_record
+    assert captured["manual_notes_record"] is not None
+    assert cast(SummarizationPolicy, captured["policy"]).language == "de-CH"
+
+
+def test_summarize_workflow_binds_provider_through_runtime_resolver(
+    tmp_path: Path,
+) -> None:
+    session_dir, _, _, _ = _build_summarize_session_bundle(tmp_path)
+    selection = cast(
+        RuntimeProfileSelection,
+        SimpleNamespace(actual=SimpleNamespace(accepted_profile_id="profile")),
+    )
+    provider = SimpleNamespace(metadata=SimpleNamespace(config_id="provider"))
+    captured: dict[str, object] = {}
+
+    def _bind(**kwargs: object) -> object:
+        captured["selection"] = kwargs["selection"]
+        captured["settings"] = kwargs["settings"]
+        return provider
+
+    def _stage(**kwargs: object) -> SimpleNamespace:
+        captured["provider"] = kwargs["provider"]
+        store = cast(ArtifactStore, kwargs["store"])
+        return SimpleNamespace(
+            summary_record=store.store(
+                artifact_type="summary",
+                name="summary/final.json",
+                data=b"{}",
+                version=1,
+            ),
+        )
+
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+
+    assert (
+        run_summarization_command(
+            session_path=session_dir,
+            manual_notes=None,
+            language=None,
+            settings=settings,
+            runtime_profile_selector_fn=lambda **_kwargs: selection,
+            runtime_profile_store_fn=lambda **_kwargs: None,
+            runtime_summarization_binder_fn=_bind,
+            run_summarization_stage_fn=_stage,
+        )
+        == 0
+    )
+
+    assert captured["selection"] is selection
+    assert captured["settings"] is settings
+    assert captured["provider"] is provider
+
+
+def test_summarize_workflow_uses_unique_runtime_profile_provenance_per_run(
+    tmp_path: Path,
+) -> None:
+    session_dir, _, _, _ = _build_summarize_session_bundle(tmp_path)
+    run_ids: list[str] = []
+
+    def _store(**kwargs: object) -> None:
+        run_ids.append(cast(str, kwargs["run_id"]))
+
+    def _stage(**kwargs: object) -> SimpleNamespace:
+        store = cast(ArtifactStore, kwargs["store"])
+        ledger = cast(SimpleNamespace, kwargs["ledger"])
+        return SimpleNamespace(
+            summary_record=store.store(
+                artifact_type="summary",
+                name=f"summary/{ledger.run_id}.json",
+                data=b"{}",
+                version=1,
+            ),
+        )
+
+    for _ in range(2):
+        assert (
+            run_summarization_command(
+                session_path=session_dir,
+                manual_notes=None,
+                language=None,
+                settings=AppSettings.from_env(env={}, home=tmp_path),
+                runtime_profile_selector_fn=_runtime_selection,
+                runtime_profile_store_fn=_store,
+                runtime_summarization_binder_fn=lambda **_kwargs: SimpleNamespace(),
+                run_summarization_stage_fn=_stage,
+            )
+            == 0
+        )
+
+    assert len(run_ids) == 2
+    assert len(set(run_ids)) == 2
+    assert all(run_id.startswith("summarize-") for run_id in run_ids)
+
+
+def test_summarize_workflow_releases_terminal_runtime_after_stage_failure(
+    tmp_path: Path,
+) -> None:
+    session_dir, _, _, _ = _build_summarize_session_bundle(tmp_path)
+    releases: list[dict[str, object]] = []
+
+    def _release(**kwargs: object) -> None:
+        releases.append(kwargs)
+
+    with pytest.raises(SummarizationError, match="provider unavailable"):
+        run_summarization_command(
+            session_path=session_dir,
+            manual_notes=None,
+            language=None,
+            settings=AppSettings.from_env(env={}, home=tmp_path),
+            runtime_profile_selector_fn=_runtime_selection,
+            runtime_profile_store_fn=lambda **_kwargs: None,
+            runtime_summarization_binder_fn=lambda **_kwargs: SimpleNamespace(),
+            run_summarization_stage_fn=lambda **_kwargs: (_ for _ in ()).throw(
+                SummarizationError("provider unavailable")
+            ),
+            terminal_llm_release_fn=_release,
+        )
+
+    assert releases[0]["stage"] == "summarization"
+    assert releases[0]["boundary"] == "summarize"
+    assert releases[0]["attempt"] == 1
