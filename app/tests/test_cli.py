@@ -21,6 +21,7 @@ from mena.capture import make_wav_bytes
 from mena.cli import (
     COMMANDS,
     WORKER_EXIT_TIMEOUT_SECONDS,
+    ConsoleCorrectionInteraction,
     ConsoleRecordInteraction,
     SourceAudioInput,
     _collect_capture_segments,
@@ -50,6 +51,13 @@ from mena.diarization import (
     PyannoteCommunityDiarizationProvider,
 )
 from mena.discovery import AudioDiscovery, AudioRoute, DiscoveryStatus, PlaybackStream
+from mena.interaction import (
+    ChoiceOption,
+    ChoiceRequest,
+    ConfirmationRequest,
+    TextRequest,
+    WorkflowNotice,
+)
 from mena.merge_timing import (
     MERGED_TRANSCRIPT_ARTIFACT_TYPE,
     MERGED_TRANSCRIPT_SCHEMA_VERSION,
@@ -2425,6 +2433,88 @@ def test_main_correct_handles_artifact_store_errors(
 
     assert exit_code == 1
     assert "Cannot run correction workflow: Unsupported artifact manifest version." in captured.out
+
+
+def test_console_correction_interaction_reprompts_invalid_action(
+    capsys: CaptureFixture[str],
+) -> None:
+    answers = iter(["z", "s"])
+    interaction = ConsoleCorrectionInteraction(lambda _: next(answers))
+
+    chosen = interaction.choose(
+        ChoiceRequest(
+            topic="correction.action",
+            options=(
+                ChoiceOption(option_id="playback", label="play"),
+                ChoiceOption(option_id="skip", label="skip"),
+            ),
+        )
+    )
+    captured = capsys.readouterr()
+
+    assert chosen.option_id == "skip"
+    assert "Invalid action. Use [p]lay, [s]kip, [r]eassign, [t]ext, or [o]verlap." in captured.out
+
+
+def test_console_correction_interaction_reads_speaker_text_and_validation_notices(
+    capsys: CaptureFixture[str],
+) -> None:
+    prompts: list[str] = []
+
+    def _input(prompt: str) -> str:
+        prompts.append(prompt)
+        return "2"
+
+    interaction = ConsoleCorrectionInteraction(_input)
+
+    answer = interaction.request_text(TextRequest(topic="correction.speaker_assignment"))
+    interaction.notify(WorkflowNotice(topic="correction.speaker_assignment.invalid_number"))
+    interaction.notify(WorkflowNotice(topic="correction.speaker_assignment.empty"))
+    captured = capsys.readouterr()
+
+    assert answer == "2"
+    assert prompts == ["Choose existing speaker number or enter a new speaker label: "]
+    assert "Choose a valid number from the list." in captured.out
+    assert "Enter a speaker id or a label." in captured.out
+
+
+def test_console_correction_interaction_reprompts_invalid_overlap(
+    capsys: CaptureFixture[str],
+) -> None:
+    answers = iter(["maybe", "yes"])
+    interaction = ConsoleCorrectionInteraction(lambda _: next(answers))
+
+    assert interaction.confirm(ConfirmationRequest(topic="correction.overlap_mark")) is True
+    captured = capsys.readouterr()
+
+    assert "Please answer y or n." in captured.out
+
+
+def test_console_correction_interaction_prints_playback_and_completion_notices(
+    capsys: CaptureFixture[str],
+) -> None:
+    interaction = ConsoleCorrectionInteraction(lambda _: "s")
+
+    interaction.notify(
+        WorkflowNotice(
+            topic="correction.playback_completed",
+            context={"source_id": "system_audio", "start_seconds": 0.0, "end_seconds": 3.3},
+        )
+    )
+    interaction.notify(
+        WorkflowNotice(topic="correction.playback_failed", context={"error": "nope"})
+    )
+    interaction.notify(
+        WorkflowNotice(
+            topic="correction.completed",
+            context={"reviewed": 1, "skipped": 1, "corrected": 0},
+        )
+    )
+    captured = capsys.readouterr()
+
+    assert "Playback completed for system_audio 0.00-3.30s." in captured.out
+    assert "Playback failed: nope" in captured.out
+    assert "Correction completed. reviewed=1, skipped=1, corrected=0." in captured.out
 
 
 def test_main_correct_playback_prompt_uses_injected_player(

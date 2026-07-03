@@ -24,8 +24,6 @@ from mena.correction_workflow import (
     _ordered_speaker_catalog,
     _playback_window,
     _print_review_item,
-    _prompt_overlap_mark,
-    _prompt_speaker_assignment,
     _resolve_session,
     _timestamp,
     run_correction_workflow,
@@ -33,6 +31,7 @@ from mena.correction_workflow import (
 from mena.correction_workflow import (
     _extract_session_id as extract_session_id,
 )
+from mena.interaction import ChoiceOption, ChoiceRequest, ScriptedInteraction, ScriptedResponse
 from mena.merge_timing import (
     MERGED_TRANSCRIPT_SCHEMA_VERSION,
     MergedTranscriptArtifact,
@@ -63,6 +62,26 @@ from mena.transcription import (
 
 SESSION_ID = "00000000-0000-0000-0000-000000000001"
 NOW = datetime(2026, 5, 19, 15, 20, 0, tzinfo=UTC)
+
+
+def _interaction(*responses: ScriptedResponse) -> ScriptedInteraction:
+    return ScriptedInteraction(responses)
+
+
+def _choose_action(option_id: str) -> ScriptedResponse:
+    return ScriptedResponse(kind="choose", topic="correction.action", value=option_id)
+
+
+def _speaker_assignment(value: str) -> ScriptedResponse:
+    return ScriptedResponse(kind="text", topic="correction.speaker_assignment", value=value)
+
+
+def _text_edit(value: str) -> ScriptedResponse:
+    return ScriptedResponse(kind="text", topic="correction.text_edit", value=value)
+
+
+def _overlap_mark(value: bool) -> ScriptedResponse:
+    return ScriptedResponse(kind="confirm", topic="correction.overlap_mark", value=value)
 
 
 def test_run_correction_workflow_persists_overlay_and_keeps_source_transcript_immutable(
@@ -97,12 +116,15 @@ def test_run_correction_workflow_persists_overlay_and_keeps_source_transcript_im
     source_record = store.list(artifact_type="merged_transcript")[0]
     source_path = session_dir / source_record.path
     source_bytes_before = source_path.read_bytes()
-    inputs = iter(["r", "2", "o", "y"])
-
     result = run_correction_workflow(
         session_path=session_dir,
         now=NOW,
-        input_fn=lambda _: next(inputs),
+        interaction=_interaction(
+            _choose_action("speaker_reassignment"),
+            _speaker_assignment("2"),
+            _choose_action("overlap_mark"),
+            _overlap_mark(True),
+        ),
     )
 
     assert result.reviewed == 2
@@ -123,10 +145,7 @@ def test_run_correction_workflow_persists_overlay_and_keeps_source_transcript_im
     assert source_path.read_bytes() == source_bytes_before
 
 
-def test_run_correction_workflow_rejects_invalid_action_and_reprompts(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
+def test_run_correction_workflow_records_skip_action(tmp_path: Path) -> None:
     session_dir, _, _ = _build_session_bundle(
         tmp_path,
         flags=(
@@ -142,18 +161,14 @@ def test_run_correction_workflow_rejects_invalid_action_and_reprompts(
             ),
         ),
     )
-    inputs = iter(["z", "s"])
-
     result = run_correction_workflow(
         session_path=session_dir,
         now=NOW,
-        input_fn=lambda _: next(inputs),
+        interaction=_interaction(_choose_action("skip")),
     )
-    captured = capsys.readouterr()
 
     assert result.reviewed == 1
     assert result.skipped == 1
-    assert "Invalid action" in captured.out
 
 
 def test_run_correction_workflow_records_all_action_types(
@@ -204,23 +219,19 @@ def test_run_correction_workflow_records_all_action_types(
             ),
         ),
     )
-    inputs = iter(
-        [
-            "r",
-            "1",  # keep first segment as `you`
-            "t",
-            "corrected",
-            "o",
-            "y",
-            "r",
-            "2",  # reassign to `remote`
-        ]
-    )
-
     result = run_correction_workflow(
         session_path=session_dir,
         now=NOW,
-        input_fn=lambda _: next(inputs),
+        interaction=_interaction(
+            _choose_action("speaker_reassignment"),
+            _speaker_assignment("1"),
+            _choose_action("text_edit"),
+            _text_edit("corrected"),
+            _choose_action("overlap_mark"),
+            _overlap_mark(True),
+            _choose_action("speaker_reassignment"),
+            _speaker_assignment("2"),
+        ),
     )
     payload = json.loads(store.retrieve(result.overlay_artifact_record.id))
 
@@ -256,12 +267,13 @@ def test_run_correction_workflow_allows_new_speaker_label(
             ),
         ),
     )
-    inputs = iter(["r", "Alice Johnson"])
-
     result = run_correction_workflow(
         session_path=session_dir,
         now=NOW,
-        input_fn=lambda _: next(inputs),
+        interaction=_interaction(
+            _choose_action("speaker_reassignment"),
+            _speaker_assignment("Alice Johnson"),
+        ),
     )
     payload = json.loads(store.retrieve(result.overlay_artifact_record.id))
 
@@ -290,12 +302,10 @@ def test_run_correction_workflow_displays_context_and_candidates(
             ),
         ),
     )
-    inputs = iter(["s"])
-
     run_correction_workflow(
         session_path=session_dir,
         now=NOW,
-        input_fn=lambda _: next(inputs),
+        interaction=_interaction(_choose_action("skip")),
     )
     captured = capsys.readouterr()
 
@@ -621,12 +631,12 @@ def test_run_correction_workflow_playback_invokes_fake_player_and_returns_to_sam
         ),
     )
     requests: list[PlaybackRequest] = []
-    inputs = iter(["p", "s"])
+    interaction = _interaction(_choose_action("playback"), _choose_action("skip"))
 
     result = run_correction_workflow(
         session_path=session_dir,
         now=NOW,
-        input_fn=lambda _: next(inputs),
+        interaction=interaction,
         playback_player=requests.append,
     )
 
@@ -663,12 +673,12 @@ def test_run_correction_workflow_playback_accepts_provider_prep_audio(
         source_artifact_type_by_id={"system_audio": "provider_prep_audio"},
     )
     requests: list[PlaybackRequest] = []
-    inputs = iter(["p", "s"])
+    interaction = _interaction(_choose_action("playback"), _choose_action("skip"))
 
     result = run_correction_workflow(
         session_path=session_dir,
         now=NOW,
-        input_fn=lambda _: next(inputs),
+        interaction=interaction,
         playback_player=requests.append,
     )
 
@@ -688,7 +698,6 @@ def test_run_correction_workflow_playback_accepts_provider_prep_audio(
 
 def test_run_correction_workflow_playback_failure_does_not_consume_review_item(
     tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
 ) -> None:
     session_dir, _, _, _ = _build_playback_session_bundle(
         tmp_path,
@@ -706,7 +715,7 @@ def test_run_correction_workflow_playback_failure_does_not_consume_review_item(
         ),
     )
     requests: list[PlaybackRequest] = []
-    inputs = iter(["p", "s"])
+    interaction = _interaction(_choose_action("playback"), _choose_action("skip"))
 
     def _fail_playback(request: PlaybackRequest) -> None:
         requests.append(request)
@@ -715,20 +724,23 @@ def test_run_correction_workflow_playback_failure_does_not_consume_review_item(
     result = run_correction_workflow(
         session_path=session_dir,
         now=NOW,
-        input_fn=lambda _: next(inputs),
+        interaction=interaction,
         playback_player=_fail_playback,
     )
-    captured = capsys.readouterr()
 
     assert result.reviewed == 1
     assert result.skipped == 1
     assert len(requests) == 1
-    assert "Playback failed: audio device unavailable" in captured.out
+    assert [
+        notice.topic
+        for notice in interaction.notices
+        if notice.topic == "correction.playback_failed"
+    ] == ["correction.playback_failed"]
+    assert interaction.notices[-2].context["error"] == "audio device unavailable"
 
 
 def test_run_correction_workflow_playback_reports_missing_transcript_reference_inline(
     tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
 ) -> None:
     session_dir, _, _ = _build_session_bundle(
         tmp_path,
@@ -746,26 +758,30 @@ def test_run_correction_workflow_playback_reports_missing_transcript_reference_i
         ),
     )
     requests: list[PlaybackRequest] = []
-    inputs = iter(["p", "s"])
+    interaction = _interaction(_choose_action("playback"), _choose_action("skip"))
 
     result = run_correction_workflow(
         session_path=session_dir,
         now=NOW,
-        input_fn=lambda _: next(inputs),
+        interaction=interaction,
         playback_player=requests.append,
     )
-    captured = capsys.readouterr()
 
     assert result.reviewed == 1
     assert result.skipped == 1
     assert requests == []
-    assert "Playback failed: Transcript source for source 'local_mic'" in captured.out
-    assert "missing transcript artifact" in captured.out
+    errors = [
+        str(notice.context["error"])
+        for notice in interaction.notices
+        if notice.topic == "correction.playback_failed"
+    ]
+    assert errors == [
+        "Transcript source for source 'local_mic' references a missing transcript artifact."
+    ]
 
 
 def test_run_correction_workflow_playback_reports_stale_source_audio_reference_inline(
     tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
 ) -> None:
     session_dir, _, _, _ = _build_playback_session_bundle(
         tmp_path,
@@ -783,25 +799,27 @@ def test_run_correction_workflow_playback_reports_stale_source_audio_reference_i
         ),
         source_audio_ref_sha_by_id={"system_audio": "0" * 64},
     )
-    inputs = iter(["p", "s"])
+    interaction = _interaction(_choose_action("playback"), _choose_action("skip"))
 
     result = run_correction_workflow(
         session_path=session_dir,
         now=NOW,
-        input_fn=lambda _: next(inputs),
+        interaction=interaction,
         playback_player=lambda _: None,
     )
-    captured = capsys.readouterr()
 
     assert result.reviewed == 1
     assert result.skipped == 1
-    assert "Playback failed: Playback audio artifact for source 'system_audio'" in captured.out
-    assert "sha256 is stale" in captured.out
+    errors = [
+        str(notice.context["error"])
+        for notice in interaction.notices
+        if notice.topic == "correction.playback_failed"
+    ]
+    assert errors == ["Playback audio artifact for source 'system_audio' sha256 is stale."]
 
 
 def test_run_correction_workflow_playback_reports_version_mismatched_source_audio_reference_inline(
     tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
 ) -> None:
     session_dir, _, _, _ = _build_playback_session_bundle(
         tmp_path,
@@ -819,25 +837,27 @@ def test_run_correction_workflow_playback_reports_version_mismatched_source_audi
         ),
         source_audio_ref_version_by_id={"system_audio": 999},
     )
-    inputs = iter(["p", "s"])
+    interaction = _interaction(_choose_action("playback"), _choose_action("skip"))
 
     result = run_correction_workflow(
         session_path=session_dir,
         now=NOW,
-        input_fn=lambda _: next(inputs),
+        interaction=interaction,
         playback_player=lambda _: None,
     )
-    captured = capsys.readouterr()
 
     assert result.reviewed == 1
     assert result.skipped == 1
-    assert "Playback failed: Playback audio artifact for source 'system_audio'" in captured.out
-    assert "version is stale" in captured.out
+    errors = [
+        str(notice.context["error"])
+        for notice in interaction.notices
+        if notice.topic == "correction.playback_failed"
+    ]
+    assert errors == ["Playback audio artifact for source 'system_audio' version is stale."]
 
 
 def test_run_correction_workflow_playback_reports_malformed_transcript_source_ref_inline(
     tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
 ) -> None:
     session_dir = _create_session_record(tmp_path)
     store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=session_dir)
@@ -892,25 +912,29 @@ def test_run_correction_workflow_playback_reports_malformed_transcript_source_re
         ),
         name="review/queue.json",
     )
-    inputs = iter(["p", "s"])
+    interaction = _interaction(_choose_action("playback"), _choose_action("skip"))
 
     result = run_correction_workflow(
         session_path=session_dir,
         now=NOW,
-        input_fn=lambda _: next(inputs),
+        interaction=interaction,
         playback_player=lambda _: None,
     )
-    captured = capsys.readouterr()
 
     assert result.reviewed == 1
     assert result.skipped == 1
-    assert "Playback failed: Transcript artifact for source 'system_audio'" in captured.out
-    assert "payload is invalid" in captured.out
+    errors = [
+        str(notice.context["error"])
+        for notice in interaction.notices
+        if notice.topic == "correction.playback_failed"
+    ]
+    assert len(errors) == 1
+    assert "Transcript artifact for source 'system_audio' payload is invalid:" in errors[0]
+    assert "must be a non-empty string" in errors[0]
 
 
 def test_run_correction_workflow_playback_reports_corrupt_source_audio_artifact_inline(
     tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
 ) -> None:
     session_dir, _, _, source_records = _build_playback_session_bundle(
         tmp_path,
@@ -928,20 +952,26 @@ def test_run_correction_workflow_playback_reports_corrupt_source_audio_artifact_
         ),
     )
     (session_dir / source_records["system_audio"].path).write_bytes(b"changed audio")
-    inputs = iter(["p", "s"])
+    interaction = _interaction(_choose_action("playback"), _choose_action("skip"))
 
     result = run_correction_workflow(
         session_path=session_dir,
         now=NOW,
-        input_fn=lambda _: next(inputs),
+        interaction=interaction,
         playback_player=lambda _: None,
     )
-    captured = capsys.readouterr()
 
     assert result.reviewed == 1
     assert result.skipped == 1
-    assert "Playback failed: Playback audio artifact for source 'system_audio'" in captured.out
-    assert "is invalid" in captured.out
+    errors = [
+        str(notice.context["error"])
+        for notice in interaction.notices
+        if notice.topic == "correction.playback_failed"
+    ]
+    assert errors == [
+        "Playback audio artifact for source 'system_audio' is invalid: "
+        "artifact content does not match metadata"
+    ]
 
 
 def test_run_correction_workflow_persists_skip_mark_entries(tmp_path: Path) -> None:
@@ -964,7 +994,7 @@ def test_run_correction_workflow_persists_skip_mark_entries(tmp_path: Path) -> N
     result = run_correction_workflow(
         session_path=session_dir,
         now=NOW,
-        input_fn=lambda _: "s",
+        interaction=_interaction(_choose_action("skip")),
     )
     payload = json.loads(store.retrieve(result.overlay_artifact_record.id))
 
@@ -1015,16 +1045,19 @@ def test_run_correction_workflow_persists_partial_overlay_on_cancellation(
             ),
         ),
     )
-    inputs = iter(("s",))
 
-    def _input(_: str) -> str:
-        try:
-            return next(inputs)
-        except StopIteration as exc:
-            raise EOFError from exc
+    class CancellingInteraction(ScriptedInteraction):
+        def choose(self, request: ChoiceRequest) -> ChoiceOption:
+            if not self.requests:
+                return super().choose(request)
+            raise EOFError
 
     with pytest.raises(EOFError):
-        run_correction_workflow(session_path=session_dir, now=NOW, input_fn=_input)
+        run_correction_workflow(
+            session_path=session_dir,
+            now=NOW,
+            interaction=CancellingInteraction((_choose_action("skip"),)),
+        )
 
     overlays = store.list(artifact_type=CORRECTION_OVERLAY_ARTIFACT_TYPE)
     assert len(overlays) == 1
@@ -1057,12 +1090,12 @@ def test_run_correction_workflow_can_persist_two_runs_in_same_second(tmp_path: P
     first = run_correction_workflow(
         session_path=session_dir,
         now=NOW,
-        input_fn=lambda _: "s",
+        interaction=_interaction(_choose_action("skip")),
     )
     second = run_correction_workflow(
         session_path=session_dir,
         now=NOW,
-        input_fn=lambda _: "s",
+        interaction=_interaction(_choose_action("skip")),
     )
 
     assert first.overlay_artifact_record.id != second.overlay_artifact_record.id
@@ -1073,7 +1106,11 @@ def test_run_correction_workflow_rejects_missing_review_queue(tmp_path: Path) ->
     session_dir = _create_session_record(tmp_path)
 
     with pytest.raises(CorrectionWorkflowError, match="No review queue artifact"):
-        run_correction_workflow(session_path=session_dir, now=NOW, input_fn=lambda _: "s")
+        run_correction_workflow(
+            session_path=session_dir,
+            now=NOW,
+            interaction=_interaction(_choose_action("skip")),
+        )
 
 
 def test_run_correction_workflow_rejects_stale_review_queue_reference(tmp_path: Path) -> None:
@@ -1122,7 +1159,11 @@ def test_run_correction_workflow_rejects_stale_review_queue_reference(tmp_path: 
     )
 
     with pytest.raises(CorrectionWorkflowError, match="missing merged transcript"):
-        run_correction_workflow(session_path=session_dir, now=NOW, input_fn=lambda _: "s")
+        run_correction_workflow(
+            session_path=session_dir,
+            now=NOW,
+            interaction=_interaction(_choose_action("skip")),
+        )
 
 
 def test_load_review_queue_rejects_failed_integrity_verification(tmp_path: Path) -> None:
@@ -1237,39 +1278,79 @@ def test_extract_session_id_validates_payload(tmp_path: Path) -> None:
     assert extract_session_id({"id": SESSION_ID}) == SESSION_ID
 
 
-def test_prompt_overlap_mark_reprompts_on_invalid_input() -> None:
-    values = iter(["maybe", "yes"])
-    response = _prompt_overlap_mark(input_fn=_read_with_values(values))
-
-    assert response is True
-
-
-def test_prompt_speaker_assignment_rejects_invalid_choices() -> None:
-    values = iter(["3", "", "2"])
-    input_fn = _read_with_values(values)
-
-    speaker_id, speaker_label = _prompt_speaker_assignment(
-        input_fn=input_fn,
-        candidates=[("you", "You"), ("remote", "Remote")],
+def test_run_correction_workflow_speaker_assignment_retries_invalid_choices(
+    tmp_path: Path,
+) -> None:
+    session_dir, store, _ = _build_session_bundle(
+        tmp_path,
+        flags=(
+            ReviewFlag(
+                id="flag_speaker_retry",
+                segment_id="segment_2",
+                reason_code="low_speaker_confidence",
+                start_seconds=1.0,
+                end_seconds=1.8,
+                source_id="system_audio",
+                speaker_id="remote",
+                metadata={},
+            ),
+        ),
+    )
+    interaction = _interaction(
+        _choose_action("speaker_reassignment"),
+        _speaker_assignment("3"),
+        _speaker_assignment(""),
+        _speaker_assignment("2"),
     )
 
-    assert speaker_id == "remote"
-    assert speaker_label == "Remote"
+    result = run_correction_workflow(session_path=session_dir, now=NOW, interaction=interaction)
+    payload = json.loads(store.retrieve(result.overlay_artifact_record.id))
+
+    assert result.corrected == 1
+    assert payload["entries"][0]["speaker_id"] == "remote"
+    assert payload["entries"][0]["speaker_label"] == "Remote"
+    assert [
+        notice.topic
+        for notice in interaction.notices
+        if notice.topic.startswith("correction.speaker_assignment.")
+    ] == [
+        "correction.speaker_assignment.invalid_number",
+        "correction.speaker_assignment.empty",
+    ]
 
 
-def test_prompt_speaker_assignment_adds_new_speaker_id_for_unknown_label() -> None:
-    values = iter(["new person"])
-    input_fn = _read_with_values(values)
-    candidates: list[tuple[str, str]] = [("you", "You"), ("remote", "Remote")]
-
-    speaker_id, speaker_label = _prompt_speaker_assignment(
-        input_fn=input_fn,
-        candidates=candidates,
+def test_run_correction_workflow_speaker_assignment_adds_new_speaker_id(
+    tmp_path: Path,
+) -> None:
+    session_dir, store, _ = _build_session_bundle(
+        tmp_path,
+        flags=(
+            ReviewFlag(
+                id="flag_new_speaker",
+                segment_id="segment_2",
+                reason_code="low_speaker_confidence",
+                start_seconds=1.0,
+                end_seconds=1.8,
+                source_id="system_audio",
+                speaker_id="remote",
+                metadata={},
+            ),
+        ),
     )
 
-    assert speaker_id == "new_person"
-    assert speaker_label == "new person"
-    assert ("new_person", "new person") in candidates
+    result = run_correction_workflow(
+        session_path=session_dir,
+        now=NOW,
+        interaction=_interaction(
+            _choose_action("speaker_reassignment"),
+            _speaker_assignment("new person"),
+        ),
+    )
+    payload = json.loads(store.retrieve(result.overlay_artifact_record.id))
+
+    assert result.corrected == 1
+    assert payload["entries"][0]["speaker_id"] == "new_person"
+    assert payload["entries"][0]["speaker_label"] == "new person"
 
 
 def test_new_speaker_id_rewrites_and_makes_unique(tmp_path: Path) -> None:
@@ -1327,7 +1408,11 @@ def test_ordered_review_flags_rejects_unknown_segment_reference(tmp_path: Path) 
         ),
     )
     with pytest.raises(CorrectionWorkflowError, match="references unknown segment_id"):
-        run_correction_workflow(session_dir, now=NOW, input_fn=lambda _: "s")
+        run_correction_workflow(
+            session_dir,
+            now=NOW,
+            interaction=_interaction(_choose_action("skip")),
+        )
 
 
 def test_ordered_speaker_catalog_deduplicates_speakers() -> None:
