@@ -322,6 +322,40 @@ def test_export_workflow_reports_selected_session_with_malformed_summary_record(
         )
 
 
+def test_export_workflow_reports_selected_session_with_malformed_summary_status(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    _, older_store, older_merged = _build_export_session(
+        settings.paths.sessions_dir / "session-older"
+    )
+    _persist_summary(
+        store=older_store,
+        merged_transcript_record=older_merged,
+        summary_created_at="2026-07-03T08:00:00Z",
+    )
+    malformed_dir, malformed_store, malformed_merged = _build_export_session(
+        settings.paths.sessions_dir / "session-newer-malformed"
+    )
+    malformed_summary = _persist_summary(
+        store=malformed_store,
+        merged_transcript_record=malformed_merged,
+        summary_created_at="2026-07-03T09:00:00Z",
+    )
+    _update_artifact_manifest_record(
+        malformed_dir,
+        artifact_id=malformed_summary.id,
+        updates={"status": "sealedd"},
+    )
+
+    with pytest.raises(SessionIntegrityError, match="artifact_record_invalid"):
+        run_export_workflow(
+            ExportCommandInput(session_path=None, export_format="markdown"),
+            settings=settings,
+            interaction=ScriptedInteraction(()),
+        )
+
+
 def test_export_workflow_skips_corrupt_non_selected_summary(
     tmp_path: Path,
 ) -> None:
@@ -355,11 +389,11 @@ def test_export_workflow_skips_corrupt_non_selected_summary(
     assert str(result.export_path).startswith(str(valid_dir))
 
 
-def test_export_workflow_reports_corrupt_legacy_summary_during_default_discovery(
+def test_export_workflow_skips_corrupt_summary_without_ranking_metadata(
     tmp_path: Path,
 ) -> None:
     settings = AppSettings.from_env(env={}, home=tmp_path)
-    _, older_store, older_merged = _build_export_session(
+    older_dir, older_store, older_merged = _build_export_session(
         settings.paths.sessions_dir / "session-older"
     )
     _persist_summary(
@@ -382,12 +416,15 @@ def test_export_workflow_reports_corrupt_legacy_summary_during_default_discovery
     )
     (corrupt_dir / corrupt_summary.path).write_text("{", encoding="utf-8")
 
-    with pytest.raises(SessionIntegrityError):
-        run_export_workflow(
-            ExportCommandInput(session_path=None, export_format="markdown"),
-            settings=settings,
-            interaction=ScriptedInteraction(()),
-        )
+    result = run_export_workflow(
+        ExportCommandInput(session_path=None, export_format="markdown"),
+        settings=settings,
+        interaction=ScriptedInteraction(()),
+    )
+
+    assert result.status == "success"
+    assert result.export_path is not None
+    assert str(result.export_path).startswith(str(older_dir))
 
 
 def test_export_workflow_reports_corrupt_newest_summary_during_default_discovery(
@@ -463,6 +500,121 @@ def test_export_workflow_selects_requested_summary_artifact_session(
     ]
 
 
+def test_export_workflow_requested_artifact_skips_malformed_unrelated_session(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    malformed_dir, malformed_store, malformed_merged = _build_export_session(
+        settings.paths.sessions_dir / "session-malformed"
+    )
+    _persist_summary(
+        store=malformed_store,
+        merged_transcript_record=malformed_merged,
+        summary_name="summary/unrelated.json",
+    )
+    malformed_record_path = malformed_dir / SESSION_RECORD_FILENAME
+    malformed_record = json.loads(malformed_record_path.read_text(encoding="utf-8"))
+    malformed_record.pop("id")
+    malformed_record_path.write_text(json.dumps(malformed_record), encoding="utf-8")
+    target_dir, target_store, target_merged = _build_export_session(
+        settings.paths.sessions_dir / "session-target"
+    )
+    requested_summary = _persist_summary(
+        store=target_store,
+        merged_transcript_record=target_merged,
+        summary_name="summary/requested.json",
+    )
+
+    result = run_export_workflow(
+        ExportCommandInput(
+            session_path=None,
+            summary_artifact_id=requested_summary.id,
+            export_format="markdown",
+        ),
+        settings=settings,
+        interaction=ScriptedInteraction(()),
+    )
+
+    assert result.status == "success"
+    assert result.export_path is not None
+    assert str(result.export_path).startswith(str(target_dir))
+
+
+def test_export_workflow_reports_requested_artifact_with_malformed_session_record(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    target_dir, target_store, target_merged = _build_export_session(
+        settings.paths.sessions_dir / "session-target"
+    )
+    requested_summary = _persist_summary(
+        store=target_store,
+        merged_transcript_record=target_merged,
+        summary_name="summary/requested.json",
+    )
+    target_record_path = target_dir / SESSION_RECORD_FILENAME
+    target_record = json.loads(target_record_path.read_text(encoding="utf-8"))
+    target_record.pop("id")
+    target_record_path.write_text(json.dumps(target_record), encoding="utf-8")
+    _, valid_store, valid_merged = _build_export_session(
+        settings.paths.sessions_dir / "session-valid"
+    )
+    _persist_summary(
+        store=valid_store,
+        merged_transcript_record=valid_merged,
+        summary_name="summary/valid.json",
+    )
+
+    with pytest.raises(SessionIntegrityError):
+        run_export_workflow(
+            ExportCommandInput(
+                session_path=None,
+                summary_artifact_id=requested_summary.id,
+                export_format="markdown",
+            ),
+            settings=settings,
+            interaction=ScriptedInteraction(()),
+        )
+
+
+def test_export_workflow_reports_requested_summary_artifact_with_malformed_status(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    malformed_dir, malformed_store, malformed_merged = _build_export_session(
+        settings.paths.sessions_dir / "session-malformed"
+    )
+    malformed_summary = _persist_summary(
+        store=malformed_store,
+        merged_transcript_record=malformed_merged,
+        summary_name="summary/requested.json",
+    )
+    _update_artifact_manifest_record(
+        malformed_dir,
+        artifact_id=malformed_summary.id,
+        updates={"status": "sealedd"},
+    )
+    _, valid_store, valid_merged = _build_export_session(
+        settings.paths.sessions_dir / "session-valid"
+    )
+    _persist_summary(
+        store=valid_store,
+        merged_transcript_record=valid_merged,
+        summary_name="summary/valid.json",
+    )
+
+    with pytest.raises(SessionIntegrityError, match="artifact_record_invalid"):
+        run_export_workflow(
+            ExportCommandInput(
+                session_path=None,
+                summary_artifact_id=malformed_summary.id,
+                export_format="markdown",
+            ),
+            settings=settings,
+            interaction=ScriptedInteraction(()),
+        )
+
+
 def test_export_workflow_reports_corrupt_requested_summary_artifact(
     tmp_path: Path,
 ) -> None:
@@ -495,6 +647,42 @@ def test_export_workflow_reports_corrupt_requested_summary_artifact(
             settings=settings,
             interaction=ScriptedInteraction(()),
         )
+
+
+def test_export_workflow_ranks_invalid_summary_payload_timestamp_as_oldest(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    stale_dir, stale_store, stale_merged = _build_export_session(
+        settings.paths.sessions_dir / "session-stale-invalid-timestamp"
+    )
+    stale_summary = _persist_summary(
+        store=stale_store,
+        merged_transcript_record=stale_merged,
+        summary_created_at="2026-05-20T10:00:00Z",
+    )
+    stale_payload_path = stale_dir / stale_summary.path
+    stale_payload = json.loads(stale_payload_path.read_text(encoding="utf-8"))
+    stale_payload["created_at"] = "not-a-timestamp"
+    stale_payload_path.write_text(json.dumps(stale_payload), encoding="utf-8")
+    current_dir, current_store, current_merged = _build_export_session(
+        settings.paths.sessions_dir / "session-current"
+    )
+    _persist_summary(
+        store=current_store,
+        merged_transcript_record=current_merged,
+        summary_created_at="2026-06-15T10:00:00Z",
+    )
+
+    result = run_export_workflow(
+        ExportCommandInput(session_path=None, export_format="markdown"),
+        settings=settings,
+        interaction=ScriptedInteraction(()),
+    )
+
+    assert result.status == "success"
+    assert result.export_path is not None
+    assert str(result.export_path).startswith(str(current_dir))
 
 
 def test_export_workflow_reports_requested_summary_session_with_unreadable_manifest(

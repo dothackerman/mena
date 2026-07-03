@@ -11,6 +11,7 @@ from typing import Literal, cast
 
 from mena.artifacts import (
     ARTIFACT_MANIFEST_VERSION,
+    ARTIFACT_STATUSES,
     ArtifactRecord,
     ArtifactStoreError,
     FileSystemArtifactStore,
@@ -24,7 +25,7 @@ from mena.settings import AppSettings
 from mena.summarization import SUMMARY_ARTIFACT_TYPE, SUMMARY_SCHEMA_VERSION
 from mena.timestamps import parse_utc_timestamp
 
-_INVALID_SUMMARY_CREATED_AT = datetime.max.replace(tzinfo=UTC)
+_INVALID_SUMMARY_CREATED_AT = datetime.min.replace(tzinfo=UTC)
 
 
 @dataclass(frozen=True)
@@ -153,6 +154,11 @@ def resolve_default_export_session(
         for session_dir in _iter_session_directories(sessions_root):
             records = _session_summary_records(session_dir=session_dir)
             if records is None:
+                if _manifest_contains_summary_artifact_id(
+                    session_dir=session_dir,
+                    artifact_id=summary_artifact_id,
+                ):
+                    return session_dir
                 if _session_id_matches_artifact_id(
                     session_dir=session_dir,
                     artifact_id=summary_artifact_id,
@@ -270,7 +276,8 @@ def _invalid_summary_manifest_record(
         return None
     if item.get("artifact_type") != SUMMARY_ARTIFACT_TYPE:
         return None
-    if item.get("status") != "sealed":
+    raw_status = item.get("status")
+    if raw_status in ARTIFACT_STATUSES and raw_status != "sealed":
         return None
     metadata = item.get("metadata", {})
     artifact_id = item.get("id")
@@ -296,12 +303,30 @@ def _summary_record_created_at(
                 return _summary_metadata_created_at(record) or _INVALID_SUMMARY_CREATED_AT
             created_at = data.get("created_at")
             if not isinstance(created_at, str):
-                return _summary_metadata_created_at(record) or _INVALID_SUMMARY_CREATED_AT
+                return _INVALID_SUMMARY_CREATED_AT
             return _parse_iso_timestamp(created_at) or _INVALID_SUMMARY_CREATED_AT
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return _summary_metadata_created_at(record) or _INVALID_SUMMARY_CREATED_AT
 
     return _summary_metadata_created_at(record) or _INVALID_SUMMARY_CREATED_AT
+
+
+def _manifest_contains_summary_artifact_id(*, session_dir: Path, artifact_id: str) -> bool:
+    try:
+        data = json.loads(session_artifact_manifest_path(session_dir).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    artifacts = data.get("artifacts")
+    if not isinstance(artifacts, list):
+        return False
+    return any(
+        isinstance(item, dict)
+        and item.get("id") == artifact_id
+        and item.get("artifact_type") == SUMMARY_ARTIFACT_TYPE
+        for item in artifacts
+    )
 
 
 def _summary_metadata_created_at(record: _SummaryManifestRecord) -> datetime | None:
