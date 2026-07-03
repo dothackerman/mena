@@ -1218,7 +1218,14 @@ def _resolve_default_export_session(
     if summary_artifact_id is not None:
         for session_dir in _iter_session_directories(sessions_root):
             records = _session_summary_records(session_dir=session_dir)
-            if records is None or all(record.id != summary_artifact_id for record in records):
+            if records is None:
+                if _session_id_matches_artifact_id(
+                    session_dir=session_dir,
+                    artifact_id=summary_artifact_id,
+                ):
+                    return session_dir
+                continue
+            if all(record.id != summary_artifact_id for record in records):
                 continue
             return session_dir
         return None
@@ -1304,6 +1311,15 @@ def _session_summary_records(*, session_dir: Path) -> tuple[_SummaryManifestReco
         return None
 
 
+def _session_id_matches_artifact_id(*, session_dir: Path, artifact_id: str) -> bool:
+    try:
+        resolved = resolve_session(session_dir)
+    except (ArtifactStoreError, FileNotFoundError, OSError, UnicodeDecodeError, ValueError):
+        return False
+    resolved_session_id = session_id(dict(resolved.record))
+    return artifact_id.startswith(f"{resolved_session_id}:")
+
+
 def _invalid_summary_manifest_record(
     *,
     item: Mapping[str, object],
@@ -1332,7 +1348,9 @@ def _summary_record_created_at(
 ) -> datetime | None:
     metadata_created_at = record.metadata.get("summary_created_at")
     if isinstance(metadata_created_at, str):
-        return _parse_iso_timestamp(metadata_created_at) or _INVALID_SUMMARY_CREATED_AT
+        parsed_metadata_created_at = _parse_iso_timestamp(metadata_created_at)
+        if parsed_metadata_created_at is not None:
+            return parsed_metadata_created_at
     if record.record is None:
         return _INVALID_SUMMARY_CREATED_AT
     if record.path is None:
