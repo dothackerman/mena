@@ -173,7 +173,14 @@ class _CaptureEventMonitor:
                 WorkflowNotice(
                     topic="record.capture_route_event",
                     severity="warning" if event.event != "recovered" else "info",
-                    context={"event": event.event, "message": event.message},
+                    context={
+                        "event": event.event,
+                        "message": event.message,
+                        "code": event.code,
+                        "source_id": event.source_id,
+                        "capture_mode": event.capture_mode,
+                        "selected_sources": list(self.start_payload.selected_sources),
+                    },
                 )
             )
             return True
@@ -447,7 +454,7 @@ def run_recording_control_workflow(
         interaction.notify(
             WorkflowNotice(
                 topic="record.process_handoff",
-                context={"record_path": created_session.record_path},
+                context={"data_root": data_root, "record_path": created_session.record_path},
             )
         )
     elif final_error:

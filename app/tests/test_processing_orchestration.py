@@ -9,12 +9,12 @@ import pytest
 
 from mena.artifacts import FileSystemArtifactStore
 from mena.diarization import DiarizationProviderUnavailable
+from mena.interaction import ConfirmationRequest, ScriptedInteraction, ScriptedResponse
 from mena.processing import ArtifactRef, ProcessingErrorInfo, ProcessingStageLedger
 from mena.processing_orchestration import (
     CaptureSegmentInput,
     SourceAudioInput,
     _asr_language_from_session_language,
-    _confirm_one_run_runtime_fallback,
     _ensure_provider_prep_audio_artifact,
     _stitch_provider_prep_audio,
     collect_capture_segments,
@@ -26,6 +26,7 @@ from mena.processing_orchestration import (
     validate_capture_segment_alignment,
 )
 from mena.profiles import get_capture_profile
+from mena.runtime_profile import RuntimeFallbackUnavailable, RuntimeProfileSelection
 from mena.transcription import TranscriptionProviderUnavailable
 
 SESSION_ID = "00000000-0000-0000-0000-000000000001"
@@ -57,13 +58,7 @@ def _write_wav_with_rate(path: Path, sample_rate: int) -> None:
         wav_file.writeframes(b"\0\0" * 16)
 
 
-def test_run_processing_command_delegates_to_injected_stage_runner(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    import mena.processing_orchestration as orchestration
-
+def _write_processing_session(tmp_path: Path) -> Path:
     local_path = tmp_path / "local_mic-1.wav"
     system_path = tmp_path / "system_audio-1.wav"
     _write_wav(local_path)
@@ -79,42 +74,61 @@ def test_run_processing_command_delegates_to_injected_stage_runner(
             ]
         },
     }
-    (tmp_path / "session.json").write_text(json.dumps(session_record), encoding="utf-8")
+    record_path = tmp_path / "session.json"
+    record_path.write_text(json.dumps(session_record), encoding="utf-8")
+    return tmp_path
+
+
+class _FakeTranscription:
+    name = "fake-transcription"
+
+    def transcribe(self) -> None:
+        raise AssertionError("not called")
+
+
+class _FakeDiarization:
+    name = "fake-diarization"
+    config_id = "fake-diarization"
+
+    def diarize(self) -> None:
+        raise AssertionError("not called")
+
+
+class _FakeSemantic:
+    metadata = SimpleNamespace(config_id="fake-semantic", to_dict=lambda: {})
+
+    def check(self) -> None:
+        raise AssertionError("not called")
+
+
+def _successful_processing_stages(**_kwargs: object) -> object:
+    return SimpleNamespace(semantic_coherence_result=SimpleNamespace(skip_reason=None))
+
+
+def test_run_processing_command_delegates_to_injected_stage_runner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import mena.processing_orchestration as orchestration
+
+    session_path = _write_processing_session(tmp_path)
     monkeypatch.setattr(orchestration, "_requires_runtime_profile", lambda *_args: False)
     calls: list[dict[str, object]] = []
 
-    class Transcription:
-        name = "fake-transcription"
-
-        def transcribe(self) -> None:
-            raise AssertionError("not called")
-
-    class Diarization:
-        name = "fake-diarization"
-        config_id = "fake-diarization"
-
-        def diarize(self) -> None:
-            raise AssertionError("not called")
-
-    class Semantic:
-        metadata = SimpleNamespace(config_id="fake-semantic", to_dict=lambda: {})
-
-        def check(self) -> None:
-            raise AssertionError("not called")
-
     def _stage_runner(**kwargs: object) -> object:
         calls.append(kwargs)
-        return SimpleNamespace(semantic_coherence_result=SimpleNamespace(skip_reason=None))
+        return _successful_processing_stages(**kwargs)
 
     assert (
         run_processing_command(
-            session_path=tmp_path,
+            session_path=session_path,
             run_id="run-1",
             attempt=2,
             now=NOW,
-            transcription_provider_factory=Transcription,
-            diarization_provider_factory=Diarization,
-            semantic_coherence_provider_factory=Semantic,
+            transcription_provider_factory=_FakeTranscription,
+            diarization_provider_factory=_FakeDiarization,
+            semantic_coherence_provider_factory=_FakeSemantic,
             processing_stages_runner=_stage_runner,
         )
         == 0
@@ -124,6 +138,101 @@ def test_run_processing_command_delegates_to_injected_stage_runner(
     source_inputs = cast(dict[str, object], calls[0]["source_inputs"])
     assert sorted(source_inputs) == ["local_mic", "system_audio"]
     assert "Processing completed for run 'run-1' (attempt 2)." in capsys.readouterr().out
+
+
+def test_run_processing_command_authorizes_runtime_fallback_through_interaction(
+    tmp_path: Path,
+) -> None:
+    session_path = _write_processing_session(tmp_path)
+    fallback_evaluation = SimpleNamespace(profile=SimpleNamespace(id="fallback"))
+    observed_authorization: list[bool] = []
+
+    def _runtime_selection(**kwargs: object) -> RuntimeProfileSelection:
+        authorizer = kwargs["authorize_runtime_fallback"]
+        assert callable(authorizer)
+        observed_authorization.append(authorizer("gpu missing", fallback_evaluation))
+        return cast(
+            RuntimeProfileSelection,
+            SimpleNamespace(
+                accepted=SimpleNamespace(),
+                actual=SimpleNamespace(
+                    selected_asr_profile=SimpleNamespace(
+                        id="fake-asr",
+                        checkpoint="tiny",
+                        device="cpu",
+                        compute_type="int8",
+                        reason="test",
+                    )
+                ),
+                fallback_used=True,
+            ),
+        )
+
+    interaction = ScriptedInteraction(
+        [ScriptedResponse(kind="confirm", topic="runtime_fallback.one_run", value=True)]
+    )
+
+    assert (
+        run_processing_command(
+            session_path=session_path,
+            run_id="run-1",
+            attempt=1,
+            now=NOW,
+            diarization_provider_factory=_FakeDiarization,
+            semantic_coherence_provider_factory=_FakeSemantic,
+            interaction=interaction,
+            runtime_selection_fn=_runtime_selection,
+            runtime_profile_provenance_store_fn=lambda **_kwargs: None,
+            processing_stages_runner=_successful_processing_stages,
+        )
+        == 0
+    )
+
+    assert observed_authorization == [True]
+    assert interaction.pending == 0
+    request = interaction.requests[0]
+    assert isinstance(request, ConfirmationRequest)
+    assert request.topic == "runtime_fallback.one_run"
+    assert request.default is False
+    assert request.context["accepted_failure"] == "gpu missing"
+    assert request.context["fallback_evaluation"] is fallback_evaluation
+
+
+def test_run_processing_command_declines_runtime_fallback_through_interaction(
+    tmp_path: Path,
+) -> None:
+    session_path = _write_processing_session(tmp_path)
+    fallback_evaluation = SimpleNamespace(profile=SimpleNamespace(id="fallback"))
+
+    def _runtime_selection(**kwargs: object) -> RuntimeProfileSelection:
+        authorizer = kwargs["authorize_runtime_fallback"]
+        assert callable(authorizer)
+        if not authorizer("gpu missing", fallback_evaluation):
+            raise RuntimeFallbackUnavailable(
+                "Accepted runtime profile is unavailable and fallback was declined."
+            )
+        raise AssertionError("fallback should have been declined")
+
+    interaction = ScriptedInteraction(
+        [ScriptedResponse(kind="confirm", topic="runtime_fallback.one_run", value=False)]
+    )
+
+    with pytest.raises(RuntimeFallbackUnavailable, match="fallback was declined"):
+        run_processing_command(
+            session_path=session_path,
+            run_id="run-1",
+            attempt=1,
+            now=NOW,
+            diarization_provider_factory=_FakeDiarization,
+            semantic_coherence_provider_factory=_FakeSemantic,
+            interaction=interaction,
+            runtime_selection_fn=_runtime_selection,
+            runtime_profile_provenance_store_fn=lambda **_kwargs: None,
+            processing_stages_runner=_successful_processing_stages,
+        )
+
+    assert interaction.pending == 0
+    assert interaction.requests[0].topic == "runtime_fallback.one_run"
 
 
 def test_run_processing_stages_sequences_room_mic_profile(tmp_path: Path) -> None:
@@ -462,7 +571,6 @@ def test_validate_capture_segment_alignment_rejects_unpaired_online_segments() -
 
 def test_processing_orchestration_small_helpers_cover_runtime_decisions(
     tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
 ) -> None:
     store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=tmp_path)
     ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id="run-1")
@@ -495,18 +603,3 @@ def test_processing_orchestration_small_helpers_cover_runtime_decisions(
         )
         == "diarization"
     )
-
-    class FallbackEvaluation:
-        profile = type("Profile", (), {"id": "fallback"})()
-        selected_asr_profile = type(
-            "AsrProfile",
-            (),
-            {"checkpoint": "tiny", "device": "cpu"},
-        )()
-
-    assert _confirm_one_run_runtime_fallback(
-        accepted_failure="gpu missing",
-        fallback_evaluation=FallbackEvaluation(),
-        input_fn=lambda _prompt: "yes",
-    )
-    assert "Accepted runtime profile is unavailable" in capsys.readouterr().out

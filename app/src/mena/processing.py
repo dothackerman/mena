@@ -461,8 +461,46 @@ def latest_resumable_processing_state(
     return None
 
 
+def has_completed_processing_pipeline(store: ArtifactStore, session_id: str) -> bool:
+    """Return True when the latest processing checkpoint completed the pipeline."""
+
+    latest = _latest_processing_state(
+        store=store,
+        session_id=session_id,
+        allowed_statuses=frozenset({"running", "completed", "failed", "skipped"}),
+    )
+    return (
+        latest is not None
+        and latest.status in {"completed", "skipped"}
+        and _is_final_processing_stage(latest)
+        and (
+            _outputs_verify(store, latest)
+            or (latest.status == "skipped" and latest.skip_reason == "provider_unavailable")
+        )
+    )
+
+
 def _is_final_processing_stage(state: ProcessingStageState) -> bool:
     return state.stage == "semantic_coherence"
+
+
+def _outputs_verify(store: ArtifactStore, state: ProcessingStageState) -> bool:
+    return bool(state.output_artifacts) and all(
+        _artifact_ref_verifies(store, artifact) for artifact in state.output_artifacts
+    )
+
+
+def _artifact_ref_verifies(store: ArtifactStore, artifact: ArtifactRef) -> bool:
+    record = next((item for item in store.list() if item.id == artifact.id), None)
+    if record is None:
+        return False
+    if (
+        record.artifact_type != artifact.artifact_type
+        or record.version != artifact.version
+        or record.sha256 != artifact.sha256
+    ):
+        return False
+    return store.verify(artifact.id).ok
 
 
 def latest_non_retryable_processing_failure(

@@ -1,18 +1,34 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
-from mena.artifacts import FileSystemArtifactStore, InMemoryArtifactStore
+from mena.artifacts import ArtifactStore, FileSystemArtifactStore, InMemoryArtifactStore
+from mena.interaction import ChoiceRequest, ScriptedInteraction, ScriptedResponse
 from mena.merge_timing import MERGED_TRANSCRIPT_ARTIFACT_TYPE
+from mena.runtime_profile import RuntimeProfileSelection
 from mena.sessions import resolve_session, session_language_or_default
+from mena.settings import AppSettings
+from mena.summarization import SummarizationError, SummarizationPolicy
 from mena.summarize_workflow import (
     _merged_transcript_timestamp_key,
     _parse_iso_timestamp,
     _resolve_latest_merged_transcript_record,
+    resolve_summarize_session_path,
+    run_summarization_command,
+)
+from test_cli import (
+    _build_ready_summarize_session_bundle_with_metadata,
+    _build_summarize_session_bundle,
 )
 
 SESSION_ID = "00000000-0000-0000-0000-000000000001"
+
+
+def _runtime_selection(**_kwargs: object) -> RuntimeProfileSelection:
+    return cast(RuntimeProfileSelection, SimpleNamespace())
 
 
 def test_summarize_workflow_resolves_session_directory_and_record_path(
@@ -66,3 +82,364 @@ def test_summarize_workflow_filters_invalid_merged_transcripts(tmp_path: Path) -
     (tmp_path / corrupt.path).write_bytes(b"changed")
 
     assert _merged_transcript_timestamp_key(store=file_store, record=corrupt) is None
+
+
+def test_summarize_workflow_requests_semantic_choice_for_multiple_ready_sessions(
+    tmp_path: Path,
+) -> None:
+    _build_ready_summarize_session_bundle_with_metadata(
+        tmp_path,
+        directory_name="older",
+        created_at="2026-05-19T12:00:00Z",
+        name="Older Ready Session",
+    )
+    newer = _build_ready_summarize_session_bundle_with_metadata(
+        tmp_path,
+        directory_name="newer",
+        created_at="2026-05-19T13:00:00Z",
+        name="Newest Ready Session",
+    )
+    interaction = ScriptedInteraction(
+        [ScriptedResponse(kind="choose", topic="summarize.session", value=None)]
+    )
+
+    selected = resolve_summarize_session_path(
+        explicit_session_path=None,
+        sessions_root=tmp_path / "sessions",
+        interaction=interaction,
+    )
+
+    assert selected == newer
+    request = cast(ChoiceRequest, interaction.requests[0])
+    assert request.topic == "summarize.session"
+    assert request.default_option_id == newer.as_posix()
+    assert [option.label for option in request.options] == [
+        "newer (Newest Ready Session, 2026-05-19T13:00:00+00:00)",
+        "older (Older Ready Session, 2026-05-19T12:00:00+00:00)",
+    ]
+    assert interaction.notices[-1].topic == "summarize.session_selected"
+    assert interaction.notices[-1].context["session_dir"] == newer
+
+
+def test_summarize_workflow_notifies_progress_and_export_guidance(
+    tmp_path: Path,
+) -> None:
+    session_dir, _, _, _ = _build_summarize_session_bundle(tmp_path)
+    interaction = ScriptedInteraction()
+
+    def _stage(**kwargs: object) -> SimpleNamespace:
+        store = cast(ArtifactStore, kwargs["store"])
+        return SimpleNamespace(
+            summary_record=store.store(
+                artifact_type="summary",
+                name="summary/final.json",
+                data=b"{}",
+                version=1,
+            ),
+        )
+
+    assert (
+        run_summarization_command(
+            session_path=session_dir,
+            manual_notes=None,
+            language=None,
+            settings=AppSettings.from_env(env={}, home=tmp_path),
+            runtime_profile_selector_fn=_runtime_selection,
+            runtime_profile_store_fn=lambda **_kwargs: None,
+            runtime_summarization_binder_fn=lambda **_kwargs: SimpleNamespace(),
+            run_summarization_stage_fn=_stage,
+            interaction=interaction,
+        )
+        == 0
+    )
+
+    assert [notice.topic for notice in interaction.notices] == [
+        "summarize.started",
+        "summarize.completed",
+    ]
+    assert interaction.notices[-1].context["summary_path"] == "artifacts/summary/summary/final.json"
+    assert interaction.notices[-1].context["summary_artifact_id"] == (
+        "00000000-0000-0000-0000-000000000001:artifacts/summary/summary/final.json"
+    )
+    assert interaction.notices[-1].context["session_dir"] == session_dir
+
+
+def test_summarize_workflow_prints_quoted_export_command_for_returned_summary(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    data_root = tmp_path / "Mena Data"
+    data_root.mkdir()
+    session_dir, _, _, _ = _build_summarize_session_bundle(data_root)
+    summary_id = ""
+
+    def _stage(**kwargs: object) -> SimpleNamespace:
+        nonlocal summary_id
+        store = cast(ArtifactStore, kwargs["store"])
+        summary_record = store.store(
+            artifact_type="summary",
+            name="summary/final.json",
+            data=b"{}",
+            version=1,
+        )
+        summary_id = summary_record.id
+        return SimpleNamespace(summary_record=summary_record)
+
+    assert (
+        run_summarization_command(
+            session_path=session_dir,
+            manual_notes=None,
+            language=None,
+            settings=AppSettings.from_env(env={}, home=tmp_path),
+            runtime_profile_selector_fn=_runtime_selection,
+            runtime_profile_store_fn=lambda **_kwargs: None,
+            runtime_summarization_binder_fn=lambda **_kwargs: SimpleNamespace(),
+            run_summarization_stage_fn=_stage,
+        )
+        == 0
+    )
+
+    assert (
+        f"Next command: mena export --summary-artifact-id {summary_id} '{session_dir}'"
+        in capsys.readouterr().out
+    )
+
+
+def test_summarize_workflow_reports_no_ready_sessions_for_unlistable_root(
+    tmp_path: Path,
+) -> None:
+    sessions_root = tmp_path / "sessions"
+    sessions_root.write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="No ready sessions were found"):
+        resolve_summarize_session_path(
+            explicit_session_path=None,
+            sessions_root=sessions_root,
+        )
+
+
+def test_summarize_workflow_skips_session_with_unreadable_artifact_manifest(
+    tmp_path: Path,
+) -> None:
+    _build_ready_summarize_session_bundle_with_metadata(
+        tmp_path,
+        directory_name="bad",
+        created_at="2026-05-19T14:00:00Z",
+        name="Unreadable Manifest",
+    )
+    valid_session = _build_ready_summarize_session_bundle_with_metadata(
+        tmp_path,
+        directory_name="valid",
+        created_at="2026-05-19T13:00:00Z",
+        name="Valid Ready Session",
+    )
+    manifest_path = tmp_path / "sessions" / "bad" / "artifacts" / "artifact-manifest.v1.json"
+    manifest_path.unlink()
+    manifest_path.mkdir()
+
+    selected = resolve_summarize_session_path(
+        explicit_session_path=None,
+        sessions_root=tmp_path / "sessions",
+    )
+
+    assert selected == valid_session
+
+
+def test_summarize_workflow_applies_active_overlay_and_manual_notes(
+    tmp_path: Path,
+) -> None:
+    session_dir, _, merged_record, overlay_record = _build_summarize_session_bundle(tmp_path)
+    notes_path = tmp_path / "notes.md"
+    notes_path.write_text("- manual note from workflow", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    def _fake_run_summarization_stage(**kwargs: object) -> SimpleNamespace:
+        captured.update(kwargs)
+        store = cast(ArtifactStore, kwargs["store"])
+        return SimpleNamespace(
+            summary_record=store.store(
+                artifact_type="summary",
+                name="summary/final.json",
+                data=b"{}",
+                version=1,
+            ),
+        )
+
+    assert (
+        run_summarization_command(
+            session_path=session_dir,
+            manual_notes=str(notes_path),
+            language="de-CH",
+            settings=AppSettings.from_env(env={}, home=tmp_path),
+            runtime_profile_selector_fn=_runtime_selection,
+            runtime_profile_store_fn=lambda **_kwargs: None,
+            runtime_summarization_binder_fn=lambda **_kwargs: SimpleNamespace(),
+            run_summarization_stage_fn=_fake_run_summarization_stage,
+        )
+        == 0
+    )
+
+    assert captured["merged_transcript_record"] == merged_record
+    assert captured["correction_overlay_record"] == overlay_record
+    assert captured["manual_notes_record"] is not None
+    assert cast(SummarizationPolicy, captured["policy"]).language == "de-CH"
+
+
+def test_summarize_workflow_binds_provider_through_runtime_resolver(
+    tmp_path: Path,
+) -> None:
+    session_dir, _, _, _ = _build_summarize_session_bundle(tmp_path)
+    selection = cast(
+        RuntimeProfileSelection,
+        SimpleNamespace(actual=SimpleNamespace(accepted_profile_id="profile")),
+    )
+    provider = SimpleNamespace(metadata=SimpleNamespace(config_id="provider"))
+    captured: dict[str, object] = {}
+
+    def _bind(**kwargs: object) -> object:
+        captured["selection"] = kwargs["selection"]
+        captured["settings"] = kwargs["settings"]
+        return provider
+
+    def _stage(**kwargs: object) -> SimpleNamespace:
+        captured["provider"] = kwargs["provider"]
+        store = cast(ArtifactStore, kwargs["store"])
+        return SimpleNamespace(
+            summary_record=store.store(
+                artifact_type="summary",
+                name="summary/final.json",
+                data=b"{}",
+                version=1,
+            ),
+        )
+
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+
+    assert (
+        run_summarization_command(
+            session_path=session_dir,
+            manual_notes=None,
+            language=None,
+            settings=settings,
+            runtime_profile_selector_fn=lambda **_kwargs: selection,
+            runtime_profile_store_fn=lambda **_kwargs: None,
+            runtime_summarization_binder_fn=_bind,
+            run_summarization_stage_fn=_stage,
+        )
+        == 0
+    )
+
+    assert captured["selection"] is selection
+    assert captured["settings"] is settings
+    assert captured["provider"] is provider
+
+
+def test_summarize_workflow_uses_unique_runtime_profile_provenance_per_run(
+    tmp_path: Path,
+) -> None:
+    session_dir, _, _, _ = _build_summarize_session_bundle(tmp_path)
+    run_ids: list[str] = []
+
+    def _store(**kwargs: object) -> None:
+        run_ids.append(cast(str, kwargs["run_id"]))
+
+    def _stage(**kwargs: object) -> SimpleNamespace:
+        store = cast(ArtifactStore, kwargs["store"])
+        ledger = cast(SimpleNamespace, kwargs["ledger"])
+        return SimpleNamespace(
+            summary_record=store.store(
+                artifact_type="summary",
+                name=f"summary/{ledger.run_id}.json",
+                data=b"{}",
+                version=1,
+            ),
+        )
+
+    for _ in range(2):
+        assert (
+            run_summarization_command(
+                session_path=session_dir,
+                manual_notes=None,
+                language=None,
+                settings=AppSettings.from_env(env={}, home=tmp_path),
+                runtime_profile_selector_fn=_runtime_selection,
+                runtime_profile_store_fn=_store,
+                runtime_summarization_binder_fn=lambda **_kwargs: SimpleNamespace(),
+                run_summarization_stage_fn=_stage,
+            )
+            == 0
+        )
+
+    assert len(run_ids) == 2
+    assert len(set(run_ids)) == 2
+    assert all(run_id.startswith("summarize-") for run_id in run_ids)
+
+
+def test_summarize_workflow_releases_terminal_runtime_after_successful_run(
+    tmp_path: Path,
+) -> None:
+    session_dir, _, _, _ = _build_summarize_session_bundle(tmp_path)
+    releases: list[dict[str, object]] = []
+
+    def _release(**kwargs: object) -> None:
+        releases.append(kwargs)
+
+    def _stage(**kwargs: object) -> SimpleNamespace:
+        store = cast(ArtifactStore, kwargs["store"])
+        return SimpleNamespace(
+            summary_record=store.store(
+                artifact_type="summary",
+                name="summary/final.json",
+                data=b"{}",
+                version=1,
+            ),
+        )
+
+    assert (
+        run_summarization_command(
+            session_path=session_dir,
+            manual_notes=None,
+            language=None,
+            settings=AppSettings.from_env(env={}, home=tmp_path),
+            runtime_profile_selector_fn=_runtime_selection,
+            runtime_profile_store_fn=lambda **_kwargs: None,
+            runtime_summarization_binder_fn=lambda **_kwargs: SimpleNamespace(),
+            run_summarization_stage_fn=_stage,
+            terminal_llm_release_fn=_release,
+        )
+        == 0
+    )
+
+    assert len(releases) == 1
+    assert releases[0]["stage"] == "summarization"
+    assert releases[0]["boundary"] == "summarize"
+    assert releases[0]["attempt"] == 1
+
+
+def test_summarize_workflow_releases_terminal_runtime_after_stage_failure(
+    tmp_path: Path,
+) -> None:
+    session_dir, _, _, _ = _build_summarize_session_bundle(tmp_path)
+    releases: list[dict[str, object]] = []
+
+    def _release(**kwargs: object) -> None:
+        releases.append(kwargs)
+
+    with pytest.raises(SummarizationError, match="provider unavailable"):
+        run_summarization_command(
+            session_path=session_dir,
+            manual_notes=None,
+            language=None,
+            settings=AppSettings.from_env(env={}, home=tmp_path),
+            runtime_profile_selector_fn=_runtime_selection,
+            runtime_profile_store_fn=lambda **_kwargs: None,
+            runtime_summarization_binder_fn=lambda **_kwargs: SimpleNamespace(),
+            run_summarization_stage_fn=lambda **_kwargs: (_ for _ in ()).throw(
+                SummarizationError("provider unavailable")
+            ),
+            terminal_llm_release_fn=_release,
+        )
+
+    assert releases[0]["stage"] == "summarization"
+    assert releases[0]["boundary"] == "summarize"
+    assert releases[0]["attempt"] == 1
