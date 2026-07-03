@@ -135,6 +135,7 @@ from mena.setup_workflow import (
     run_setup_workflow,
 )
 from mena.summarization import (
+    SUMMARY_ARTIFACT_TYPE,
     SummarizationError,
     run_summarization_stage,
 )
@@ -1204,10 +1205,10 @@ def _resolve_default_export_session(
             store = _export_summary_store(session_dir=session_dir)
             if store is None:
                 continue
-            try:
-                resolve_summary_markdown_input(store=store, summary_record_id=summary_artifact_id)
-            except SummaryMarkdownExportError:
+            records = _list_export_summary_records(store=store)
+            if records is None or all(record.id != summary_artifact_id for record in records):
                 continue
+            resolve_summary_markdown_input(store=store, summary_record_id=summary_artifact_id)
             return session_dir
         return None
 
@@ -1227,15 +1228,30 @@ def _session_summary_created_at(session_dir: Path) -> tuple[datetime, Path] | No
     if store is None:
         return None
 
-    try:
-        _, summary = resolve_summary_markdown_input(store=store)
-    except SummaryMarkdownExportError:
+    records = _list_export_summary_records(store=store)
+    if not records:
         return None
 
+    _, summary = resolve_summary_markdown_input(store=store)
     summary_created_at = _parse_iso_timestamp(summary.created_at)
     if summary_created_at is None:
         return None
     return summary_created_at, session_dir
+
+
+def _list_export_summary_records(
+    *,
+    store: ArtifactStore,
+) -> tuple[ArtifactRecord, ...] | None:
+    try:
+        return tuple(store.list(artifact_type=SUMMARY_ARTIFACT_TYPE, status="sealed"))
+    except (
+        ArtifactStoreError,
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+    ):
+        return None
 
 
 def _export_summary_store(*, session_dir: Path) -> FileSystemArtifactStore | None:
