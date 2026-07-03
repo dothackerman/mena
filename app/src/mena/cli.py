@@ -48,6 +48,7 @@ from mena.interaction import (
     ChoiceOption,
     ChoiceRequest,
     ConfirmationRequest,
+    InteractionPort,
     TextRequest,
     WorkflowNotice,
 )
@@ -124,18 +125,14 @@ from mena.setup import (
     CommandIdentity,
     CommandRunner,
     HardwareFacts,
-    ReadinessItem,
-    RuntimeProfileState,
     SetupEvaluation,
-    SubprocessCommandRunner,
-    build_runtime_profile_state,
-    default_profile_catalog,
-    detect_local_installation_state,
-    evaluate_setup,
-    execute_setup_plan,
-    format_setup_report,
-    get_alpha_local_profile,
-    persist_runtime_profile_state,
+)
+from mena.setup_detection import DefaultSetupDetector
+from mena.setup_workflow import (
+    SetupMessageEvent,
+    SetupReportEvent,
+    SetupWorkflowOptions,
+    run_setup_workflow,
 )
 from mena.summarization import (
     SummarizationError,
@@ -814,230 +811,50 @@ def _run_setup_command(
     command_identity: CommandIdentity | None,
     hardware: HardwareFacts | None,
 ) -> int:
-    command_runner = runner or SubprocessCommandRunner()
-    profile = get_alpha_local_profile(settings.local_llm.ollama_model)
-    try:
-        state = detect_local_installation_state(
-            settings,
-            runner=command_runner,
+    result = run_setup_workflow(
+        settings=settings,
+        options=SetupWorkflowOptions(
+            check_only=check_only,
+            assume_yes=assume_yes,
+            authorize_local_fallback=authorize_local_fallback,
+        ),
+        interaction=_CliSetupInteraction(input_fn=input_fn),
+        runner=runner,
+        detector=DefaultSetupDetector(
             command_identity=command_identity,
             hardware=hardware,
-        )
-    except KeyboardInterrupt:
-        print("Setup interrupted; local provider readiness is incomplete.")
-        return 1
-    evaluation = evaluate_setup(profile, state)
-    print(format_setup_report(evaluation), end="")
-
-    if check_only:
-        return 0 if evaluation.ready else 1
-    if evaluation.ready:
-        try:
-            fallback_evaluation = _evaluate_setup_fallback_authorization(
-                settings=settings,
-                runner=command_runner,
-                command_identity=command_identity,
-                hardware=hardware,
-            )
-            fallback_evaluation = _maybe_execute_setup_fallback_actions(
-                fallback_evaluation=fallback_evaluation,
-                authorize_local_fallback=authorize_local_fallback,
-                assume_yes=assume_yes,
-                input_fn=input_fn,
-                settings=settings,
-                runner=command_runner,
-                command_identity=command_identity,
-                hardware=hardware,
-            )
-        except KeyboardInterrupt:
-            print("Setup interrupted; local provider readiness is incomplete.")
-            return 1
-        accepted_state = build_runtime_profile_state(
-            evaluation,
-            fallback_evaluation=fallback_evaluation,
-            authorize_local_fallback=authorize_local_fallback,
-        )
-        state_path = persist_runtime_profile_state(accepted_state, paths=settings.paths)
-        _print_runtime_fallback_authorization_notice(accepted_state)
-        print(f"Accepted runtime profile state: {state_path}")
-        return 0
-    if not evaluation.plan.actions:
-        return 1
-    if _readiness_item_failed(evaluation.readiness, "command:mena"):
-        print("Setup actions were not run because this is not the installed product command.")
-        return 1
-    if not any(action.mode == "automated" for action in evaluation.plan.actions):
-        print("Setup actions were not run because only manual actions remain.")
-        return 1
-
-    prompt_fn = input if input_fn is None else input_fn
-    if not assume_yes:
-        try:
-            answer = prompt_fn("Proceed with automated setup actions? [y/N] ")
-        except (EOFError, KeyboardInterrupt):
-            print("Setup interrupted; local provider readiness is incomplete.")
-            return 1
-        if answer.strip().lower() not in {"y", "yes"}:
-            print("Setup declined; local provider readiness is incomplete.")
-            return 1
-
-    try:
-        results = execute_setup_plan(evaluation.plan, runner=command_runner)
-    except KeyboardInterrupt:
-        print("Setup interrupted; local provider readiness is incomplete.")
-        return 1
-    try:
-        refreshed_state = detect_local_installation_state(
-            settings,
-            runner=command_runner,
-            command_identity=command_identity,
-            hardware=hardware,
-        )
-    except KeyboardInterrupt:
-        print("Setup interrupted; local provider readiness is incomplete.")
-        return 1
-    refreshed_evaluation = evaluate_setup(profile, refreshed_state)
-    final_ready = refreshed_evaluation.ready
-    print(
-        format_setup_report(
-            refreshed_evaluation,
-            action_results=results,
-            final_ready=final_ready,
         ),
-        end="",
     )
-    if final_ready:
-        try:
-            fallback_evaluation = _evaluate_setup_fallback_authorization(
-                settings=settings,
-                runner=command_runner,
-                command_identity=command_identity,
-                hardware=hardware,
-            )
-            fallback_evaluation = _maybe_execute_setup_fallback_actions(
-                fallback_evaluation=fallback_evaluation,
-                authorize_local_fallback=authorize_local_fallback,
-                assume_yes=assume_yes,
-                input_fn=input_fn,
-                settings=settings,
-                runner=command_runner,
-                command_identity=command_identity,
-                hardware=hardware,
-            )
-        except KeyboardInterrupt:
-            print("Setup interrupted; local provider readiness is incomplete.")
-            return 1
-        accepted_state = build_runtime_profile_state(
-            refreshed_evaluation,
-            fallback_evaluation=fallback_evaluation,
-            authorize_local_fallback=authorize_local_fallback,
-        )
-        state_path = persist_runtime_profile_state(accepted_state, paths=settings.paths)
-        _print_runtime_fallback_authorization_notice(accepted_state)
-        print(f"Accepted runtime profile state: {state_path}")
-    return 0 if final_ready else 1
+    for event in result.events:
+        if isinstance(event, SetupReportEvent):
+            print(event.render(), end="")
+        elif isinstance(event, SetupMessageEvent):
+            print(event.text)
+    return result.exit_code
 
 
-def _evaluate_setup_fallback_authorization(
-    *,
-    settings: AppSettings,
-    runner: CommandRunner,
-    command_identity: CommandIdentity | None,
-    hardware: HardwareFacts | None,
-) -> SetupEvaluation | None:
-    fallback_profile = next(
-        (
-            profile
-            for profile in default_profile_catalog(settings.local_llm.ollama_model)
-            if profile.fallback
-        ),
-        None,
-    )
-    if fallback_profile is None:
+class _CliSetupInteraction(InteractionPort):
+    def __init__(self, input_fn: Callable[[str], str] | None) -> None:
+        self._input_fn = input if input_fn is None else input_fn
+
+    def choose(self, request: ChoiceRequest) -> ChoiceOption:
+        raise ValueError(f"Unsupported setup choice request: {request.topic}")
+
+    def confirm(self, request: ConfirmationRequest) -> bool:
+        if request.topic == "setup.primary_actions":
+            prompt = "Proceed with automated setup actions? [y/N] "
+        elif request.topic == "setup.fallback_actions":
+            prompt = "Proceed with automated fallback setup actions? [y/N] "
+        else:
+            raise ValueError(f"Unsupported setup confirmation request: {request.topic}")
+        answer = self._input_fn(prompt)
+        return answer.strip().lower() in {"y", "yes"}
+
+    def request_text(self, request: TextRequest) -> str:
+        raise ValueError(f"Unsupported setup text request: {request.topic}")
+
+    def notify(self, notice: WorkflowNotice) -> None:
         return None
-    fallback_state = detect_local_installation_state(
-        settings,
-        runner=runner,
-        command_identity=command_identity,
-        hardware=hardware,
-        profile=fallback_profile,
-    )
-    return evaluate_setup(fallback_profile, fallback_state)
-
-
-def _maybe_execute_setup_fallback_actions(
-    *,
-    fallback_evaluation: SetupEvaluation | None,
-    authorize_local_fallback: bool,
-    assume_yes: bool,
-    input_fn: Callable[[str], str] | None,
-    settings: AppSettings,
-    runner: CommandRunner,
-    command_identity: CommandIdentity | None,
-    hardware: HardwareFacts | None,
-) -> SetupEvaluation | None:
-    if (
-        fallback_evaluation is None
-        or not authorize_local_fallback
-        or fallback_evaluation.ready
-        or not any(action.mode == "automated" for action in fallback_evaluation.plan.actions)
-    ):
-        return fallback_evaluation
-
-    if not assume_yes:
-        prompt_fn = input if input_fn is None else input_fn
-        try:
-            answer = prompt_fn("Proceed with automated fallback setup actions? [y/N] ")
-        except EOFError:
-            print(
-                "Fallback setup actions declined; automatic local runtime fallback "
-                "remains unavailable."
-            )
-            return fallback_evaluation
-        if answer.strip().lower() not in {"y", "yes"}:
-            print(
-                "Fallback setup actions declined; automatic local runtime fallback "
-                "remains unavailable."
-            )
-            return fallback_evaluation
-
-    results = execute_setup_plan(fallback_evaluation.plan, runner=runner)
-    refreshed_fallback_state = detect_local_installation_state(
-        settings,
-        runner=runner,
-        command_identity=command_identity,
-        hardware=hardware,
-        profile=fallback_evaluation.profile,
-    )
-    refreshed_fallback_evaluation = evaluate_setup(
-        fallback_evaluation.profile,
-        refreshed_fallback_state,
-    )
-    print(
-        format_setup_report(
-            refreshed_fallback_evaluation,
-            action_results=results,
-            final_ready=refreshed_fallback_evaluation.ready,
-        ),
-        end="",
-    )
-    return refreshed_fallback_evaluation
-
-
-def _print_runtime_fallback_authorization_notice(state: RuntimeProfileState) -> None:
-    authorization = state.fallback_authorization
-    if authorization.local_status == "authorized":
-        stages = ", ".join(authorization.stage_scope)
-        print(f"Automatic local runtime fallback authorized for: {stages}.")
-    elif authorization.local_status == "configured_unauthorized":
-        print(
-            "Automatic local runtime fallback is not authorized; rerun `mena setup "
-            "--authorize-local-fallback` to permit setup-evaluated local fallback."
-        )
-    elif authorization.local_status == "unavailable":
-        print("Automatic local runtime fallback is unavailable and remains disabled.")
-        for reason in authorization.blocking_reasons:
-            print(f"Fallback blocker: {reason}")
 
 
 def _resolve_runtime_fallback_input(
@@ -1080,13 +897,6 @@ def _print_semantic_review_skip_notice(result: SemanticCoherenceStageResult) -> 
         "Semantic review skipped: local semantic LLM provider is unavailable. "
         "Processing completed without semantic incoherence flags."
     )
-
-
-def _readiness_item_failed(
-    readiness: Sequence[ReadinessItem],
-    readiness_id: str,
-) -> bool:
-    return any(item.id == readiness_id and not item.ready for item in readiness)
 
 
 def _requires_runtime_profile(
