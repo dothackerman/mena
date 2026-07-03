@@ -402,7 +402,7 @@ def _format_routes(routes: tuple[AudioRoute, ...]) -> list[str]:
     return [
         f"  - {route.route_id} {route.name}"
         f"{f' ({route.description})' if route.description else ''}"
-        f" [{'active' if route.active else 'inactive'}]"
+        f" [{_activity_label(route.active)}]"
         for route in routes
     ]
 
@@ -420,9 +420,13 @@ def _format_streams(streams: tuple[PlaybackStream, ...]) -> list[str]:
         lines.append(
             f"  - {stream.route_id} {stream.name}"
             f"{f' ({details})' if details else ''}"
-            f" [{'active' if stream.active else 'inactive'}]"
+            f" [{_activity_label(stream.active)}]"
         )
     return lines
+
+
+def _activity_label(active: bool) -> str:
+    return "active" if active else "idle"
 
 
 def _required_int(data: dict[str, object], key: str) -> int:

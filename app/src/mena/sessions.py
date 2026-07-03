@@ -12,7 +12,7 @@ from uuid import uuid4
 from mena.fileops import write_json_atomically
 from mena.profiles import CaptureProfileSelection
 from mena.settings import AppSettings
-from mena.timestamps import utc_timestamp, utc_timestamp_for_filename
+from mena.timestamps import parse_utc_timestamp, utc_timestamp, utc_timestamp_for_filename
 
 SESSION_RECORD_VERSION = 1
 SESSION_RECORD_FILENAME = "session.json"
@@ -160,6 +160,52 @@ def resolve_session_paths(session_path: Path) -> tuple[Path, Path]:
     return session_path, session_path / SESSION_RECORD_FILENAME
 
 
+def latest_recorded_session_record_path(sessions_root: Path) -> Path | None:
+    """Return the newest successfully recorded session record under a sessions root."""
+
+    best_completed_at: datetime | None = None
+    best_paths: list[Path] = []
+    try:
+        for session_dir in sessions_root.iterdir():
+            if not session_dir.is_dir():
+                continue
+            record_path = session_dir / SESSION_RECORD_FILENAME
+            if not record_path.is_file():
+                continue
+            try:
+                record = read_session_record(record_path)
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+            if record.get("status") != "recorded":
+                continue
+            try:
+                completed_at = _recording_completed_at(record)
+            except ValueError as exc:
+                raise SessionRecordError(
+                    "recorded session has invalid recording.finalization.completed_at; "
+                    "pass an explicit session path."
+                ) from exc
+            if completed_at is None:
+                raise SessionRecordError(
+                    "recorded session is missing recording.finalization.completed_at; "
+                    "pass an explicit session path."
+                )
+            if best_completed_at is None or completed_at > best_completed_at:
+                best_completed_at = completed_at
+                best_paths = [record_path]
+            elif completed_at == best_completed_at:
+                best_paths.append(record_path)
+    except OSError:
+        return None
+    if best_completed_at is None:
+        return None
+    if len(best_paths) > 1:
+        raise SessionRecordError(
+            "latest recorded session is ambiguous; pass an explicit session path."
+        )
+    return best_paths[0]
+
+
 def session_id(session_record: Mapping[str, object]) -> str:
     """Return the required session id from a session record."""
 
@@ -213,6 +259,21 @@ def session_recording_finalization(
             "Session field 'recording.finalization' is required and must be an object."
         )
     return value
+
+
+def _recording_completed_at(session_record: Mapping[str, object]) -> datetime | None:
+    recording = session_record.get("recording")
+    if not isinstance(recording, Mapping):
+        return None
+    finalization = recording.get("finalization")
+    if not isinstance(finalization, Mapping):
+        return None
+    if finalization.get("status") != "finalized":
+        return None
+    completed_at = finalization.get("completed_at")
+    if not isinstance(completed_at, str):
+        return None
+    return parse_utc_timestamp(completed_at)
 
 
 def session_recording_finalization_status(
