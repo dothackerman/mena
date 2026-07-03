@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from mena.artifacts import ArtifactRecord, ArtifactStore
+from mena.processing import ProcessingStateError
 from mena.summarization import (
     SUMMARY_ARTIFACT_TYPE,
     SummarizationContractError,
@@ -96,7 +97,14 @@ def resolve_summary_markdown_input(
 
     candidates: list[tuple[datetime, str, str, ArtifactRecord, SummaryArtifact]] = []
     for record in records:
-        _, summary = _load_summary_artifact(record=record, store=store)
+        try:
+            _, summary = _load_summary_artifact(record=record, store=store)
+        except SummaryMarkdownExportError:
+            # Old summary.v1 artifacts (and any payload that no longer satisfies the
+            # strict summary.v2 contract) remain sealed in the manifest by design.
+            # When auto-selecting export input, skip incompatible payloads so a valid
+            # summary.v2 from a rerun can still be chosen; only fail if none exist.
+            continue
         candidates.append(
             (
                 _summary_created_at(summary),
@@ -141,7 +149,7 @@ def _load_summary_artifact(
 
     try:
         summary = SummaryArtifact.from_dict(payload)
-    except SummarizationContractError as exc:
+    except (SummarizationContractError, ProcessingStateError) as exc:
         raise SummaryMarkdownExportError(
             f"Summary artifact {record.id} is not a valid summary.v2 payload."
         ) from exc

@@ -78,14 +78,14 @@ def test_resolve_summary_markdown_input_prefers_latest_timestamp(tmp_path: Path)
     assert selected_record.id != old_record.id
 
 
-def test_resolve_summary_markdown_input_fails_closed_on_invalid_summary(
+def test_resolve_summary_markdown_input_skips_incompatible_payloads(
     tmp_path: Path,
 ) -> None:
     store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=tmp_path)
-    _persist_summary_artifact(
+    valid_record, _ = _persist_summary_artifact(
         store=store,
         created_at="2026-05-18T17:00:00Z",
-        name="summary/old.json",
+        name="summary/valid.json",
     )
     store.store(
         artifact_type="summary",
@@ -95,7 +95,58 @@ def test_resolve_summary_markdown_input_fails_closed_on_invalid_summary(
         status="sealed",
     )
 
-    with pytest.raises(SummaryMarkdownExportError, match="is not valid JSON"):
+    selected_record, selected_summary = resolve_summary_markdown_input(store=store)
+
+    assert selected_record.id == valid_record.id
+    assert selected_summary.created_at == "2026-05-18T17:00:00Z"
+
+
+def test_resolve_summary_markdown_input_selects_v2_over_sealed_legacy_v1(
+    tmp_path: Path,
+) -> None:
+    store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=tmp_path)
+    legacy_v1_payload = json.dumps(
+        {
+            "version": 1,
+            "session_id": SESSION_ID,
+            "timeline": ["Discussed milestones."],
+            "action_items": [],
+            "general_summary": "Legacy summary.",
+            "created_at": "2026-05-20T17:00:00Z",
+        }
+    ).encode("utf-8")
+    store.store(
+        artifact_type="summary",
+        name="summary/legacy-v1.json",
+        data=legacy_v1_payload,
+        version=1,
+        status="sealed",
+    )
+    v2_record, _ = _persist_summary_artifact(
+        store=store,
+        created_at="2026-05-18T17:00:00Z",
+        name="summary/rerun-v2.json",
+    )
+
+    selected_record, selected_summary = resolve_summary_markdown_input(store=store)
+
+    assert selected_record.id == v2_record.id
+    assert selected_summary.created_at == "2026-05-18T17:00:00Z"
+
+
+def test_resolve_summary_markdown_input_fails_when_only_incompatible_summaries_exist(
+    tmp_path: Path,
+) -> None:
+    store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=tmp_path)
+    store.store(
+        artifact_type="summary",
+        name="summary/new-invalid.json",
+        data=b"not-json",
+        version=1,
+        status="sealed",
+    )
+
+    with pytest.raises(SummaryMarkdownExportError, match="No valid summary.v2 artifact"):
         resolve_summary_markdown_input(store=store)
 
 
@@ -133,7 +184,7 @@ def test_export_summary_markdown_rejects_no_valid_summary_artifact(tmp_path: Pat
         status="sealed",
     )
 
-    with pytest.raises(SummaryMarkdownExportError, match="is not valid JSON"):
+    with pytest.raises(SummaryMarkdownExportError, match="No valid summary.v2 artifact"):
         export_summary_markdown(store=store)
 
 

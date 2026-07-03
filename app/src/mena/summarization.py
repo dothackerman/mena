@@ -189,10 +189,36 @@ class SummarizationPolicy:
 
 @dataclass(frozen=True)
 class SummarizationProviderMetadata(LocalLLMProviderMetadata):
-    """Provider identity persisted with summary artifacts."""
+    """Provider identity persisted with summary artifacts.
+
+    The effective request-discipline options (``num_ctx``/``temperature``/
+    ``seed``) participate in ``config_id`` so that reuse identity (and thus
+    ``skip_completed``) invalidates a completed summary when a provider is
+    retuned to different request discipline. They are part of the reuse key
+    only; the persisted artifact records the effective options per product in
+    ``request_records``, so they are intentionally omitted from ``to_dict`` to
+    avoid duplicating provenance in the provider block.
+    """
 
     endpoint: str | None = None
     prompt_policy: str = PROMPT_POLICY
+    num_ctx: int | None = None
+    temperature: float | None = None
+    seed: int | None = None
+
+    @property
+    def config_id(self) -> str:
+        payload = self.to_dict()
+        if any(option is not None for option in (self.num_ctx, self.temperature, self.seed)):
+            payload = {
+                **payload,
+                "request_options": {
+                    "num_ctx": self.num_ctx,
+                    "temperature": self.temperature,
+                    "seed": self.seed,
+                },
+            }
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
 @dataclass(frozen=True)
@@ -333,6 +359,9 @@ class OllamaSummarizationProvider:
             name="ollama",
             model=model,
             endpoint=_summarization_local_ollama_endpoint(endpoint),
+            num_ctx=OLLAMA_SUMMARIZATION_NUM_CTX,
+            temperature=OLLAMA_SUMMARIZATION_TEMPERATURE,
+            seed=OLLAMA_SUMMARIZATION_SEED,
         )
         self.timeout_seconds = timeout_seconds
         self._runtime_resource_used = False
@@ -504,7 +533,7 @@ class SummaryArtifact:
             ),
             general_summary=_required_str(item, "general_summary", "Summary artifact"),
             created_at=_required_str(item, "created_at", "Summary artifact"),
-            request_records=_request_records(item),
+            request_records=_request_records(item, required=True),
         )
         if artifact.version != SUMMARY_SCHEMA_VERSION:
             raise SummarizationContractError("Unsupported summary artifact version.")
@@ -1131,9 +1160,15 @@ def _optional_int(data: Mapping[str, object], field_name: str, label: str) -> in
     return value
 
 
-def _request_records(data: Mapping[str, object]) -> tuple[ProductRequestRecord, ...]:
+def _request_records(
+    data: Mapping[str, object], *, required: bool = False
+) -> tuple[ProductRequestRecord, ...]:
     value = data.get("request_records")
     if value is None:
+        if required:
+            raise SummarizationContractError(
+                "Field 'request_records' is required for version 2 summary artifacts."
+            )
         return ()
     if not isinstance(value, list):
         raise SummarizationContractError("Field 'request_records' must be an array.")

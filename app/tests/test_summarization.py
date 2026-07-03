@@ -39,6 +39,7 @@ from mena.summarization import (
     SummarizationContractError,
     SummarizationError,
     SummarizationPolicy,
+    SummarizationProviderMetadata,
     SummarizationProviderUnavailable,
     SummarizationRequest,
     SummarizationTokenBudgetError,
@@ -937,6 +938,63 @@ def test_summary_artifact_from_dict_validates_contract() -> None:
     cast(dict[str, object], payload["provider"])["prompt_policy"] = "other"
     with pytest.raises(SummarizationContractError, match="Unsupported summary provider"):
         SummaryArtifact.from_dict(payload)
+
+
+def test_summary_artifact_from_dict_requires_request_records() -> None:
+    artifact = SummaryArtifact(
+        version=2,
+        session_id=SESSION_ID,
+        merged_transcript_artifact=ArtifactRef(
+            id=f"{SESSION_ID}:artifacts/merged_transcript/merged.json",
+            artifact_type="merged_transcript",
+            version=1,
+            sha256="1" * 64,
+        ),
+        manual_notes_artifact=None,
+        policy=SummarizationPolicy(language="en").to_dict(),
+        provider=FakeSummarizationProvider(result=_summary_result()).metadata,
+        timeline=_summary_result().timeline,
+        action_items=_summary_result().action_items,
+        general_summary=_summary_result().general_summary,
+        created_at="2026-05-18T17:00:00Z",
+    )
+
+    payload = artifact.to_dict()
+    del payload["request_records"]
+    with pytest.raises(SummarizationContractError, match="request_records' is required"):
+        SummaryArtifact.from_dict(payload)
+
+    payload = artifact.to_dict()
+    payload["request_records"] = None
+    with pytest.raises(SummarizationContractError, match="request_records' is required"):
+        SummaryArtifact.from_dict(payload)
+
+
+def test_provider_request_options_participate_in_reuse_identity() -> None:
+    base = SummarizationProviderMetadata(name="ollama", model="llama3.1:8b", endpoint=None)
+    tuned = SummarizationProviderMetadata(
+        name="ollama",
+        model="llama3.1:8b",
+        endpoint=None,
+        num_ctx=OLLAMA_SUMMARIZATION_NUM_CTX,
+        temperature=0,
+        seed=OLLAMA_SUMMARIZATION_SEED,
+    )
+    retuned_seed = replace(tuned, seed=OLLAMA_SUMMARIZATION_SEED + 1)
+    retuned_ctx = replace(tuned, num_ctx=OLLAMA_SUMMARIZATION_NUM_CTX * 2)
+
+    # Providers without request options keep the pre-existing reuse identity.
+    assert (
+        base.config_id
+        == SummarizationProviderMetadata(
+            name="ollama", model="llama3.1:8b", endpoint=None
+        ).config_id
+    )
+    # Applying request discipline changes the reuse identity.
+    assert tuned.config_id != base.config_id
+    # Retuning any request-discipline option invalidates the reuse identity.
+    assert retuned_seed.config_id != tuned.config_id
+    assert retuned_ctx.config_id != tuned.config_id
 
 
 def test_summary_artifact_from_dict_accepts_legacy_prompt_policy() -> None:
