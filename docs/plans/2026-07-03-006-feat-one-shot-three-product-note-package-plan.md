@@ -1,7 +1,7 @@
 ---
 title: Implement one-shot three-product note package
 type: feat
-status: active
+status: completed
 date: 2026-07-03
 issue: 112
 ---
