@@ -241,6 +241,7 @@ def run_summarization_command(
             topic="summarize.completed",
             context={
                 "summary_path": result.summary_record.path,
+                "summary_artifact_id": result.summary_record.id,
                 "session_dir": resolved_session.session_dir,
             },
         ),

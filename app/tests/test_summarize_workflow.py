@@ -158,6 +158,9 @@ def test_summarize_workflow_notifies_progress_and_export_guidance(
         "summarize.completed",
     ]
     assert interaction.notices[-1].context["summary_path"] == "artifacts/summary/summary/final.json"
+    assert interaction.notices[-1].context["summary_artifact_id"] == (
+        "00000000-0000-0000-0000-000000000001:artifacts/summary/summary/final.json"
+    )
     assert interaction.notices[-1].context["session_dir"] == session_dir
 
 

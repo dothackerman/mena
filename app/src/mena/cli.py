@@ -443,7 +443,11 @@ class ConsoleSummarizeInteraction:
         elif topic == "summarize.completed":
             print(f"Notes created: {context['summary_path']}")
             print(f"Session path: {context['session_dir']}")
-            print(f"Next command: mena export {context['session_dir']}")
+            print(
+                "Next command: "
+                f"mena export --summary-artifact-id {quote(str(context['summary_artifact_id']))} "
+                f"{quote(str(context['session_dir']))}"
+            )
         else:
             raise ValueError(f"Unsupported summarize notice topic '{topic}'.")
 

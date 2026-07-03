@@ -6,6 +6,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from shlex import quote
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -967,6 +968,7 @@ def test_cli_does_not_wire_concrete_processing_provider_defaults() -> None:
 def test_main_summarize_uses_session_language_before_config_default(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
 ) -> None:
     session_dir, _, _, _ = _build_summarize_session_bundle(tmp_path)
     config_path = tmp_path / "config.toml"
@@ -1001,25 +1003,31 @@ model = "mistral:7b"
         captured["language"] = policy.language if policy is not None else None
         captured["provider_model"] = provider_metadata.model
         captured["provider_endpoint"] = provider_metadata.endpoint
-        return SimpleNamespace(
-            summary_record=store.store(
-                artifact_type="summary",
-                name="summary/final.json",
-                data=b"{}",
-                version=1,
-            ),
+        summary_record = store.store(
+            artifact_type="summary",
+            name="summary/final.json",
+            data=b"{}",
+            version=1,
         )
+        captured["summary_artifact_id"] = summary_record.id
+        return SimpleNamespace(summary_record=summary_record)
 
     monkeypatch.setattr("mena.cli.run_summarization_stage", _fake_run_summarization_stage)
     settings = AppSettings.from_env(env={}, home=tmp_path, config_path=config_path)
     _persist_ready_runtime_profile_state(settings, monkeypatch)
 
     exit_code = main(["summarize", str(session_dir)], settings=settings)
+    output = capsys.readouterr().out
 
     assert exit_code == 0
     assert captured["language"] == "fr-CH"
     assert captured["provider_model"] == "mistral:7b"
     assert captured["provider_endpoint"] == "http://127.0.0.1:11436"
+    assert (
+        "Next command: "
+        f"mena export --summary-artifact-id {quote(str(captured['summary_artifact_id']))} "
+        f"{quote(str(session_dir))}"
+    ) in output
 
 
 def test_main_summarize_rejects_invalid_session_language_before_provider_invocation(
