@@ -2172,6 +2172,39 @@ def test_main_export_command_defaults_to_newest_of_multiple_summarized_sessions(
     assert str(export_path).startswith(str(newer_dir))
 
 
+def test_main_export_command_skips_malformed_session_during_default_discovery(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    malformed_dir, malformed_store, malformed_merged = _build_verified_export_session_bundle_at(
+        settings.paths.sessions_dir / "session-malformed"
+    )
+    _persist_summary_artifact_for_cli(
+        store=malformed_store,
+        merged_transcript_record=malformed_merged,
+        summary_created_at="2026-07-03T09:00:00Z",
+    )
+    malformed_record_path = malformed_dir / SESSION_RECORD_FILENAME
+    malformed_record = json.loads(malformed_record_path.read_text(encoding="utf-8"))
+    malformed_record.pop("id")
+    malformed_record_path.write_text(json.dumps(malformed_record), encoding="utf-8")
+    valid_dir, valid_store, valid_merged = _build_verified_export_session_bundle_at(
+        settings.paths.sessions_dir / "session-valid"
+    )
+    _persist_summary_artifact_for_cli(
+        store=valid_store,
+        merged_transcript_record=valid_merged,
+        summary_created_at="2026-07-03T08:00:00Z",
+    )
+
+    exit_code = main(["export"], settings=settings, input_fn=lambda _prompt: "y")
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert f"Using latest summarized session: {valid_dir}" in captured.out
+    assert "Markdown notes exported to:" in captured.out
+
+
 def test_main_export_command_describes_explicit_summary_session_selection(
     tmp_path: Path, capsys: CaptureFixture[str]
 ) -> None:

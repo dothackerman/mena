@@ -1249,12 +1249,12 @@ def _export_summary_store(*, session_dir: Path) -> FileSystemArtifactStore | Non
     """
     try:
         resolved = resolve_session(session_dir)
+        return FileSystemArtifactStore(
+            session_id=session_id(dict(resolved.record)),
+            session_dir=resolved.session_dir,
+        )
     except (OSError, ValueError):
         return None
-    return FileSystemArtifactStore(
-        session_id=session_id(dict(resolved.record)),
-        session_dir=resolved.session_dir,
-    )
 
 
 def _iter_session_directories(sessions_root: Path) -> tuple[Path, ...]:
