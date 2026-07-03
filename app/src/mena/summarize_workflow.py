@@ -11,7 +11,6 @@ from uuid import uuid4
 
 from mena.artifacts import ArtifactRecord, ArtifactStore, FileSystemArtifactStore
 from mena.correction_overlay import resolve_active_correction_overlay
-from mena.fields import required_str
 from mena.manual_notes import ingest_manual_notes_file
 from mena.merge_timing import (
     MERGED_TRANSCRIPT_ARTIFACT_TYPE,
@@ -27,7 +26,12 @@ from mena.runtime_profile import (
     store_runtime_profile_provenance,
 )
 from mena.runtime_stewardship import RuntimeReleaseResult
-from mena.sessions import SESSION_RECORD_FILENAME, read_session_record
+from mena.sessions import (
+    ResolvedSession,
+    resolve_session,
+    session_id,
+    session_language_or_default,
+)
 from mena.settings import AppSettings, validate_summary_language
 from mena.setup import CommandIdentity, CommandRunner, HardwareFacts
 from mena.summarization import (
@@ -43,7 +47,7 @@ RuntimeProfileStoreFn = Callable[..., object]
 RuntimeSummarizationProviderFn = Callable[..., object]
 SummarizationStageFn = Callable[..., object]
 TerminalReleaseFn = Callable[..., RuntimeReleaseResult | None]
-ResolveSessionFn = Callable[[Path], tuple[Path, dict[str, object]]]
+ResolveSessionFn = Callable[[Path], ResolvedSession]
 
 
 def run_summarization_command(
@@ -67,20 +71,22 @@ def run_summarization_command(
     terminal_llm_release_fn: TerminalReleaseFn | None = None,
 ) -> int:
     if resolve_session_fn is None:
-        resolve_session_fn = _resolve_session
+        resolve_session_fn = resolve_session
 
     # Accept for API parity with processing orchestration; summarize currently
     # does not use this prompt hook directly.
     _ = runtime_fallback_input_fn
 
-    session_dir, session_record = resolve_session_fn(session_path)
-    session_id = _extract_session_id(session_record)
-    summary_language = language or _session_language_or_default(
+    resolved_session = resolve_session_fn(session_path)
+    session_dir = resolved_session.session_dir
+    session_record = resolved_session.record
+    session_id_value = session_id(session_record)
+    summary_language = language or session_language_or_default(
         session_record,
         settings.summary.language,
     )
     summary_language = validate_summary_language(summary_language, "summary language")
-    store = FileSystemArtifactStore(session_id=session_id, session_dir=session_dir)
+    store = FileSystemArtifactStore(session_id=session_id_value, session_dir=session_dir)
 
     merged_transcript_record = _resolve_latest_merged_transcript_record(store=store)
     if merged_transcript_record is None:
@@ -122,7 +128,7 @@ def run_summarization_command(
         runtime_state=runtime_selection.actual,
     )
 
-    ledger = ProcessingStageLedger(store=store, session_id=session_id, run_id=run_id)
+    ledger = ProcessingStageLedger(store=store, session_id=session_id_value, run_id=run_id)
     try:
         result = cast(
             SummarizationStageResult,
@@ -192,42 +198,6 @@ def _parse_iso_timestamp(value: str) -> datetime | None:
         return parse_utc_timestamp(value)
     except ValueError:
         return None
-
-
-def _resolve_session(session_path: Path) -> tuple[Path, dict[str, object]]:
-    if session_path.is_dir():
-        session_record_path = session_path / SESSION_RECORD_FILENAME
-        resolved_session_dir = session_path
-    elif session_path.is_file() and session_path.name == SESSION_RECORD_FILENAME:
-        session_record_path = session_path
-        resolved_session_dir = session_path.parent
-    else:
-        raise ValueError(
-            "Session path must be a session directory or an existing session.json path."
-        )
-
-    try:
-        record = read_session_record(session_record_path)
-    except Exception as exc:
-        raise ValueError(f"Cannot read session record at {session_record_path}.") from exc
-
-    return resolved_session_dir, record
-
-
-def _extract_session_id(session_record: dict[str, object]) -> str:
-    return required_str(
-        session_record,
-        "id",
-        error=ValueError,
-        message="Session field 'id' is required and must be a non-empty string.",
-    )
-
-
-def _session_language_or_default(session_record: dict[str, object], default_language: str) -> str:
-    language = session_record.get("language")
-    if isinstance(language, str) and language:
-        return language
-    return default_language
 
 
 _run_summarization_command = run_summarization_command
