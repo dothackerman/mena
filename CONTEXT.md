@@ -43,3 +43,23 @@ _Avoid_: provider factory helper, runtime fallback dance, per-command provider s
 **Direct Mistral summarization provider**:
 The Mistral summarization provider behind Mena's existing summarization port. The provider owns Mistral API endpoint/request details and the fixed Mena-selected model; Mena owns the summarization input/output contract and setup/runtime authorization policy.
 _Avoid_: Mistral route subsystem, OpenRouter route, user-configured Mistral endpoint
+
+**Note package**:
+The structured-notes output of one accepted summarization run: exactly three note products — timestamped timeline, action items, and general summary. A package is accepted and persisted as a whole; there is no `important_points` product.
+_Avoid_: summary artifact, monolithic summary, summary fields
+
+**Note product**:
+One user-meaningful notes output inside a note package, generated under its own prompt and output contract with its own provenance. The three note products are the timestamped timeline, the action items, and the general summary.
+_Avoid_: summary section, summary field, sub-summary
+
+**Timestamped timeline**:
+The chronological note product: a record of what happened in the meeting, each entry grounded in the transcript segments it came from, with its timestamp derived from those segments rather than authored by the model.
+_Avoid_: timeline strings, chronology summary, bare dates
+
+**General summary**:
+The recall note product: a short, non-chronological, high-level takeaway of the meeting. It shares no job with the timestamped timeline — chronology belongs to the timeline, recall to the summary.
+_Avoid_: overview section, abstract, meeting recap timeline
+
+**Note-product execution strategy**:
+The provider-owned choice of how one note product is generated — one-shot today, chunked map/reduce later — invisible to the summarize workflow behind the per-product port call.
+_Avoid_: pipeline mode, reducer flag, chunking switch

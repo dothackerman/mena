@@ -89,5 +89,6 @@ Proposed → Accepted → [Superseded | Deprecated | Rejected]
 | ADR-031 | Architecture | Runtime fallback authorization and setup state | Accepted | 2026-06-15 |
 | ADR-032 | Architecture | Continuous capture with rotating source segments | Accepted | 2026-06-17 |
 | ADR-033 | Architecture | Mistral summarization provider and ordered fallback | Accepted | 2026-06-28 |
+| ADR-034 | Architecture | Three-product note package with per-product generation contracts | Accepted | 2026-07-03 |
 | PDR-001 | Product | Automatic correction overlay selection | Accepted | 2026-05-20 |
 | PDR-004 | Product | Mistral summarization disclosure and consent | Accepted | 2026-06-29 |

@@ -1,4 +1,5 @@
 import hashlib
+import inspect
 import json
 import queue
 from collections.abc import Mapping, Sequence
@@ -11,6 +12,7 @@ from typing import Any, cast
 import pytest
 from pytest import CaptureFixture
 
+import mena.cli as cli_module
 from mena.artifacts import (
     ArtifactRecord,
     ArtifactStore,
@@ -101,6 +103,7 @@ from mena.runtime_profile import (
     PROCESSING_REQUIRED_RUNTIME_STAGES,
     SUMMARIZATION_RUNTIME_STAGES,
     RuntimeFallbackUnavailable,
+    RuntimeProfileSelection,
     runtime_diarization_factory,
     runtime_semantic_factory,
     runtime_transcription_factory,
@@ -142,6 +145,7 @@ from mena.summarization import (
     FakeSummarizationProvider,
     SummarizationError,
     SummarizationPolicy,
+    SummarizationProvider,
     SummaryArtifact,
     SummaryResult,
     persist_summary_artifact,
@@ -1671,6 +1675,14 @@ def test_record_worker_exit_timeout_default_is_generous() -> None:
     assert WORKER_EXIT_TIMEOUT_SECONDS == 30.0
 
 
+def test_cli_does_not_wire_concrete_processing_provider_defaults() -> None:
+    source = inspect.getsource(cli_module)
+
+    assert "FasterWhisperTranscriptionProvider" not in source
+    assert "PyannoteCommunityDiarizationProvider" not in source
+    assert "OllamaSemanticCoherenceProvider" not in source
+
+
 def test_main_summarize_applies_active_overlay_and_manual_notes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1738,6 +1750,44 @@ def test_main_summarize_applies_active_overlay_and_manual_notes(
         stage["stage"] == "summarization" for stage in provenance["actual_profile"]["stages"]
     )
     assert "Summary written to:" in captured_output.out
+
+
+def test_main_summarize_binds_provider_through_runtime_resolver(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_dir, _, _, _ = _build_summarize_session_bundle(tmp_path)
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    _persist_ready_runtime_profile_state(settings, monkeypatch)
+    captured: dict[str, object] = {}
+    provider = FakeSummarizationProvider(result=_summary_result_for_export())
+
+    def _fake_bind_summarization_runtime(**kwargs: object) -> object:
+        captured["selection"] = kwargs["selection"]
+        captured["settings"] = kwargs["settings"]
+        return provider
+
+    def _fake_run_summarization_stage(**kwargs: object) -> SimpleNamespace:
+        captured["provider"] = kwargs["provider"]
+        store = cast(ArtifactStore, kwargs["store"])
+        return SimpleNamespace(
+            summary_record=store.store(
+                artifact_type="summary",
+                name="summary/final.json",
+                data=b"{}",
+                version=1,
+            ),
+        )
+
+    monkeypatch.setattr("mena.cli.bind_summarization_runtime", _fake_bind_summarization_runtime)
+    monkeypatch.setattr("mena.cli.run_summarization_stage", _fake_run_summarization_stage)
+
+    assert main(["summarize", str(session_dir)], settings=settings) == 0
+
+    selection = cast(RuntimeProfileSelection, captured["selection"])
+    assert selection.actual.accepted_profile_id == "linux-alpha-local-v1"
+    assert captured["settings"] is settings
+    assert captured["provider"] is provider
 
 
 def test_main_summarize_uses_unique_runtime_profile_provenance_per_run(
@@ -2051,7 +2101,7 @@ def test_main_reports_config_errors_before_command_execution(
     assert not (tmp_path / "sessions").exists()
 
 
-def test_main_process_does_not_preconfigure_default_semantic_provider(
+def test_main_process_leaves_default_semantic_provider_to_resolver(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2068,10 +2118,7 @@ model = "semantic-model:latest"
     captured: dict[str, object] = {}
 
     def _fake_run_processing_command(**kwargs: object) -> int:
-        provider_factory = cast(Any, kwargs["semantic_coherence_provider_factory"])
-        provider = provider_factory()
-        captured["model"] = provider.metadata.model
-        captured["endpoint"] = provider.metadata.endpoint
+        captured["semantic_factory"] = kwargs["semantic_coherence_provider_factory"]
         return 0
 
     monkeypatch.setattr("mena.cli._run_processing_command", _fake_run_processing_command)
@@ -2079,8 +2126,7 @@ model = "semantic-model:latest"
     exit_code = main(["process", str(session_dir)], config_path=config_path)
 
     assert exit_code == 0
-    assert captured["model"] == "llama3.2:3b"
-    assert captured["endpoint"] == "http://localhost:11434"
+    assert captured["semantic_factory"] is None
 
 
 def test_main_process_without_session_path_uses_latest_recorded_session(
@@ -6775,6 +6821,27 @@ def test_require_provider_type_requirements() -> None:
             ),
             provider_type=SemanticCoherenceProvider,
             provider_name="semantic_coherence",
+        )
+
+    with pytest.raises(
+        TypeError, match="summarization provider must expose summarization metadata config_id"
+    ):
+        _require_provider(
+            provider_factory=lambda: SimpleNamespace(metadata={}, summarize=lambda *_args: None),
+            provider_type=SummarizationProvider,
+            provider_name="summarization",
+        )
+
+    with pytest.raises(
+        TypeError, match="summarization provider must expose summarization metadata to_dict"
+    ):
+        _require_provider(
+            provider_factory=lambda: SimpleNamespace(
+                metadata=SimpleNamespace(config_id="cfg"),
+                summarize=lambda *_args: None,
+            ),
+            provider_type=SummarizationProvider,
+            provider_name="summarization",
         )
 
     with pytest.raises(

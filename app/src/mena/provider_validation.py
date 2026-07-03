@@ -7,6 +7,7 @@ from typing import Any
 
 from mena.diarization import DiarizationProvider
 from mena.semantic_coherence import SemanticCoherenceProvider
+from mena.summarization import SummarizationProvider
 from mena.transcription import TranscriptionProvider
 
 ProviderFactory = Callable[[], Any]
@@ -37,39 +38,52 @@ def require_provider_instance(
     provider_type: type[Any],
     provider_name: str,
 ) -> Any:
-    required: tuple[str, ...] = ()
-    if provider_type is TranscriptionProvider:
-        required = ("name", "transcribe")
-    elif provider_type is DiarizationProvider:
-        required = ("name", "config_id", "diarize")
-    elif provider_type is SemanticCoherenceProvider:
-        required = ("metadata", "check")
-
-    if required:
-        if not _provider_implements(provider, *required):
+    if provider_type in {
+        TranscriptionProvider,
+        DiarizationProvider,
+        SemanticCoherenceProvider,
+        SummarizationProvider,
+    }:
+        if not isinstance(provider, provider_type) or not _protocol_methods_callable(
+            provider, provider_type
+        ):
             raise ProviderValidationError(
                 f"{provider_name} provider must implement {provider_type.__name__}."
             )
         if provider_type is SemanticCoherenceProvider:
-            metadata = provider.metadata
-            config_id = getattr(metadata, "config_id", None)
-            if not isinstance(config_id, str) or not config_id:
-                raise ProviderValidationError(
-                    f"{provider_name} provider must expose semantic metadata config_id."
-                )
-            if not callable(getattr(metadata, "to_dict", None)):
-                raise ProviderValidationError(
-                    f"{provider_name} provider must expose semantic metadata to_dict."
-                )
+            _require_provider_metadata(provider, provider_name, "semantic")
+        if provider_type is SummarizationProvider:
+            _require_provider_metadata(provider, provider_name, "summarization")
         return provider
 
+    try:
+        valid = isinstance(provider, provider_type)
+    except TypeError:
+        valid = False
+    if not valid:
+        raise ProviderValidationError(
+            f"{provider_name} provider must implement {provider_type.__name__}."
+        )
     return provider
 
 
-def _provider_implements(provider: Any, *required_attrs: str) -> bool:
-    for attr in required_attrs:
-        if not hasattr(provider, attr):
-            return False
-        if attr in {"transcribe", "diarize", "check"} and not callable(getattr(provider, attr)):
-            return False
-    return True
+def _protocol_methods_callable(provider: Any, provider_type: type[Any]) -> bool:
+    method_names = (
+        name
+        for name, member in vars(provider_type).items()
+        if not name.startswith("_") and callable(member)
+    )
+    return all(callable(getattr(provider, method_name, None)) for method_name in method_names)
+
+
+def _require_provider_metadata(provider: Any, provider_name: str, metadata_name: str) -> None:
+    metadata = provider.metadata
+    config_id = getattr(metadata, "config_id", None)
+    if not isinstance(config_id, str) or not config_id:
+        raise ProviderValidationError(
+            f"{provider_name} provider must expose {metadata_name} metadata config_id."
+        )
+    if not callable(getattr(metadata, "to_dict", None)):
+        raise ProviderValidationError(
+            f"{provider_name} provider must expose {metadata_name} metadata to_dict."
+        )

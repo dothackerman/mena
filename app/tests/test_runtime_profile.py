@@ -13,6 +13,7 @@ from mena.runtime_profile import (
     RuntimeFallbackUnavailable,
     RuntimeProfileSelection,
     bind_processing_runtime,
+    bind_summarization_runtime,
     run_processing_with_runtime_fallback,
     runtime_fallback_stage_for_provider_failure,
     runtime_stage_policy_payload,
@@ -62,6 +63,13 @@ def _runtime_state(profile_id: str, *, device: str = "cuda") -> RuntimeProfileSt
                 model="llama3.2:3b",
                 device="cpu",
                 policy="optional-local",
+            ),
+            StageProfile(
+                stage="summarization",
+                provider="ollama",
+                model="llama3.2:3b",
+                device="cpu",
+                policy="local-only",
             ),
         ),
         selected_asr_profile=FasterWhisperModelProfile(
@@ -145,6 +153,14 @@ class _Semantic:
         raise AssertionError("not called")
 
 
+class _Summarization:
+    def __init__(self, **_kwargs: object) -> None:
+        self.metadata = SimpleNamespace(config_id="summary", to_dict=lambda: {})
+
+    def summarize(self, _request: object) -> object:
+        raise AssertionError("not called")
+
+
 def test_runtime_fallback_stage_for_provider_failure_maps_provider_errors() -> None:
     assert (
         runtime_fallback_stage_for_provider_failure(
@@ -180,6 +196,104 @@ def test_bind_processing_runtime_constructs_bound_provider_set() -> None:
     assert isinstance(runtime.diarization_provider, _Diarization)
     assert runtime.semantic_coherence_provider is semantic
     assert runtime_stage_policy_payload(runtime.selection.actual)[0]["stage"] == "transcription"
+
+
+def test_bind_processing_runtime_uses_resolver_owned_default_factories(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DefaultTranscription(_Transcription):
+        def __init__(self, **_kwargs: object) -> None:
+            super().__init__("default-transcription")
+
+    class DefaultDiarization(_Diarization):
+        def __init__(self, **_kwargs: object) -> None:
+            super().__init__("default-diarization")
+
+    class DefaultSemantic(_Semantic):
+        def __init__(self, **_kwargs: object) -> None:
+            super().__init__()
+
+    monkeypatch.setattr(
+        "mena.runtime_profile.FasterWhisperTranscriptionProvider", DefaultTranscription
+    )
+    monkeypatch.setattr(
+        "mena.runtime_profile.PyannoteCommunityDiarizationProvider", DefaultDiarization
+    )
+    monkeypatch.setattr("mena.runtime_profile.OllamaSemanticCoherenceProvider", DefaultSemantic)
+
+    runtime = bind_processing_runtime(
+        selection=_selection("accepted"),
+        settings=cast(
+            AppSettings,
+            SimpleNamespace(local_llm=SimpleNamespace(ollama_endpoint="http://ollama")),
+        ),
+    )
+
+    assert isinstance(runtime.transcription_provider, DefaultTranscription)
+    assert isinstance(runtime.diarization_provider, DefaultDiarization)
+    assert isinstance(runtime.semantic_coherence_provider, DefaultSemantic)
+
+
+def test_bind_summarization_runtime_uses_selected_runtime_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class DefaultSummarization(_Summarization):
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+            super().__init__()
+
+    monkeypatch.setattr("mena.runtime_profile.OllamaSummarizationProvider", DefaultSummarization)
+
+    provider = bind_summarization_runtime(
+        selection=_selection("accepted"),
+        settings=cast(
+            AppSettings,
+            SimpleNamespace(local_llm=SimpleNamespace(ollama_endpoint="http://ollama")),
+        ),
+    )
+
+    assert isinstance(provider, DefaultSummarization)
+    assert captured == {"model": "llama3.2:3b", "endpoint": "http://ollama"}
+
+
+def test_bind_summarization_runtime_wraps_bound_factory_type_errors() -> None:
+    def broken_factory() -> object:
+        raise TypeError("missing constructor argument")
+
+    with pytest.raises(
+        ProviderValidationError,
+        match="summarization provider must implement SummarizationProvider",
+    ):
+        bind_summarization_runtime(
+            selection=_selection("accepted"),
+            settings=cast(
+                AppSettings,
+                SimpleNamespace(local_llm=SimpleNamespace(ollama_endpoint="http://ollama")),
+            ),
+            summarization_provider_factory=broken_factory,
+        )
+
+
+def test_bind_summarization_runtime_validates_bound_injected_provider_methods() -> None:
+    provider = SimpleNamespace(
+        metadata=SimpleNamespace(config_id="cfg", to_dict=lambda: {}),
+        summarize="not-callable",
+    )
+
+    with pytest.raises(
+        ProviderValidationError,
+        match="summarization provider must implement SummarizationProvider",
+    ):
+        bind_summarization_runtime(
+            selection=_selection("accepted"),
+            settings=cast(
+                AppSettings,
+                SimpleNamespace(local_llm=SimpleNamespace(ollama_endpoint="http://ollama")),
+            ),
+            summarization_provider_factory=lambda: provider,
+        )
 
 
 def test_bind_processing_runtime_validates_bound_injected_providers() -> None:
