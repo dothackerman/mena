@@ -6,6 +6,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from shlex import quote
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -1012,6 +1013,7 @@ def test_cli_does_not_wire_concrete_processing_provider_defaults() -> None:
 def test_main_summarize_uses_session_language_before_config_default(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
 ) -> None:
     session_dir, _, _, _ = _build_summarize_session_bundle(tmp_path)
     config_path = tmp_path / "config.toml"
@@ -1046,25 +1048,31 @@ model = "mistral:7b"
         captured["language"] = policy.language if policy is not None else None
         captured["provider_model"] = provider_metadata.model
         captured["provider_endpoint"] = provider_metadata.endpoint
-        return SimpleNamespace(
-            summary_record=store.store(
-                artifact_type="summary",
-                name="summary/final.json",
-                data=b"{}",
-                version=1,
-            ),
+        summary_record = store.store(
+            artifact_type="summary",
+            name="summary/final.json",
+            data=b"{}",
+            version=1,
         )
+        captured["summary_artifact_id"] = summary_record.id
+        return SimpleNamespace(summary_record=summary_record)
 
     monkeypatch.setattr("mena.cli.run_summarization_stage", _fake_run_summarization_stage)
     settings = AppSettings.from_env(env={}, home=tmp_path, config_path=config_path)
     _persist_ready_runtime_profile_state(settings, monkeypatch)
 
     exit_code = main(["summarize", str(session_dir)], settings=settings)
+    output = capsys.readouterr().out
 
     assert exit_code == 0
     assert captured["language"] == "fr-CH"
     assert captured["provider_model"] == "mistral:7b"
     assert captured["provider_endpoint"] == "http://127.0.0.1:11436"
+    assert (
+        "Next command: "
+        f"mena export --summary-artifact-id {quote(str(captured['summary_artifact_id']))} "
+        f"{quote(str(session_dir))}"
+    ) in output
 
 
 def test_main_summarize_rejects_invalid_session_language_before_provider_invocation(
@@ -1870,6 +1878,125 @@ def test_main_summarize_accepts_session_json_file(
     exit_code = main(["summarize", str(session_json_path)], settings=settings)
 
     assert exit_code == 0
+
+
+def test_main_summarize_auto_selects_ready_session_when_session_path_is_omitted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    session_dir = _build_ready_summarize_session_bundle_with_metadata(
+        tmp_path,
+        directory_name="single-session",
+        created_at="2026-05-19T15:00:00Z",
+    )
+    observed: dict[str, Path] = {}
+
+    def _fake_run_summarization_command(**kwargs: object) -> int:
+        observed["session_path"] = cast(Path, kwargs["session_path"])
+        return 0
+
+    monkeypatch.setattr(
+        "mena.cli.summarize_workflow.run_summarization_command",
+        _fake_run_summarization_command,
+    )
+
+    exit_code = main(["summarize"], data_root=tmp_path)
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert observed["session_path"] == session_dir
+    assert f"Session path: {session_dir}" in captured.out
+
+
+def test_main_summarize_prompts_and_recommends_newest_ready_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    _build_ready_summarize_session_bundle_with_metadata(
+        tmp_path,
+        directory_name="older",
+        created_at="2026-05-19T12:00:00Z",
+        name="Older Ready Session",
+    )
+    newer_session = _build_ready_summarize_session_bundle_with_metadata(
+        tmp_path,
+        directory_name="newer",
+        created_at="2026-05-19T13:00:00Z",
+        name="Newest Ready Session",
+    )
+    observed: dict[str, Path] = {}
+
+    def _fake_run_summarization_command(**kwargs: object) -> int:
+        observed["session_path"] = cast(Path, kwargs["session_path"])
+        return 0
+
+    monkeypatch.setattr(
+        "mena.cli.summarize_workflow.run_summarization_command",
+        _fake_run_summarization_command,
+    )
+
+    exit_code = main(
+        ["summarize"],
+        data_root=tmp_path,
+        input_fn=lambda _prompt: "",
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert observed["session_path"] == newer_session
+    assert "Ready session to summarize" in captured.out
+    assert "Newest Ready Session" in captured.out
+    assert "[recommended]" in captured.out
+    assert f"Session path: {newer_session}" in captured.out
+
+
+def test_main_summarize_with_no_ready_sessions_returns_error(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    exit_code = main(["summarize"], data_root=tmp_path)
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "No ready sessions were found for summarization." in captured.out
+
+
+def test_main_summarize_ignores_invalid_ready_session_records(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _build_ready_summarize_session_bundle_with_metadata(
+        tmp_path,
+        directory_name="invalid-session",
+        created_at="2026-05-19T11:00:00Z",
+    )
+    valid_session = _build_ready_summarize_session_bundle_with_metadata(
+        tmp_path,
+        directory_name="valid-session",
+        created_at="2026-05-19T12:00:00Z",
+    )
+    invalid_session = tmp_path / "sessions" / "bad-session"
+    invalid_session.mkdir(parents=True)
+    # Not a valid session record; should be ignored during candidate discovery.
+    (invalid_session / SESSION_RECORD_FILENAME).write_text("{invalid json", encoding="utf-8")
+
+    observed: dict[str, Path] = {}
+
+    def _fake_run_summarization_command(**kwargs: object) -> int:
+        observed["session_path"] = cast(Path, kwargs["session_path"])
+        return 0
+
+    monkeypatch.setattr(
+        "mena.cli.summarize_workflow.run_summarization_command",
+        _fake_run_summarization_command,
+    )
+
+    exit_code = main(["summarize"], data_root=tmp_path)
+
+    assert exit_code == 0
+    assert observed["session_path"] == valid_session
 
 
 def test_main_summarize_requires_accepted_runtime_profile_state(
@@ -3681,6 +3808,64 @@ def _build_summarize_session_bundle(
         },
     )
     return session_dir, store, merged_record, overlay_record
+
+
+def _build_ready_summarize_session_bundle_with_metadata(
+    tmp_path: Path,
+    *,
+    directory_name: str,
+    created_at: str,
+    name: str | None = None,
+) -> Path:
+    session_dir = tmp_path / "sessions" / directory_name
+    session_dir.mkdir(parents=True)
+    record_data = {
+        "version": SESSION_RECORD_VERSION,
+        "id": SESSION_ID,
+        "created_at": created_at,
+        "name": name,
+        "status": "created",
+        "profile": "online_dual_stream",
+        "language": "fr-CH",
+        "recording": {
+            "started_at": None,
+            "stopped_at": None,
+            "stop_reason": None,
+            "finalization": {
+                "status": "not_started",
+                "completed_at": None,
+                "error": None,
+            },
+        },
+        "capture_plan": None,
+        "degradations": [],
+        "failures": [],
+    }
+    (session_dir / SESSION_RECORD_FILENAME).write_text(
+        json.dumps(record_data, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=session_dir)
+    merged_record = _persist_merged_transcript(store=store)
+    source_ref = ArtifactRef.from_record(merged_record)
+    overlay_artifact = create_correction_overlay(
+        session_id=SESSION_ID,
+        source_transcript_artifact=source_ref,
+        entries=(),
+        now=datetime(2026, 5, 19, 15, 20, 0, tzinfo=UTC),
+    )
+    persist_correction_overlay_artifact(
+        store=store,
+        artifact=overlay_artifact,
+        name=f"overlay/{directory_name}.json",
+        metadata={
+            "workflow_status": "completed",
+            "completed_at": "2026-05-19T15:20:00Z",
+        },
+    )
+
+    return session_dir
 
 
 def _build_verified_export_session_bundle(
