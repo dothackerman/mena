@@ -741,10 +741,8 @@ def test_record_prompt_text_for_output_sink_selection(
     captured = capsys.readouterr()
 
     assert exit_code == 0
-    assert "Where do you hear the meeting?" in captured.out
-    assert any(
-        prompt.startswith("Select where do you hear the meeting? [1]:") for prompt in prompts
-    )
+    assert "Where do you hear the meeting?" in captured.out.splitlines()
+    assert any(prompt.startswith("Select meeting audio output [1]:") for prompt in prompts)
     assert FakeWorkerProcess.last_start_payload is not None
     output_sink_route_ids = [
         route.route_id

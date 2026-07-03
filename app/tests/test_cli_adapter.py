@@ -126,7 +126,8 @@ def test_prompt_and_runtime_adapter_helpers(
 
     assert (
         cli._prompt_choice(
-            title="Choices",
+            header="Choices:",
+            label="choices",
             choices=choices,
             formatter=lambda choice: choice.label,
             input_fn=lambda _prompt: "",
@@ -136,7 +137,8 @@ def test_prompt_and_runtime_adapter_helpers(
     )
     with pytest.raises(ValueError, match="Invalid default"):
         cli._prompt_choice(
-            title="Choices",
+            header="Choices:",
+            label="choices",
             choices=choices,
             formatter=lambda choice: choice.label,
             input_fn=lambda _prompt: "1",
@@ -144,14 +146,16 @@ def test_prompt_and_runtime_adapter_helpers(
         )
     with pytest.raises(ValueError, match="Invalid choices selection 'x'"):
         cli._prompt_choice(
-            title="Choices",
+            header="Choices:",
+            label="choices",
             choices=choices,
             formatter=lambda choice: choice.label,
             input_fn=lambda _prompt: "x",
         )
     with pytest.raises(ValueError, match="Invalid choices selection '3'"):
         cli._prompt_choice(
-            title="Choices",
+            header="Choices:",
+            label="choices",
             choices=choices,
             formatter=lambda choice: choice.label,
             input_fn=lambda _prompt: "3",
@@ -209,17 +213,32 @@ def test_record_choice_and_data_root_adapter_branches(
     )
 
     assert selected.option_id == "two"
-    assert prompts == ["Select where do you hear the meeting? [2]: "]
+    assert prompts == ["Select meeting audio output [2]: "]
     assert cli._record_choice_prompt_metadata("record.capture_route.playback_stream") == (
         "playback stream",
         "--playback-stream",
-        "Playback streams",
+        "Playback streams:",
+        "playback streams",
     )
     assert cli._record_choice_prompt_metadata("record.capture_route.output_sink") == (
         "output sink",
         "--output-sink",
         "Where do you hear the meeting?",
+        "meeting audio output",
     )
+
+    invalid_selection = cli.ConsoleRecordInteraction(lambda _prompt: "x")
+    with pytest.raises(ValueError, match="Invalid meeting audio output selection 'x'"):
+        invalid_selection.choose(
+            ChoiceRequest(
+                topic="record.capture_route.output_sink",
+                options=(
+                    ChoiceOption(option_id="one", label="One"),
+                    ChoiceOption(option_id="two", label="Two"),
+                ),
+                default_option_id=None,
+            )
+        )
     assert cli._resolve_record_profile(None, input_fn=lambda _prompt: "2").id.value == (
         "in_person_single_mic"
     )
