@@ -708,6 +708,51 @@ def test_record_route_prompt_cancellation_does_not_start_capture(
     assert "capture" not in record
 
 
+def test_record_prompt_text_for_output_sink_selection(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    FakeWorkerProcess.last_start_payload = None
+    prompts: list[str] = []
+
+    def _input(prompt: str) -> str:
+        prompts.append(prompt)
+        if "record>" in prompt:
+            return "q"
+        return "1"
+
+    exit_code = main(
+        [
+            "record",
+            "--profile",
+            "online",
+            "--language",
+            "en",
+            "--mic",
+            "pipewire:node:31",
+            "--playback-stream",
+            "pulse:sink-input:151",
+        ],
+        data_root=tmp_path,
+        discoverer=_ambiguous_discoverer,
+        worker_factory=FakeWorkerProcess,
+        input_fn=_input,
+    )
+
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Where do you hear the meeting?" in captured.out.splitlines()
+    assert any(prompt.startswith("Select meeting audio output [1]:") for prompt in prompts)
+    assert FakeWorkerProcess.last_start_payload is not None
+    output_sink_route_ids = [
+        route.route_id
+        for route in FakeWorkerProcess.last_start_payload.routes
+        if route.role == "output_sink"
+    ]
+    assert output_sink_route_ids == ["pipewire:node:42"]
+
+
 def test_record_uses_explicit_noninteractive_route_flags(tmp_path: Path) -> None:
     FakeWorkerProcess.last_start_payload = None
 
