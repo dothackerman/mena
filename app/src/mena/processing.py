@@ -473,7 +473,10 @@ def has_completed_processing_pipeline(store: ArtifactStore, session_id: str) -> 
         latest is not None
         and latest.status in {"completed", "skipped"}
         and _is_final_processing_stage(latest)
-        and _outputs_verify(store, latest)
+        and (
+            _outputs_verify(store, latest)
+            or (latest.status == "skipped" and latest.skip_reason == "provider_unavailable")
+        )
     )
 
 

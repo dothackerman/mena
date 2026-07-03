@@ -228,6 +228,13 @@ def processable_session_candidates(
                     "recorded session is missing recording.finalization.completed_at; "
                     "pass an explicit session path."
                 )
+            try:
+                record_session_id = session_id(record)
+                record_profile = session_profile(record)
+                record_created_at = _required_record_str(record, "created_at")
+                record_completed_at = _required_completed_at(record)
+            except SessionRecordError:
+                continue
             if not include_processed and _processing_is_complete(session_dir, record):
                 continue
             try:
@@ -235,11 +242,11 @@ def processable_session_candidates(
                     ProcessableSessionCandidate(
                         session_dir=session_dir,
                         record_path=record_path,
-                        session_id=session_id(record),
+                        session_id=record_session_id,
                         name=_optional_record_str(record, "name"),
-                        profile=session_profile(record),
-                        created_at=_required_record_str(record, "created_at"),
-                        completed_at=_required_completed_at(record),
+                        profile=record_profile,
+                        created_at=record_created_at,
+                        completed_at=record_completed_at,
                         sort_completed_at=completed_at,
                     )
                 )
