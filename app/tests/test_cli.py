@@ -892,8 +892,18 @@ def test_record_defaults_to_runtime_sessions_dir(
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
 
     exit_code = main(
-        ["record", "--profile", "online", "--dry-run"],
+        [
+            "record",
+            "--profile",
+            "online",
+            "--language",
+            "en",
+            "--playback-stream",
+            "pulse:sink-input:151",
+        ],
         discoverer=_available_discoverer,
+        worker_factory=FakeWorkerProcess,
+        input_fn=lambda _prompt: "q",
     )
     captured = capsys.readouterr()
 
@@ -902,6 +912,7 @@ def test_record_defaults_to_runtime_sessions_dir(
     assert exit_code == 0
     assert len(sessions) == 1
     assert f"Session record: {sessions[0] / 'session.json'}" in captured.out
+    assert f"Next command: {DATA_ROOT_ENV_VAR}={sessions_dir.parent} mena process" in captured.out
 
 
 def test_record_data_root_override_remains_session_scoped(

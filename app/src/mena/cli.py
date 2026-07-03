@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from collections.abc import Callable, Sequence
 from datetime import datetime
@@ -835,6 +836,10 @@ def _effective_record_data_root(
     sessions_root = settings.paths.sessions_dir.parent
     if sessions_root != settings.paths.data_home:
         return sessions_root
+    if xdg_data_home := os.environ.get("XDG_DATA_HOME"):
+        xdg_data_root = Path(xdg_data_home).expanduser() / "mena"
+        if sessions_root == xdg_data_root:
+            return sessions_root
     return None
 
 
