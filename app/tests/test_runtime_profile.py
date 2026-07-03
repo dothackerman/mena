@@ -7,6 +7,7 @@ import pytest
 
 from mena.artifacts import FileSystemArtifactStore
 from mena.diarization import DiarizationProvider, DiarizationProviderUnavailable
+from mena.provider_validation import ProviderValidationError
 from mena.runtime_profile import (
     BoundProcessingRuntime,
     RuntimeFallbackUnavailable,
@@ -179,6 +180,28 @@ def test_bind_processing_runtime_constructs_bound_provider_set() -> None:
     assert isinstance(runtime.diarization_provider, _Diarization)
     assert runtime.semantic_coherence_provider is semantic
     assert runtime_stage_policy_payload(runtime.selection.actual)[0]["stage"] == "transcription"
+
+
+def test_bind_processing_runtime_validates_bound_injected_providers() -> None:
+    class InvalidTranscription:
+        name = "invalid-transcription"
+        transcribe = "not-callable"
+
+    with pytest.raises(
+        ProviderValidationError,
+        match="transcription provider must implement TranscriptionProvider",
+    ):
+        bind_processing_runtime(
+            selection=_selection("accepted"),
+            settings=cast(
+                AppSettings,
+                SimpleNamespace(local_llm=SimpleNamespace(ollama_endpoint="http://ollama")),
+            ),
+            transcription_provider_factory=InvalidTranscription,
+            diarization_provider_factory=_Diarization,
+            semantic_coherence_provider_factory=_Semantic,
+            semantic_coherence_provider=cast(SemanticCoherenceProvider, _Semantic()),
+        )
 
 
 def test_run_processing_with_runtime_fallback_retries_once_and_records_provenance() -> None:

@@ -14,6 +14,7 @@ from mena.diarization import (
     DiarizationProviderUnavailable,
     PyannoteCommunityDiarizationProvider,
 )
+from mena.provider_validation import require_provider_instance
 from mena.semantic_coherence import OllamaSemanticCoherenceProvider, SemanticCoherenceProvider
 from mena.settings import AppSettings
 from mena.setup import (
@@ -324,10 +325,20 @@ def bind_processing_runtime(
         transcription_provider_factory,
         selection.actual,
     )()
+    transcription_provider = require_provider_instance(
+        transcription_provider,
+        TranscriptionProvider,
+        "transcription",
+    )
     diarization_provider = runtime_diarization_factory(
         diarization_provider_factory,
         selection.actual,
     )()
+    diarization_provider = require_provider_instance(
+        diarization_provider,
+        DiarizationProvider,
+        "diarization",
+    )
     semantic_provider = (
         semantic_coherence_provider
         if semantic_coherence_provider is not None
@@ -336,6 +347,11 @@ def bind_processing_runtime(
             settings=settings,
             runtime_state=selection.accepted,
         )()
+    )
+    semantic_provider = require_provider_instance(
+        semantic_provider,
+        SemanticCoherenceProvider,
+        "semantic_coherence",
     )
     return BoundProcessingRuntime(
         selection=selection,
