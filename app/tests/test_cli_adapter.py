@@ -101,6 +101,17 @@ def test_console_record_interaction_rejects_noninteractive_choices_and_text() ->
             )
         )
 
+    with pytest.raises(
+        ValueError,
+        match="Multiple meeting audio output routes were discovered; pass --output-sink.",
+    ):
+        interaction.choose(
+            ChoiceRequest(
+                topic="record.capture_route.output_sink",
+                options=(ChoiceOption(option_id="sink-1", label="Headphones"),),
+            )
+        )
+
     with pytest.raises(RuntimeError, match="interactive terminal"):
         interaction.request_text(TextRequest(topic="record.stop_command"))
     with pytest.raises(ValueError, match="Unsupported record confirmation topic"):
@@ -221,7 +232,7 @@ def test_record_choice_and_data_root_adapter_branches(
         "playback streams",
     )
     assert cli._record_choice_prompt_metadata("record.capture_route.output_sink") == (
-        "output sink",
+        "meeting audio output",
         "--output-sink",
         "Where do you hear the meeting?",
         "meeting audio output",

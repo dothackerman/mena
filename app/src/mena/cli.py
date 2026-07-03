@@ -293,7 +293,7 @@ def _record_choice_prompt_metadata(topic: str) -> tuple[str, str, str, str]:
         return ("playback stream", "--playback-stream", "Playback streams:", "playback streams")
     if topic == "record.capture_route.output_sink":
         return (
-            "output sink",
+            "meeting audio output",
             "--output-sink",
             "Where do you hear the meeting?",
             "meeting audio output",
