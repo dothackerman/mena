@@ -295,12 +295,9 @@ def _processing_is_complete(
     session_dir: Path,
     session_record: Mapping[str, object],
 ) -> bool:
-    try:
-        session_id_value = session_id(session_record)
-        store = FileSystemArtifactStore(session_id=session_id_value, session_dir=session_dir)
-        return has_completed_processing_pipeline(store, session_id_value)
-    except Exception:
-        return False
+    session_id_value = session_id(session_record)
+    store = FileSystemArtifactStore(session_id=session_id_value, session_dir=session_dir)
+    return has_completed_processing_pipeline(store, session_id_value)
 
 
 def _required_record_str(session_record: Mapping[str, object], key: str) -> str:

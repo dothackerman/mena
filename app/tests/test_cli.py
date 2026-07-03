@@ -18,6 +18,7 @@ from mena.artifacts import (
     ArtifactStore,
     ArtifactStoreError,
     FileSystemArtifactStore,
+    session_artifact_manifest_path,
 )
 from mena.capture import make_wav_bytes
 from mena.cli import (
@@ -2186,6 +2187,71 @@ def test_main_process_without_session_path_prefers_unprocessed_recording(
 
     assert exit_code == 0
     assert calls == [unprocessed.record_path]
+
+
+def test_main_process_without_session_path_keeps_completed_session_with_corrupt_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    session = _create_runtime_session(
+        settings,
+        status="recorded",
+        created_at="2026-05-19T12:00:00Z",
+    )
+    _mark_processing_complete(session)
+    output_path = session.bundle_path / "artifacts" / "semantic_review" / "semantic-review.json"
+    output_path.write_bytes(b"{")
+    calls: list[Path] = []
+
+    def _fake_run_processing_command(**kwargs: object) -> int:
+        calls.append(cast(Path, kwargs["session_path"]))
+        return 0
+
+    monkeypatch.setattr("mena.cli._run_processing_command", _fake_run_processing_command)
+
+    exit_code = main(["process"], settings=settings)
+
+    assert exit_code == 0
+    assert calls == [session.record_path]
+
+
+def test_main_process_without_session_path_reports_corrupt_completed_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    valid_unprocessed = _create_runtime_session(
+        settings,
+        status="recorded",
+        created_at="2026-05-19T10:00:00Z",
+    )
+    corrupt_completed = _create_runtime_session(
+        settings,
+        status="recorded",
+        created_at="2026-05-19T12:00:00Z",
+    )
+    _mark_processing_complete(corrupt_completed)
+    session_artifact_manifest_path(corrupt_completed.bundle_path).write_text(
+        json.dumps({"version": 999, "session_id": corrupt_completed.record.id, "artifacts": []}),
+        encoding="utf-8",
+    )
+    calls: list[Path] = []
+
+    def _fake_run_processing_command(**kwargs: object) -> int:
+        calls.append(cast(Path, kwargs["session_path"]))
+        return 0
+
+    monkeypatch.setattr("mena.cli._run_processing_command", _fake_run_processing_command)
+
+    exit_code = main(["process"], settings=settings)
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert calls == []
+    assert valid_unprocessed.record_path != corrupt_completed.record_path
+    assert "Cannot run processing workflow: Unsupported artifact manifest version." in captured.out
 
 
 def test_main_process_without_session_path_keeps_failed_processing_candidate(
