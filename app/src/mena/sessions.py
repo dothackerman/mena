@@ -174,13 +174,22 @@ def latest_recorded_session_record_path(sessions_root: Path) -> Path | None:
                 continue
             try:
                 record = read_session_record(record_path)
-                if record.get("status") != "recorded":
-                    continue
-                completed_at = _recording_completed_at(record)
-                if completed_at is None:
-                    continue
             except (OSError, ValueError, json.JSONDecodeError):
                 continue
+            if record.get("status") != "recorded":
+                continue
+            try:
+                completed_at = _recording_completed_at(record)
+            except ValueError as exc:
+                raise SessionRecordError(
+                    "recorded session has invalid recording.finalization.completed_at; "
+                    "pass an explicit session path."
+                ) from exc
+            if completed_at is None:
+                raise SessionRecordError(
+                    "recorded session is missing recording.finalization.completed_at; "
+                    "pass an explicit session path."
+                )
             if best_completed_at is None or completed_at > best_completed_at:
                 best_completed_at = completed_at
                 best_paths = [record_path]

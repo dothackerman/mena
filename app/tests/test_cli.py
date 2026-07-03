@@ -2159,6 +2159,36 @@ def test_main_process_without_session_path_rejects_ambiguous_latest_recording(
     ) in captured.out
 
 
+def test_main_process_without_session_path_rejects_unorderable_recorded_session(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    _create_runtime_session(
+        settings,
+        status="recorded",
+        created_at="2026-05-19T10:00:00Z",
+        completed_at="2026-05-19T12:00:00Z",
+    )
+    unorderable = _create_runtime_session(
+        settings,
+        status="recorded",
+        created_at="2026-05-19T13:00:00Z",
+    )
+    record = json.loads(unorderable.record_path.read_text(encoding="utf-8"))
+    record["recording"]["finalization"]["completed_at"] = None
+    unorderable.record_path.write_text(json.dumps(record), encoding="utf-8")
+
+    exit_code = main(["process"], settings=settings)
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert (
+        "Cannot run processing workflow: recorded session is missing "
+        "recording.finalization.completed_at; pass an explicit session path."
+    ) in captured.out
+
+
 def test_main_process_without_session_path_reports_missing_recorded_session(
     tmp_path: Path,
     capsys: CaptureFixture[str],
