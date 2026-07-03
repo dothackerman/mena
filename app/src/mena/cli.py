@@ -423,7 +423,8 @@ class ConsoleSummarizeInteraction:
             return default
 
         return _prompt_choice(
-            title="Ready session to summarize",
+            header="Ready session to summarize:",
+            label="ready session",
             choices=request.options,
             formatter=lambda option: _format_summarize_choice(
                 option,
