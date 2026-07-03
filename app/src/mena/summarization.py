@@ -310,11 +310,13 @@ class ProductRequestRecord:
         return cls(
             product=_required_str(item, "product", "Product request record"),
             model=_required_str(item, "model", "Product request record"),
-            num_ctx=_required_int(item, "num_ctx", "Product request record"),
+            num_ctx=_required_positive_int(item, "num_ctx", "Product request record"),
             temperature=_required_number(item, "temperature", "Product request record"),
             seed=_required_int(item, "seed", "Product request record"),
-            prompt_eval_count=_optional_int(item, "prompt_eval_count", "Product request record"),
-            eval_count=_optional_int(item, "eval_count", "Product request record"),
+            prompt_eval_count=_optional_nonnegative_int(
+                item, "prompt_eval_count", "Product request record"
+            ),
+            eval_count=_optional_nonnegative_int(item, "eval_count", "Product request record"),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -1249,6 +1251,22 @@ def _optional_int(data: Mapping[str, object], field_name: str, label: str) -> in
         raise SummarizationContractError(
             f"Field '{field_name}' in {label} must be null or an integer."
         )
+    return value
+
+
+def _required_positive_int(data: Mapping[str, object], field_name: str, label: str) -> int:
+    value = _required_int(data, field_name, label)
+    if value < 1:
+        raise SummarizationContractError(f"Field '{field_name}' in {label} must be at least 1.")
+    return value
+
+
+def _optional_nonnegative_int(
+    data: Mapping[str, object], field_name: str, label: str
+) -> int | None:
+    value = _optional_int(data, field_name, label)
+    if value is not None and value < 0:
+        raise SummarizationContractError(f"Field '{field_name}' in {label} must be at least 0.")
     return value
 
 

@@ -152,6 +152,8 @@ def _optional_token_count(value: object) -> int | None:
         return None
     if isinstance(value, bool) or not isinstance(value, int):
         raise LocalLLMContractError("Ollama token count must be an integer.")
+    if value < 0:
+        raise LocalLLMContractError("Ollama token count must be non-negative.")
     return value
 
 

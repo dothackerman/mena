@@ -1135,6 +1135,45 @@ def test_summary_artifact_from_dict_requires_complete_request_records(
         SummaryArtifact.from_dict(artifact.to_dict())
 
 
+@pytest.mark.parametrize(
+    ("field_name", "value", "message"),
+    [
+        ("num_ctx", 0, "at least 1"),
+        ("prompt_eval_count", -1, "at least 0"),
+        ("eval_count", -1, "at least 0"),
+    ],
+)
+def test_summary_artifact_from_dict_rejects_out_of_range_request_record_metrics(
+    field_name: str,
+    value: int,
+    message: str,
+) -> None:
+    artifact = SummaryArtifact(
+        version=2,
+        session_id=SESSION_ID,
+        merged_transcript_artifact=ArtifactRef(
+            id=f"{SESSION_ID}:artifacts/merged_transcript/merged.json",
+            artifact_type="merged_transcript",
+            version=1,
+            sha256="1" * 64,
+        ),
+        manual_notes_artifact=None,
+        policy=SummarizationPolicy(language="en").to_dict(),
+        provider=FakeSummarizationProvider(result=_summary_result()).metadata,
+        timeline=_summary_result().timeline,
+        action_items=_summary_result().action_items,
+        general_summary=_summary_result().general_summary,
+        created_at="2026-05-18T17:00:00Z",
+        request_records=_summary_result().request_records,
+    )
+    payload = artifact.to_dict()
+    request_records = cast(list[dict[str, object]], payload["request_records"])
+    request_records[0][field_name] = value
+
+    with pytest.raises(SummarizationContractError, match=message):
+        SummaryArtifact.from_dict(payload)
+
+
 def test_provider_request_options_participate_in_reuse_identity() -> None:
     base = SummarizationProviderMetadata(name="ollama", model="llama3.1:8b", endpoint=None)
     tuned = SummarizationProviderMetadata(
