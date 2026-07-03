@@ -14,7 +14,7 @@ from mena.diarization import (
     DiarizationProviderUnavailable,
     PyannoteCommunityDiarizationProvider,
 )
-from mena.provider_validation import require_provider_instance
+from mena.provider_validation import require_provider, require_provider_instance
 from mena.semantic_coherence import OllamaSemanticCoherenceProvider, SemanticCoherenceProvider
 from mena.settings import AppSettings
 from mena.setup import (
@@ -321,32 +321,34 @@ def bind_processing_runtime(
 ) -> BoundProcessingRuntime:
     """Construct providers bound to a selected runtime profile."""
 
-    transcription_provider = runtime_transcription_factory(
-        transcription_provider_factory,
-        selection.actual,
-    )()
-    transcription_provider = require_provider_instance(
-        transcription_provider,
+    transcription_provider = require_provider(
+        runtime_transcription_factory(
+            transcription_provider_factory,
+            selection.actual,
+        ),
         TranscriptionProvider,
         "transcription",
     )
-    diarization_provider = runtime_diarization_factory(
-        diarization_provider_factory,
-        selection.actual,
-    )()
-    diarization_provider = require_provider_instance(
-        diarization_provider,
+    diarization_provider = require_provider(
+        runtime_diarization_factory(
+            diarization_provider_factory,
+            selection.actual,
+        ),
         DiarizationProvider,
         "diarization",
     )
     semantic_provider = (
         semantic_coherence_provider
         if semantic_coherence_provider is not None
-        else runtime_semantic_factory(
-            semantic_coherence_provider_factory,
-            settings=settings,
-            runtime_state=selection.accepted,
-        )()
+        else require_provider(
+            runtime_semantic_factory(
+                semantic_coherence_provider_factory,
+                settings=settings,
+                runtime_state=selection.accepted,
+            ),
+            SemanticCoherenceProvider,
+            "semantic_coherence",
+        )
     )
     semantic_provider = require_provider_instance(
         semantic_provider,

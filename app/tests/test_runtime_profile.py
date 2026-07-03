@@ -204,6 +204,27 @@ def test_bind_processing_runtime_validates_bound_injected_providers() -> None:
         )
 
 
+def test_bind_processing_runtime_wraps_bound_factory_type_errors() -> None:
+    def broken_factory() -> object:
+        raise TypeError("missing constructor argument")
+
+    with pytest.raises(
+        ProviderValidationError,
+        match="transcription provider must implement TranscriptionProvider",
+    ):
+        bind_processing_runtime(
+            selection=_selection("accepted"),
+            settings=cast(
+                AppSettings,
+                SimpleNamespace(local_llm=SimpleNamespace(ollama_endpoint="http://ollama")),
+            ),
+            transcription_provider_factory=broken_factory,
+            diarization_provider_factory=_Diarization,
+            semantic_coherence_provider_factory=_Semantic,
+            semantic_coherence_provider=cast(SemanticCoherenceProvider, _Semantic()),
+        )
+
+
 def test_run_processing_with_runtime_fallback_retries_once_and_records_provenance() -> None:
     calls: list[str] = []
     stored: list[dict[str, object]] = []
