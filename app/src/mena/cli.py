@@ -357,6 +357,37 @@ class ConsoleCorrectionInteraction:
             raise ValueError(f"Unsupported correction notice topic '{topic}'.")
 
 
+class ConsoleProcessingInteraction:
+    """Console adapter for processing workflow interaction topics."""
+
+    def __init__(self, input_fn: Callable[[str], str]) -> None:
+        self._input_fn = input_fn
+
+    def choose(self, request: ChoiceRequest) -> ChoiceOption:
+        raise ValueError(f"Unsupported processing choice topic '{request.topic}'.")
+
+    def confirm(self, request: ConfirmationRequest) -> bool:
+        if request.topic != "runtime_fallback.one_run":
+            raise ValueError(f"Unsupported processing confirmation topic '{request.topic}'.")
+        accepted_failure = str(request.context["accepted_failure"])
+        fallback_evaluation = cast(SetupEvaluation, request.context["fallback_evaluation"])
+        print(f"Accepted runtime profile is unavailable: {accepted_failure}")
+        print(
+            "One-run local runtime fallback is ready: "
+            f"{fallback_evaluation.profile.id} using "
+            f"{fallback_evaluation.selected_asr_profile.checkpoint}/"
+            f"{fallback_evaluation.selected_asr_profile.device}."
+        )
+        answer = self._input_fn("Use local runtime fallback for this run? [y/N] ")
+        return answer.strip().lower() in {"y", "yes"}
+
+    def request_text(self, request: TextRequest) -> str:
+        raise ValueError(f"Unsupported processing text topic '{request.topic}'.")
+
+    def notify(self, notice: WorkflowNotice) -> None:
+        raise ValueError(f"Unsupported processing notice topic '{notice.topic}'.")
+
+
 def _correction_action_option_id(raw: str) -> str | None:
     if raw in {"p", "play", "playback"}:
         return "playback"
@@ -614,7 +645,6 @@ def main(
                 setup_command_identity=setup_command_identity,
                 setup_hardware=setup_hardware,
                 allow_runtime_fallback=args.allow_runtime_fallback,
-                runtime_fallback_input_fn=_resolve_runtime_fallback_input(input_fn),
             )
         except (
             ArtifactStoreError,
@@ -716,7 +746,7 @@ def main(
                 setup_command_identity=setup_command_identity,
                 setup_hardware=setup_hardware,
                 allow_runtime_fallback=args.allow_runtime_fallback,
-                runtime_fallback_input_fn=_resolve_runtime_fallback_input(input_fn),
+                interaction=_resolve_runtime_fallback_interaction(input_fn),
             )
         except RuntimeFallbackUnavailable as exc:
             # Recoverable: a GPU stage failed and a CPU fallback exists but is not
@@ -920,21 +950,13 @@ def _resolve_runtime_fallback_input(
     return input if sys.stdin.isatty() else None
 
 
-def _confirm_one_run_runtime_fallback(
-    *,
-    accepted_failure: str,
-    fallback_evaluation: SetupEvaluation,
-    input_fn: Callable[[str], str],
-) -> bool:
-    print(f"Accepted runtime profile is unavailable: {accepted_failure}")
-    print(
-        "One-run local runtime fallback is ready: "
-        f"{fallback_evaluation.profile.id} using "
-        f"{fallback_evaluation.selected_asr_profile.checkpoint}/"
-        f"{fallback_evaluation.selected_asr_profile.device}."
-    )
-    answer = input_fn("Use local runtime fallback for this run? [y/N] ")
-    return answer.strip().lower() in {"y", "yes"}
+def _resolve_runtime_fallback_interaction(
+    input_fn: Callable[[str], str] | None,
+) -> InteractionPort | None:
+    reader = _resolve_runtime_fallback_input(input_fn)
+    if reader is None:
+        return None
+    return ConsoleProcessingInteraction(reader)
 
 
 def _print_semantic_review_skip_notice(result: SemanticCoherenceStageResult) -> None:
@@ -967,7 +989,6 @@ def _run_summarize_command(
     setup_command_identity: CommandIdentity | None = None,
     setup_hardware: HardwareFacts | None = None,
     allow_runtime_fallback: bool = False,
-    runtime_fallback_input_fn: Callable[[str], str] | None = None,
 ) -> int:
     return summarize_workflow.run_summarization_command(
         session_path=session_path,
@@ -978,7 +999,6 @@ def _run_summarize_command(
         setup_command_identity=setup_command_identity,
         setup_hardware=setup_hardware,
         allow_runtime_fallback=allow_runtime_fallback,
-        runtime_fallback_input_fn=runtime_fallback_input_fn,
         runtime_profile_selector_fn=select_runtime_profile,
         runtime_profile_store_fn=store_runtime_profile_provenance,
         runtime_summarization_binder_fn=bind_summarization_runtime,
@@ -1087,7 +1107,7 @@ def _run_processing_command(
     setup_command_identity: CommandIdentity | None = None,
     setup_hardware: HardwareFacts | None = None,
     allow_runtime_fallback: bool = False,
-    runtime_fallback_input_fn: Callable[[str], str] | None = None,
+    interaction: InteractionPort | None = None,
 ) -> int:
     def _processing_stages_adapter(
         *,
@@ -1131,7 +1151,7 @@ def _run_processing_command(
         setup_command_identity=setup_command_identity,
         setup_hardware=setup_hardware,
         allow_runtime_fallback=allow_runtime_fallback,
-        runtime_fallback_input_fn=runtime_fallback_input_fn,
+        interaction=interaction,
         terminal_llm_release=_record_terminal_local_llm_release,
         processing_stages_runner=_processing_stages_adapter,
         transcription_stage_runner=run_transcription_stage,
