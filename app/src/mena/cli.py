@@ -5,8 +5,9 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections.abc import Callable, Sequence
-from datetime import datetime
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypeVar, cast
 from uuid import uuid4
@@ -20,6 +21,7 @@ from mena.artifacts import (
 )
 from mena.correction_overlay import (
     CorrectionOverlayContractError,
+    resolve_active_correction_overlay,
 )
 from mena.correction_workflow import (
     CorrectionWorkflowError,
@@ -112,7 +114,7 @@ from mena.session_integrity import (
     load_verified_session_bundle,
     verify_session_bundle,
 )
-from mena.sessions import resolve_session, session_id
+from mena.sessions import SESSION_RECORD_FILENAME, resolve_session, session_id
 from mena.settings import AppSettings, SettingsError, validate_summary_language
 from mena.setup import (
     CommandIdentity,
@@ -444,7 +446,9 @@ def build_parser() -> argparse.ArgumentParser:
         if command in {"correct", "process", "resume", "summarize", "export", "inspect"}:
             subparser.add_argument(
                 "session_path",
+                nargs="?" if command == "summarize" else None,
                 help="Path to the session directory or session.json.",
+                default=None,
             )
         if command in {"process", "resume", "summarize"}:
             subparser.add_argument(
@@ -517,6 +521,9 @@ def main(
 
     try:
         app_settings = settings or AppSettings.from_env(config_path=config_path)
+        sessions_root = (
+            data_root / "sessions" if data_root is not None else app_settings.paths.sessions_dir
+        )
     except SettingsError as exc:
         print(f"Cannot load configuration: {exc}")
         return 1
@@ -590,8 +597,13 @@ def main(
 
     if args.command == "summarize":
         try:
+            resolved_session_path = _resolve_summarize_session_path(
+                explicit_session_path=args.session_path,
+                sessions_root=sessions_root,
+                input_fn=input_fn,
+            )
             return _run_summarize_command(
-                session_path=Path(args.session_path),
+                session_path=resolved_session_path,
                 manual_notes=args.manual_notes,
                 language=(
                     None
@@ -911,6 +923,148 @@ def _requires_runtime_profile(
         diarization_provider_factory=diarization_provider_factory,
         semantic_coherence_provider_factory=semantic_coherence_provider_factory,
     )
+
+
+@dataclass(frozen=True)
+class _SummarizeSessionOption:
+    session_dir: Path
+    created_at: datetime | None
+    name: str | None
+
+
+def _select_summarize_session(
+    *,
+    options: tuple[_SummarizeSessionOption, ...],
+    input_fn: Callable[[str], str] | None,
+) -> Path:
+    newest = options[0]
+    reader = _record_input(input_fn)
+    if reader is None:
+        print(
+            "Multiple ready sessions found for summarization."
+            " Using newest session by default:"
+            f" {_summarize_session_label(newest)}"
+        )
+        print("Pass the session path argument to summarize a different session.")
+        print(f"Session path: {newest.session_dir}")
+        return newest.session_dir
+
+    selected = _prompt_choice(
+        title="Ready session to summarize",
+        choices=options,
+        formatter=lambda option: (
+            _summarize_session_label(option) + (" [recommended]" if option == newest else "")
+        ),
+        input_fn=reader,
+        default_index=1,
+    )
+    print(f"Session path: {selected.session_dir}")
+    return selected.session_dir
+
+
+def _summarize_session_label(option: _SummarizeSessionOption) -> str:
+    created_at = (
+        option.created_at.isoformat(timespec="seconds") if option.created_at is not None else "?"
+    )
+    if option.name:
+        return f"{option.session_dir.name} ({option.name}, {created_at})"
+    return f"{option.session_dir.name} ({created_at})"
+
+
+def _resolve_summarize_session_path(
+    *,
+    explicit_session_path: str | None,
+    sessions_root: Path,
+    input_fn: Callable[[str], str] | None = None,
+) -> Path:
+    if explicit_session_path is not None:
+        return Path(explicit_session_path)
+
+    candidates = _find_ready_summarize_sessions(sessions_root=sessions_root)
+    if len(candidates) == 0:
+        raise ValueError(
+            "No ready sessions were found for summarization. "
+            "Run process and correction first, then retry with an explicit session path."
+        )
+    if len(candidates) == 1:
+        session_dir = candidates[0].session_dir
+        print(f"Session path: {session_dir}")
+        return session_dir
+
+    return _select_summarize_session(options=candidates, input_fn=input_fn)
+
+
+def _find_ready_summarize_sessions(
+    *,
+    sessions_root: Path,
+) -> tuple[_SummarizeSessionOption, ...]:
+    if not sessions_root.exists():
+        return ()
+
+    options: list[_SummarizeSessionOption] = []
+    for session_dir in sorted(
+        session_dir for session_dir in sessions_root.iterdir() if session_dir.is_dir()
+    ):
+        if not (session_dir / SESSION_RECORD_FILENAME).is_file():
+            continue
+        option = _resolve_summarize_session_candidate(session_dir=session_dir)
+        if option is not None:
+            options.append(option)
+    return tuple(
+        sorted(
+            options,
+            key=lambda option: (
+                option.created_at or datetime.min.replace(tzinfo=UTC),
+                option.session_dir.name,
+            ),
+            reverse=True,
+        )
+    )
+
+
+def _resolve_summarize_session_candidate(
+    *,
+    session_dir: Path,
+) -> _SummarizeSessionOption | None:
+    try:
+        resolved_session = resolve_session(session_dir)
+    except ValueError:
+        return None
+
+    try:
+        session_record = resolved_session.record
+        session_id_value = session_id(session_record)
+        store = FileSystemArtifactStore(session_id=session_id_value, session_dir=session_dir)
+        merged_record = _resolve_latest_merged_transcript_record(store=store)
+        if merged_record is None:
+            return None
+        if (
+            resolve_active_correction_overlay(
+                store=store,
+                source_transcript_record=merged_record,
+            )
+            is None
+        ):
+            return None
+    except (CorrectionOverlayContractError, ArtifactStoreError, ValueError):
+        return None
+
+    raw_name = session_record.get("name")
+    if not isinstance(raw_name, str):
+        raw_name = None
+
+    return _SummarizeSessionOption(
+        session_dir=session_dir,
+        created_at=_parse_session_created_at(session_record=session_record),
+        name=raw_name,
+    )
+
+
+def _parse_session_created_at(*, session_record: Mapping[str, object]) -> datetime | None:
+    raw = session_record.get("created_at")
+    if not isinstance(raw, str):
+        return None
+    return _parse_iso_timestamp(raw)
 
 
 def _run_summarize_command(

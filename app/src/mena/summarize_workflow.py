@@ -88,6 +88,8 @@ def run_summarization_command(
     summary_language = validate_summary_language(summary_language, "summary language")
     store = FileSystemArtifactStore(session_id=session_id_value, session_dir=session_dir)
 
+    print("Creating notes...")
+
     merged_transcript_record = _resolve_latest_merged_transcript_record(store=store)
     if merged_transcript_record is None:
         raise SummarizationError("No merged transcript artifact found for this session.")
@@ -154,6 +156,8 @@ def run_summarization_command(
             )
 
     print(f"Summary written to: {result.summary_record.path}")
+    print(f"Session path: {resolved_session.session_dir}")
+    print(f"Export command: mena export {resolved_session.session_dir}")
     return 0
 
 
