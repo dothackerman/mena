@@ -127,7 +127,11 @@ from mena.setup import (
     persist_runtime_profile_state,
 )
 from mena.summarization import (
+    OLLAMA_SUMMARIZATION_NUM_CTX,
+    OLLAMA_SUMMARIZATION_SEED,
+    REQUIRED_NOTE_PRODUCTS,
     FakeSummarizationProvider,
+    ProductRequestRecord,
     SummarizationError,
     SummarizationPolicy,
     SummarizationProvider,
@@ -4362,9 +4366,9 @@ def _mark_semantic_provider_unavailable_skip(session: CreatedSession) -> None:
 def _summary_result_for_export() -> SummaryResult:
     return SummaryResult(
         timeline=("Agenda covered.",),
-        important_points=("A decision was made.",),
         action_items=(),
         general_summary="The team aligned on the plan.",
+        request_records=_request_records_for_products(REQUIRED_NOTE_PRODUCTS),
     )
 
 
@@ -4390,17 +4394,17 @@ def _persist_summary_artifact_for_cli(
     return persist_summary_artifact(
         store=store,
         artifact=SummaryArtifact(
-            version=1,
+            version=2,
             session_id=SESSION_ID,
             merged_transcript_artifact=merged_artifact_ref,
             manual_notes_artifact=None,
             policy=SummarizationPolicy(language="en").to_dict(),
             provider=FakeSummarizationProvider(result=summary_result).metadata,
             timeline=summary_result.timeline,
-            important_points=summary_result.important_points,
             action_items=summary_result.action_items,
             general_summary=summary_result.general_summary,
             created_at=summary_created_at,
+            request_records=summary_result.request_records,
         ),
         name=summary_name,
         correction_overlay_record=None,
@@ -4445,6 +4449,21 @@ def _update_artifact_manifest_record(
     else:
         raise AssertionError(f"Artifact record not found: {artifact_id}")
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+
+def _request_records_for_products(products: tuple[str, ...]) -> tuple[ProductRequestRecord, ...]:
+    return tuple(
+        ProductRequestRecord(
+            product=product,
+            model="fake-summarizer",
+            num_ctx=OLLAMA_SUMMARIZATION_NUM_CTX,
+            temperature=0,
+            seed=OLLAMA_SUMMARIZATION_SEED,
+            prompt_eval_count=None,
+            eval_count=None,
+        )
+        for product in products
+    )
 
 
 def _persist_merged_transcript(*, store: FileSystemArtifactStore) -> ArtifactRecord:

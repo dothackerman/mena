@@ -9,8 +9,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from mena.artifacts import ArtifactRecord, ArtifactStore
+from mena.processing import ProcessingStateError
 from mena.summarization import (
     SUMMARY_ARTIFACT_TYPE,
+    SUMMARY_ARTIFACT_VERSION,
     SummarizationContractError,
     SummaryArtifact,
 )
@@ -18,12 +20,16 @@ from mena.summary_markdown import format_summary_markdown
 from mena.timestamps import parse_utc_timestamp, utc_timestamp
 
 SUMMARY_MARKDOWN_EXPORT_ARTIFACT_TYPE = "summary_markdown_export"
-SUMMARY_MARKDOWN_EXPORT_ARTIFACT_VERSION = 2
-SUMMARY_MARKDOWN_EXPORT_CONTRACT = "summary-markdown-language-chrome-v2"
+SUMMARY_MARKDOWN_EXPORT_ARTIFACT_VERSION = 3
+SUMMARY_MARKDOWN_EXPORT_CONTRACT = "summary-markdown-note-package-v3"
 
 
 class SummaryMarkdownExportError(RuntimeError):
     """Raised when markdown export cannot be produced."""
+
+
+class _IncompatibleSummaryMarkdownInput(SummaryMarkdownExportError):
+    """Raised when a sealed summary payload is not compatible with markdown export."""
 
 
 @dataclass(frozen=True)
@@ -96,7 +102,16 @@ def resolve_summary_markdown_input(
 
     candidates: list[tuple[datetime, str, str, ArtifactRecord, SummaryArtifact]] = []
     for record in records:
-        _, summary = _load_summary_artifact(record=record, store=store)
+        if record.version != SUMMARY_ARTIFACT_VERSION:
+            continue
+        try:
+            _, summary = _load_summary_artifact(record=record, store=store)
+        except _IncompatibleSummaryMarkdownInput:
+            # Old summary.v1 artifacts (and any payload that no longer satisfies the
+            # strict summary.v2 contract) remain sealed in the manifest by design.
+            # When auto-selecting export input, skip incompatible payloads so a valid
+            # summary.v2 from a rerun can still be chosen; only fail if none exist.
+            continue
         candidates.append(
             (
                 _summary_created_at(summary),
@@ -108,7 +123,7 @@ def resolve_summary_markdown_input(
         )
 
     if not candidates:
-        raise SummaryMarkdownExportError("No valid summary.v1 artifact was found for export.")
+        raise SummaryMarkdownExportError("No valid summary.v2 artifact was found for export.")
 
     _, _, _, selected_record, selected_summary = max(candidates)
     return selected_record, selected_summary
@@ -141,9 +156,9 @@ def _load_summary_artifact(
 
     try:
         summary = SummaryArtifact.from_dict(payload)
-    except SummarizationContractError as exc:
-        raise SummaryMarkdownExportError(
-            f"Summary artifact {record.id} is not a valid summary.v1 payload."
+    except (SummarizationContractError, ProcessingStateError) as exc:
+        raise _IncompatibleSummaryMarkdownInput(
+            f"Summary artifact {record.id} is not a valid summary.v2 payload."
         ) from exc
 
     if summary.session_id != record.session_id:

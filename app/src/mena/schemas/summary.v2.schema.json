@@ -1,0 +1,294 @@
+{
+  "$id": "https://dothackerman.github.io/mena/schemas/summary.v2.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "action_item": {
+      "additionalProperties": false,
+      "properties": {
+        "due": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "owner": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "text": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": ["text", "owner", "due"],
+      "type": "object"
+    },
+    "artifact_ref": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_type": {
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_:-]*$",
+          "type": "string"
+        },
+        "id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "version": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": ["id", "artifact_type", "version", "sha256"],
+      "type": "object"
+    },
+    "request_record": {
+      "additionalProperties": false,
+      "properties": {
+        "product": {
+          "enum": ["timeline", "action_items", "general_summary"],
+          "type": "string"
+        },
+        "model": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "num_ctx": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "temperature": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "prompt_eval_count": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "eval_count": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "product",
+        "model",
+        "num_ctx",
+        "temperature",
+        "seed",
+        "prompt_eval_count",
+        "eval_count"
+      ],
+      "type": "object"
+    },
+    "policy": {
+      "additionalProperties": false,
+      "properties": {
+        "include_manual_notes": {
+          "type": "boolean"
+        },
+        "language": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "policy_version": {
+          "const": 1,
+          "type": "integer"
+        },
+        "prompt_policy": {
+          "enum": [
+            "meeting-summary-json-v1",
+            "meeting-summary-json-schema-v1",
+            "meeting-summary-json-schema-language-output-v2",
+            "note-package-three-product-v1"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "policy_version",
+        "prompt_policy",
+        "language",
+        "include_manual_notes"
+      ],
+      "type": "object"
+    },
+    "provider": {
+      "additionalProperties": false,
+      "properties": {
+        "endpoint": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "model": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "name": {
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_:-]*$",
+          "type": "string"
+        },
+        "prompt_policy": {
+          "enum": [
+            "meeting-summary-json-v1",
+            "meeting-summary-json-schema-v1",
+            "meeting-summary-json-schema-language-output-v2",
+            "note-package-three-product-v1"
+          ],
+          "type": "string"
+        }
+      },
+      "required": ["name", "model", "endpoint", "prompt_policy"],
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Versioned three-product note-package summary artifact emitted by the summarization port.",
+  "properties": {
+    "action_items": {
+      "items": {
+        "$ref": "#/$defs/action_item"
+      },
+      "type": "array"
+    },
+    "created_at": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "general_summary": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "manual_notes_artifact": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/artifact_ref"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "merged_transcript_artifact": {
+      "$ref": "#/$defs/artifact_ref"
+    },
+    "policy": {
+      "$ref": "#/$defs/policy"
+    },
+    "provider": {
+      "$ref": "#/$defs/provider"
+    },
+    "request_records": {
+      "allOf": [
+        {
+          "contains": {
+            "properties": {
+              "product": {
+                "const": "timeline"
+              }
+            },
+            "required": ["product"]
+          }
+        },
+        {
+          "contains": {
+            "properties": {
+              "product": {
+                "const": "action_items"
+              }
+            },
+            "required": ["product"]
+          }
+        },
+        {
+          "contains": {
+            "properties": {
+              "product": {
+                "const": "general_summary"
+              }
+            },
+            "required": ["product"]
+          }
+        }
+      ],
+      "items": {
+        "$ref": "#/$defs/request_record"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    },
+    "session_id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "timeline": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "version": {
+      "const": 2,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version",
+    "session_id",
+    "merged_transcript_artifact",
+    "manual_notes_artifact",
+    "policy",
+    "provider",
+    "timeline",
+    "action_items",
+    "general_summary",
+    "created_at",
+    "request_records"
+  ],
+  "title": "Mena Summary v2",
+  "type": "object"
+}

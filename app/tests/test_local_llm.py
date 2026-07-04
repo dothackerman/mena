@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from mena.local_llm import LocalLLMContractError, unload_ollama_model
+from mena.local_llm import LocalLLMContractError, ollama_token_counts, unload_ollama_model
 
 
 def test_unload_ollama_model_posts_empty_chat_with_zero_keep_alive(
@@ -47,6 +47,14 @@ def test_unload_ollama_model_posts_empty_chat_with_zero_keep_alive(
             "keep_alive": 0,
         },
     }
+
+
+def test_ollama_token_counts_reject_negative_counts() -> None:
+    with pytest.raises(LocalLLMContractError, match="non-negative"):
+        ollama_token_counts({"prompt_eval_count": -1, "eval_count": 0})
+
+    with pytest.raises(LocalLLMContractError, match="non-negative"):
+        ollama_token_counts({"prompt_eval_count": 0, "eval_count": -1})
 
 
 @pytest.mark.parametrize(

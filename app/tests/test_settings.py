@@ -87,7 +87,7 @@ def test_app_settings_uses_defaults_when_config_file_is_missing(tmp_path: Path) 
 
     assert settings.summary.language == "en"
     assert settings.local_llm.ollama_endpoint == "http://localhost:11434"
-    assert settings.local_llm.ollama_model == "llama3.2:3b"
+    assert settings.local_llm.ollama_model == "llama3.1:8b"
 
 
 def test_app_settings_rejects_broken_config_symlink(tmp_path: Path) -> None:

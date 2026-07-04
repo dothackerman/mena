@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 OLLAMA_DEFAULT_ENDPOINT = "http://localhost:11434"
-OLLAMA_DEFAULT_MODEL = "llama3.2:3b"
+OLLAMA_DEFAULT_MODEL = "llama3.1:8b"
 
 
 class LocalLLMError(RuntimeError):
@@ -136,6 +136,25 @@ def ollama_message_content(response: Mapping[str, object]) -> str:
     if not isinstance(content, str) or not content.strip():
         raise LocalLLMContractError("Ollama response message content is empty.")
     return content
+
+
+def ollama_token_counts(response: Mapping[str, object]) -> tuple[int | None, int | None]:
+    """Return (prompt_eval_count, eval_count) from an Ollama response envelope."""
+
+    return (
+        _optional_token_count(response.get("prompt_eval_count")),
+        _optional_token_count(response.get("eval_count")),
+    )
+
+
+def _optional_token_count(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise LocalLLMContractError("Ollama token count must be an integer.")
+    if value < 0:
+        raise LocalLLMContractError("Ollama token count must be non-negative.")
+    return value
 
 
 def strip_json_fence(content: str) -> str:
