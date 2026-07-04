@@ -71,7 +71,7 @@ def test_setup_workflow_executes_primary_actions_then_persists_ready_state(
     )
 
     assert result.exit_code == 0
-    assert ("ollama", "pull", "llama3.2:3b") in runner.run_calls
+    assert ("ollama", "pull", "llama3.1:8b") in runner.run_calls
     assert (settings.paths.state_home / "setup-state.json").is_file()
     accepted = load_runtime_profile_state(settings.paths)
     assert accepted.fallback_authorization.local_status == "configured_unauthorized"

@@ -313,8 +313,8 @@ def test_final_provider_readiness_can_complete_after_successful_automated_action
 
     assert {result.status for result in results} == {"installed"}
     assert final_provider_readiness(evaluation, results)
-    assert ("ollama", "pull", "llama3.2:3b") in runner.run_calls
-    ollama_call_index = runner.run_calls.index(("ollama", "pull", "llama3.2:3b"))
+    assert ("ollama", "pull", "llama3.1:8b") in runner.run_calls
+    ollama_call_index = runner.run_calls.index(("ollama", "pull", "llama3.1:8b"))
     assert runner.run_envs[ollama_call_index]["OLLAMA_HOST"] == "http://localhost:11434"
     assert any(call[1] == "-c" and "faster_whisper" in call[2] for call in runner.run_calls)
     assert any(call[1] == "-c" and "pyannote.audio" in call[2] for call in runner.run_calls)
@@ -486,7 +486,7 @@ def test_detect_local_installation_state_uses_runner_env_and_configured_paths(
             ("ollama", "list"): CommandRun(
                 ("ollama", "list"),
                 0,
-                stdout="NAME ID SIZE MODIFIED\nllama3.2:3b abc 2 GB now\n",
+                stdout="NAME ID SIZE MODIFIED\nllama3.1:8b abc 2 GB now\n",
             )
         }
     )
@@ -978,7 +978,7 @@ def _state(
         ),
         ollama=OllamaState(
             endpoint="http://localhost:11434",
-            model="llama3.2:3b",
+            model="llama3.1:8b",
             command=CommandCheck(
                 "ollama", None if "ollama" in missing else Path("/usr/bin/ollama")
             ),
@@ -987,7 +987,7 @@ def _state(
             detail=(
                 "model present"
                 if ollama_model_present
-                else "model llama3.2:3b is not listed by Ollama"
+                else "model llama3.1:8b is not listed by Ollama"
             ),
         ),
         asr_model_present=asr_model_present,

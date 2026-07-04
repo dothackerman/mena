@@ -2,7 +2,11 @@ from dataclasses import replace
 
 from mena.processing import ArtifactRef
 from mena.summarization import (
+    OLLAMA_SUMMARIZATION_NUM_CTX,
+    OLLAMA_SUMMARIZATION_SEED,
+    REQUIRED_NOTE_PRODUCTS,
     FakeSummarizationProvider,
+    ProductRequestRecord,
     SummarizationPolicy,
     SummaryActionItem,
     SummaryArtifact,
@@ -18,7 +22,6 @@ def test_summary_markdown_renders_sections_in_order_with_exact_headings() -> Non
 
     assert [line for line in markdown.splitlines() if line.startswith("## ")] == [
         "## Timeline",
-        "## Important points",
         "## Action items",
         "## General summary",
     ]
@@ -27,10 +30,6 @@ def test_summary_markdown_renders_sections_in_order_with_exact_headings() -> Non
         "\n"
         "- Discussed database migration before Friday.\n"
         "- Confirmed release risk.\n"
-        "\n"
-        "## Important points\n"
-        "\n"
-        "- Release is blocked until migration is complete.\n"
         "\n"
         "## Action items\n"
         "\n"
@@ -77,7 +76,6 @@ def test_summary_markdown_uses_german_chrome_for_german_summary_artifact() -> No
 
     assert [line for line in markdown.splitlines() if line.startswith("## ")] == [
         "## Zeitverlauf",
-        "## Wichtige Punkte",
         "## Aufgaben",
         "## Zusammenfassung",
     ]
@@ -134,7 +132,7 @@ def _summary_artifact(
 ) -> SummaryArtifact:
     result = _summary_result(action_items=action_items)
     return SummaryArtifact(
-        version=1,
+        version=2,
         session_id=SESSION_ID,
         merged_transcript_artifact=ArtifactRef(
             id=f"{SESSION_ID}:artifacts/merged_transcript/merged.json",
@@ -146,10 +144,10 @@ def _summary_artifact(
         policy=SummarizationPolicy(language=language).to_dict(),
         provider=FakeSummarizationProvider(result=result).metadata,
         timeline=result.timeline,
-        important_points=result.important_points,
         action_items=result.action_items,
         general_summary=result.general_summary,
         created_at="2026-05-18T17:00:00Z",
+        request_records=result.request_records,
     )
 
 
@@ -162,7 +160,6 @@ def _summary_result(
             "Discussed database migration before Friday.",
             "Confirmed release risk.",
         ),
-        important_points=("Release is blocked until migration is complete.",),
         action_items=(
             action_items
             if action_items is not None
@@ -172,4 +169,20 @@ def _summary_result(
             )
         ),
         general_summary="The meeting focused on database migration risk.",
+        request_records=_request_records_for_products(REQUIRED_NOTE_PRODUCTS),
+    )
+
+
+def _request_records_for_products(products: tuple[str, ...]) -> tuple[ProductRequestRecord, ...]:
+    return tuple(
+        ProductRequestRecord(
+            product=product,
+            model="fake-summarizer",
+            num_ctx=OLLAMA_SUMMARIZATION_NUM_CTX,
+            temperature=0,
+            seed=OLLAMA_SUMMARIZATION_SEED,
+            prompt_eval_count=None,
+            eval_count=None,
+        )
+        for product in products
     )
