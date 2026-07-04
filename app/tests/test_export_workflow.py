@@ -615,6 +615,46 @@ def test_export_workflow_reports_requested_summary_artifact_with_malformed_statu
         )
 
 
+@pytest.mark.parametrize("artifact_type", [None, ["summary"]])
+def test_export_workflow_reports_requested_summary_artifact_with_malformed_type(
+    tmp_path: Path,
+    artifact_type: object,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    malformed_dir, malformed_store, malformed_merged = _build_export_session(
+        settings.paths.sessions_dir / "session-malformed"
+    )
+    malformed_summary = _persist_summary(
+        store=malformed_store,
+        merged_transcript_record=malformed_merged,
+        summary_name="summary/requested.json",
+    )
+    _update_artifact_manifest_record(
+        malformed_dir,
+        artifact_id=malformed_summary.id,
+        updates={"artifact_type": artifact_type},
+    )
+    _, valid_store, valid_merged = _build_export_session(
+        settings.paths.sessions_dir / "session-valid"
+    )
+    _persist_summary(
+        store=valid_store,
+        merged_transcript_record=valid_merged,
+        summary_name="summary/valid.json",
+    )
+
+    with pytest.raises(SessionIntegrityError, match="artifact_record_invalid"):
+        run_export_workflow(
+            ExportCommandInput(
+                session_path=None,
+                summary_artifact_id=malformed_summary.id,
+                export_format="markdown",
+            ),
+            settings=settings,
+            interaction=ScriptedInteraction(()),
+        )
+
+
 def test_export_workflow_reports_requested_summary_artifact_with_session_id_mismatch(
     tmp_path: Path,
 ) -> None:
@@ -902,7 +942,11 @@ def _update_artifact_manifest_record(
         if item["id"] != artifact_id:
             continue
         if updates is not None:
-            item.update(updates)
+            for key, value in updates.items():
+                if value is None:
+                    item.pop(key, None)
+                else:
+                    item[key] = value
         if metadata_updates is not None:
             metadata = item.setdefault("metadata", {})
             for key, value in metadata_updates.items():

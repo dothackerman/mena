@@ -231,6 +231,7 @@ def _session_summary_records(
                 invalid_record = _invalid_summary_manifest_record(
                     item=raw_record,
                     resolved_session_id=resolved_session_id,
+                    requested_summary_artifact_id=requested_summary_artifact_id,
                 )
                 if invalid_record is not None:
                     records.append(invalid_record)
@@ -289,16 +290,20 @@ def _invalid_summary_manifest_record(
     *,
     item: Mapping[str, object],
     resolved_session_id: str,
+    requested_summary_artifact_id: str | None,
 ) -> _SummaryManifestRecord | None:
     if item.get("session_id") != resolved_session_id:
         return None
-    if item.get("artifact_type") != SUMMARY_ARTIFACT_TYPE:
+    artifact_id = item.get("id")
+    if (
+        item.get("artifact_type") != SUMMARY_ARTIFACT_TYPE
+        and artifact_id != requested_summary_artifact_id
+    ):
         return None
     raw_status = item.get("status")
     if isinstance(raw_status, str) and raw_status in ARTIFACT_STATUSES and raw_status != "sealed":
         return None
     metadata = item.get("metadata", {})
-    artifact_id = item.get("id")
     path = item.get("path")
     return _SummaryManifestRecord(
         id=artifact_id if isinstance(artifact_id, str) else None,
