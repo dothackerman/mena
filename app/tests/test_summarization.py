@@ -729,6 +729,8 @@ def _fake_product_responses(
     return {
         product: {
             "message": {"content": json.dumps(payload)},
+            "prompt_eval_count": 123,
+            "eval_count": 45,
             **(extra or {}),
         }
         for product, payload in payloads.items()
@@ -750,7 +752,11 @@ def _german_product_responses(
         "general_summary": {"general_summary": general_summary},
     }
     return {
-        product: {"message": {"content": json.dumps(payload, ensure_ascii=False)}}
+        product: {
+            "message": {"content": json.dumps(payload, ensure_ascii=False)},
+            "prompt_eval_count": 123,
+            "eval_count": 45,
+        }
         for product, payload in payloads.items()
     }
 
@@ -823,6 +829,34 @@ def test_ollama_summarization_provider_records_request_provenance(
         assert record.eval_count == 42
 
 
+@pytest.mark.parametrize(
+    ("missing_count", "present_count"),
+    [
+        ("prompt_eval_count", "eval_count"),
+        ("eval_count", "prompt_eval_count"),
+    ],
+)
+def test_ollama_summarization_provider_rejects_missing_token_counts(
+    monkeypatch: pytest.MonkeyPatch,
+    missing_count: str,
+    present_count: str,
+) -> None:
+    provider = OllamaSummarizationProvider(model="test-model")
+    responses = _fake_product_responses(extra={missing_count: None, present_count: 1})
+
+    def fake_post_json(path: str, payload: object) -> dict[str, object]:
+        assert isinstance(payload, dict)
+        return responses[_product_key(payload)]
+
+    monkeypatch.setattr(provider, "_post_json", fake_post_json)
+
+    with pytest.raises(
+        SummarizationContractError,
+        match=f"omitted required token counts: {missing_count}",
+    ):
+        provider.summarize(_summary_request())
+
+
 def test_ollama_summarization_provider_rejects_short_word_prompt_over_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -880,6 +914,15 @@ def test_ollama_summarization_provider_hard_fails_on_english_drift(
 ) -> None:
     provider = OllamaSummarizationProvider(model="test-model")
     responses = _fake_product_responses()  # English content for a German request.
+    responses["general_summary"]["message"] = {
+        "content": json.dumps(
+            {
+                "general_summary": (
+                    "The team is working with the database and the migration before Friday."
+                )
+            }
+        )
+    }
 
     def fake_post_json(path: str, payload: object) -> dict[str, object]:
         assert isinstance(payload, dict)
@@ -889,6 +932,39 @@ def test_ollama_summarization_provider_hard_fails_on_english_drift(
 
     request = replace(_summary_request(), policy=SummarizationPolicy(language="de"))
     with pytest.raises(SummarizationContractError, match="drifted to English"):
+        provider.summarize(request)
+
+
+def test_ollama_summarization_provider_hard_fails_on_per_field_english_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OllamaSummarizationProvider(model="test-model")
+    responses = _german_product_responses()
+    responses["action_items"]["message"] = {
+        "content": json.dumps(
+            {
+                "action_items": [
+                    {
+                        "text": "The team should finish the migration before Friday.",
+                        "owner": "Du",
+                        "due": None,
+                    }
+                ]
+            }
+        )
+    }
+
+    def fake_post_json(path: str, payload: object) -> dict[str, object]:
+        assert isinstance(payload, dict)
+        return responses[_product_key(payload)]
+
+    monkeypatch.setattr(provider, "_post_json", fake_post_json)
+
+    request = replace(_summary_request(), policy=SummarizationPolicy(language="de"))
+    with pytest.raises(
+        SummarizationContractError,
+        match=r"action_items\[0\]\.text output drifted to English",
+    ):
         provider.summarize(request)
 
 
@@ -967,6 +1043,27 @@ def test_ollama_summarization_provider_rejects_invalid_json_response(
     message = str(exc_info.value)
     assert "timeline response was not valid JSON" in message
     assert "Raw Ollama message content: not-json" in message
+
+
+def test_ollama_summarization_provider_rejects_length_truncated_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OllamaSummarizationProvider(model="test-model")
+    responses = _fake_product_responses(extra={"done_reason": "length"})
+
+    def fake_post_json(path: str, payload: object) -> dict[str, object]:
+        assert isinstance(payload, dict)
+        return responses[_product_key(payload)]
+
+    monkeypatch.setattr(provider, "_post_json", fake_post_json)
+
+    with pytest.raises(SummarizationContractError) as exc_info:
+        provider.summarize(_summary_request())
+
+    message = str(exc_info.value)
+    assert "Ollama timeline response was truncated" in message
+    assert "done_reason=length" in message
+    assert "Raw Ollama message content:" in message
 
 
 def test_ollama_summarization_provider_preserves_raw_output_on_contract_failure(

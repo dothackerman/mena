@@ -480,6 +480,11 @@ class OllamaSummarizationProvider:
         }
         response = self._post_json("/api/chat", payload)
         content = _summarization_ollama_message_content(response)
+        _assert_ollama_response_not_truncated(
+            product=product,
+            response=response,
+            content=content,
+        )
         try:
             decoded = json.loads(strip_json_fence(content))
         except json.JSONDecodeError as exc:
@@ -496,7 +501,10 @@ class OllamaSummarizationProvider:
             raise SummarizationContractError(
                 _with_raw_ollama_message_content(str(exc), content)
             ) from exc
-        prompt_eval_count, eval_count = _summarization_ollama_token_counts(response)
+        prompt_eval_count, eval_count = _summarization_ollama_token_counts(
+            product=product,
+            response=response,
+        )
         records.append(
             ProductRequestRecord(
                 product=product,
@@ -1040,27 +1048,31 @@ def _assert_output_language(result: SummaryResult, language: str) -> None:
 
     if _is_english_language(language):
         return
-    if _looks_like_english_drift(_note_package_text(result)):
-        raise SummarizationContractError(
-            f"Note-package output drifted to English but '{language}' was requested; "
-            "refusing to persist off-language notes (small local models drift to English)."
-        )
+    for label, text in _note_package_user_facing_fields(result):
+        if _looks_like_english_drift(text):
+            raise SummarizationContractError(
+                f"Note-package {label} output drifted to English but '{language}' "
+                "was requested; refusing to persist off-language notes "
+                "(small local models drift to English)."
+            )
 
 
 def _is_english_language(language: str) -> bool:
     return language.replace("_", "-").split("-", 1)[0].lower() == "en"
 
 
-def _note_package_text(result: SummaryResult) -> str:
-    parts = list(result.timeline)
-    for action in result.action_items:
-        parts.append(action.text)
+def _note_package_user_facing_fields(result: SummaryResult) -> tuple[tuple[str, str], ...]:
+    parts: list[tuple[str, str]] = [
+        (f"timeline[{index}]", entry) for index, entry in enumerate(result.timeline)
+    ]
+    for index, action in enumerate(result.action_items):
+        parts.append((f"action_items[{index}].text", action.text))
         if action.owner:
-            parts.append(action.owner)
+            parts.append((f"action_items[{index}].owner", action.owner))
         if action.due:
-            parts.append(action.due)
-    parts.append(result.general_summary)
-    return " ".join(parts)
+            parts.append((f"action_items[{index}].due", action.due))
+    parts.append(("general_summary", result.general_summary))
+    return tuple(parts)
 
 
 def _looks_like_english_drift(text: str) -> bool:
@@ -1098,12 +1110,45 @@ def _guard_token_budget(
 
 
 def _summarization_ollama_token_counts(
+    *,
+    product: str,
     response: Mapping[str, object],
-) -> tuple[int | None, int | None]:
+) -> tuple[int, int]:
     try:
-        return ollama_token_counts(response)
+        prompt_eval_count, eval_count = ollama_token_counts(response)
     except LocalLLMContractError as exc:
         raise SummarizationContractError(str(exc)) from exc
+    missing = [
+        name
+        for name, value in (
+            ("prompt_eval_count", prompt_eval_count),
+            ("eval_count", eval_count),
+        )
+        if value is None
+    ]
+    if missing:
+        raise SummarizationContractError(
+            f"Ollama {product} response omitted required token counts: {', '.join(missing)}."
+        )
+    assert prompt_eval_count is not None
+    assert eval_count is not None
+    return prompt_eval_count, eval_count
+
+
+def _assert_ollama_response_not_truncated(
+    *,
+    product: str,
+    response: Mapping[str, object],
+    content: str,
+) -> None:
+    if response.get("done_reason") == "length":
+        raise SummarizationContractError(
+            _with_raw_ollama_message_content(
+                f"Ollama {product} response was truncated by the generation token limit "
+                "(done_reason=length).",
+                content,
+            )
+        )
 
 
 def _summarization_ollama_message_content(response: Mapping[str, object]) -> str:
