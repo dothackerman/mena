@@ -2377,6 +2377,98 @@ def test_main_export_command_describes_explicit_summary_session_selection(
     assert str(export_path).startswith(str(older_dir))
 
 
+def test_main_export_command_exact_id_with_malformed_session_record_fails_integrity(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    session_dir, store, merged_record = _build_verified_export_session_bundle_at(
+        settings.paths.sessions_dir / "session-malformed-record"
+    )
+    summary = _persist_summary_artifact_for_cli(
+        store=store,
+        merged_transcript_record=merged_record,
+    )
+    _update_artifact_manifest_record(
+        session_dir,
+        artifact_id=summary.id,
+        updates={"artifact_type": None},
+    )
+    session_record_path = session_dir / SESSION_RECORD_FILENAME
+    session_record = json.loads(session_record_path.read_text(encoding="utf-8"))
+    session_record.pop("id")
+    session_record_path.write_text(json.dumps(session_record), encoding="utf-8")
+
+    exit_code = main(
+        ["export", "--summary-artifact-id", summary.id],
+        settings=settings,
+        input_fn=lambda _prompt: "y",
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "Session bundle failed integrity verification" in captured.out
+    assert "Summary artifact not found" not in captured.out
+
+
+def test_main_export_command_exact_id_with_bad_manifest_session_id_fails_integrity(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    session_dir, store, merged_record = _build_verified_export_session_bundle_at(
+        settings.paths.sessions_dir / "session-bad-summary-record"
+    )
+    summary = _persist_summary_artifact_for_cli(
+        store=store,
+        merged_transcript_record=merged_record,
+    )
+    _update_artifact_manifest_record(
+        session_dir,
+        artifact_id=summary.id,
+        updates={"session_id": None},
+    )
+
+    exit_code = main(
+        ["export", "--summary-artifact-id", summary.id],
+        settings=settings,
+        input_fn=lambda _prompt: "y",
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "Session bundle failed integrity verification" in captured.out
+    assert "artifact_record_invalid" in captured.out
+    assert "Summary artifact not found" not in captured.out
+
+
+def test_main_export_command_default_ignores_malformed_non_summary_record(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    valid_dir, valid_store, valid_merged = _build_verified_export_session_bundle_at(
+        settings.paths.sessions_dir / "session-valid"
+    )
+    _persist_summary_artifact_for_cli(
+        store=valid_store,
+        merged_transcript_record=valid_merged,
+        summary_created_at="2026-05-20T10:00:00Z",
+    )
+    malformed_dir = _create_session_record(
+        session_dir=settings.paths.sessions_dir / "session-malformed-export"
+    )
+    _append_malformed_artifact_manifest_record(
+        malformed_dir,
+        artifact_type="summary_markdown_export",
+        metadata={"summary_created_at": "2026-07-01T10:00:00Z"},
+    )
+
+    exit_code = main(["export"], settings=settings, input_fn=lambda _prompt: "y")
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert f"Using latest summarized session: {valid_dir}" in captured.out
+    assert "Session bundle failed integrity verification" not in captured.out
+
+
 def test_main_export_command_rejects_unknown_summary_artifact(
     tmp_path: Path,
     capsys: CaptureFixture[str],
@@ -4411,14 +4503,29 @@ def _persist_summary_artifact_for_cli(
     )
 
 
-def _append_malformed_artifact_manifest_record(session_dir: Path) -> None:
+def _append_malformed_artifact_manifest_record(
+    session_dir: Path,
+    *,
+    artifact_type: object = "transcript",
+    metadata: Mapping[str, object] | None = None,
+) -> None:
     manifest_path = session_artifact_manifest_path(session_dir)
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    else:
+        session_record = json.loads((session_dir / SESSION_RECORD_FILENAME).read_text("utf-8"))
+        manifest = {
+            "version": 1,
+            "session_id": session_record["id"],
+            "artifacts": [],
+        }
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest["artifacts"].append(
         {
-            "artifact_type": "transcript",
+            "artifact_type": artifact_type,
             "path": "artifacts/transcript/malformed.json",
             "status": "sealed",
+            "metadata": dict(metadata or {}),
         }
     )
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")

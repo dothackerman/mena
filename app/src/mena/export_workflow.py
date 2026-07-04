@@ -292,13 +292,18 @@ def _invalid_summary_manifest_record(
     resolved_session_id: str,
     requested_summary_artifact_id: str | None,
 ) -> _SummaryManifestRecord | None:
-    if item.get("session_id") != resolved_session_id:
-        return None
     artifact_id = item.get("id")
-    if (
-        item.get("artifact_type") != SUMMARY_ARTIFACT_TYPE
-        and artifact_id != requested_summary_artifact_id
-    ):
+    preserves_requested_id = (
+        requested_summary_artifact_id is not None
+        and isinstance(artifact_id, str)
+        and artifact_id == requested_summary_artifact_id
+    )
+    if not preserves_requested_id:
+        if item.get("session_id") != resolved_session_id:
+            return None
+        if item.get("artifact_type") != SUMMARY_ARTIFACT_TYPE:
+            return None
+    elif _raw_artifact_type_is_known_non_summary(item.get("artifact_type")):
         return None
     raw_status = item.get("status")
     if isinstance(raw_status, str) and raw_status in ARTIFACT_STATUSES and raw_status != "sealed":
@@ -345,11 +350,22 @@ def _manifest_contains_summary_artifact_id(*, session_dir: Path, artifact_id: st
     if not isinstance(artifacts, list):
         return False
     return any(
-        isinstance(item, dict)
-        and item.get("id") == artifact_id
-        and item.get("artifact_type") == SUMMARY_ARTIFACT_TYPE
+        isinstance(item, dict) and _raw_manifest_record_matches_summary_request(item, artifact_id)
         for item in artifacts
     )
+
+
+def _raw_manifest_record_matches_summary_request(
+    item: Mapping[str, object],
+    artifact_id: str,
+) -> bool:
+    if item.get("id") != artifact_id:
+        return False
+    return not _raw_artifact_type_is_known_non_summary(item.get("artifact_type"))
+
+
+def _raw_artifact_type_is_known_non_summary(value: object) -> bool:
+    return isinstance(value, str) and value != SUMMARY_ARTIFACT_TYPE
 
 
 def _summary_metadata_created_at(record: _SummaryManifestRecord) -> datetime | None:
