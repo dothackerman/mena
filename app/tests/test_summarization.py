@@ -35,6 +35,7 @@ from mena.summarization import (
     REQUIRED_NOTE_PRODUCTS,
     SCHEMA_PROMPT_POLICY,
     SUMMARIZATION_STAGE,
+    SUMMARY_SCHEMA_VERSION,
     FakeSummarizationProvider,
     OllamaSummarizationProvider,
     ProductRequestRecord,
@@ -90,7 +91,7 @@ def test_summarize_to_export_path_renders_three_product_package(
     markdown = store.retrieve(export_result.export_record.id).decode("utf-8")
     headings = [line for line in markdown.splitlines() if line.startswith("## ")]
 
-    assert stage_result.summary.version == 2
+    assert stage_result.summary.version == SUMMARY_SCHEMA_VERSION
     assert not hasattr(stage_result.summary, "important_points")
     assert headings == expected_headings
     assert forbidden_heading not in markdown
@@ -118,7 +119,7 @@ def test_summarization_stage_persists_summary_and_checkpoint(tmp_path: Path) -> 
     assert result.skipped is False
     assert result.state.status == "completed"
     assert result.summary_record.artifact_type == "summary"
-    assert result.summary_record.metadata["contract"] == "summary.v2"
+    assert result.summary_record.metadata["contract"] == "summary.v3"
     payload = json.loads(store.retrieve(result.summary_record.id))
     Draft202012Validator(_load_summary_schema(), format_checker=FormatChecker()).validate(payload)
     artifact = SummaryArtifact.from_dict(payload)
@@ -271,7 +272,7 @@ def test_summarization_stage_does_not_reuse_old_prompt_policy_completed_output()
         prompt_policy=SCHEMA_PROMPT_POLICY,
     )
     old_artifact = SummaryArtifact(
-        version=2,
+        version=SUMMARY_SCHEMA_VERSION,
         session_id=SESSION_ID,
         merged_transcript_artifact=ArtifactRef.from_record(merged_record),
         manual_notes_artifact=None,
@@ -1115,7 +1116,7 @@ def test_summarization_policy_and_result_validate_contract() -> None:
 
 def test_summary_artifact_from_dict_validates_contract() -> None:
     artifact = SummaryArtifact(
-        version=2,
+        version=SUMMARY_SCHEMA_VERSION,
         session_id=SESSION_ID,
         merged_transcript_artifact=ArtifactRef(
             id=f"{SESSION_ID}:artifacts/merged_transcript/merged.json",
@@ -1146,7 +1147,7 @@ def test_summary_artifact_from_dict_validates_contract() -> None:
 
 def test_summary_artifact_from_dict_requires_request_records() -> None:
     artifact = SummaryArtifact(
-        version=2,
+        version=SUMMARY_SCHEMA_VERSION,
         session_id=SESSION_ID,
         merged_transcript_artifact=ArtifactRef(
             id=f"{SESSION_ID}:artifacts/merged_transcript/merged.json",
@@ -1178,13 +1179,13 @@ def test_summary_artifact_from_dict_requires_request_records() -> None:
 @pytest.mark.parametrize(
     ("records", "message"),
     [
-        ((), "exactly one record for each note product"),
+        ((), "at least one record for timeline"),
         (
             (
                 "timeline",
                 "action_items",
             ),
-            "exactly one record for each note product",
+            "at least one record for general_summary",
         ),
         (
             (
@@ -1192,7 +1193,7 @@ def test_summary_artifact_from_dict_requires_request_records() -> None:
                 "timeline",
                 "general_summary",
             ),
-            "exactly one record for each note product",
+            "exactly one one_shot record for timeline",
         ),
         (
             (
@@ -1201,7 +1202,7 @@ def test_summary_artifact_from_dict_requires_request_records() -> None:
                 "general_summary",
                 "other",
             ),
-            "exactly one record for each note product",
+            "must only contain records for the note",
         ),
     ],
 )
@@ -1210,7 +1211,7 @@ def test_summary_artifact_from_dict_requires_complete_request_records(
     message: str,
 ) -> None:
     artifact = SummaryArtifact(
-        version=2,
+        version=SUMMARY_SCHEMA_VERSION,
         session_id=SESSION_ID,
         merged_transcript_artifact=ArtifactRef(
             id=f"{SESSION_ID}:artifacts/merged_transcript/merged.json",
@@ -1232,6 +1233,174 @@ def test_summary_artifact_from_dict_requires_complete_request_records(
         SummaryArtifact.from_dict(artifact.to_dict())
 
 
+def _summary_artifact_with_records(
+    records: tuple[ProductRequestRecord, ...],
+) -> SummaryArtifact:
+    result = _summary_result()
+    return SummaryArtifact(
+        version=SUMMARY_SCHEMA_VERSION,
+        session_id=SESSION_ID,
+        merged_transcript_artifact=ArtifactRef(
+            id=f"{SESSION_ID}:artifacts/merged_transcript/merged.json",
+            artifact_type="merged_transcript",
+            version=1,
+            sha256="1" * 64,
+        ),
+        manual_notes_artifact=None,
+        policy=SummarizationPolicy(language="en").to_dict(),
+        provider=FakeSummarizationProvider(result=result).metadata,
+        timeline=result.timeline,
+        action_items=result.action_items,
+        general_summary=result.general_summary,
+        created_at="2026-05-18T17:00:00Z",
+        request_records=records,
+    )
+
+
+def _reducer_records_for_product(
+    product: str,
+    *,
+    chunk_count: int = 2,
+) -> tuple[ProductRequestRecord, ...]:
+    map_records = tuple(
+        ProductRequestRecord(
+            product=product,
+            model="fake-summarizer",
+            num_ctx=OLLAMA_SUMMARIZATION_NUM_CTX,
+            temperature=0,
+            seed=OLLAMA_SUMMARIZATION_SEED,
+            prompt_eval_count=100,
+            eval_count=20,
+            strategy="reducer",
+            call="map",
+            chunk_index=index,
+            chunk_count=chunk_count,
+        )
+        for index in range(chunk_count)
+    )
+    reduce_record = ProductRequestRecord(
+        product=product,
+        model="fake-summarizer",
+        num_ctx=OLLAMA_SUMMARIZATION_NUM_CTX,
+        temperature=0,
+        seed=OLLAMA_SUMMARIZATION_SEED,
+        prompt_eval_count=60,
+        eval_count=40,
+        strategy="reducer",
+        call="reduce",
+        chunk_index=None,
+        chunk_count=chunk_count,
+    )
+    return (*map_records, reduce_record)
+
+
+def test_summary_artifact_accepts_mixed_one_shot_and_reducer_products() -> None:
+    records = (
+        *_reducer_records_for_product("timeline"),
+        *_request_records_for_products(("action_items", "general_summary")),
+    )
+    artifact = _summary_artifact_with_records(records)
+
+    loaded = SummaryArtifact.from_dict(artifact.to_dict())
+
+    assert [record.call for record in loaded.request_records if record.product == "timeline"] == [
+        "map",
+        "map",
+        "reduce",
+    ]
+    Draft202012Validator(_load_summary_schema(), format_checker=FormatChecker()).validate(
+        artifact.to_dict()
+    )
+
+
+def test_summary_artifact_rejects_mixed_strategies_within_one_product() -> None:
+    records = (
+        *_reducer_records_for_product("timeline"),
+        *_request_records_for_products(("timeline", "action_items", "general_summary")),
+    )
+
+    with pytest.raises(SummarizationContractError, match="one strategy for timeline"):
+        SummaryArtifact.from_dict(_summary_artifact_with_records(records).to_dict())
+
+
+def test_summary_artifact_rejects_reducer_product_without_reduce_call() -> None:
+    reducer_records = _reducer_records_for_product("timeline")
+    records = (
+        *(record for record in reducer_records if record.call == "map"),
+        *_request_records_for_products(("action_items", "general_summary")),
+    )
+
+    with pytest.raises(SummarizationContractError, match="exactly one reduce call"):
+        SummaryArtifact.from_dict(_summary_artifact_with_records(records).to_dict())
+
+
+def test_summary_artifact_rejects_reducer_map_calls_with_chunk_gaps() -> None:
+    reducer_records = _reducer_records_for_product("timeline", chunk_count=3)
+    records = (
+        *(record for record in reducer_records if record.chunk_index != 1),
+        *_request_records_for_products(("action_items", "general_summary")),
+    )
+
+    with pytest.raises(SummarizationContractError, match="cover each chunk index exactly once"):
+        SummaryArtifact.from_dict(_summary_artifact_with_records(records).to_dict())
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"strategy": "chunked"}, "strategy must be one_shot or reducer"),
+        ({"call": "shuffle"}, "call must be one_shot, map, or reduce"),
+        ({"call": "map"}, "strategy and call kind must agree"),
+        ({"chunk_index": 0}, "one_shot calls must not set chunk fields"),
+        (
+            {"strategy": "reducer", "call": "map"},
+            "map calls require chunk_index and chunk_count",
+        ),
+        (
+            {"strategy": "reducer", "call": "map", "chunk_index": 2, "chunk_count": 2},
+            "chunk_index must be within chunk_count",
+        ),
+        (
+            {"strategy": "reducer", "call": "reduce", "chunk_index": 0, "chunk_count": 1},
+            "reduce calls must not set chunk_index",
+        ),
+        (
+            {"strategy": "reducer", "call": "reduce"},
+            "reduce calls require chunk_count",
+        ),
+    ],
+)
+def test_product_request_record_rejects_incoherent_strategy_fields(
+    overrides: dict[str, object],
+    message: str,
+) -> None:
+    base = _request_records_for_products(("timeline",))[0].to_dict()
+    base.update(overrides)
+
+    with pytest.raises(SummarizationContractError, match=message):
+        ProductRequestRecord.from_dict(base)
+
+
+def test_persist_summary_artifact_records_note_product_strategies_metadata() -> None:
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    records = (
+        *_reducer_records_for_product("timeline"),
+        *_request_records_for_products(("action_items", "general_summary")),
+    )
+    artifact = _summary_artifact_with_records(records)
+
+    record = persist_summary_artifact(
+        store=store,
+        artifact=artifact,
+        name="summary/strategies.json",
+        correction_overlay_record=None,
+    )
+
+    assert record.metadata["note_product_strategies"] == (
+        "timeline=reducer,action_items=one_shot,general_summary=one_shot"
+    )
+
+
 @pytest.mark.parametrize(
     ("field_name", "value", "message"),
     [
@@ -1246,7 +1415,7 @@ def test_summary_artifact_from_dict_rejects_out_of_range_request_record_metrics(
     message: str,
 ) -> None:
     artifact = SummaryArtifact(
-        version=2,
+        version=SUMMARY_SCHEMA_VERSION,
         session_id=SESSION_ID,
         merged_transcript_artifact=ArtifactRef(
             id=f"{SESSION_ID}:artifacts/merged_transcript/merged.json",
@@ -1300,7 +1469,7 @@ def test_provider_request_options_participate_in_reuse_identity() -> None:
 
 def test_summary_artifact_from_dict_accepts_legacy_prompt_policy() -> None:
     artifact = SummaryArtifact(
-        version=2,
+        version=SUMMARY_SCHEMA_VERSION,
         session_id=SESSION_ID,
         merged_transcript_artifact=ArtifactRef(
             id=f"{SESSION_ID}:artifacts/merged_transcript/merged.json",
@@ -1339,7 +1508,7 @@ def test_summary_artifact_from_dict_accepts_legacy_prompt_policy() -> None:
 
 def test_summary_schema_validates_contract() -> None:
     artifact = SummaryArtifact(
-        version=2,
+        version=SUMMARY_SCHEMA_VERSION,
         session_id=SESSION_ID,
         merged_transcript_artifact=ArtifactRef(
             id=f"{SESSION_ID}:artifacts/merged_transcript/merged.json",
@@ -1375,7 +1544,7 @@ def test_summary_schema_validates_contract() -> None:
 )
 def test_summary_schema_rejects_incomplete_request_records(records: list[str]) -> None:
     artifact = SummaryArtifact(
-        version=2,
+        version=SUMMARY_SCHEMA_VERSION,
         session_id=SESSION_ID,
         merged_transcript_artifact=ArtifactRef(
             id=f"{SESSION_ID}:artifacts/merged_transcript/merged.json",
@@ -1401,7 +1570,7 @@ def test_summary_schema_rejects_incomplete_request_records(records: list[str]) -
 
 def test_summary_schema_rejects_legacy_provider_config_inside_policy() -> None:
     artifact = SummaryArtifact(
-        version=2,
+        version=SUMMARY_SCHEMA_VERSION,
         session_id=SESSION_ID,
         merged_transcript_artifact=ArtifactRef(
             id=f"{SESSION_ID}:artifacts/merged_transcript/merged.json",
@@ -1670,5 +1839,5 @@ def _word_confidence() -> SegmentConfidence:
 
 
 def _load_summary_schema() -> dict[str, object]:
-    schema_path = files("mena.schemas").joinpath("summary.v2.schema.json")
+    schema_path = files("mena.schemas").joinpath("summary.v3.schema.json")
     return cast(dict[str, object], json.loads(schema_path.read_text(encoding="utf-8")))

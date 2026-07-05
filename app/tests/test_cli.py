@@ -130,6 +130,7 @@ from mena.summarization import (
     OLLAMA_SUMMARIZATION_NUM_CTX,
     OLLAMA_SUMMARIZATION_SEED,
     REQUIRED_NOTE_PRODUCTS,
+    SUMMARY_SCHEMA_VERSION,
     FakeSummarizationProvider,
     ProductRequestRecord,
     SummarizationError,
@@ -4193,7 +4194,7 @@ def _persist_summary_artifact_for_cli(
     return persist_summary_artifact(
         store=store,
         artifact=SummaryArtifact(
-            version=2,
+            version=SUMMARY_SCHEMA_VERSION,
             session_id=SESSION_ID,
             merged_transcript_artifact=merged_artifact_ref,
             manual_notes_artifact=None,

@@ -33,6 +33,14 @@ from mena.local_llm import (
     unload_ollama_model,
 )
 from mena.merge_timing import MergedTranscriptArtifact, MergeTimingContractError
+from mena.note_product_strategy import (
+    MAP_CALL,
+    NOTE_PRODUCT_CALLS,
+    NOTE_PRODUCT_STRATEGIES,
+    ONE_SHOT_CALL,
+    ONE_SHOT_STRATEGY,
+    REDUCE_CALL,
+)
 from mena.processing import (
     ArtifactRef,
     ProcessingErrorInfo,
@@ -44,8 +52,9 @@ from mena.settings import SettingsError, normalize_summary_language
 from mena.timestamps import utc_timestamp
 
 SUMMARY_ARTIFACT_TYPE = "summary"
-SUMMARY_ARTIFACT_VERSION = 2
-SUMMARY_SCHEMA_VERSION = 2
+SUMMARY_ARTIFACT_VERSION = 3
+SUMMARY_SCHEMA_VERSION = 3
+SUMMARY_ARTIFACT_CONTRACT = f"summary.v{SUMMARY_SCHEMA_VERSION}"
 MANUAL_NOTES_ARTIFACT_TYPE = "manual_notes"
 MANUAL_NOTES_CONTRACT = "manual-notes.raw"
 SUMMARIZATION_STAGE = "summarization"
@@ -53,9 +62,16 @@ SUMMARIZATION_POLICY_VERSION = 1
 LEGACY_PROMPT_POLICY = "meeting-summary-json-v1"
 SCHEMA_PROMPT_POLICY = "meeting-summary-json-schema-v1"
 LANGUAGE_PROMPT_POLICY = "meeting-summary-json-schema-language-output-v2"
-PROMPT_POLICY = "note-package-three-product-v1"
+NOTE_PACKAGE_PROMPT_POLICY = "note-package-three-product-v1"
+PROMPT_POLICY = "note-package-three-product-strategy-v2"
 SUPPORTED_PROMPT_POLICIES = frozenset(
-    {LEGACY_PROMPT_POLICY, SCHEMA_PROMPT_POLICY, LANGUAGE_PROMPT_POLICY, PROMPT_POLICY}
+    {
+        LEGACY_PROMPT_POLICY,
+        SCHEMA_PROMPT_POLICY,
+        LANGUAGE_PROMPT_POLICY,
+        NOTE_PACKAGE_PROMPT_POLICY,
+        PROMPT_POLICY,
+    }
 )
 DEFAULT_LANGUAGE = "en"
 REQUIRED_NOTE_PRODUCTS = ("timeline", "action_items", "general_summary")
@@ -294,7 +310,12 @@ class SummaryActionItem:
 
 @dataclass(frozen=True)
 class ProductRequestRecord:
-    """Effective request options and response token counts for one note product."""
+    """Effective request options and response token counts for one provider call.
+
+    A one-shot product records exactly one ``one_shot`` call; a reducer
+    product records one ``map`` call per transcript chunk plus one final
+    ``reduce`` call, so truncation and cost stay auditable per call (#108).
+    """
 
     product: str
     model: str
@@ -303,6 +324,46 @@ class ProductRequestRecord:
     seed: int
     prompt_eval_count: int | None = None
     eval_count: int | None = None
+    strategy: str = ONE_SHOT_STRATEGY
+    call: str = ONE_SHOT_CALL
+    chunk_index: int | None = None
+    chunk_count: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.strategy not in NOTE_PRODUCT_STRATEGIES:
+            raise SummarizationContractError(
+                "Product request record strategy must be one_shot or reducer."
+            )
+        if self.call not in NOTE_PRODUCT_CALLS:
+            raise SummarizationContractError(
+                "Product request record call must be one_shot, map, or reduce."
+            )
+        if (self.strategy == ONE_SHOT_STRATEGY) != (self.call == ONE_SHOT_CALL):
+            raise SummarizationContractError(
+                "Product request record strategy and call kind must agree."
+            )
+        if self.call == MAP_CALL:
+            if self.chunk_index is None or self.chunk_count is None:
+                raise SummarizationContractError(
+                    "Product request record map calls require chunk_index and chunk_count."
+                )
+            if not 0 <= self.chunk_index < self.chunk_count:
+                raise SummarizationContractError(
+                    "Product request record chunk_index must be within chunk_count."
+                )
+        elif self.call == REDUCE_CALL:
+            if self.chunk_index is not None:
+                raise SummarizationContractError(
+                    "Product request record reduce calls must not set chunk_index."
+                )
+            if self.chunk_count is None or self.chunk_count < 1:
+                raise SummarizationContractError(
+                    "Product request record reduce calls require chunk_count of at least 1."
+                )
+        elif self.chunk_index is not None or self.chunk_count is not None:
+            raise SummarizationContractError(
+                "Product request record one_shot calls must not set chunk fields."
+            )
 
     @classmethod
     def from_dict(cls, data: object) -> Self:
@@ -317,6 +378,10 @@ class ProductRequestRecord:
                 item, "prompt_eval_count", "Product request record"
             ),
             eval_count=_optional_nonnegative_int(item, "eval_count", "Product request record"),
+            strategy=_required_str(item, "strategy", "Product request record"),
+            call=_required_str(item, "call", "Product request record"),
+            chunk_index=_optional_nonnegative_int(item, "chunk_index", "Product request record"),
+            chunk_count=_optional_nonnegative_int(item, "chunk_count", "Product request record"),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -328,6 +393,10 @@ class ProductRequestRecord:
             "seed": self.seed,
             "prompt_eval_count": self.prompt_eval_count,
             "eval_count": self.eval_count,
+            "strategy": self.strategy,
+            "call": self.call,
+            "chunk_index": self.chunk_index,
+            "chunk_count": self.chunk_count,
         }
 
 
@@ -559,7 +628,7 @@ class OllamaSummarizationProvider:
 
 @dataclass(frozen=True)
 class SummaryArtifact:
-    """Persisted `summary.v2` three-product note-package artifact."""
+    """Persisted `summary.v3` three-product note-package artifact."""
 
     version: int
     session_id: str
@@ -647,7 +716,8 @@ def persist_summary_artifact(
     SummaryArtifact.from_dict(artifact.to_dict())
     metadata: dict[str, object] = {
         "category": "summary",
-        "contract": "summary.v2",
+        "contract": SUMMARY_ARTIFACT_CONTRACT,
+        "note_product_strategies": _note_product_strategies_metadata(artifact.request_records),
         "policy_config_id": _policy_config_id(artifact.policy),
         "provider_config_id": artifact.provider.config_id,
         "stage_config_id": _stage_config_id(
@@ -1329,19 +1399,68 @@ def _request_records(
         raise SummarizationContractError("Field 'request_records' must be an array.")
     records = tuple(ProductRequestRecord.from_dict(record) for record in value)
     if required:
-        products = tuple(record.product for record in records)
-        expected = set(REQUIRED_NOTE_PRODUCTS)
-        actual = set(products)
-        if len(records) != len(REQUIRED_NOTE_PRODUCTS) or actual != expected:
+        by_product = {
+            product: tuple(record for record in records if record.product == product)
+            for product in REQUIRED_NOTE_PRODUCTS
+        }
+        known = sum(len(product_records) for product_records in by_product.values())
+        if known != len(records):
             raise SummarizationContractError(
-                "Field 'request_records' must contain exactly one record for each "
-                "note product: timeline, action_items, general_summary."
+                "Field 'request_records' must only contain records for the note "
+                "products timeline, action_items, general_summary."
             )
-        if len(actual) != len(products):
-            raise SummarizationContractError(
-                "Field 'request_records' must not contain duplicate note products."
-            )
+        for product, product_records in by_product.items():
+            _validate_product_request_records(product, product_records)
     return records
+
+
+def _validate_product_request_records(
+    product: str, records: tuple[ProductRequestRecord, ...]
+) -> None:
+    if not records:
+        raise SummarizationContractError(
+            f"Field 'request_records' must contain at least one record for {product}."
+        )
+    strategies = {record.strategy for record in records}
+    if len(strategies) != 1:
+        raise SummarizationContractError(
+            f"Field 'request_records' must use one strategy for {product}."
+        )
+    if strategies == {ONE_SHOT_STRATEGY}:
+        if len(records) != 1:
+            raise SummarizationContractError(
+                f"Field 'request_records' must contain exactly one one_shot record for {product}."
+            )
+        return
+    map_records = tuple(record for record in records if record.call == MAP_CALL)
+    reduce_records = tuple(record for record in records if record.call == REDUCE_CALL)
+    if not map_records or len(reduce_records) != 1:
+        raise SummarizationContractError(
+            f"Field 'request_records' reducer records for {product} must contain "
+            "at least one map call and exactly one reduce call."
+        )
+    chunk_count = reduce_records[0].chunk_count
+    chunk_indexes = sorted(
+        record.chunk_index for record in map_records if record.chunk_index is not None
+    )
+    if (
+        chunk_count != len(map_records)
+        or any(record.chunk_count != chunk_count for record in map_records)
+        or chunk_indexes != list(range(len(map_records)))
+    ):
+        raise SummarizationContractError(
+            f"Field 'request_records' reducer map calls for {product} must cover "
+            "each chunk index exactly once with a consistent chunk_count."
+        )
+
+
+def _note_product_strategies_metadata(records: tuple[ProductRequestRecord, ...]) -> str:
+    strategies = {record.product: record.strategy for record in records}
+    return ",".join(
+        f"{product}={strategies[product]}"
+        for product in REQUIRED_NOTE_PRODUCTS
+        if product in strategies
+    )
 
 
 def _timestamp(now: datetime | None) -> str:

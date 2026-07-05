@@ -5,6 +5,7 @@ from mena.summarization import (
     OLLAMA_SUMMARIZATION_NUM_CTX,
     OLLAMA_SUMMARIZATION_SEED,
     REQUIRED_NOTE_PRODUCTS,
+    SUMMARY_SCHEMA_VERSION,
     FakeSummarizationProvider,
     ProductRequestRecord,
     SummarizationPolicy,
@@ -132,7 +133,7 @@ def _summary_artifact(
 ) -> SummaryArtifact:
     result = _summary_result(action_items=action_items)
     return SummaryArtifact(
-        version=2,
+        version=SUMMARY_SCHEMA_VERSION,
         session_id=SESSION_ID,
         merged_transcript_artifact=ArtifactRef(
             id=f"{SESSION_ID}:artifacts/merged_transcript/merged.json",
