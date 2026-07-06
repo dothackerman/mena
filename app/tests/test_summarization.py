@@ -1073,7 +1073,11 @@ def test_ollama_summarization_provider_preserves_raw_output_on_contract_failure(
     provider = OllamaSummarizationProvider(model="test-model")
     responses = _fake_product_responses()
     raw_content = json.dumps({"general_summary": None})
-    responses["general_summary"] = {"message": {"content": raw_content}}
+    responses["general_summary"] = {
+        "message": {"content": raw_content},
+        "prompt_eval_count": 123,
+        "eval_count": 45,
+    }
 
     def fake_post_json(path: str, payload: object) -> dict[str, object]:
         assert isinstance(payload, dict)

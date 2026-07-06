@@ -32,7 +32,11 @@ from mena.local_llm import (
     strip_json_fence,
     unload_ollama_model,
 )
-from mena.merge_timing import MergedTranscriptArtifact, MergeTimingContractError
+from mena.merge_timing import (
+    MergedTranscriptArtifact,
+    MergedTranscriptSegment,
+    MergeTimingContractError,
+)
 from mena.note_product_strategy import (
     MAP_CALL,
     NOTE_PRODUCT_CALLS,
@@ -40,6 +44,12 @@ from mena.note_product_strategy import (
     ONE_SHOT_CALL,
     ONE_SHOT_STRATEGY,
     REDUCE_CALL,
+    REDUCER_STRATEGY,
+    NoteProductStrategyError,
+    estimate_prompt_tokens,
+    plan_chunk_spans,
+    prompt_token_budget,
+    select_note_product_strategy,
 )
 from mena.processing import (
     ArtifactRef,
@@ -122,6 +132,23 @@ GENERAL_SUMMARY_RESPONSE_SCHEMA: dict[str, object] = {
     "additionalProperties": False,
     "required": ["general_summary"],
     "properties": {"general_summary": {"type": "string", "minLength": 1}},
+}
+
+# Reducer map-step schemas keep the per-product keys so map and reduce stay
+# aligned, but one chunk may legitimately contain no timeline events, so the
+# map timeline drops the final schema's minItems requirement.
+TIMELINE_MAP_RESPONSE_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["timeline"],
+    "properties": {
+        "timeline": {"type": "array", "items": {"type": "string"}},
+    },
+}
+_MAP_RESPONSE_SCHEMAS: dict[str, dict[str, object]] = {
+    "timeline": TIMELINE_MAP_RESPONSE_SCHEMA,
+    "action_items": ACTION_ITEMS_RESPONSE_SCHEMA,
+    "general_summary": GENERAL_SUMMARY_RESPONSE_SCHEMA,
 }
 
 # Request discipline (#108): explicit context budget with a loud pre-send
@@ -466,8 +493,25 @@ class FakeSummarizationProvider:
         return self.result
 
 
+@dataclass(frozen=True)
+class _OllamaProductCall:
+    """Validated envelope of one Ollama note-product chat call."""
+
+    payload: Mapping[str, object]
+    content: str
+    prompt_eval_count: int
+    eval_count: int
+
+
 class OllamaSummarizationProvider:
-    """Local Ollama adapter for structured meeting summarization."""
+    """Local Ollama adapter for structured meeting summarization.
+
+    The adapter owns the note-product execution strategy mechanics (ADR-035):
+    per product it either sends one one-shot request or, when the one-shot
+    prompt exceeds the ``num_ctx`` token budget, runs a chunked map/reduce
+    over the merged transcript. Provider *selection* stays with the
+    capability resolver; this class never chooses providers.
+    """
 
     def __init__(
         self,
@@ -529,10 +573,155 @@ class OllamaSummarizationProvider:
         request: SummarizationRequest,
         records: list[ProductRequestRecord],
     ) -> Mapping[str, object]:
-        system_content = _product_system_prompt(product, request.policy.language)
+        """Generate one note product behind the provider-owned strategy seam.
+
+        Routing between one-shot and reducer execution uses the same token
+        budget arithmetic as the pre-send hard-fail guard (#113): a one-shot
+        prompt within budget is sent as-is; anything larger runs as chunked
+        map/reduce instead of being silently truncated by Ollama.
+        """
+
+        system_content = _product_system_prompt(product, request.policy.language, schema)
         user_content = _product_user_prompt(request)
-        _guard_token_budget(
+        strategy = select_note_product_strategy(
+            prompt_estimate=(
+                estimate_prompt_tokens(system_content) + estimate_prompt_tokens(user_content)
+            ),
+            prompt_budget=_summarization_prompt_budget(),
+        )
+        if strategy == ONE_SHOT_STRATEGY:
+            return self._run_one_shot_product(
+                product=product,
+                schema=schema,
+                system_content=system_content,
+                user_content=user_content,
+                records=records,
+            )
+        return self._run_reducer_product(
             product=product,
+            schema=schema,
+            request=request,
+            records=records,
+        )
+
+    def _run_one_shot_product(
+        self,
+        *,
+        product: str,
+        schema: Mapping[str, object],
+        system_content: str,
+        user_content: str,
+        records: list[ProductRequestRecord],
+    ) -> Mapping[str, object]:
+        call = self._post_product_call(
+            label=product,
+            schema=schema,
+            system_content=system_content,
+            user_content=user_content,
+        )
+        try:
+            _validate_product_payload(product, call.payload)
+        except SummarizationContractError as exc:
+            raise SummarizationContractError(
+                _with_raw_ollama_message_content(str(exc), call.content)
+            ) from exc
+        records.append(
+            self._request_record(
+                product=product,
+                strategy=ONE_SHOT_STRATEGY,
+                call_kind=ONE_SHOT_CALL,
+                call=call,
+            )
+        )
+        return call.payload
+
+    def _run_reducer_product(
+        self,
+        *,
+        product: str,
+        schema: Mapping[str, object],
+        request: SummarizationRequest,
+        records: list[ProductRequestRecord],
+    ) -> Mapping[str, object]:
+        language = request.policy.language
+        reduce_system = _reduce_system_prompt(product, language, schema)
+        _guard_reduce_preflight_budget(
+            product=product,
+            reduce_system_content=reduce_system,
+            request=request,
+        )
+        map_schema = _MAP_RESPONSE_SCHEMAS[product]
+        map_system = _map_system_prompt(product, language, map_schema)
+        chunks = _plan_reducer_chunks(
+            product=product,
+            request=request,
+            map_system_content=map_system,
+        )
+        chunk_count = len(chunks)
+        candidates: list[dict[str, object]] = []
+        for chunk_index, segments in chunks:
+            call = self._post_product_call(
+                label=f"{product} map {chunk_index + 1}/{chunk_count}",
+                schema=map_schema,
+                system_content=map_system,
+                user_content=_map_user_prompt(
+                    request=request,
+                    chunk_index=chunk_index,
+                    chunk_count=chunk_count,
+                    segments=segments,
+                ),
+            )
+            try:
+                _validate_map_payload(product, call.payload)
+            except SummarizationContractError as exc:
+                raise SummarizationContractError(
+                    _with_raw_ollama_message_content(str(exc), call.content)
+                ) from exc
+            records.append(
+                self._request_record(
+                    product=product,
+                    strategy=REDUCER_STRATEGY,
+                    call_kind=MAP_CALL,
+                    call=call,
+                    chunk_index=chunk_index,
+                    chunk_count=chunk_count,
+                )
+            )
+            candidates.append({"chunk_index": chunk_index, product: call.payload.get(product)})
+        _require_timeline_candidates(product, candidates)
+        reduce_call = self._post_product_call(
+            label=f"{product} reduce",
+            schema=schema,
+            system_content=reduce_system,
+            user_content=_reduce_user_prompt(request=request, candidates=candidates),
+        )
+        try:
+            _validate_product_payload(product, reduce_call.payload)
+        except SummarizationContractError as exc:
+            raise SummarizationContractError(
+                _with_raw_ollama_message_content(str(exc), reduce_call.content)
+            ) from exc
+        records.append(
+            self._request_record(
+                product=product,
+                strategy=REDUCER_STRATEGY,
+                call_kind=REDUCE_CALL,
+                call=reduce_call,
+                chunk_count=chunk_count,
+            )
+        )
+        return reduce_call.payload
+
+    def _post_product_call(
+        self,
+        *,
+        label: str,
+        schema: Mapping[str, object],
+        system_content: str,
+        user_content: str,
+    ) -> _OllamaProductCall:
+        _guard_token_budget(
+            label=label,
             system_content=system_content,
             user_content=user_content,
             num_ctx=OLLAMA_SUMMARIZATION_NUM_CTX,
@@ -550,7 +739,7 @@ class OllamaSummarizationProvider:
         response = self._post_json("/api/chat", payload)
         content = _summarization_ollama_message_content(response)
         _assert_ollama_response_not_truncated(
-            product=product,
+            label=label,
             response=response,
             content=content,
         )
@@ -559,33 +748,45 @@ class OllamaSummarizationProvider:
         except json.JSONDecodeError as exc:
             raise SummarizationContractError(
                 _with_raw_ollama_message_content(
-                    f"Ollama {product} response was not valid JSON.",
+                    f"Ollama {label} response was not valid JSON.",
                     content,
                 )
             ) from exc
-        payload_mapping = _mapping(decoded, f"Ollama {product} response")
-        try:
-            _validate_product_payload(product, payload_mapping)
-        except SummarizationContractError as exc:
-            raise SummarizationContractError(
-                _with_raw_ollama_message_content(str(exc), content)
-            ) from exc
+        payload_mapping = _mapping(decoded, f"Ollama {label} response")
         prompt_eval_count, eval_count = _summarization_ollama_token_counts(
-            product=product,
+            label=label,
             response=response,
         )
-        records.append(
-            ProductRequestRecord(
-                product=product,
-                model=self.metadata.model,
-                num_ctx=OLLAMA_SUMMARIZATION_NUM_CTX,
-                temperature=OLLAMA_SUMMARIZATION_TEMPERATURE,
-                seed=OLLAMA_SUMMARIZATION_SEED,
-                prompt_eval_count=prompt_eval_count,
-                eval_count=eval_count,
-            )
+        return _OllamaProductCall(
+            payload=payload_mapping,
+            content=content,
+            prompt_eval_count=prompt_eval_count,
+            eval_count=eval_count,
         )
-        return payload_mapping
+
+    def _request_record(
+        self,
+        *,
+        product: str,
+        strategy: str,
+        call_kind: str,
+        call: _OllamaProductCall,
+        chunk_index: int | None = None,
+        chunk_count: int | None = None,
+    ) -> ProductRequestRecord:
+        return ProductRequestRecord(
+            product=product,
+            model=self.metadata.model,
+            num_ctx=OLLAMA_SUMMARIZATION_NUM_CTX,
+            temperature=OLLAMA_SUMMARIZATION_TEMPERATURE,
+            seed=OLLAMA_SUMMARIZATION_SEED,
+            prompt_eval_count=call.prompt_eval_count,
+            eval_count=call.eval_count,
+            strategy=strategy,
+            call=call_kind,
+            chunk_index=chunk_index,
+            chunk_count=chunk_count,
+        )
 
     def _post_json(self, path: str, payload: Mapping[str, object]) -> Mapping[str, object]:
         try:
@@ -1061,14 +1262,96 @@ _PRODUCT_INSTRUCTIONS: dict[str, str] = {
     ),
 }
 
+# Reducer map step: extract per-chunk candidates; a chunk may have nothing to
+# contribute, so instructions explicitly allow empty results where the final
+# product schema would not.
+_MAP_INSTRUCTIONS: dict[str, str] = {
+    "timeline": (
+        "Return only key timeline (array of strings). Each entry is a meaningful "
+        "chronological event from this transcript chunk, not a bare date; return "
+        "an empty array when the chunk contains no meaningful events."
+    ),
+    "action_items": (
+        "Return only key action_items (array of objects with text, owner, due). "
+        "Each item is an actual task stated in this transcript chunk, not a topic "
+        "label; owner and due may be null; return an empty array when the chunk "
+        "contains no tasks."
+    ),
+    "general_summary": (
+        "Return only key general_summary (string): a concise summary of what "
+        "happened in this transcript chunk."
+    ),
+}
 
-def _product_system_prompt(product: str, language: str) -> str:
+# Reducer reduce step: combine chunk candidates into the final product without
+# inventing content that no chunk contributed.
+_REDUCE_INSTRUCTIONS: dict[str, str] = {
+    "timeline": (
+        "Return only key timeline (array of strings): merge the chunk timeline "
+        "candidates into one chronological timeline for the whole meeting, "
+        "preserving chunk order and dropping duplicates."
+    ),
+    "action_items": (
+        "Return only key action_items (array of objects with text, owner, due): "
+        "merge the chunk action-item candidates into one deduplicated task list; "
+        "keep owner and due when stated; drop entries that are topic labels "
+        "rather than actual tasks."
+    ),
+    "general_summary": (
+        "Return only key general_summary (string): one concise high-level "
+        "overview of the whole meeting composed from the chunk summaries."
+    ),
+}
+
+
+def _schema_grounding(schema: Mapping[str, object]) -> str:
+    # Ollama's structured-outputs guidance: constrained decoding via `format`
+    # guarantees shape only; also passing the schema in the prompt grounds the
+    # model's response (docs.ollama.com/capabilities/structured-outputs).
+    schema_json = json.dumps(schema, sort_keys=True, separators=(",", ":"))
+    return f"Respond only with one JSON object that satisfies this JSON schema: {schema_json}"
+
+
+def _product_system_prompt(product: str, language: str, schema: Mapping[str, object]) -> str:
     return (
         "You extract meeting notes into strict JSON. "
         f"{_PRODUCT_INSTRUCTIONS[product]} "
         "Be faithful to the transcript and manual notes. "
-        f"Write every user-facing string in {language}."
+        f"Write every user-facing string in {language}. "
+        f"{_schema_grounding(schema)}"
     )
+
+
+def _map_system_prompt(product: str, language: str, schema: Mapping[str, object]) -> str:
+    return (
+        "You extract candidate meeting notes from one chunk of a longer meeting "
+        "transcript. "
+        f"{_MAP_INSTRUCTIONS[product]} "
+        "Be faithful to the transcript chunk. "
+        f"Write every user-facing string in {language}. "
+        f"{_schema_grounding(schema)}"
+    )
+
+
+def _reduce_system_prompt(product: str, language: str, schema: Mapping[str, object]) -> str:
+    return (
+        "You combine candidate meeting notes extracted from consecutive chunks "
+        "of one meeting transcript. "
+        f"{_REDUCE_INSTRUCTIONS[product]} "
+        "Use only the provided chunk candidates and manual notes; do not invent "
+        "content. "
+        f"Write every user-facing string in {language}. "
+        f"{_schema_grounding(schema)}"
+    )
+
+
+def _segment_payload(segment: MergedTranscriptSegment) -> dict[str, object]:
+    return {
+        "speaker": segment.speaker.label,
+        "start_seconds": segment.start_seconds,
+        "end_seconds": segment.end_seconds,
+        "text": segment.text,
+    }
 
 
 def _product_user_prompt(request: SummarizationRequest) -> str:
@@ -1079,15 +1362,50 @@ def _product_user_prompt(request: SummarizationRequest) -> str:
             "output_language": _output_language_instruction(request.policy.language),
             "transcript": {
                 "segments": [
-                    {
-                        "speaker": segment.speaker.label,
-                        "start_seconds": segment.start_seconds,
-                        "end_seconds": segment.end_seconds,
-                        "text": segment.text,
-                    }
-                    for segment in request.merged_transcript.segments
+                    _segment_payload(segment) for segment in request.merged_transcript.segments
                 ],
             },
+            "manual_notes": request.manual_notes,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def _map_user_prompt(
+    *,
+    request: SummarizationRequest,
+    chunk_index: int,
+    chunk_count: int,
+    segments: tuple[MergedTranscriptSegment, ...],
+) -> str:
+    return json.dumps(
+        {
+            "task": "meeting_notes_chunk",
+            "language": request.policy.language,
+            "output_language": _output_language_instruction(request.policy.language),
+            "chunk_index": chunk_index,
+            "chunk_count": chunk_count,
+            "transcript": {
+                "segments": [_segment_payload(segment) for segment in segments],
+            },
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def _reduce_user_prompt(
+    *,
+    request: SummarizationRequest,
+    candidates: list[dict[str, object]],
+) -> str:
+    return json.dumps(
+        {
+            "task": "meeting_notes_reduce",
+            "language": request.policy.language,
+            "output_language": _output_language_instruction(request.policy.language),
+            "chunk_candidates": candidates,
             "manual_notes": request.manual_notes,
         },
         ensure_ascii=False,
@@ -1111,6 +1429,35 @@ def _validate_product_payload(product: str, payload: Mapping[str, object]) -> No
             SummaryActionItem.from_dict(action)
     else:
         _required_str(payload, "general_summary", "Summary result")
+
+
+def _validate_map_payload(product: str, payload: Mapping[str, object]) -> None:
+    """Validate one reducer map response; unlike the final product, a chunk may be empty."""
+
+    if product == "timeline":
+        _str_list(payload, "timeline", "Timeline chunk candidates")
+    elif product == "action_items":
+        for action in _list(payload, "action_items"):
+            SummaryActionItem.from_dict(action)
+    else:
+        _required_str(payload, "general_summary", "General summary chunk candidate")
+
+
+def _require_timeline_candidates(product: str, candidates: list[dict[str, object]]) -> None:
+    """Fail loudly when no chunk contributed a timeline entry to reduce.
+
+    The final timeline schema requires at least one entry, so an all-empty
+    candidate set would force the reduce call to fabricate events.
+    """
+
+    if product != "timeline":
+        return
+    if any(candidate.get(product) for candidate in candidates):
+        return
+    raise SummarizationContractError(
+        "Ollama timeline map calls returned no timeline candidates; refusing to "
+        "reduce an empty timeline."
+    )
 
 
 def _assert_output_language(result: SummaryResult, language: str) -> None:
@@ -1155,33 +1502,106 @@ def _looks_like_english_drift(text: str) -> bool:
     return len(hits) / len(tokens) >= _ENGLISH_DRIFT_MIN_RATIO
 
 
-def _estimate_prompt_tokens(text: str) -> int:
-    # Ollama does not expose a preflight tokenizer here. Counting UTF-8 bytes is
-    # a hard upper bound for byte-fallback tokenizers and avoids len(text)/4
-    # undercounts for short words, IDs, and punctuation-heavy notes.
-    return len(text.encode("utf-8"))
+def _summarization_prompt_budget() -> int:
+    return prompt_token_budget(
+        num_ctx=OLLAMA_SUMMARIZATION_NUM_CTX,
+        budget_fraction=TOKEN_BUDGET_FRACTION,
+    )
 
 
 def _guard_token_budget(
     *,
-    product: str,
+    label: str,
     system_content: str,
     user_content: str,
     num_ctx: int,
 ) -> None:
-    estimate = _estimate_prompt_tokens(system_content) + _estimate_prompt_tokens(user_content)
-    budget = int(num_ctx * TOKEN_BUDGET_FRACTION)
+    estimate = estimate_prompt_tokens(system_content) + estimate_prompt_tokens(user_content)
+    budget = _summarization_prompt_budget()
     if estimate > budget:
         raise SummarizationTokenBudgetError(
-            f"Estimated {product} prompt tokens ({estimate}) exceed the configured "
+            f"Estimated {label} prompt tokens ({estimate}) exceed the configured "
             f"num_ctx budget ({budget} of {num_ctx}); refusing to send to avoid "
             "silent context truncation."
         )
 
 
-def _summarization_ollama_token_counts(
+def _guard_reduce_preflight_budget(
     *,
     product: str,
+    reduce_system_content: str,
+    request: SummarizationRequest,
+) -> None:
+    """Fail loudly before any map call when the reduce call can never fit.
+
+    The reduce prompt carries the manual notes and reduction envelope even
+    with zero candidates; when that floor already exceeds the budget there is
+    no point spending map calls, and hierarchical reduction is intentionally
+    not implemented in this slice.
+    """
+
+    floor_estimate = estimate_prompt_tokens(reduce_system_content) + estimate_prompt_tokens(
+        _reduce_user_prompt(request=request, candidates=[])
+    )
+    budget = _summarization_prompt_budget()
+    if floor_estimate > budget:
+        raise SummarizationTokenBudgetError(
+            f"Estimated {product} reduce prompt tokens ({floor_estimate}) exceed the "
+            f"configured num_ctx budget ({budget} of {OLLAMA_SUMMARIZATION_NUM_CTX}) "
+            "before any chunk candidates; manual notes and reduction overhead are "
+            "too large for the reducer strategy."
+        )
+
+
+# Chunk planning reserves headroom for chunk_index/chunk_count digits and JSON
+# separators that the empty-segments envelope estimate does not include.
+_CHUNK_ENVELOPE_MARGIN = 64
+
+
+def _plan_reducer_chunks(
+    *,
+    product: str,
+    request: SummarizationRequest,
+    map_system_content: str,
+) -> tuple[tuple[int, tuple[MergedTranscriptSegment, ...]], ...]:
+    segments = request.merged_transcript.segments
+    envelope = _map_user_prompt(
+        request=request,
+        chunk_index=0,
+        chunk_count=0,
+        segments=(),
+    )
+    chunk_budget = (
+        _summarization_prompt_budget()
+        - estimate_prompt_tokens(map_system_content)
+        - estimate_prompt_tokens(envelope)
+        - _CHUNK_ENVELOPE_MARGIN
+    )
+    if chunk_budget < 1:
+        raise SummarizationTokenBudgetError(
+            f"Estimated {product} map prompt overhead exceeds the configured "
+            "num_ctx budget; no room is left for transcript segments."
+        )
+    item_estimates = tuple(
+        estimate_prompt_tokens(
+            json.dumps(_segment_payload(segment), ensure_ascii=False, sort_keys=True)
+        )
+        + 2
+        for segment in segments
+    )
+    try:
+        spans = plan_chunk_spans(item_estimates=item_estimates, chunk_budget=chunk_budget)
+    except NoteProductStrategyError as exc:
+        raise SummarizationTokenBudgetError(
+            f"Estimated {product} chunk prompt tokens exceed the configured "
+            f"num_ctx budget: {exc}"
+        ) from exc
+    return tuple((span.index, segments[span.start : span.end]) for span in spans)
+
+
+def _summarization_ollama_token_counts(
+    *,
+    label: str,
     response: Mapping[str, object],
 ) -> tuple[int, int]:
     try:
@@ -1198,7 +1618,7 @@ def _summarization_ollama_token_counts(
     ]
     if missing:
         raise SummarizationContractError(
-            f"Ollama {product} response omitted required token counts: {', '.join(missing)}."
+            f"Ollama {label} response omitted required token counts: {', '.join(missing)}."
         )
     assert prompt_eval_count is not None
     assert eval_count is not None
@@ -1207,14 +1627,14 @@ def _summarization_ollama_token_counts(
 
 def _assert_ollama_response_not_truncated(
     *,
-    product: str,
+    label: str,
     response: Mapping[str, object],
     content: str,
 ) -> None:
     if response.get("done_reason") == "length":
         raise SummarizationContractError(
             _with_raw_ollama_message_content(
-                f"Ollama {product} response was truncated by the generation token limit "
+                f"Ollama {label} response was truncated by the generation token limit "
                 "(done_reason=length).",
                 content,
             )
