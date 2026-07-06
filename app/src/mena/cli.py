@@ -93,7 +93,7 @@ from mena.runtime_profile import (
     RuntimeFallbackUnavailable,
     bind_summarization_runtime,
     production_runtime_required,
-    select_runtime_profile,
+    select_summarization_runtime_profile,
     store_runtime_profile_provenance,
 )
 from mena.runtime_stewardship import (
@@ -548,7 +548,25 @@ class ConsoleSummarizeInteraction:
         )
 
     def confirm(self, request: ConfirmationRequest) -> bool:
-        raise ValueError(f"Unsupported summarize confirmation topic '{request.topic}'.")
+        if request.topic != "runtime_fallback.summarization_remote":
+            raise ValueError(f"Unsupported summarize confirmation topic '{request.topic}'.")
+        reader = _record_input(self._input_fn)
+        reason = str(request.context.get("reason", "accepted provider unavailable"))
+        print(f"Accepted summarization provider is unavailable: {reason}")
+        disclosure = request.context.get("disclosure", ())
+        if isinstance(disclosure, tuple):
+            print("Mistral summarization disclosure:")
+            for line in disclosure:
+                print(f"  - {line}")
+        if reader is None:
+            print(
+                "Remote Mistral fallback is not pre-authorized and this run is "
+                "non-interactive; declining. Re-run setup with "
+                "--authorize-mistral-summary-fallback to pre-authorize it."
+            )
+            return False
+        answer = reader("Use Mistral summarization fallback for this run? [y/N] ")
+        return answer.strip().lower() in {"y", "yes"}
 
     def request_text(self, request: TextRequest) -> str:
         raise ValueError(f"Unsupported summarize text topic '{request.topic}'.")
@@ -650,6 +668,32 @@ def build_parser() -> argparse.ArgumentParser:
         "--authorize-local-fallback",
         action="store_true",
         help="Authorize automatic local runtime fallback when the fallback profile is ready.",
+    )
+    setup_parser.add_argument(
+        "--summarization-provider",
+        choices=("local", "mistral"),
+        default="local",
+        help=(
+            "Accepted summarization primary provider. 'mistral' uses the fixed "
+            "allow-listed direct Mistral model and requires the disclosure to be "
+            "accepted."
+        ),
+    )
+    setup_parser.add_argument(
+        "--authorize-mistral-summary-fallback",
+        action="store_true",
+        help=(
+            "Accept Mistral as the first ordered summarization fallback provider "
+            "for a local primary; requires the disclosure to be accepted."
+        ),
+    )
+    setup_parser.add_argument(
+        "--accept-mistral-summary-disclosure",
+        action="store_true",
+        help=(
+            "Acknowledge the Mistral summarization disclosure non-interactively. "
+            "--yes alone never accepts the disclosure."
+        ),
     )
     setup_parser.set_defaults(command="setup")
 
@@ -764,6 +808,9 @@ def main(
             check_only=args.check,
             assume_yes=args.yes,
             authorize_local_fallback=args.authorize_local_fallback,
+            summarization_provider=args.summarization_provider,
+            mistral_summary_fallback=args.authorize_mistral_summary_fallback,
+            accept_mistral_disclosure=args.accept_mistral_summary_disclosure,
             settings=app_settings,
             input_fn=input_fn,
             runner=setup_runner,
@@ -847,6 +894,12 @@ def main(
                 allow_runtime_fallback=args.allow_runtime_fallback,
                 interaction=interaction,
             )
+        except RuntimeFallbackUnavailable as exc:
+            # Recoverable: the accepted summarization provider failed and an
+            # accepted fallback exists but is not authorized (or none is
+            # configured). Exit code 3 mirrors the processing contract.
+            print(f"Cannot summarize session: {exc}")
+            return 3
         except (
             ArtifactStoreError,
             CorrectionOverlayContractError,
@@ -1184,6 +1237,9 @@ def _run_setup_command(
     runner: CommandRunner | None,
     command_identity: CommandIdentity | None,
     hardware: HardwareFacts | None,
+    summarization_provider: str = "local",
+    mistral_summary_fallback: bool = False,
+    accept_mistral_disclosure: bool = False,
 ) -> int:
     result = run_setup_workflow(
         settings=settings,
@@ -1191,6 +1247,9 @@ def _run_setup_command(
             check_only=check_only,
             assume_yes=assume_yes,
             authorize_local_fallback=authorize_local_fallback,
+            summarization_provider=summarization_provider,
+            mistral_summary_fallback=mistral_summary_fallback,
+            accept_mistral_disclosure=accept_mistral_disclosure,
         ),
         interaction=_CliSetupInteraction(input_fn=input_fn),
         runner=runner,
@@ -1219,6 +1278,12 @@ class _CliSetupInteraction(InteractionPort):
             prompt = "Proceed with automated setup actions? [y/N] "
         elif request.topic == "setup.fallback_actions":
             prompt = "Proceed with automated fallback setup actions? [y/N] "
+        elif request.topic == "setup.mistral_summary_disclosure":
+            role = str(request.context.get("role", "provider"))
+            prompt = (
+                f"Accept the Mistral summarization disclosure above and enable "
+                f"Mistral as {role} provider? [y/N] "
+            )
         else:
             raise ValueError(f"Unsupported setup confirmation request: {request.topic}")
         answer = self._input_fn(prompt)
@@ -1298,7 +1363,7 @@ def _run_summarize_command(
         setup_command_identity=setup_command_identity,
         setup_hardware=setup_hardware,
         allow_runtime_fallback=allow_runtime_fallback,
-        runtime_profile_selector_fn=select_runtime_profile,
+        runtime_profile_selector_fn=select_summarization_runtime_profile,
         runtime_profile_store_fn=store_runtime_profile_provenance,
         runtime_summarization_binder_fn=bind_summarization_runtime,
         run_summarization_stage_fn=run_summarization_stage,

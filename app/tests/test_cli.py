@@ -2472,7 +2472,10 @@ def test_main_correct_does_not_select_runtime_profile(
         raise AssertionError("correction must not acquire runtime resources")
 
     monkeypatch.setattr("mena.cli.run_correction_workflow", _fake_run_correction_workflow)
-    monkeypatch.setattr("mena.cli.select_runtime_profile", _fail_runtime_profile_selection)
+    monkeypatch.setattr(
+        "mena.cli.select_summarization_runtime_profile",
+        _fail_runtime_profile_selection,
+    )
 
     assert main(["correct", str(tmp_path)]) == 0
     assert calls == [tmp_path]

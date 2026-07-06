@@ -21,19 +21,27 @@ from mena.correction_overlay import (
     CorrectionOverlayContractError,
     resolve_active_correction_overlay,
 )
-from mena.interaction import ChoiceOption, ChoiceRequest, InteractionPort, WorkflowNotice
+from mena.interaction import (
+    ChoiceOption,
+    ChoiceRequest,
+    ConfirmationRequest,
+    InteractionPort,
+    WorkflowNotice,
+)
 from mena.manual_notes import ingest_manual_notes_file
 from mena.merge_timing import (
     MERGED_TRANSCRIPT_ARTIFACT_TYPE,
     MergedTranscriptArtifact,
     MergeTimingContractError,
 )
+from mena.mistral_llm import MISTRAL_SUMMARY_DISCLOSURE, MistralSummaryState
 from mena.processing import ProcessingStageLedger
 from mena.runtime_profile import (
-    SUMMARIZATION_RUNTIME_STAGES,
     RuntimeProfileSelection,
+    SummarizationRuntimePlan,
     bind_summarization_runtime,
-    select_runtime_profile,
+    select_summarization_runtime_after_stage_failure,
+    select_summarization_runtime_profile,
     store_runtime_profile_provenance,
 )
 from mena.runtime_stewardship import RuntimeReleaseResult
@@ -49,6 +57,7 @@ from mena.setup import CommandIdentity, CommandRunner, HardwareFacts
 from mena.summarization import (
     SummarizationError,
     SummarizationPolicy,
+    SummarizationProviderUnavailable,
     SummarizationStageResult,
     run_summarization_stage,
 )
@@ -139,10 +148,13 @@ def run_summarization_command(
     setup_command_identity: CommandIdentity | None = None,
     setup_hardware: HardwareFacts | None = None,
     allow_runtime_fallback: bool = False,
-    runtime_profile_selector_fn: RuntimeProfileSelector = select_runtime_profile,
+    runtime_profile_selector_fn: RuntimeProfileSelector = select_summarization_runtime_profile,
     runtime_profile_store_fn: RuntimeProfileStoreFn = store_runtime_profile_provenance,
     runtime_summarization_binder_fn: RuntimeSummarizationBinderFn = bind_summarization_runtime,
     run_summarization_stage_fn: SummarizationStageFn = run_summarization_stage,
+    summarization_stage_fallback_selector_fn: RuntimeProfileSelector = (
+        select_summarization_runtime_after_stage_failure
+    ),
     resolve_session_fn: ResolveSessionFn | None = None,
     terminal_llm_release_fn: TerminalReleaseFn | None = None,
     interaction: InteractionPort | None = None,
@@ -188,13 +200,14 @@ def run_summarization_command(
         store=store,
         notes_path=manual_notes,
     )
+    authorize_remote_fallback = _remote_fallback_authorizer(interaction)
     runtime_selection: RuntimeProfileSelection = runtime_profile_selector_fn(
         settings=settings,
         runner=setup_runner,
         command_identity=setup_command_identity,
         hardware=setup_hardware,
         allow_runtime_fallback=allow_runtime_fallback,
-        required_stages=SUMMARIZATION_RUNTIME_STAGES,
+        authorize_remote_summarization_fallback=authorize_remote_fallback,
     )
 
     run_id = f"summarize-{uuid4()}"
@@ -211,25 +224,87 @@ def run_summarization_command(
     )
 
     ledger = ProcessingStageLedger(store=store, session_id=session_id_value, run_id=run_id)
+    attempt = 1
     try:
-        result = cast(
-            SummarizationStageResult,
-            run_summarization_stage_fn(
+        try:
+            result = cast(
+                SummarizationStageResult,
+                run_summarization_stage_fn(
+                    store=store,
+                    ledger=ledger,
+                    merged_transcript_record=merged_transcript_record,
+                    correction_overlay_record=resolved_overlay[0],
+                    manual_notes_record=manual_notes_record,
+                    provider=provider,
+                    policy=SummarizationPolicy(language=summary_language),
+                    attempt=attempt,
+                ),
+            )
+        except SummarizationProviderUnavailable as exc:
+            used_plan = cast(
+                SummarizationRuntimePlan | None,
+                getattr(runtime_selection, "summarization", None),
+            )
+            if used_plan is None:
+                raise
+            # Provoked fallback (ADR-033): the bound provider failed at
+            # provider time; consume the next accepted ordered fallback entry.
+            if terminal_llm_release_fn is not None:
+                terminal_llm_release_fn(
+                    store=store,
+                    run_id=run_id,
+                    attempt=attempt,
+                    provider=provider,
+                    stage="summarization",
+                    boundary="summarize",
+                )
+            fallback_selection = summarization_stage_fallback_selector_fn(
+                settings=settings,
+                runner=setup_runner,
+                command_identity=setup_command_identity,
+                hardware=setup_hardware,
+                accepted=runtime_selection.accepted,
+                used_plan=used_plan,
+                failure_reason=str(exc),
+                failure_class=exc.__class__.__name__,
+                failed_input_artifacts=_stage_input_artifact_ids(
+                    merged_transcript_record,
+                    resolved_overlay[0],
+                    manual_notes_record,
+                ),
+                authorize_remote_summarization_fallback=authorize_remote_fallback,
+            )
+            runtime_profile_store_fn(
                 store=store,
-                ledger=ledger,
-                merged_transcript_record=merged_transcript_record,
-                correction_overlay_record=resolved_overlay[0],
-                manual_notes_record=manual_notes_record,
-                provider=provider,
-                policy=SummarizationPolicy(language=summary_language),
-            ),
-        )
+                run_id=run_id,
+                attempt=attempt,
+                selection=fallback_selection,
+                name_suffix="stage-fallback",
+            )
+            provider = runtime_summarization_binder_fn(
+                selection=fallback_selection,
+                settings=settings,
+            )
+            attempt += 1
+            result = cast(
+                SummarizationStageResult,
+                run_summarization_stage_fn(
+                    store=store,
+                    ledger=ledger,
+                    merged_transcript_record=merged_transcript_record,
+                    correction_overlay_record=resolved_overlay[0],
+                    manual_notes_record=manual_notes_record,
+                    provider=provider,
+                    policy=SummarizationPolicy(language=summary_language),
+                    attempt=attempt,
+                ),
+            )
     finally:
         if terminal_llm_release_fn is not None:
             terminal_llm_release_fn(
                 store=store,
                 run_id=run_id,
-                attempt=1,
+                attempt=attempt,
                 provider=provider,
                 stage="summarization",
                 boundary="summarize",
@@ -254,6 +329,47 @@ def run_summarization_command(
         ),
     )
     return 0
+
+
+def _remote_fallback_authorizer(
+    interaction: InteractionPort | None,
+) -> Callable[[str, MistralSummaryState], bool]:
+    """Interactive authorization for a not-pre-authorized remote fallback transition.
+
+    Without an interaction port the transition is declined: a non-interactive
+    run must never move summarization text to a remote provider that setup did
+    not pre-authorize.
+    """
+
+    def _authorize(reason: str, state: MistralSummaryState) -> bool:
+        if interaction is None:
+            return False
+        return interaction.confirm(
+            ConfirmationRequest(
+                topic="runtime_fallback.summarization_remote",
+                context={
+                    "reason": reason,
+                    "provider": "Mistral",
+                    "request_model": state.request_model,
+                    "resolved_model": state.resolved_model,
+                    "disclosure": MISTRAL_SUMMARY_DISCLOSURE,
+                },
+                default=False,
+            )
+        )
+
+    return _authorize
+
+
+def _stage_input_artifact_ids(
+    merged_transcript_record: ArtifactRecord,
+    correction_overlay_record: ArtifactRecord,
+    manual_notes_record: ArtifactRecord | None,
+) -> tuple[str, ...]:
+    ids = [merged_transcript_record.id, correction_overlay_record.id]
+    if manual_notes_record is not None:
+        ids.append(manual_notes_record.id)
+    return tuple(ids)
 
 
 def _choose_summarize_session(
