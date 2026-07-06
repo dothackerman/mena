@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
@@ -19,6 +19,13 @@ from typing import Protocol
 from mena import __version__
 from mena.fields import optional_str, required_bool, required_dict, required_int, required_str
 from mena.local_llm import OLLAMA_DEFAULT_MODEL
+from mena.mistral_llm import (
+    MENA_MISTRAL_API_KEY_ENV,
+    MISTRAL_SUMMARY_ALLOWLIST_POLICY,
+    MISTRAL_SUMMARY_REQUEST_MODEL,
+    MistralSummaryState,
+    check_mistral_summary_readiness,
+)
 from mena.settings import CONFIG_FILENAME, AppSettings, RuntimePaths
 from mena.stage_policy import stage_device as lookup_stage_device
 from mena.stage_policy import stage_model as lookup_stage_model
@@ -33,7 +40,14 @@ ALPHA_LOCAL_PROFILE_ID = "linux-alpha-local-v1"
 ALPHA_LOCAL_PROFILE_VERSION = "2026.05"
 FALLBACK_LOCAL_PROFILE_ID = "linux-alpha-cpu-fallback-v1"
 FALLBACK_LOCAL_PROFILE_VERSION = "2026.06"
+MISTRAL_SUMMARY_PROFILE_ID = "linux-alpha-mistral-summary-v1"
+MISTRAL_SUMMARY_PROFILE_VERSION = "2026.07"
 RUNTIME_PROFILE_CATALOG_VERSION = "2026.06-poc-v1"
+OLLAMA_STAGE_PROVIDER = "Ollama"
+MISTRAL_STAGE_PROVIDER = "Mistral"
+MISTRAL_SUMMARY_STAGE_POLICY = (
+    "remote-direct-mistral, fixed allow-listed model, PDR-004 disclosure accepted"
+)
 RUNTIME_PROFILE_STATE_SCHEMA_VERSION = 1
 SETUP_STATE_FILENAME = "setup-state.json"
 PYANNOTE_COMMUNITY_CHECKPOINT = "pyannote/speaker-diarization-community-1"
@@ -76,6 +90,12 @@ class CommandRunner(Protocol):
         env: Mapping[str, str] | None = None,
     ) -> CommandRun:
         """Run a command and capture its result."""
+
+
+class MistralSummaryProbe(Protocol):
+    """Injectable Mistral readiness probe used by detection and tests."""
+
+    def __call__(self, *, env: Mapping[str, str]) -> MistralSummaryState: ...
 
 
 class SubprocessCommandRunner:
@@ -225,6 +245,7 @@ class LocalInstallationState:
     diarization_model_present: bool | None
     pyannote_token_present: bool
     python_executable: Path
+    mistral_summary: MistralSummaryState | None = None
 
 
 @dataclass(frozen=True)
@@ -296,6 +317,17 @@ class RuntimeProfileState:
     evidence_digest: str
     evidence: Mapping[str, object]
     fallback_authorization: RuntimeFallbackAuthorization
+    # ADR-033 ordered fallback: the accepted primary stays in stage_policies;
+    # accepted fallback summarization providers live in this separate ordered
+    # list. Runtime consumes only this accepted order.
+    summarization_fallback_providers: tuple[StageProfile, ...] = ()
+
+    def __post_init__(self) -> None:
+        for stage in self.summarization_fallback_providers:
+            if stage.stage != "summarization":
+                raise ValueError(
+                    "Summarization fallback providers must be summarization stage entries."
+                )
 
     @classmethod
     def from_dict(cls, data: object) -> RuntimeProfileState:
@@ -304,6 +336,7 @@ class RuntimeProfileState:
         schema_version = _required_int(data, "schema_version")
         if schema_version != RUNTIME_PROFILE_STATE_SCHEMA_VERSION:
             raise ValueError("Unsupported runtime profile state schema version.")
+        fallback_providers = data.get("summarization_fallback_providers")
         return cls(
             schema_version=schema_version,
             catalog_version=_required_str(data, "catalog_version"),
@@ -318,6 +351,9 @@ class RuntimeProfileState:
             evidence=_required_mapping(data, "evidence"),
             fallback_authorization=RuntimeFallbackAuthorization.from_dict(
                 data.get("fallback_authorization")
+            ),
+            summarization_fallback_providers=(
+                () if fallback_providers is None else _stage_profiles_from_dicts(fallback_providers)
             ),
         )
 
@@ -335,6 +371,9 @@ class RuntimeProfileState:
             "evidence_digest": self.evidence_digest,
             "evidence": dict(self.evidence),
             "fallback_authorization": self.fallback_authorization.to_dict(),
+            "summarization_fallback_providers": [
+                _stage_profile_to_dict(stage) for stage in self.summarization_fallback_providers
+            ],
         }
 
 
@@ -524,7 +563,79 @@ def default_profile_catalog(ollama_model: str = OLLAMA_DEFAULT_MODEL) -> tuple[S
             minimum_cuda_vram_gb=0.0,
             fallback=True,
         ),
+        SetupProfile(
+            id=MISTRAL_SUMMARY_PROFILE_ID,
+            version=MISTRAL_SUMMARY_PROFILE_VERSION,
+            catalog_version=RUNTIME_PROFILE_CATALOG_VERSION,
+            name="Linux alpha profile with direct Mistral summarization",
+            stages=(
+                StageProfile(
+                    stage="transcription",
+                    provider="faster-whisper",
+                    model="hardware-selected Whisper profile",
+                    device="hardware-selected",
+                    policy="local-only",
+                ),
+                StageProfile(
+                    stage="diarization",
+                    provider="pyannote.audio",
+                    model=PYANNOTE_COMMUNITY_CHECKPOINT,
+                    device="hardware-selected",
+                    policy="local-only",
+                ),
+                mistral_summary_stage_profile(),
+                StageProfile(
+                    stage="semantic-review",
+                    provider=OLLAMA_STAGE_PROVIDER,
+                    model=ollama_model,
+                    device="local-service",
+                    policy="local-preferred, remote fallback not configured by setup",
+                ),
+            ),
+            python_surfaces=(
+                PythonSurfaceRequirement(
+                    label="faster-whisper",
+                    import_name="faster_whisper",
+                    install_extra="asr",
+                ),
+                PythonSurfaceRequirement(
+                    label="pyannote.audio",
+                    import_name="pyannote.audio",
+                    install_extra="diarization",
+                ),
+            ),
+            required_commands=REQUIRED_COMMANDS,
+            playback_commands=PLAYBACK_COMMANDS,
+            minimum_ram_gb=MINIMUM_RAM_GB,
+            minimum_cuda_vram_gb=MINIMUM_CUDA_VRAM_GB,
+        ),
     )
+
+
+def mistral_summary_stage_profile() -> StageProfile:
+    """Return the fixed direct-Mistral summarization stage policy entry.
+
+    The same entry is used for the Mistral-primary profile's ``stage_policies``
+    and for the ordered summarization fallback-provider list, so both routes
+    share one provider/model/policy identity.
+    """
+
+    return StageProfile(
+        stage="summarization",
+        provider=MISTRAL_STAGE_PROVIDER,
+        model=MISTRAL_SUMMARY_REQUEST_MODEL,
+        device="remote-api",
+        policy=MISTRAL_SUMMARY_STAGE_POLICY,
+    )
+
+
+def get_mistral_summary_profile(ollama_model: str = OLLAMA_DEFAULT_MODEL) -> SetupProfile:
+    """Return the Linux alpha profile with Mistral as accepted summarization primary."""
+
+    for profile in default_profile_catalog(ollama_model=ollama_model):
+        if profile.id == MISTRAL_SUMMARY_PROFILE_ID:
+            return profile
+    raise ValueError("Mistral summarization profile is missing from the bundled catalog.")
 
 
 def get_alpha_local_profile(ollama_model: str = OLLAMA_DEFAULT_MODEL) -> SetupProfile:
@@ -582,8 +693,14 @@ def detect_local_installation_state(
     profile: SetupProfile | None = None,
     env: Mapping[str, str] | None = None,
     python_executable: Path | None = None,
+    mistral_probe: MistralSummaryProbe | None = None,
 ) -> LocalInstallationState:
-    """Inspect local setup state without installing or downloading anything."""
+    """Inspect local setup state without installing or downloading anything.
+
+    The Mistral readiness probe is the one deliberate network exception: when
+    the evaluated profile routes summarization to Mistral, readiness requires
+    an authenticated model-resolution probe (never meeting content).
+    """
 
     command_runner = runner or SubprocessCommandRunner()
     current_env = os.environ if env is None else env
@@ -611,7 +728,7 @@ def detect_local_installation_state(
         )
         for requirement in evaluated_profile.python_surfaces
     )
-    if _profile_has_any_stage(evaluated_profile, {"summarization", "semantic-review"}):
+    if _profile_has_local_llm_stage(evaluated_profile):
         ollama = _detect_ollama_state(
             settings=settings,
             model=_local_llm_model(evaluated_profile),
@@ -620,6 +737,10 @@ def detect_local_installation_state(
         )
     else:
         ollama = _not_evaluated_ollama_state(settings)
+    mistral_summary = None
+    if _profile_has_mistral_summary_stage(evaluated_profile):
+        probe = mistral_probe or check_mistral_summary_readiness
+        mistral_summary = probe(env=current_env)
     asr_model_present = (
         _detect_asr_model_present(
             runner=command_runner,
@@ -655,6 +776,7 @@ def detect_local_installation_state(
             current_env.get("HF_TOKEN") or current_env.get("HUGGING_FACE_HUB_TOKEN")
         ),
         python_executable=resolved_python,
+        mistral_summary=mistral_summary,
     )
 
 
@@ -683,8 +805,10 @@ def evaluate_setup(
     _evaluate_required_commands(profile, state, readiness, actions)
     _evaluate_playback_commands(state, readiness, actions)
     _evaluate_python_surfaces(state, readiness, actions)
-    if _profile_has_any_stage(profile, {"summarization", "semantic-review"}):
+    if _profile_has_local_llm_stage(profile):
         _evaluate_ollama_model(state, readiness, actions)
+    if _profile_has_mistral_summary_stage(profile):
+        _evaluate_mistral_summary(state, readiness, actions)
     if _profile_has_stage(profile, "transcription"):
         _evaluate_asr_model(state, selected_asr_profile, readiness, actions)
     if _profile_has_stage(profile, "diarization"):
@@ -786,8 +910,15 @@ def build_runtime_profile_state(
     accepted_at: datetime | None = None,
     fallback_evaluation: SetupEvaluation | None = None,
     authorize_local_fallback: bool = False,
+    summarization_fallback_providers: tuple[StageProfile, ...] = (),
 ) -> RuntimeProfileState:
-    """Build persisted state from an already-ready setup evaluation."""
+    """Build persisted state from an already-ready setup evaluation.
+
+    ``summarization_fallback_providers`` is the accepted ordered fallback list
+    (ADR-033). Entries are only ever added by setup after their own readiness
+    check and PDR-004 disclosure acceptance, so listing a remote entry records
+    typed remote authorization scoped to the summarization stage.
+    """
 
     if not evaluation.ready:
         raise ValueError("Runtime profile state can only be built from a ready setup evaluation.")
@@ -796,6 +927,17 @@ def build_runtime_profile_state(
         json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
     timestamp = accepted_at or datetime.now(UTC)
+    authorization = _build_runtime_fallback_authorization(
+        evaluation,
+        fallback_evaluation=fallback_evaluation,
+        authorize_local_fallback=authorize_local_fallback,
+    )
+    if any(stage.provider == MISTRAL_STAGE_PROVIDER for stage in summarization_fallback_providers):
+        authorization = replace(
+            authorization,
+            remote_status="authorized",
+            remote_stage_scope=("summarization",),
+        )
     return RuntimeProfileState(
         schema_version=RUNTIME_PROFILE_STATE_SCHEMA_VERSION,
         catalog_version=evaluation.profile.catalog_version,
@@ -808,11 +950,8 @@ def build_runtime_profile_state(
         readiness_summary=evaluation.readiness,
         evidence_digest=evidence_digest,
         evidence=evidence,
-        fallback_authorization=_build_runtime_fallback_authorization(
-            evaluation,
-            fallback_evaluation=fallback_evaluation,
-            authorize_local_fallback=authorize_local_fallback,
-        ),
+        fallback_authorization=authorization,
+        summarization_fallback_providers=summarization_fallback_providers,
     )
 
 
@@ -902,6 +1041,11 @@ def runtime_evidence_to_dict(state: LocalInstallationState) -> dict[str, object]
             "diarization_model_present": state.diarization_model_present,
             "pyannote_token_present": state.pyannote_token_present,
         },
+        # Resolved-model evidence only; the Mena-scoped API key never enters
+        # setup state, evidence, or provenance.
+        "mistral_summary": (
+            None if state.mistral_summary is None else state.mistral_summary.to_dict()
+        ),
     }
 
 
@@ -1162,6 +1306,69 @@ def _evaluate_ollama_model(
                 detail=(
                     "Start the configured local Ollama service before setup can pull "
                     f"{state.ollama.model} from {state.ollama.endpoint}."
+                ),
+            )
+        )
+
+
+def _evaluate_mistral_summary(
+    state: LocalInstallationState,
+    readiness: list[ReadinessItem],
+    actions: list[SetupAction],
+) -> None:
+    mistral = state.mistral_summary
+    label = f"Mistral summarization model {MISTRAL_SUMMARY_REQUEST_MODEL}"
+    if mistral is None:
+        readiness.append(
+            ReadinessItem(
+                id="mistral-summary-model",
+                label=label,
+                ready=False,
+                detail="Mistral summarization readiness was not evaluated.",
+            )
+        )
+        return
+    if mistral.key_present and mistral.reachable and mistral.model_allowed:
+        readiness.append(
+            ReadinessItem(
+                id="mistral-summary-model",
+                label=label,
+                ready=True,
+                detail=mistral.detail,
+            )
+        )
+        return
+    readiness.append(
+        ReadinessItem(
+            id="mistral-summary-model",
+            label=label,
+            ready=False,
+            detail=mistral.detail,
+        )
+    )
+    if not mistral.key_present:
+        actions.append(
+            SetupAction(
+                id="mistral-summary-model",
+                label="Provide the Mena-scoped Mistral API key",
+                mode="manual",
+                detail=(
+                    f"Export {MENA_MISTRAL_API_KEY_ENV} with a key from your own "
+                    "Mistral account before accepting Mistral summarization. "
+                    "The key is read from the environment only and never persisted."
+                ),
+            )
+        )
+    elif not mistral.model_allowed and mistral.resolved_model is not None:
+        actions.append(
+            SetupAction(
+                id="mistral-summary-model",
+                label="Review the Mistral summarization model allow-list",
+                mode="manual",
+                detail=(
+                    f"{MISTRAL_SUMMARY_REQUEST_MODEL} resolved outside "
+                    f"{MISTRAL_SUMMARY_ALLOWLIST_POLICY}; a new allow-list review "
+                    "must accept the resolved model before setup can proceed."
                 ),
             )
         )
@@ -1472,12 +1679,40 @@ def _stage_model(profile: SetupProfile | RuntimeProfileState, stage: str) -> str
 
 
 def _local_llm_model(profile: SetupProfile) -> str:
-    for stage in ("summarization", "semantic-review"):
-        try:
-            return _stage_model(profile, stage)
-        except ValueError:
-            continue
+    for stage_name in ("summarization", "semantic-review"):
+        for stage in profile.stages:
+            if stage.stage == stage_name and stage.provider == OLLAMA_STAGE_PROVIDER:
+                return stage.model
     raise ValueError(f"Profile {profile!r} does not define a local LLM stage.")
+
+
+def local_llm_stage_model(policies: Sequence[StageProfile], default: str) -> str:
+    """Return the accepted local Ollama model from stage policies, or a default.
+
+    Provider-aware: a Mistral summarization stage must not leak its request
+    model into local Ollama stage lookups (semantic review stays local).
+    """
+
+    for stage_name in ("summarization", "semantic-review"):
+        for stage in policies:
+            if stage.stage == stage_name and stage.provider == OLLAMA_STAGE_PROVIDER:
+                return stage.model
+    return default
+
+
+def _profile_has_local_llm_stage(profile: SetupProfile) -> bool:
+    return any(
+        stage.stage in {"summarization", "semantic-review"}
+        and stage.provider == OLLAMA_STAGE_PROVIDER
+        for stage in profile.stages
+    )
+
+
+def _profile_has_mistral_summary_stage(profile: SetupProfile) -> bool:
+    return any(
+        stage.stage == "summarization" and stage.provider == MISTRAL_STAGE_PROVIDER
+        for stage in profile.stages
+    )
 
 
 def _stage_device(

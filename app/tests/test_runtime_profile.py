@@ -235,7 +235,7 @@ def _stage_failure_accepted_state(
     setup_state: LocalInstallationState,
     authorize_local_fallback: bool,
 ) -> RuntimeProfileState:
-    primary_profile, fallback_profile = default_profile_catalog(settings.local_llm.ollama_model)
+    primary_profile, fallback_profile, *_ = default_profile_catalog(settings.local_llm.ollama_model)
     return build_runtime_profile_state(
         evaluate_setup(primary_profile, setup_state),
         fallback_evaluation=evaluate_setup(fallback_profile, setup_state),
@@ -529,7 +529,7 @@ def test_runtime_profile_stage_failure_selection_allows_explicit_one_run_fallbac
 ) -> None:
     settings = AppSettings.from_env(env={}, home=tmp_path)
     setup_state = _setup_state(settings=settings, pyannote_token_present=True)
-    primary_profile, fallback_profile = default_profile_catalog(settings.local_llm.ollama_model)
+    primary_profile, fallback_profile, *_ = default_profile_catalog(settings.local_llm.ollama_model)
     accepted = build_runtime_profile_state(
         evaluate_setup(primary_profile, setup_state),
         fallback_evaluation=evaluate_setup(fallback_profile, setup_state),
