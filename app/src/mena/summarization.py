@@ -1593,8 +1593,7 @@ def _plan_reducer_chunks(
         spans = plan_chunk_spans(item_estimates=item_estimates, chunk_budget=chunk_budget)
     except NoteProductStrategyError as exc:
         raise SummarizationTokenBudgetError(
-            f"Estimated {product} chunk prompt tokens exceed the configured "
-            f"num_ctx budget: {exc}"
+            f"Estimated {product} chunk prompt tokens exceed the configured num_ctx budget: {exc}"
         ) from exc
     return tuple((span.index, segments[span.start : span.end]) for span in spans)
 

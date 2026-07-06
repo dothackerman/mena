@@ -1094,6 +1094,338 @@ def test_ollama_summarization_provider_preserves_raw_output_on_contract_failure(
     assert raw_content in message
 
 
+def _long_merged_transcript_fixture(*, segment_count: int = 60) -> MergedTranscriptArtifact:
+    """Synthetic long transcript that exceeds the one-shot prompt budget.
+
+    Content is generated filler so the fixture stays free of private meeting
+    material while still forcing the reducer route by size.
+    """
+
+    base = _merged_transcript_fixture()
+    template = base.segments[0]
+    segments = tuple(
+        replace(
+            template,
+            id=f"merged_segment_{index:06d}",
+            text=(
+                f"Segment {index}: the team reviewed synthetic agenda topic {index}, "
+                "compared the available deployment options in detail, and recorded "
+                "the follow-up questions that remained open for the next milestone."
+            ),
+            start_seconds=float(index),
+            end_seconds=float(index) + 0.9,
+            transcript_segment_id=f"local_segment_{index}",
+        )
+        for index in range(segment_count)
+    )
+    return replace(base, segments=segments, text=" ".join(segment.text for segment in segments))
+
+
+def _reducer_map_responses() -> dict[str, dict[str, object]]:
+    payloads: dict[str, dict[str, object]] = {
+        "timeline": {"timeline": ["Reviewed one synthetic agenda topic."]},
+        "action_items": {
+            "action_items": [
+                {"text": "Answer the open follow-up questions.", "owner": None, "due": None}
+            ]
+        },
+        "general_summary": {"general_summary": "This chunk covered one agenda topic."},
+    }
+    return {
+        product: {
+            "message": {"content": json.dumps(payload)},
+            "prompt_eval_count": 222,
+            "eval_count": 33,
+        }
+        for product, payload in payloads.items()
+    }
+
+
+def _strategy_aware_post_json(
+    *,
+    reduce_responses: dict[str, dict[str, object]],
+    map_responses: dict[str, dict[str, object]],
+    calls: list[dict[str, object]],
+) -> "object":
+    def fake_post_json(path: str, payload: object) -> dict[str, object]:
+        assert path == "/api/chat"
+        assert isinstance(payload, dict)
+        product = _product_key(payload)
+        messages = cast(list[dict[str, str]], payload["messages"])
+        user_payload = json.loads(messages[1]["content"])
+        calls.append(
+            {
+                "product": product,
+                "task": user_payload["task"],
+                "chunk_index": user_payload.get("chunk_index"),
+                "chunk_count": user_payload.get("chunk_count"),
+                "has_manual_notes": "manual_notes" in user_payload,
+                "system_content": messages[0]["content"],
+            }
+        )
+        if user_payload["task"] == "meeting_notes_chunk":
+            return map_responses[product]
+        return reduce_responses[product]
+
+    return fake_post_json
+
+
+def _long_summary_request() -> SummarizationRequest:
+    return replace(_summary_request(), merged_transcript=_long_merged_transcript_fixture())
+
+
+def test_ollama_provider_routes_long_input_to_reducer_per_product(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OllamaSummarizationProvider(model="test-model")
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        provider,
+        "_post_json",
+        _strategy_aware_post_json(
+            reduce_responses=_fake_product_responses(),
+            map_responses=_reducer_map_responses(),
+            calls=calls,
+        ),
+    )
+
+    result = provider.summarize(_long_summary_request())
+
+    assert {call["task"] for call in calls} == {"meeting_notes_chunk", "meeting_notes_reduce"}
+    for product in REQUIRED_NOTE_PRODUCTS:
+        product_calls = [call for call in calls if call["product"] == product]
+        map_calls = [call for call in product_calls if call["task"] == "meeting_notes_chunk"]
+        reduce_calls = [call for call in product_calls if call["task"] == "meeting_notes_reduce"]
+        assert len(map_calls) >= 2
+        assert len(reduce_calls) == 1
+        assert [call["chunk_index"] for call in map_calls] == list(range(len(map_calls)))
+        assert all(call["chunk_count"] == len(map_calls) for call in map_calls)
+        # Manual notes are global context: reduce-only, never per chunk.
+        assert all(call["has_manual_notes"] is False for call in map_calls)
+        assert reduce_calls[0]["has_manual_notes"] is True
+        # Official Ollama guidance: the schema is also passed in the prompt.
+        assert all(
+            "satisfies this JSON schema" in cast(str, call["system_content"])
+            for call in product_calls
+        )
+    assert result.timeline == ("Discussed database migration before Friday.",)
+    assert result.general_summary == "The meeting focused on database migration risk."
+
+
+def test_ollama_provider_records_per_call_reducer_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OllamaSummarizationProvider(model="test-model")
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        provider,
+        "_post_json",
+        _strategy_aware_post_json(
+            reduce_responses=_fake_product_responses(),
+            map_responses=_reducer_map_responses(),
+            calls=calls,
+        ),
+    )
+
+    result = provider.summarize(_long_summary_request())
+
+    for product in REQUIRED_NOTE_PRODUCTS:
+        records = [record for record in result.request_records if record.product == product]
+        map_records = [record for record in records if record.call == "map"]
+        reduce_records = [record for record in records if record.call == "reduce"]
+        assert all(record.strategy == "reducer" for record in records)
+        assert len(map_records) >= 2
+        assert len(reduce_records) == 1
+        assert [record.chunk_index for record in map_records] == list(range(len(map_records)))
+        assert all(record.chunk_count == len(map_records) for record in map_records)
+        assert reduce_records[0].chunk_index is None
+        assert reduce_records[0].chunk_count == len(map_records)
+        assert all(record.prompt_eval_count == 222 for record in map_records)
+        assert all(record.eval_count == 33 for record in map_records)
+        assert reduce_records[0].prompt_eval_count == 123
+        assert reduce_records[0].eval_count == 45
+        assert all(record.num_ctx == OLLAMA_SUMMARIZATION_NUM_CTX for record in records)
+
+
+def test_ollama_provider_short_input_records_one_shot_strategy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OllamaSummarizationProvider(model="test-model")
+    responses = _fake_product_responses()
+    calls: list[str] = []
+
+    def fake_post_json(path: str, payload: object) -> dict[str, object]:
+        assert isinstance(payload, dict)
+        product = _product_key(payload)
+        calls.append(product)
+        messages = cast(list[dict[str, str]], payload["messages"])
+        assert json.loads(messages[1]["content"])["task"] == "meeting_notes"
+        return responses[product]
+
+    monkeypatch.setattr(provider, "_post_json", fake_post_json)
+
+    result = provider.summarize(_summary_request())
+
+    assert calls == list(REQUIRED_NOTE_PRODUCTS)
+    assert [record.strategy for record in result.request_records] == ["one_shot"] * 3
+    assert [record.call for record in result.request_records] == ["one_shot"] * 3
+    assert all(record.chunk_index is None for record in result.request_records)
+    assert all(record.chunk_count is None for record in result.request_records)
+
+
+def test_ollama_provider_reducer_fails_loudly_when_reduce_candidates_exceed_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OllamaSummarizationProvider(model="test-model")
+    oversized_map_responses = _reducer_map_responses()
+    oversized_map_responses["timeline"] = {
+        "message": {"content": json.dumps({"timeline": ["An oversized event entry. " * 400]})},
+        "prompt_eval_count": 222,
+        "eval_count": 33,
+    }
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        provider,
+        "_post_json",
+        _strategy_aware_post_json(
+            reduce_responses=_fake_product_responses(),
+            map_responses=oversized_map_responses,
+            calls=calls,
+        ),
+    )
+
+    with pytest.raises(
+        SummarizationTokenBudgetError,
+        match="timeline reduce prompt tokens .* exceed the configured",
+    ):
+        provider.summarize(_long_summary_request())
+
+    assert all(call["task"] == "meeting_notes_chunk" for call in calls)
+
+
+def test_ollama_provider_reducer_fails_loudly_before_map_calls_when_notes_never_fit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OllamaSummarizationProvider(model="test-model")
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        provider,
+        "_post_json",
+        _strategy_aware_post_json(
+            reduce_responses=_fake_product_responses(),
+            map_responses=_reducer_map_responses(),
+            calls=calls,
+        ),
+    )
+    request = replace(
+        _long_summary_request(),
+        manual_notes="An oversized manual note. " * (OLLAMA_SUMMARIZATION_NUM_CTX // 2),
+    )
+
+    with pytest.raises(
+        SummarizationTokenBudgetError,
+        match="before any chunk candidates",
+    ):
+        provider.summarize(request)
+
+    assert calls == []
+
+
+def test_ollama_provider_reducer_rejects_all_empty_timeline_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OllamaSummarizationProvider(model="test-model")
+    empty_map_responses = _reducer_map_responses()
+    empty_map_responses["timeline"] = {
+        "message": {"content": json.dumps({"timeline": []})},
+        "prompt_eval_count": 222,
+        "eval_count": 33,
+    }
+    monkeypatch.setattr(
+        provider,
+        "_post_json",
+        _strategy_aware_post_json(
+            reduce_responses=_fake_product_responses(),
+            map_responses=empty_map_responses,
+            calls=[],
+        ),
+    )
+
+    with pytest.raises(
+        SummarizationContractError,
+        match="refusing to reduce an empty timeline",
+    ):
+        provider.summarize(_long_summary_request())
+
+
+def test_ollama_provider_reducer_rejects_invalid_map_payload_with_raw_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OllamaSummarizationProvider(model="test-model")
+    invalid_map_responses = _reducer_map_responses()
+    raw_content = json.dumps({"timeline": [123]})
+    invalid_map_responses["timeline"] = {
+        "message": {"content": raw_content},
+        "prompt_eval_count": 222,
+        "eval_count": 33,
+    }
+    monkeypatch.setattr(
+        provider,
+        "_post_json",
+        _strategy_aware_post_json(
+            reduce_responses=_fake_product_responses(),
+            map_responses=invalid_map_responses,
+            calls=[],
+        ),
+    )
+
+    with pytest.raises(SummarizationContractError) as exc_info:
+        provider.summarize(_long_summary_request())
+
+    message = str(exc_info.value)
+    assert "Timeline chunk candidates must contain non-empty strings." in message
+    assert raw_content in message
+
+
+def test_summarization_stage_persists_reducer_provenance_and_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    merged_record = persist_merged_transcript_artifact(
+        store=store,
+        artifact=_long_merged_transcript_fixture(),
+        name="merged-long.json",
+    )
+    provider = OllamaSummarizationProvider(model="test-model")
+    monkeypatch.setattr(
+        provider,
+        "_post_json",
+        _strategy_aware_post_json(
+            reduce_responses=_fake_product_responses(),
+            map_responses=_reducer_map_responses(),
+            calls=[],
+        ),
+    )
+    ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+
+    result = run_summarization_stage(
+        store=store,
+        ledger=ledger,
+        merged_transcript_record=merged_record,
+        provider=provider,
+        now=NOW,
+    )
+
+    payload = json.loads(store.retrieve(result.summary_record.id))
+    Draft202012Validator(_load_summary_schema(), format_checker=FormatChecker()).validate(payload)
+    assert result.summary_record.metadata["note_product_strategies"] == (
+        "timeline=reducer,action_items=reducer,general_summary=reducer"
+    )
+    reloaded = SummaryArtifact.from_dict(payload)
+    assert {record.strategy for record in reloaded.request_records} == {"reducer"}
+    assert len(reloaded.request_records) > len(REQUIRED_NOTE_PRODUCTS)
+
+
 def test_summarization_policy_and_result_validate_contract() -> None:
     assert "provider_config_id" not in SummarizationPolicy(language="en").to_dict()
     assert SummarizationPolicy(language="de_CH").language == "de-CH"
