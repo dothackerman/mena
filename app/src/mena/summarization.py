@@ -107,6 +107,11 @@ GENERAL_SUMMARY_RESPONSE_SCHEMA: dict[str, object] = {
     "required": ["general_summary"],
     "properties": {"general_summary": {"type": "string", "minLength": 1}},
 }
+PRODUCT_RESPONSE_SCHEMAS: dict[str, dict[str, object]] = {
+    "timeline": TIMELINE_RESPONSE_SCHEMA,
+    "action_items": ACTION_ITEMS_RESPONSE_SCHEMA,
+    "general_summary": GENERAL_SUMMARY_RESPONSE_SCHEMA,
+}
 
 # Request discipline (#108): explicit context budget with a loud pre-send
 # hard-fail instead of silent head-truncation, deterministic sampling, and a
@@ -255,6 +260,7 @@ class SummarizationProviderMetadata(LocalLLMProviderMetadata):
     num_ctx: int | None = None
     temperature: float | None = None
     seed: int | None = None
+    resolved_model: str | None = None
 
     @property
     def config_id(self) -> str:
@@ -269,6 +275,15 @@ class SummarizationProviderMetadata(LocalLLMProviderMetadata):
                 },
             }
         return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+    def to_dict(self) -> dict[str, object]:
+        payload = super().to_dict()
+        # Remote providers resolve a mutable request alias to a dated model
+        # snapshot; recording it scopes summary reuse to the resolved model.
+        # Omitted when unset so local provider payloads stay unchanged.
+        if self.resolved_model is not None:
+            payload["resolved_model"] = self.resolved_model
+        return payload
 
 
 @dataclass(frozen=True)
@@ -449,7 +464,7 @@ class OllamaSummarizationProvider:
             "request_records": [record.to_dict() for record in records],
         }
         result = SummaryResult.from_dict(combined)
-        _assert_output_language(result, request.policy.language)
+        assert_summary_output_language(result, request.policy.language)
         return result
 
     def _run_product(
@@ -460,9 +475,9 @@ class OllamaSummarizationProvider:
         request: SummarizationRequest,
         records: list[ProductRequestRecord],
     ) -> Mapping[str, object]:
-        system_content = _product_system_prompt(product, request.policy.language)
-        user_content = _product_user_prompt(request)
-        _guard_token_budget(
+        system_content = product_system_prompt(product, request.policy.language)
+        user_content = product_user_prompt(request)
+        guard_summarization_token_budget(
             product=product,
             system_content=system_content,
             user_content=user_content,
@@ -496,7 +511,7 @@ class OllamaSummarizationProvider:
             ) from exc
         payload_mapping = _mapping(decoded, f"Ollama {product} response")
         try:
-            _validate_product_payload(product, payload_mapping)
+            validate_product_payload(product, payload_mapping)
         except SummarizationContractError as exc:
             raise SummarizationContractError(
                 _with_raw_ollama_message_content(str(exc), content)
@@ -992,7 +1007,7 @@ _PRODUCT_INSTRUCTIONS: dict[str, str] = {
 }
 
 
-def _product_system_prompt(product: str, language: str) -> str:
+def product_system_prompt(product: str, language: str) -> str:
     return (
         "You extract meeting notes into strict JSON. "
         f"{_PRODUCT_INSTRUCTIONS[product]} "
@@ -1001,7 +1016,7 @@ def _product_system_prompt(product: str, language: str) -> str:
     )
 
 
-def _product_user_prompt(request: SummarizationRequest) -> str:
+def product_user_prompt(request: SummarizationRequest) -> str:
     return json.dumps(
         {
             "task": "meeting_notes",
@@ -1032,7 +1047,7 @@ def _output_language_instruction(language: str) -> str:
     )
 
 
-def _validate_product_payload(product: str, payload: Mapping[str, object]) -> None:
+def validate_product_payload(product: str, payload: Mapping[str, object]) -> None:
     if product == "timeline":
         if not _str_list(payload, "timeline", "Summary timeline"):
             raise SummarizationContractError("Summary timeline must not be empty.")
@@ -1043,7 +1058,7 @@ def _validate_product_payload(product: str, payload: Mapping[str, object]) -> No
         _required_str(payload, "general_summary", "Summary result")
 
 
-def _assert_output_language(result: SummaryResult, language: str) -> None:
+def assert_summary_output_language(result: SummaryResult, language: str) -> None:
     """Fail loudly when a non-English request produced English-drifted output."""
 
     if _is_english_language(language):
@@ -1092,7 +1107,7 @@ def _estimate_prompt_tokens(text: str) -> int:
     return len(text.encode("utf-8"))
 
 
-def _guard_token_budget(
+def guard_summarization_token_budget(
     *,
     product: str,
     system_content: str,
@@ -1190,6 +1205,7 @@ def _provider_from_dict(data: object) -> SummarizationProviderMetadata:
         model=_required_str(item, "model", "Summary provider"),
         endpoint=_optional_str(item, "endpoint", "Summary provider"),
         prompt_policy=_required_str(item, "prompt_policy", "Summary provider"),
+        resolved_model=_optional_str(item, "resolved_model", "Summary provider"),
     )
     if provider.prompt_policy not in SUPPORTED_PROMPT_POLICIES:
         raise SummarizationContractError("Unsupported summary provider prompt policy.")

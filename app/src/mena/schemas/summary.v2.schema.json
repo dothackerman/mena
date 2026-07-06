@@ -177,6 +177,17 @@
             "note-package-three-product-v1"
           ],
           "type": "string"
+        },
+        "resolved_model": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": ["name", "model", "endpoint", "prompt_policy"],
