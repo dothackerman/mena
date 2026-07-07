@@ -14,6 +14,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from hashlib import sha256
 
 MISTRAL_API_BASE_URL = "https://api.mistral.ai"
 MISTRAL_CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
@@ -42,11 +43,17 @@ _QUOTA_BODY_MARKERS = ("quota", "credit", "billing", "insufficient", "funds", "b
 # Minimum PDR-004 implementation disclosure shown before Mistral may be
 # accepted as summarization primary or fallback. Domain data, not adapter
 # wording: interface adapters render these lines verbatim or restyle them.
+# The summarization text explicitly includes speaker labels: the shared
+# provider-independent request carries per-segment speaker attribution, and
+# corrected labels can be real names, so the disclosure must cover them
+# rather than claim all speaker data stays local.
 MISTRAL_SUMMARY_DISCLOSURE = (
-    "Transcript text selected for summarization, plus manual notes when "
-    "included, is sent to your configured Mistral account.",
-    "Audio, ASR, diarization, local transcript artifacts, and speaker data "
-    "stay local; only summarization text goes to Mistral.",
+    "Transcript text selected for summarization is sent to your configured "
+    "Mistral account, including per-segment speaker labels (which may be "
+    "real names after correction) and manual notes when included.",
+    "Audio, ASR and diarization processing, raw local artifacts, speaker "
+    "embeddings, and other speaker-sensitive artifacts stay local; nothing "
+    "beyond the summarization text above is uploaded.",
     "Mistral use may incur API charges. Account, quota, subscription, ZDR "
     "activation, and legal posture are your responsibility; Mena cannot "
     "verify them.",
@@ -120,6 +127,21 @@ def load_mena_mistral_api_key(env: Mapping[str, str]) -> str | None:
     if key is None or not key.strip():
         return None
     return key.strip()
+
+
+def mistral_account_scope(api_key: str) -> str:
+    """Return a non-secret account identity for summary reuse scoping (ADR-033).
+
+    ADR-033 requires summary reuse to be scoped by non-secret Mistral
+    account/workspace identity when remote account posture affects
+    authorization. Mena cannot observe a workspace ID without extra API
+    surface, so the key itself is the account posture signal: a truncated,
+    domain-separated SHA-256 fingerprint changes exactly when the configured
+    key changes, is not reversible, and never exposes key material.
+    """
+
+    digest = sha256(f"mena-mistral-account-scope:{api_key}".encode()).hexdigest()
+    return f"mistral-account-{digest[:16]}"
 
 
 def _urllib_transport(

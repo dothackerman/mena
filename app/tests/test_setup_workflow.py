@@ -367,6 +367,10 @@ def test_setup_workflow_accepts_mistral_primary_after_disclosure(tmp_path: Path)
     messages = _messages(result.events)
     assert "Mistral summarization disclosure (primary provider):" in messages
     assert "sent to your configured Mistral account" in messages
+    # The disclosure must cover speaker labels: they travel with the shared
+    # summarization request content and can be real names after correction.
+    assert "per-segment speaker labels" in messages
+    assert "real names after correction" in messages
     assert "Accepted summarization primary: Mistral (mistral-small-latest)" in messages
     assert "Accepted summarization fallback order: none" in messages
 
