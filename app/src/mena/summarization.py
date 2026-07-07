@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -148,6 +148,11 @@ TIMELINE_MAP_RESPONSE_SCHEMA: dict[str, object] = {
 }
 _MAP_RESPONSE_SCHEMAS: dict[str, dict[str, object]] = {
     "timeline": TIMELINE_MAP_RESPONSE_SCHEMA,
+    "action_items": ACTION_ITEMS_RESPONSE_SCHEMA,
+    "general_summary": GENERAL_SUMMARY_RESPONSE_SCHEMA,
+}
+_PRODUCT_RESPONSE_SCHEMAS: dict[str, dict[str, object]] = {
+    "timeline": TIMELINE_RESPONSE_SCHEMA,
     "action_items": ACTION_ITEMS_RESPONSE_SCHEMA,
     "general_summary": GENERAL_SUMMARY_RESPONSE_SCHEMA,
 }
@@ -504,6 +509,57 @@ class _OllamaProductCall:
     eval_count: int
 
 
+@dataclass(frozen=True)
+class _ProductGenerationInputs:
+    """Product-independent inputs computed once per summarize run.
+
+    The one-shot user prompt and the per-segment token estimates are identical
+    for all three note products, so they are built once instead of
+    re-serializing the whole transcript per product.
+    """
+
+    request: SummarizationRequest
+    one_shot_user_content: str
+    one_shot_user_estimate: int
+    segment_item_estimates: tuple[int, ...]
+
+    @classmethod
+    def for_request(cls, request: SummarizationRequest) -> Self:
+        user_content = _product_user_prompt(request)
+        return cls(
+            request=request,
+            one_shot_user_content=user_content,
+            one_shot_user_estimate=estimate_prompt_tokens(user_content),
+            segment_item_estimates=_segment_item_estimates(request.merged_transcript.segments),
+        )
+
+
+def _segment_item_estimates(segments: tuple[MergedTranscriptSegment, ...]) -> tuple[int, ...]:
+    # +2 reserves room for the JSON list separators around each segment.
+    return tuple(
+        estimate_prompt_tokens(
+            json.dumps(_segment_payload(segment), ensure_ascii=False, sort_keys=True)
+        )
+        + 2
+        for segment in segments
+    )
+
+
+def _validate_call_payload(
+    validate: Callable[[str, Mapping[str, object]], None],
+    product: str,
+    call: _OllamaProductCall,
+) -> None:
+    """Run one payload validator, preserving the raw model output on failure."""
+
+    try:
+        validate(product, call.payload)
+    except SummarizationContractError as exc:
+        raise SummarizationContractError(
+            _with_raw_ollama_message_content(str(exc), call.content)
+        ) from exc
+
+
 class OllamaSummarizationProvider:
     """Local Ollama adapter for structured meeting summarization.
 
@@ -538,30 +594,20 @@ class OllamaSummarizationProvider:
 
     def summarize(self, request: SummarizationRequest) -> SummaryResult:
         records: list[ProductRequestRecord] = []
-        timeline_payload = self._run_product(
-            product="timeline",
-            schema=TIMELINE_RESPONSE_SCHEMA,
-            request=request,
-            records=records,
-        )
-        action_payload = self._run_product(
-            product="action_items",
-            schema=ACTION_ITEMS_RESPONSE_SCHEMA,
-            request=request,
-            records=records,
-        )
-        summary_payload = self._run_product(
-            product="general_summary",
-            schema=GENERAL_SUMMARY_RESPONSE_SCHEMA,
-            request=request,
-            records=records,
-        )
-        combined = {
-            "timeline": timeline_payload.get("timeline"),
-            "action_items": action_payload.get("action_items"),
-            "general_summary": summary_payload.get("general_summary"),
-            "request_records": [record.to_dict() for record in records],
+        inputs = _ProductGenerationInputs.for_request(request)
+        payloads = {
+            product: self._run_product(
+                product=product,
+                schema=_PRODUCT_RESPONSE_SCHEMAS[product],
+                inputs=inputs,
+                records=records,
+            )
+            for product in REQUIRED_NOTE_PRODUCTS
         }
+        combined: dict[str, object] = {
+            product: payloads[product].get(product) for product in REQUIRED_NOTE_PRODUCTS
+        }
+        combined["request_records"] = [record.to_dict() for record in records]
         result = SummaryResult.from_dict(combined)
         _assert_output_language(result, request.policy.language)
         return result
@@ -571,7 +617,7 @@ class OllamaSummarizationProvider:
         *,
         product: str,
         schema: Mapping[str, object],
-        request: SummarizationRequest,
+        inputs: _ProductGenerationInputs,
         records: list[ProductRequestRecord],
     ) -> Mapping[str, object]:
         """Generate one note product behind the provider-owned strategy seam.
@@ -582,11 +628,11 @@ class OllamaSummarizationProvider:
         map/reduce instead of being silently truncated by Ollama.
         """
 
+        request = inputs.request
         system_content = _product_system_prompt(product, request.policy.language, schema)
-        user_content = _product_user_prompt(request)
         strategy = select_note_product_strategy(
             prompt_estimate=(
-                estimate_prompt_tokens(system_content) + estimate_prompt_tokens(user_content)
+                estimate_prompt_tokens(system_content) + inputs.one_shot_user_estimate
             ),
             prompt_budget=_summarization_prompt_budget(),
         )
@@ -595,13 +641,13 @@ class OllamaSummarizationProvider:
                 product=product,
                 schema=schema,
                 system_content=system_content,
-                user_content=user_content,
+                user_content=inputs.one_shot_user_content,
                 records=records,
             )
         return self._run_reducer_product(
             product=product,
             schema=schema,
-            request=request,
+            inputs=inputs,
             records=records,
         )
 
@@ -620,12 +666,7 @@ class OllamaSummarizationProvider:
             system_content=system_content,
             user_content=user_content,
         )
-        try:
-            _validate_product_payload(product, call.payload)
-        except SummarizationContractError as exc:
-            raise SummarizationContractError(
-                _with_raw_ollama_message_content(str(exc), call.content)
-            ) from exc
+        _validate_call_payload(_validate_product_payload, product, call)
         records.append(
             self._request_record(
                 product=product,
@@ -641,9 +682,10 @@ class OllamaSummarizationProvider:
         *,
         product: str,
         schema: Mapping[str, object],
-        request: SummarizationRequest,
+        inputs: _ProductGenerationInputs,
         records: list[ProductRequestRecord],
     ) -> Mapping[str, object]:
+        request = inputs.request
         language = request.policy.language
         reduce_system = _reduce_system_prompt(product, language, schema)
         _guard_reduce_preflight_budget(
@@ -657,6 +699,7 @@ class OllamaSummarizationProvider:
             product=product,
             request=request,
             map_system_content=map_system,
+            item_estimates=inputs.segment_item_estimates,
         )
         chunk_count = len(chunks)
         candidates: list[dict[str, object]] = []
@@ -672,12 +715,7 @@ class OllamaSummarizationProvider:
                     segments=segments,
                 ),
             )
-            try:
-                _validate_map_payload(product, call.payload)
-            except SummarizationContractError as exc:
-                raise SummarizationContractError(
-                    _with_raw_ollama_message_content(str(exc), call.content)
-                ) from exc
+            _validate_call_payload(_validate_map_payload, product, call)
             records.append(
                 self._request_record(
                     product=product,
@@ -696,12 +734,7 @@ class OllamaSummarizationProvider:
             system_content=reduce_system,
             user_content=_reduce_user_prompt(request=request, candidates=candidates),
         )
-        try:
-            _validate_product_payload(product, reduce_call.payload)
-        except SummarizationContractError as exc:
-            raise SummarizationContractError(
-                _with_raw_ollama_message_content(str(exc), reduce_call.content)
-            ) from exc
+        _validate_call_payload(_validate_product_payload, product, reduce_call)
         records.append(
             self._request_record(
                 product=product,
@@ -721,6 +754,9 @@ class OllamaSummarizationProvider:
         system_content: str,
         user_content: str,
     ) -> _OllamaProductCall:
+        # For one-shot calls the routing arithmetic already proved the prompt
+        # fits; the guard re-checks deliberately so every outgoing call keeps
+        # the same last-line hard-fail regardless of the path that built it.
         _guard_token_budget(
             label=label,
             system_content=system_content,
@@ -1564,6 +1600,7 @@ def _plan_reducer_chunks(
     product: str,
     request: SummarizationRequest,
     map_system_content: str,
+    item_estimates: tuple[int, ...],
 ) -> tuple[tuple[int, tuple[MergedTranscriptSegment, ...]], ...]:
     segments = request.merged_transcript.segments
     envelope = _map_user_prompt(
@@ -1583,13 +1620,6 @@ def _plan_reducer_chunks(
             f"Estimated {product} map prompt overhead exceeds the configured "
             "num_ctx budget; no room is left for transcript segments."
         )
-    item_estimates = tuple(
-        estimate_prompt_tokens(
-            json.dumps(_segment_payload(segment), ensure_ascii=False, sort_keys=True)
-        )
-        + 2
-        for segment in segments
-    )
     try:
         spans = plan_chunk_spans(item_estimates=item_estimates, chunk_budget=chunk_budget)
     except NoteProductStrategyError as exc:
