@@ -188,6 +188,17 @@
               "type": "null"
             }
           ]
+        },
+        "account_scope": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": ["name", "model", "endpoint", "prompt_policy"],

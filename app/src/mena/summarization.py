@@ -261,6 +261,7 @@ class SummarizationProviderMetadata(LocalLLMProviderMetadata):
     temperature: float | None = None
     seed: int | None = None
     resolved_model: str | None = None
+    account_scope: str | None = None
 
     @property
     def config_id(self) -> str:
@@ -279,10 +280,14 @@ class SummarizationProviderMetadata(LocalLLMProviderMetadata):
     def to_dict(self) -> dict[str, object]:
         payload = super().to_dict()
         # Remote providers resolve a mutable request alias to a dated model
-        # snapshot; recording it scopes summary reuse to the resolved model.
-        # Omitted when unset so local provider payloads stay unchanged.
+        # snapshot and run under a user-owned account; recording both scopes
+        # summary reuse to the resolved model and the non-secret account
+        # identity (ADR-033). Omitted when unset so local provider payloads
+        # stay unchanged.
         if self.resolved_model is not None:
             payload["resolved_model"] = self.resolved_model
+        if self.account_scope is not None:
+            payload["account_scope"] = self.account_scope
         return payload
 
 
@@ -1206,6 +1211,7 @@ def _provider_from_dict(data: object) -> SummarizationProviderMetadata:
         endpoint=_optional_str(item, "endpoint", "Summary provider"),
         prompt_policy=_required_str(item, "prompt_policy", "Summary provider"),
         resolved_model=_optional_str(item, "resolved_model", "Summary provider"),
+        account_scope=_optional_str(item, "account_scope", "Summary provider"),
     )
     if provider.prompt_policy not in SUPPORTED_PROMPT_POLICIES:
         raise SummarizationContractError("Unsupported summary provider prompt policy.")
