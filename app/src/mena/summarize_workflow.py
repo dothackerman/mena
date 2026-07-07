@@ -249,15 +249,6 @@ def run_summarization_command(
                 raise
             # Provoked fallback (ADR-033): the bound provider failed at
             # provider time; consume the next accepted ordered fallback entry.
-            if terminal_llm_release_fn is not None:
-                terminal_llm_release_fn(
-                    store=store,
-                    run_id=run_id,
-                    attempt=attempt,
-                    provider=provider,
-                    stage="summarization",
-                    boundary="summarize",
-                )
             fallback_selection = summarization_stage_fallback_selector_fn(
                 settings=settings,
                 runner=setup_runner,
@@ -281,6 +272,18 @@ def run_summarization_command(
                 selection=fallback_selection,
                 name_suffix="stage-fallback",
             )
+            # Release the failed provider only after a fallback was actually
+            # selected; when no fallback is available the shared finally block
+            # performs the single release for the failed provider.
+            if terminal_llm_release_fn is not None:
+                terminal_llm_release_fn(
+                    store=store,
+                    run_id=run_id,
+                    attempt=attempt,
+                    provider=provider,
+                    stage="summarization",
+                    boundary="summarize",
+                )
             provider = runtime_summarization_binder_fn(
                 selection=fallback_selection,
                 settings=settings,
