@@ -215,3 +215,82 @@ Pass criteria:
 - a shorter run cannot be recorded as a clean stress pass
 - a 90-minute run is required to claim full REQ-P02 coverage; otherwise the
   untested 90-minute boundary remains explicit residual risk
+
+## Scenario UAT-G1: Mistral Summarization Primary
+
+Purpose: prove an accepted direct-Mistral summarization primary runs end to end
+without a per-run prompt, with disclosure at setup and provenance at runtime.
+
+Requirement refs:
+
+- `docs/decisions/ADR-033-stage-focused-direct-zdr-mistral-routes.md`
+- `docs/decisions/PDR-004-mistral-summarization-disclosure-and-consent.md`
+- issue #29
+
+Pass criteria:
+
+- `mena setup --summarization-provider mistral` shows the Mistral disclosure
+  and requires explicit acceptance (`--yes` alone must not accept it)
+- setup readiness records that `mistral-small-latest` resolved inside the
+  accepted Mistral Small 4 snapshot under
+  `mena-mistral-summary-allowlist-2026-06-29-v1`
+- `mena summarize` completes using Mistral without any per-run prompt
+- the summary artifact records `mistral` provider metadata including the
+  resolved model, and runtime profile provenance records accepted provider,
+  actual provider, request model, and resolved model
+- no Mistral API key appears in setup state, config, logs, provenance,
+  artifacts, or error output
+
+## Scenario UAT-G2: Mistral Summarization Fallback
+
+Purpose: prove a local primary with Mistral as the first accepted ordered
+fallback provider uses Mistral only through the accepted list and policy.
+
+Requirement refs:
+
+- `docs/decisions/ADR-033-stage-focused-direct-zdr-mistral-routes.md`
+- `docs/decisions/ADR-031-runtime-fallback-authorization-and-setup-state.md`
+- `docs/decisions/PDR-004-mistral-summarization-disclosure-and-consent.md`
+- issue #29
+
+Pass criteria:
+
+- `mena setup --authorize-mistral-summary-fallback` shows the disclosure,
+  requires acceptance, checks Mistral readiness, and persists the ordered
+  fallback list plus typed remote authorization scoped to summarization
+- with the local provider healthy, summarization stays local
+- provenance records the accepted ordered fallback list
+
+## Scenario UAT-G3: Provoked Fallback From Local Primary To Mistral
+
+Purpose: prove a provoked local summarization failure transitions to the
+accepted Mistral fallback with authorization, reason, and provenance.
+
+Pass criteria:
+
+- with the accepted Mistral fallback configured, stopping the local Ollama
+  service provokes the fallback during `mena summarize`
+- the run completes on Mistral without a prompt (fallback pre-authorized at
+  setup) and records fallback used, reason, and authorization source
+- with the fallback entry not pre-authorized, an interactive run prompts with
+  the disclosure before using Mistral, and a non-interactive run stops with an
+  explicit fallback-unavailable result (exit code 3)
+- local fallback authorization alone never routes summarization to Mistral
+
+## Scenario UAT-G4: Mistral Bad Paths Fail Closed
+
+Purpose: prove missing/invalid credentials, unavailability, allow-list drift,
+and quota failures produce explicit, key-free results.
+
+Pass criteria:
+
+- without `MENA_MISTRAL_API_KEY`, setup refuses to accept Mistral with an
+  actionable reason; a generic `MISTRAL_API_KEY` is never consumed
+- with an invalid key, setup/readiness reports the key was rejected
+- with no internet, Mistral-primary summarize reports provider unavailable
+  after bounded retries instead of hanging or silently switching providers
+- if `mistral-small-latest` resolves outside the accepted allow-list snapshot,
+  setup and runtime fail closed and name the allow-list policy
+- where Mistral exposes a recognizable quota/funds signal, the run reports a
+  clear quota/funds hard failure
+- no API key material appears in any output or persisted file
