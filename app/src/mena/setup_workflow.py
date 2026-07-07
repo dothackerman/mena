@@ -126,7 +126,7 @@ def run_setup_workflow(
     )
 
     try:
-        state = setup_detector.detect(settings, runner=command_runner)
+        state = setup_detector.detect(settings, runner=command_runner, profile=profile)
     except KeyboardInterrupt:
         return _interrupted(events)
 
@@ -179,7 +179,7 @@ def run_setup_workflow(
     except KeyboardInterrupt:
         return _interrupted(events)
     try:
-        refreshed_state = setup_detector.detect(settings, runner=command_runner)
+        refreshed_state = setup_detector.detect(settings, runner=command_runner, profile=profile)
     except KeyboardInterrupt:
         return _interrupted(events)
 
