@@ -727,7 +727,7 @@ class OllamaSummarizationProvider:
                 )
             )
             candidates.append({"chunk_index": chunk_index, product: call.payload.get(product)})
-        _require_timeline_candidates(product, candidates)
+        _require_timeline_grounding(product, candidates, request.manual_notes)
         reduce_call = self._post_product_call(
             label=f"{product} reduce",
             schema=schema,
@@ -1480,20 +1480,30 @@ def _validate_map_payload(product: str, payload: Mapping[str, object]) -> None:
         _required_str(payload, "general_summary", "General summary chunk candidate")
 
 
-def _require_timeline_candidates(product: str, candidates: list[dict[str, object]]) -> None:
-    """Fail loudly when no chunk contributed a timeline entry to reduce.
+def _require_timeline_grounding(
+    product: str,
+    candidates: list[dict[str, object]],
+    manual_notes: str | None,
+) -> None:
+    """Fail loudly when the timeline reduce call has nothing to ground on.
 
-    The final timeline schema requires at least one entry, so an all-empty
-    candidate set would force the reduce call to fabricate events.
+    The final timeline schema requires at least one entry, so with neither
+    chunk candidates nor manual notes the reduce call would be forced to
+    fabricate events. Manual notes are legitimate grounding: the reduce prompt
+    carries them, and the one-shot strategy already generates notes-informed
+    timelines, so aborting here despite available notes would make strategy
+    selection observable in acceptance behavior (ADR-035 forbids that).
     """
 
     if product != "timeline":
         return
     if any(candidate.get(product) for candidate in candidates):
         return
+    if manual_notes:
+        return
     raise SummarizationContractError(
-        "Ollama timeline map calls returned no timeline candidates; refusing to "
-        "reduce an empty timeline."
+        "Ollama timeline map calls returned no timeline candidates and no "
+        "manual notes are available; refusing to reduce an empty timeline."
     )
 
 

@@ -1331,7 +1331,7 @@ def test_ollama_provider_reducer_fails_loudly_before_map_calls_when_notes_never_
     assert calls == []
 
 
-def test_ollama_provider_reducer_rejects_all_empty_timeline_candidates(
+def test_ollama_provider_reducer_rejects_empty_timeline_candidates_without_notes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = OllamaSummarizationProvider(model="test-model")
@@ -1350,12 +1350,49 @@ def test_ollama_provider_reducer_rejects_all_empty_timeline_candidates(
             calls=[],
         ),
     )
+    request = replace(_long_summary_request(), manual_notes=None)
 
     with pytest.raises(
         SummarizationContractError,
-        match="refusing to reduce an empty timeline",
+        match="no manual notes are available; refusing to reduce an empty timeline",
     ):
-        provider.summarize(_long_summary_request())
+        provider.summarize(request)
+
+
+def test_ollama_provider_reducer_allows_manual_notes_to_ground_empty_timeline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Strategy selection must stay invisible in acceptance behavior (ADR-035):
+    # the one-shot path generates notes-informed timelines, so the reducer must
+    # let manual notes ground the reduce call when every chunk is empty.
+    provider = OllamaSummarizationProvider(model="test-model")
+    empty_map_responses = _reducer_map_responses()
+    empty_map_responses["timeline"] = {
+        "message": {"content": json.dumps({"timeline": []})},
+        "prompt_eval_count": 222,
+        "eval_count": 33,
+    }
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        provider,
+        "_post_json",
+        _strategy_aware_post_json(
+            reduce_responses=_fake_product_responses(),
+            map_responses=empty_map_responses,
+            calls=calls,
+        ),
+    )
+
+    result = provider.summarize(_long_summary_request())
+
+    timeline_reduce_calls = [
+        call
+        for call in calls
+        if call["product"] == "timeline" and call["task"] == "meeting_notes_reduce"
+    ]
+    assert len(timeline_reduce_calls) == 1
+    assert timeline_reduce_calls[0]["has_manual_notes"] is True
+    assert result.timeline == ("Discussed database migration before Friday.",)
 
 
 def test_ollama_provider_reducer_rejects_invalid_map_payload_with_raw_content(
@@ -1898,6 +1935,60 @@ def test_summary_schema_rejects_incomplete_request_records(records: list[str]) -
         request_records=_request_records_for_products(tuple(records)),
     )
     payload = artifact.to_dict()
+
+    validator = Draft202012Validator(_load_summary_schema(), format_checker=FormatChecker())
+    with pytest.raises(ValidationError):
+        validator.validate(payload)
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["duplicate_one_shot", "maps_without_reduce", "mixed_strategy"],
+)
+def test_summary_schema_rejects_incoherent_strategy_shapes(case: str) -> None:
+    reducer_records = _reducer_records_for_product("timeline")
+    records_by_case: dict[str, tuple[ProductRequestRecord, ...]] = {
+        "duplicate_one_shot": (
+            *_request_records_for_products(REQUIRED_NOTE_PRODUCTS),
+            *_request_records_for_products(("timeline",)),
+        ),
+        "maps_without_reduce": (
+            *(record for record in reducer_records if record.call == "map"),
+            *_request_records_for_products(("action_items", "general_summary")),
+        ),
+        "mixed_strategy": (
+            *reducer_records,
+            *_request_records_for_products(REQUIRED_NOTE_PRODUCTS),
+        ),
+    }
+    payload = _summary_artifact_with_records(records_by_case[case]).to_dict()
+
+    validator = Draft202012Validator(_load_summary_schema(), format_checker=FormatChecker())
+    with pytest.raises(ValidationError):
+        validator.validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("call", "overrides"),
+    [
+        ("one_shot", {"chunk_index": 0}),
+        ("one_shot", {"strategy": "reducer"}),
+        ("map", {"chunk_count": None}),
+        ("reduce", {"chunk_index": 0}),
+    ],
+)
+def test_summary_schema_rejects_incoherent_record_fields(
+    call: str,
+    overrides: dict[str, object],
+) -> None:
+    records = (
+        *_reducer_records_for_product("timeline"),
+        *_request_records_for_products(("action_items", "general_summary")),
+    )
+    payload = _summary_artifact_with_records(records).to_dict()
+    raw_records = cast(list[dict[str, object]], payload["request_records"])
+    target = next(item for item in raw_records if item["call"] == call)
+    target.update(overrides)
 
     validator = Draft202012Validator(_load_summary_schema(), format_checker=FormatChecker())
     with pytest.raises(ValidationError):

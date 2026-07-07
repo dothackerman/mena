@@ -146,6 +146,80 @@
         "chunk_index",
         "chunk_count"
       ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "call": {
+                "const": "one_shot"
+              }
+            },
+            "required": ["call"]
+          },
+          "then": {
+            "properties": {
+              "strategy": {
+                "const": "one_shot"
+              },
+              "chunk_index": {
+                "type": "null"
+              },
+              "chunk_count": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "call": {
+                "const": "map"
+              }
+            },
+            "required": ["call"]
+          },
+          "then": {
+            "properties": {
+              "strategy": {
+                "const": "reducer"
+              },
+              "chunk_index": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "chunk_count": {
+                "minimum": 1,
+                "type": "integer"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "call": {
+                "const": "reduce"
+              }
+            },
+            "required": ["call"]
+          },
+          "then": {
+            "properties": {
+              "strategy": {
+                "const": "reducer"
+              },
+              "chunk_index": {
+                "type": "null"
+              },
+              "chunk_count": {
+                "minimum": 1,
+                "type": "integer"
+              }
+            }
+          }
+        }
+      ],
       "type": "object"
     },
     "policy": {
@@ -256,36 +330,265 @@
       "$ref": "#/$defs/provider"
     },
     "request_records": {
+      "description": "Per-call provenance records. Each product must follow one strategy shape: exactly one one_shot call, or one or more map calls plus exactly one reduce call. Gap-free chunk_index coverage, chunk_index < chunk_count, and cross-record chunk_count consistency exceed JSON Schema expressiveness; SummaryArtifact.from_dict enforces them and is authoritative for this contract.",
       "allOf": [
         {
-          "contains": {
-            "properties": {
-              "product": {
-                "const": "timeline"
-              }
+          "anyOf": [
+            {
+              "allOf": [
+                {
+                  "contains": {
+                    "properties": {
+                      "product": {
+                        "const": "timeline"
+                      },
+                      "call": {
+                        "const": "one_shot"
+                      }
+                    },
+                    "required": ["product", "call"]
+                  },
+                  "minContains": 1,
+                  "maxContains": 1
+                },
+                {
+                  "contains": {
+                    "properties": {
+                      "product": {
+                        "const": "timeline"
+                      },
+                      "call": {
+                        "enum": ["map", "reduce"]
+                      }
+                    },
+                    "required": ["product", "call"]
+                  },
+                  "minContains": 0,
+                  "maxContains": 0
+                }
+              ]
             },
-            "required": ["product"]
-          }
+            {
+              "allOf": [
+                {
+                  "contains": {
+                    "properties": {
+                      "product": {
+                        "const": "timeline"
+                      },
+                      "call": {
+                        "const": "one_shot"
+                      }
+                    },
+                    "required": ["product", "call"]
+                  },
+                  "minContains": 0,
+                  "maxContains": 0
+                },
+                {
+                  "contains": {
+                    "properties": {
+                      "product": {
+                        "const": "timeline"
+                      },
+                      "call": {
+                        "const": "map"
+                      }
+                    },
+                    "required": ["product", "call"]
+                  },
+                  "minContains": 1
+                },
+                {
+                  "contains": {
+                    "properties": {
+                      "product": {
+                        "const": "timeline"
+                      },
+                      "call": {
+                        "const": "reduce"
+                      }
+                    },
+                    "required": ["product", "call"]
+                  },
+                  "minContains": 1,
+                  "maxContains": 1
+                }
+              ]
+            }
+          ]
         },
         {
-          "contains": {
-            "properties": {
-              "product": {
-                "const": "action_items"
-              }
+          "anyOf": [
+            {
+              "allOf": [
+                {
+                  "contains": {
+                    "properties": {
+                      "product": {
+                        "const": "action_items"
+                      },
+                      "call": {
+                        "const": "one_shot"
+                      }
+                    },
+                    "required": ["product", "call"]
+                  },
+                  "minContains": 1,
+                  "maxContains": 1
+                },
+                {
+                  "contains": {
+                    "properties": {
+                      "product": {
+                        "const": "action_items"
+                      },
+                      "call": {
+                        "enum": ["map", "reduce"]
+                      }
+                    },
+                    "required": ["product", "call"]
+                  },
+                  "minContains": 0,
+                  "maxContains": 0
+                }
+              ]
             },
-            "required": ["product"]
-          }
+            {
+              "allOf": [
+                {
+                  "contains": {
+                    "properties": {
+                      "product": {
+                        "const": "action_items"
+                      },
+                      "call": {
+                        "const": "one_shot"
+                      }
+                    },
+                    "required": ["product", "call"]
+                  },
+                  "minContains": 0,
+                  "maxContains": 0
+                },
+                {
+                  "contains": {
+                    "properties": {
+                      "product": {
+                        "const": "action_items"
+                      },
+                      "call": {
+                        "const": "map"
+                      }
+                    },
+                    "required": ["product", "call"]
+                  },
+                  "minContains": 1
+                },
+                {
+                  "contains": {
+                    "properties": {
+                      "product": {
+                        "const": "action_items"
+                      },
+                      "call": {
+                        "const": "reduce"
+                      }
+                    },
+                    "required": ["product", "call"]
+                  },
+                  "minContains": 1,
+                  "maxContains": 1
+                }
+              ]
+            }
+          ]
         },
         {
-          "contains": {
-            "properties": {
-              "product": {
-                "const": "general_summary"
-              }
+          "anyOf": [
+            {
+              "allOf": [
+                {
+                  "contains": {
+                    "properties": {
+                      "product": {
+                        "const": "general_summary"
+                      },
+                      "call": {
+                        "const": "one_shot"
+                      }
+                    },
+                    "required": ["product", "call"]
+                  },
+                  "minContains": 1,
+                  "maxContains": 1
+                },
+                {
+                  "contains": {
+                    "properties": {
+                      "product": {
+                        "const": "general_summary"
+                      },
+                      "call": {
+                        "enum": ["map", "reduce"]
+                      }
+                    },
+                    "required": ["product", "call"]
+                  },
+                  "minContains": 0,
+                  "maxContains": 0
+                }
+              ]
             },
-            "required": ["product"]
-          }
+            {
+              "allOf": [
+                {
+                  "contains": {
+                    "properties": {
+                      "product": {
+                        "const": "general_summary"
+                      },
+                      "call": {
+                        "const": "one_shot"
+                      }
+                    },
+                    "required": ["product", "call"]
+                  },
+                  "minContains": 0,
+                  "maxContains": 0
+                },
+                {
+                  "contains": {
+                    "properties": {
+                      "product": {
+                        "const": "general_summary"
+                      },
+                      "call": {
+                        "const": "map"
+                      }
+                    },
+                    "required": ["product", "call"]
+                  },
+                  "minContains": 1
+                },
+                {
+                  "contains": {
+                    "properties": {
+                      "product": {
+                        "const": "general_summary"
+                      },
+                      "call": {
+                        "const": "reduce"
+                      }
+                    },
+                    "required": ["product", "call"]
+                  },
+                  "minContains": 1,
+                  "maxContains": 1
+                }
+              ]
+            }
+          ]
         }
       ],
       "items": {
