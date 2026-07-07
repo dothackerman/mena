@@ -26,7 +26,7 @@ from mena.summarization import (
     SummarizationProviderUnavailable,
     SummarizationTokenBudgetError,
 )
-from test_mistral_llm import API_KEY, _FakeTransport
+from test_mistral_llm import API_KEY, _FakeTransport, _models_body
 from test_summarization import _summary_request, _summary_result
 
 RESOLVED_MODEL = "mistral-small-2603"
@@ -263,22 +263,86 @@ def test_mistral_provider_fails_closed_when_the_serving_model_drifts() -> None:
         provider.summarize(_summary_request())
 
 
-def test_mistral_provider_accepts_the_request_alias_as_response_model() -> None:
+def test_mistral_provider_reverifies_an_alias_echo_before_accepting_it() -> None:
     result = _summary_result()
+    allowed_models = _models_body(
+        {"id": "mistral-small-2603", "aliases": [MISTRAL_SUMMARY_REQUEST_MODEL]}
+    )
     bodies = [
         (
             200,
             _chat_body({"timeline": list(result.timeline)}, model=MISTRAL_SUMMARY_REQUEST_MODEL),
         ),
+        (200, allowed_models),
         (
             200,
-            _chat_body({"action_items": [action.to_dict() for action in result.action_items]}),
+            _chat_body(
+                {"action_items": [action.to_dict() for action in result.action_items]},
+                model=MISTRAL_SUMMARY_REQUEST_MODEL,
+            ),
         ),
         (200, _chat_body({"general_summary": result.general_summary})),
     ]
-    provider = _provider(_FakeTransport(bodies))
+    transport = _FakeTransport(bodies)
+    provider = _provider(transport)
 
     assert provider.summarize(_summary_request()).timeline == result.timeline
+    # The alias echo triggers exactly one /v1/models re-verification, cached
+    # for later products in the same run.
+    models_calls = [call for call in transport.calls if call[1].endswith("/v1/models")]
+    assert len(models_calls) == 1
+
+
+def test_mistral_provider_rejects_an_alias_echo_that_resolved_outside_the_allowlist() -> None:
+    result = _summary_result()
+    drifted_models = _models_body(
+        {"id": "mistral-small-2707", "aliases": [MISTRAL_SUMMARY_REQUEST_MODEL]}
+    )
+    bodies = [
+        (
+            200,
+            _chat_body({"timeline": list(result.timeline)}, model=MISTRAL_SUMMARY_REQUEST_MODEL),
+        ),
+        (200, drifted_models),
+    ]
+    provider = _provider(_FakeTransport(bodies))
+
+    with pytest.raises(SummarizationError, match="mistral-small-2707") as excinfo:
+        provider.summarize(_summary_request())
+
+    assert MISTRAL_SUMMARY_ALLOWLIST_POLICY in str(excinfo.value)
+
+
+def test_mistral_provider_reports_unavailable_when_alias_reverification_cannot_run() -> None:
+    result = _summary_result()
+    bodies: list[tuple[int, bytes] | Exception] = [
+        (
+            200,
+            _chat_body({"timeline": list(result.timeline)}, model=MISTRAL_SUMMARY_REQUEST_MODEL),
+        ),
+        OSError("down"),
+        OSError("down"),
+        OSError("down"),
+    ]
+    provider = _provider(_FakeTransport(bodies))
+
+    with pytest.raises(SummarizationProviderUnavailable, match="re-verifying"):
+        provider.summarize(_summary_request())
+
+
+def test_mistral_provider_scopes_reuse_identity_by_account() -> None:
+    first = MistralSummarizationProvider(api_key="mena-key-one")
+    second = MistralSummarizationProvider(api_key="mena-key-two")
+    keyless = MistralSummarizationProvider(api_key=None)
+
+    assert first.metadata.account_scope is not None
+    assert first.metadata.account_scope != second.metadata.account_scope
+    assert first.metadata.config_id != second.metadata.config_id
+    assert keyless.metadata.account_scope is None
+    # The non-secret scope never exposes key material.
+    payload = json.dumps(first.metadata.to_dict())
+    assert "mena-key-one" not in payload
+    assert "account_scope" not in OllamaSummarizationProvider(model="m").metadata.to_dict()
 
 
 def test_mistral_provider_guards_the_context_budget_before_sending() -> None:

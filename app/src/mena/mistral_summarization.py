@@ -23,15 +23,18 @@ from mena.mistral_llm import (
     MISTRAL_SUMMARY_REQUEST_MODEL,
     MistralAuthError,
     MistralContractError,
+    MistralModelResolution,
     MistralQuotaError,
     MistralUnavailableError,
     SleepFn,
     Transport,
+    mistral_account_scope,
     mistral_chat_completion,
     mistral_finish_reason,
     mistral_message_content,
     mistral_response_model,
     mistral_token_counts,
+    resolve_mistral_summary_model,
 )
 from mena.summarization import (
     PRODUCT_RESPONSE_SCHEMAS,
@@ -78,11 +81,13 @@ class MistralSummarizationProvider:
             temperature=MISTRAL_SUMMARIZATION_TEMPERATURE,
             seed=MISTRAL_SUMMARIZATION_SEED,
             resolved_model=resolved_model,
+            account_scope=None if api_key is None else mistral_account_scope(api_key),
         )
         self._api_key = api_key
         self._timeout_seconds = timeout_seconds
         self._transport = transport
         self._sleep = sleep
+        self._alias_verification: MistralModelResolution | None = None
 
     def summarize(self, request: SummarizationRequest) -> SummaryResult:
         if self._api_key is None:
@@ -216,16 +221,51 @@ class MistralSummarizationProvider:
 
         Setup/readiness already resolved the request alias, but the alias is
         mutable; the response-time model identity is the last line of defense
-        against silent drift between readiness and the actual call.
+        against silent drift between readiness and the actual call. An echo of
+        the mutable alias is not evidence, so it is re-resolved through
+        ``/v1/models`` (once per provider instance) before being accepted.
         """
 
         response_model = mistral_response_model(response)
-        if response_model == self.metadata.model:
-            return
         if response_model in MISTRAL_SUMMARY_ALLOWED_RESOLVED_MODELS:
             return
+        if response_model == self.metadata.model:
+            resolution = self._verified_alias_resolution(product)
+            if resolution.allowed:
+                return
+            raise SummarizationError(
+                f"Mistral served {product} under the mutable alias "
+                f"{response_model!r}, which currently resolves to "
+                f"{resolution.resolved_model!r}, outside the accepted snapshot "
+                f"under {MISTRAL_SUMMARY_ALLOWLIST_POLICY}; refusing the response "
+                "until a new allow-list review accepts it."
+            )
         raise SummarizationError(
             f"Mistral served {product} with model {response_model!r}, outside the "
             f"accepted snapshot under {MISTRAL_SUMMARY_ALLOWLIST_POLICY}; refusing "
             "the response until a new allow-list review accepts it."
         )
+
+    def _verified_alias_resolution(self, product: str) -> MistralModelResolution:
+        if self._alias_verification is not None:
+            return self._alias_verification
+        assert self._api_key is not None
+        try:
+            self._alias_verification = resolve_mistral_summary_model(
+                api_key=self._api_key,
+                timeout_seconds=self._timeout_seconds,
+                transport=self._transport,
+                sleep=self._sleep,
+            )
+        except MistralUnavailableError as exc:
+            raise SummarizationProviderUnavailable(
+                "Mistral is unavailable while re-verifying the alias resolution "
+                f"for {product}: {exc}"
+            ) from exc
+        except (MistralAuthError, MistralQuotaError) as exc:
+            raise SummarizationError(
+                f"Mistral alias re-verification failed for {product}: {exc}"
+            ) from exc
+        except MistralContractError as exc:
+            raise SummarizationContractError(str(exc)) from exc
+        return self._alias_verification
