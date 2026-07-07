@@ -14,11 +14,19 @@ from mena.diarization import (
     DiarizationProviderUnavailable,
     PyannoteCommunityDiarizationProvider,
 )
+from mena.mistral_llm import (
+    MENA_MISTRAL_API_KEY_ENV,
+    MISTRAL_SUMMARY_ALLOWLIST_POLICY,
+    MISTRAL_SUMMARY_REQUEST_MODEL,
+    MistralSummaryState,
+)
+from mena.mistral_summarization import MistralSummarizationProvider
 from mena.provider_validation import ProviderValidationError
 from mena.runtime_profile import (
     BoundProcessingRuntime,
     RuntimeFallbackUnavailable,
     RuntimeProfileSelection,
+    SummarizationRuntimePlan,
     bind_processing_runtime,
     bind_summarization_runtime,
     run_processing_with_runtime_fallback,
@@ -29,6 +37,8 @@ from mena.runtime_profile import (
     runtime_transcription_factory,
     select_runtime_profile,
     select_runtime_profile_after_stage_failure,
+    select_summarization_runtime_after_stage_failure,
+    select_summarization_runtime_profile,
     store_runtime_profile_provenance,
 )
 from mena.semantic_coherence import OllamaSemanticCoherenceProvider, SemanticCoherenceProvider
@@ -48,8 +58,11 @@ from mena.setup import (
     default_profile_catalog,
     evaluate_setup,
     get_alpha_local_profile,
+    get_mistral_summary_profile,
+    mistral_summary_stage_profile,
     persist_runtime_profile_state,
 )
+from mena.summarization import SummarizationError
 from mena.transcription import (
     FasterWhisperModelProfile,
     FasterWhisperTranscriptionProvider,
@@ -1094,3 +1107,499 @@ def test_run_processing_with_runtime_fallback_does_not_retry_after_fallback_used
             ),
             runtime_profile_store_fn=lambda **_kwargs: None,
         )
+
+
+def _mistral_summary_state(
+    *,
+    key_present: bool = True,
+    reachable: bool = True,
+    resolved_model: str | None = "mistral-small-2603",
+    model_allowed: bool = True,
+    detail: str = "resolved inside the accepted snapshot",
+) -> MistralSummaryState:
+    return MistralSummaryState(
+        key_present=key_present,
+        reachable=reachable,
+        request_model=MISTRAL_SUMMARY_REQUEST_MODEL,
+        resolved_model=resolved_model,
+        model_allowed=model_allowed,
+        policy=MISTRAL_SUMMARY_ALLOWLIST_POLICY,
+        detail=detail,
+    )
+
+
+def _mistral_probe(state: MistralSummaryState) -> Any:
+    def _probe(*, env: object) -> MistralSummaryState:
+        _ = env
+        return state
+
+    return _probe
+
+
+def _accepted_mistral_primary_state(
+    *,
+    settings: AppSettings,
+    setup_state: LocalInstallationState,
+) -> RuntimeProfileState:
+    profile = get_mistral_summary_profile(settings.local_llm.ollama_model)
+    mistral_state = replace(setup_state, mistral_summary=_mistral_summary_state())
+    return build_runtime_profile_state(evaluate_setup(profile, mistral_state))
+
+
+def _accepted_local_state_with_mistral_fallback(
+    *,
+    settings: AppSettings,
+    setup_state: LocalInstallationState,
+) -> RuntimeProfileState:
+    profile = get_alpha_local_profile(settings.local_llm.ollama_model)
+    return build_runtime_profile_state(
+        evaluate_setup(profile, setup_state),
+        summarization_fallback_providers=(mistral_summary_stage_profile(),),
+    )
+
+
+def _demote_remote_authorization(state: RuntimeProfileState) -> RuntimeProfileState:
+    payload = state.to_dict()
+    authorization = cast(dict[str, object], payload["fallback_authorization"])
+    authorization["remote_status"] = "configured_unauthorized"
+    authorization["remote_stage_scope"] = []
+    return RuntimeProfileState.from_dict(payload)
+
+
+def test_summarization_runtime_selection_uses_accepted_mistral_primary_without_prompt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    setup_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = _accepted_mistral_primary_state(settings=settings, setup_state=setup_state)
+    persist_runtime_profile_state(accepted, paths=settings.paths)
+    mistral_ready = replace(setup_state, mistral_summary=_mistral_summary_state())
+    monkeypatch.setattr(
+        "mena.runtime_profile.detect_local_installation_state",
+        lambda *_args, **_kwargs: mistral_ready,
+    )
+
+    def _never_prompt(*_args: object, **_kwargs: object) -> bool:
+        raise AssertionError("accepted primary Mistral must not prompt")
+
+    selection = select_summarization_runtime_profile(
+        settings=settings,
+        runner=None,
+        command_identity=None,
+        hardware=None,
+        allow_runtime_fallback=False,
+        authorize_runtime_fallback=_never_prompt,
+        authorize_remote_summarization_fallback=_never_prompt,
+    )
+
+    assert not selection.fallback_used
+    assert selection.summarization is not None
+    plan = selection.summarization
+    assert plan.accepted_stage.provider == "Mistral"
+    assert plan.actual_stage == plan.accepted_stage
+    assert plan.ordered_fallback == ()
+    assert plan.resolved_model == "mistral-small-2603"
+
+
+def test_summarization_runtime_selection_mistral_primary_fails_closed_on_alias_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    setup_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = _accepted_mistral_primary_state(settings=settings, setup_state=setup_state)
+    persist_runtime_profile_state(accepted, paths=settings.paths)
+    drifted = replace(
+        setup_state,
+        mistral_summary=_mistral_summary_state(
+            resolved_model="mistral-small-2707",
+            model_allowed=False,
+            detail=(
+                "resolved to 'mistral-small-2707', outside the accepted snapshot; "
+                f"failing closed under {MISTRAL_SUMMARY_ALLOWLIST_POLICY}"
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        "mena.runtime_profile.detect_local_installation_state",
+        lambda *_args, **_kwargs: drifted,
+    )
+
+    with pytest.raises(RuntimeFallbackUnavailable, match="failing closed"):
+        select_summarization_runtime_profile(
+            settings=settings,
+            runner=None,
+            command_identity=None,
+            hardware=None,
+            allow_runtime_fallback=False,
+        )
+
+
+def test_summarization_runtime_selection_uses_accepted_mistral_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    ready_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = _accepted_local_state_with_mistral_fallback(
+        settings=settings, setup_state=ready_state
+    )
+    persist_runtime_profile_state(accepted, paths=settings.paths)
+    ollama_down = _setup_state(
+        settings=settings,
+        ollama_model_present=False,
+        pyannote_token_present=True,
+    )
+    monkeypatch.setattr(
+        "mena.runtime_profile.detect_local_installation_state",
+        lambda *_args, **_kwargs: ollama_down,
+    )
+
+    selection = select_summarization_runtime_profile(
+        settings=settings,
+        runner=None,
+        command_identity=None,
+        hardware=None,
+        allow_runtime_fallback=False,
+        env={},
+        mistral_probe=_mistral_probe(_mistral_summary_state()),
+    )
+
+    assert selection.fallback_used
+    assert selection.fallback_status == "used"
+    assert selection.fallback_authorization_source == "setup_authorized"
+    assert selection.fallback_reason is not None
+    assert "not listed by Ollama" in selection.fallback_reason
+    assert selection.summarization is not None
+    plan = selection.summarization
+    assert plan.accepted_stage.provider == "Ollama"
+    assert plan.actual_stage.provider == "Mistral"
+    assert plan.resolved_model == "mistral-small-2603"
+
+
+def test_summarization_runtime_selection_local_authorization_never_authorizes_remote(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    ready_state = _setup_state(settings=settings, pyannote_token_present=True)
+    profile = get_alpha_local_profile(settings.local_llm.ollama_model)
+    fallback_profile = default_profile_catalog(settings.local_llm.ollama_model)[1]
+    accepted = build_runtime_profile_state(
+        evaluate_setup(profile, ready_state),
+        fallback_evaluation=evaluate_setup(fallback_profile, ready_state),
+        authorize_local_fallback=True,
+        summarization_fallback_providers=(mistral_summary_stage_profile(),),
+    )
+    accepted = _demote_remote_authorization(accepted)
+    persist_runtime_profile_state(accepted, paths=settings.paths)
+    ollama_down = _setup_state(
+        settings=settings,
+        ollama_model_present=False,
+        pyannote_token_present=True,
+    )
+    monkeypatch.setattr(
+        "mena.runtime_profile.detect_local_installation_state",
+        lambda *_args, **_kwargs: ollama_down,
+    )
+
+    assert accepted.fallback_authorization.local_status == "authorized"
+    with pytest.raises(RuntimeFallbackUnavailable, match="not pre-authorized"):
+        select_summarization_runtime_profile(
+            settings=settings,
+            runner=None,
+            command_identity=None,
+            hardware=None,
+            # An explicit one-run local fallback flag must not authorize a
+            # remote transition either.
+            allow_runtime_fallback=True,
+            env={},
+            mistral_probe=_mistral_probe(_mistral_summary_state()),
+        )
+
+
+def test_summarization_runtime_selection_prompts_for_unauthorized_remote_transition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    ready_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = _demote_remote_authorization(
+        _accepted_local_state_with_mistral_fallback(settings=settings, setup_state=ready_state)
+    )
+    persist_runtime_profile_state(accepted, paths=settings.paths)
+    ollama_down = _setup_state(
+        settings=settings,
+        ollama_model_present=False,
+        pyannote_token_present=True,
+    )
+    monkeypatch.setattr(
+        "mena.runtime_profile.detect_local_installation_state",
+        lambda *_args, **_kwargs: ollama_down,
+    )
+    observed: dict[str, object] = {}
+
+    def _authorize(reason: str, state: MistralSummaryState) -> bool:
+        observed["reason"] = reason
+        observed["resolved_model"] = state.resolved_model
+        return True
+
+    selection = select_summarization_runtime_profile(
+        settings=settings,
+        runner=None,
+        command_identity=None,
+        hardware=None,
+        allow_runtime_fallback=False,
+        authorize_remote_summarization_fallback=_authorize,
+        env={},
+        mistral_probe=_mistral_probe(_mistral_summary_state()),
+    )
+
+    assert selection.fallback_used
+    assert selection.fallback_authorization_source == "interactive"
+    assert "not listed by Ollama" in cast(str, observed["reason"])
+    assert observed["resolved_model"] == "mistral-small-2603"
+
+
+def test_summarization_runtime_selection_reports_unviable_mistral_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    ready_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = _accepted_local_state_with_mistral_fallback(
+        settings=settings, setup_state=ready_state
+    )
+    persist_runtime_profile_state(accepted, paths=settings.paths)
+    ollama_down = _setup_state(
+        settings=settings,
+        ollama_model_present=False,
+        pyannote_token_present=True,
+    )
+    monkeypatch.setattr(
+        "mena.runtime_profile.detect_local_installation_state",
+        lambda *_args, **_kwargs: ollama_down,
+    )
+
+    with pytest.raises(RuntimeFallbackUnavailable, match="MENA_MISTRAL_API_KEY"):
+        select_summarization_runtime_profile(
+            settings=settings,
+            runner=None,
+            command_identity=None,
+            hardware=None,
+            allow_runtime_fallback=False,
+            env={},
+            mistral_probe=_mistral_probe(
+                _mistral_summary_state(
+                    key_present=False,
+                    reachable=False,
+                    resolved_model=None,
+                    model_allowed=False,
+                    detail="MENA_MISTRAL_API_KEY is not set.",
+                )
+            ),
+        )
+
+
+def test_summarization_runtime_selection_keeps_legacy_local_only_shape(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    setup_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = _runtime_profile_state_with_evaluated_fallback(
+        settings=settings,
+        setup_state=setup_state,
+    )
+    persist_runtime_profile_state(accepted, paths=settings.paths)
+    monkeypatch.setattr(
+        "mena.runtime_profile.detect_local_installation_state",
+        lambda *_args, **_kwargs: setup_state,
+    )
+
+    selection = select_summarization_runtime_profile(
+        settings=settings,
+        runner=None,
+        command_identity=None,
+        hardware=None,
+        allow_runtime_fallback=False,
+    )
+
+    assert not selection.fallback_used
+    assert selection.summarization is not None
+    assert selection.summarization.actual_stage.provider == "Ollama"
+    assert selection.summarization.ordered_fallback == ()
+
+
+def test_summarization_stage_failure_selection_consumes_next_fallback_entry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    ready_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = _accepted_local_state_with_mistral_fallback(
+        settings=settings, setup_state=ready_state
+    )
+    monkeypatch.setattr(
+        "mena.runtime_profile.detect_local_installation_state",
+        lambda *_args, **_kwargs: ready_state,
+    )
+    accepted_stage = next(
+        stage for stage in accepted.stage_policies if stage.stage == "summarization"
+    )
+    used_plan = SummarizationRuntimePlan(
+        accepted_stage=accepted_stage,
+        actual_stage=accepted_stage,
+        ordered_fallback=accepted.summarization_fallback_providers,
+    )
+
+    selection = select_summarization_runtime_after_stage_failure(
+        settings=settings,
+        runner=None,
+        command_identity=None,
+        hardware=None,
+        accepted=accepted,
+        used_plan=used_plan,
+        failure_reason="Ollama summarization provider is unavailable.",
+        failure_class="SummarizationProviderUnavailable",
+        failed_input_artifacts=("session:artifacts/merged_transcript/merged.json",),
+        env={},
+        mistral_probe=_mistral_probe(_mistral_summary_state()),
+    )
+
+    assert selection.fallback_used
+    assert selection.fallback_status == "used_after_stage_failure"
+    assert selection.fallback_failed_stage == "summarization"
+    assert selection.fallback_authorization_source == "setup_authorized"
+    assert selection.summarization is not None
+    assert selection.summarization.actual_stage.provider == "Mistral"
+
+
+def test_summarization_stage_failure_selection_stops_after_the_last_entry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    ready_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = _accepted_local_state_with_mistral_fallback(
+        settings=settings, setup_state=ready_state
+    )
+    monkeypatch.setattr(
+        "mena.runtime_profile.detect_local_installation_state",
+        lambda *_args, **_kwargs: ready_state,
+    )
+    accepted_stage = next(
+        stage for stage in accepted.stage_policies if stage.stage == "summarization"
+    )
+    used_plan = SummarizationRuntimePlan(
+        accepted_stage=accepted_stage,
+        actual_stage=accepted.summarization_fallback_providers[0],
+        ordered_fallback=accepted.summarization_fallback_providers,
+    )
+
+    with pytest.raises(RuntimeFallbackUnavailable, match="no further accepted fallback"):
+        select_summarization_runtime_after_stage_failure(
+            settings=settings,
+            runner=None,
+            command_identity=None,
+            hardware=None,
+            accepted=accepted,
+            used_plan=used_plan,
+            failure_reason="Mistral summarization provider is unavailable.",
+            failure_class="SummarizationProviderUnavailable",
+            env={},
+            mistral_probe=_mistral_probe(_mistral_summary_state()),
+        )
+
+
+def test_runtime_profile_provenance_records_summarization_plan(tmp_path: Path) -> None:
+    store = FileSystemArtifactStore(session_id="session", session_dir=tmp_path)
+    accepted_stage = StageProfile(
+        stage="summarization",
+        provider="Ollama",
+        model="llama3.1:8b",
+        device="local-service",
+        policy="local-preferred",
+    )
+    selection = replace(
+        _selection("accepted", fallback_used=True, fallback_status="used"),
+        fallback_reason="ollama is down",
+        fallback_authorization_source="setup_authorized",
+        summarization=SummarizationRuntimePlan(
+            accepted_stage=accepted_stage,
+            actual_stage=mistral_summary_stage_profile(),
+            ordered_fallback=(mistral_summary_stage_profile(),),
+            resolved_model="mistral-small-2603",
+        ),
+    )
+
+    record = store_runtime_profile_provenance(
+        store=store,
+        run_id="summarize-run",
+        selection=selection,
+    )
+
+    payload = json.loads(store.retrieve(record.id).decode("utf-8"))
+    summarization = payload["summarization"]
+    assert summarization["accepted_provider"] == "Ollama"
+    assert summarization["actual_provider"] == "Mistral"
+    assert summarization["request_model"] == MISTRAL_SUMMARY_REQUEST_MODEL
+    assert summarization["resolved_model"] == "mistral-small-2603"
+    assert summarization["fallback_used"] is True
+    assert summarization["fallback_reason"] == "ollama is down"
+    assert summarization["authorization_source"] == "setup_authorized"
+    assert summarization["ordered_fallback_providers"][0]["provider"] == "Mistral"
+
+
+def test_bind_summarization_runtime_constructs_the_mistral_provider(tmp_path: Path) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    accepted_stage = StageProfile(
+        stage="summarization",
+        provider="Ollama",
+        model="llama3.1:8b",
+        device="local-service",
+        policy="local-preferred",
+    )
+    selection = replace(
+        _selection("accepted"),
+        summarization=SummarizationRuntimePlan(
+            accepted_stage=accepted_stage,
+            actual_stage=mistral_summary_stage_profile(),
+            ordered_fallback=(mistral_summary_stage_profile(),),
+            resolved_model="mistral-small-2603",
+        ),
+    )
+
+    provider = bind_summarization_runtime(
+        selection=selection,
+        settings=settings,
+        env={MENA_MISTRAL_API_KEY_ENV: "mena-key"},
+    )
+
+    assert isinstance(provider, MistralSummarizationProvider)
+    assert provider.metadata.model == MISTRAL_SUMMARY_REQUEST_MODEL
+    assert provider.metadata.resolved_model == "mistral-small-2603"
+
+
+def test_bind_summarization_runtime_never_consumes_the_generic_mistral_key(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    selection = replace(
+        _selection("accepted"),
+        summarization=SummarizationRuntimePlan(
+            accepted_stage=mistral_summary_stage_profile(),
+            actual_stage=mistral_summary_stage_profile(),
+        ),
+    )
+
+    provider = bind_summarization_runtime(
+        selection=selection,
+        settings=settings,
+        env={"MISTRAL_API_KEY": "generic-key"},
+    )
+
+    assert isinstance(provider, MistralSummarizationProvider)
+    with pytest.raises(SummarizationError, match=MENA_MISTRAL_API_KEY_ENV):
+        provider.summarize(cast(Any, SimpleNamespace()))

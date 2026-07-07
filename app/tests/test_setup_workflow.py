@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 
 from mena.interaction import ScriptedInteraction, ScriptedResponse
+from mena.mistral_llm import MistralSummaryState
 from mena.settings import AppSettings
 from mena.setup import (
+    ALPHA_LOCAL_PROFILE_ID,
+    FALLBACK_LOCAL_PROFILE_ID,
+    MISTRAL_SUMMARY_PROFILE_ID,
     CommandCheck,
     CommandIdentity,
     CommandRun,
@@ -272,3 +278,247 @@ def _setup_state(
 
 def _messages(events: Sequence[object]) -> str:
     return "\n".join(event.text for event in events if isinstance(event, SetupMessageEvent))
+
+
+class RoutedDetector(SetupDetector):
+    """Routes detection states by profile id for multi-profile setup flows."""
+
+    def __init__(self, states: dict[str, list[LocalInstallationState]]) -> None:
+        self.states = {key: list(value) for key, value in states.items()}
+
+    def detect(
+        self,
+        settings: AppSettings,
+        *,
+        runner: object,
+        profile: SetupProfile | None = None,
+    ) -> LocalInstallationState:
+        _ = settings, runner
+        key = ALPHA_LOCAL_PROFILE_ID if profile is None else profile.id
+        states = self.states.get(key)
+        if not states:
+            raise AssertionError(f"No scripted setup state remains for profile {key!r}.")
+        return states.pop(0)
+
+
+def _mistral_ready_state(state: LocalInstallationState) -> LocalInstallationState:
+    return replace(
+        state,
+        mistral_summary=MistralSummaryState(
+            key_present=True,
+            reachable=True,
+            request_model="mistral-small-latest",
+            resolved_model="mistral-small-2603",
+            model_allowed=True,
+            policy="mena-mistral-summary-allowlist-2026-06-29-v1",
+            detail=(
+                "Request model 'mistral-small-latest' resolved to 'mistral-small-2603' "
+                "inside the accepted snapshot."
+            ),
+        ),
+    )
+
+
+def _mistral_keyless_state(state: LocalInstallationState) -> LocalInstallationState:
+    return replace(
+        state,
+        mistral_summary=MistralSummaryState(
+            key_present=False,
+            reachable=False,
+            request_model="mistral-small-latest",
+            resolved_model=None,
+            model_allowed=False,
+            policy="mena-mistral-summary-allowlist-2026-06-29-v1",
+            detail="MENA_MISTRAL_API_KEY is not set.",
+        ),
+    )
+
+
+def test_setup_workflow_accepts_mistral_primary_after_disclosure(tmp_path: Path) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    ready = _mistral_ready_state(_setup_state(settings=settings, pyannote_token_present=True))
+    interaction = ScriptedInteraction(
+        (ScriptedResponse("confirm", "setup.mistral_summary_disclosure", True),)
+    )
+
+    result = run_setup_workflow(
+        settings=settings,
+        options=SetupWorkflowOptions(summarization_provider="mistral"),
+        interaction=interaction,
+        runner=FakeRunner(),
+        detector=RoutedDetector(
+            {
+                MISTRAL_SUMMARY_PROFILE_ID: [ready],
+                FALLBACK_LOCAL_PROFILE_ID: [ready],
+            }
+        ),
+    )
+
+    assert result.exit_code == 0
+    accepted = load_runtime_profile_state(settings.paths)
+    assert accepted.accepted_profile_id == MISTRAL_SUMMARY_PROFILE_ID
+    summarization = [stage for stage in accepted.stage_policies if stage.stage == "summarization"]
+    assert summarization[0].provider == "Mistral"
+    assert summarization[0].model == "mistral-small-latest"
+    assert accepted.summarization_fallback_providers == ()
+    evidence = json.dumps(accepted.to_dict())
+    assert "mistral-small-2603" in evidence
+    assert "MENA_MISTRAL_API_KEY is not set" not in evidence
+    messages = _messages(result.events)
+    assert "Mistral summarization disclosure (primary provider):" in messages
+    assert "sent to your configured Mistral account" in messages
+    assert "Accepted summarization primary: Mistral (mistral-small-latest)" in messages
+    assert "Accepted summarization fallback order: none" in messages
+
+
+def test_setup_workflow_mistral_primary_declined_disclosure_persists_nothing(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    ready = _mistral_ready_state(_setup_state(settings=settings, pyannote_token_present=True))
+    interaction = ScriptedInteraction(
+        (ScriptedResponse("confirm", "setup.mistral_summary_disclosure", False),)
+    )
+
+    result = run_setup_workflow(
+        settings=settings,
+        # assume_yes must not imply disclosure acceptance.
+        options=SetupWorkflowOptions(assume_yes=True, summarization_provider="mistral"),
+        interaction=interaction,
+        runner=FakeRunner(),
+        detector=RoutedDetector({MISTRAL_SUMMARY_PROFILE_ID: [ready]}),
+    )
+
+    assert result.exit_code == 1
+    assert not (settings.paths.state_home / "setup-state.json").exists()
+    assert "Mistral summarization was declined" in _messages(result.events)
+
+
+def test_setup_workflow_accepts_mistral_primary_with_explicit_disclosure_option(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    ready = _mistral_ready_state(_setup_state(settings=settings, pyannote_token_present=True))
+
+    result = run_setup_workflow(
+        settings=settings,
+        options=SetupWorkflowOptions(
+            summarization_provider="mistral",
+            accept_mistral_disclosure=True,
+        ),
+        interaction=ScriptedInteraction(),
+        runner=FakeRunner(),
+        detector=RoutedDetector(
+            {
+                MISTRAL_SUMMARY_PROFILE_ID: [ready],
+                FALLBACK_LOCAL_PROFILE_ID: [ready],
+            }
+        ),
+    )
+
+    assert result.exit_code == 0
+    assert "disclosure accepted via explicit setup option" in _messages(result.events)
+
+
+def test_setup_workflow_accepts_local_primary_with_mistral_fallback(tmp_path: Path) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    local_ready = _setup_state(settings=settings, pyannote_token_present=True)
+    mistral_ready = _mistral_ready_state(local_ready)
+    interaction = ScriptedInteraction(
+        (ScriptedResponse("confirm", "setup.mistral_summary_disclosure", True),)
+    )
+
+    result = run_setup_workflow(
+        settings=settings,
+        options=SetupWorkflowOptions(mistral_summary_fallback=True),
+        interaction=interaction,
+        runner=FakeRunner(),
+        detector=RoutedDetector(
+            {
+                ALPHA_LOCAL_PROFILE_ID: [local_ready],
+                MISTRAL_SUMMARY_PROFILE_ID: [mistral_ready],
+                FALLBACK_LOCAL_PROFILE_ID: [local_ready],
+            }
+        ),
+    )
+
+    assert result.exit_code == 0
+    accepted = load_runtime_profile_state(settings.paths)
+    assert accepted.accepted_profile_id == ALPHA_LOCAL_PROFILE_ID
+    summarization = [stage for stage in accepted.stage_policies if stage.stage == "summarization"]
+    assert summarization[0].provider == "Ollama"
+    assert len(accepted.summarization_fallback_providers) == 1
+    fallback_entry = accepted.summarization_fallback_providers[0]
+    assert fallback_entry.provider == "Mistral"
+    assert fallback_entry.model == "mistral-small-latest"
+    assert accepted.fallback_authorization.remote_status == "authorized"
+    assert accepted.fallback_authorization.remote_stage_scope == ("summarization",)
+    evidence = accepted.evidence
+    assert isinstance(evidence["mistral_summary"], dict)
+    messages = _messages(result.events)
+    assert "Mistral summarization disclosure (fallback provider):" in messages
+    assert "Accepted summarization fallback order: Mistral (mistral-small-latest)" in messages
+
+
+def test_setup_workflow_mistral_fallback_fails_closed_without_readiness(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    local_ready = _setup_state(settings=settings, pyannote_token_present=True)
+
+    result = run_setup_workflow(
+        settings=settings,
+        options=SetupWorkflowOptions(
+            mistral_summary_fallback=True,
+            accept_mistral_disclosure=True,
+        ),
+        interaction=ScriptedInteraction(),
+        runner=FakeRunner(),
+        detector=RoutedDetector(
+            {
+                ALPHA_LOCAL_PROFILE_ID: [local_ready],
+                MISTRAL_SUMMARY_PROFILE_ID: [_mistral_keyless_state(local_ready)],
+            }
+        ),
+    )
+
+    assert result.exit_code == 1
+    assert not (settings.paths.state_home / "setup-state.json").exists()
+    messages = _messages(result.events)
+    assert "Mistral summarization fallback was not accepted" in messages
+    assert "MENA_MISTRAL_API_KEY is not set" in messages
+
+
+def test_setup_workflow_rejects_conflicting_mistral_shapes(tmp_path: Path) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+
+    result = run_setup_workflow(
+        settings=settings,
+        options=SetupWorkflowOptions(
+            summarization_provider="mistral",
+            mistral_summary_fallback=True,
+        ),
+        interaction=ScriptedInteraction(),
+        runner=FakeRunner(),
+        detector=RoutedDetector({}),
+    )
+
+    assert result.exit_code == 1
+    assert "cannot be both" in _messages(result.events)
+
+
+def test_setup_workflow_rejects_unknown_summarization_provider_option(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+
+    result = run_setup_workflow(
+        settings=settings,
+        options=SetupWorkflowOptions(summarization_provider="openrouter"),
+        interaction=ScriptedInteraction(),
+        runner=FakeRunner(),
+        detector=RoutedDetector({}),
+    )
+
+    assert result.exit_code == 1
+    assert "Unsupported summarization provider option" in _messages(result.events)
