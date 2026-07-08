@@ -1279,3 +1279,64 @@ class _FakeRunner:
         if command[:2] == ("ollama", "list"):
             return CommandRun(command, 0, stdout="NAME\nllama3.1:8b latest")
         return CommandRun(command, 0, stdout="ok")
+
+
+def test_mistral_primary_profile_does_not_require_ollama() -> None:
+    profile = get_mistral_summary_profile()
+    assert "ollama" not in profile.required_commands
+
+    state = replace(
+        _state(
+            missing_commands={"ollama"},
+            ollama_reachable=False,
+            ollama_model_present=False,
+        ),
+        mistral_summary=_mistral_state(),
+    )
+
+    evaluation = evaluate_setup(profile, state)
+
+    assert evaluation.ready
+    item = _readiness(evaluation, "ollama-model")
+    assert item.ready
+    assert "semantic review skipped" in item.detail
+    assert all(action.id != "command:ollama" for action in evaluation.plan.actions)
+    assert not evaluation.plan.has_required_actions
+
+
+def test_mistral_primary_profile_offers_optional_semantic_model_pull() -> None:
+    profile = get_mistral_summary_profile()
+    state = replace(
+        _state(ollama_model_present=False),
+        mistral_summary=_mistral_state(),
+    )
+
+    evaluation = evaluate_setup(profile, state)
+
+    assert evaluation.ready
+    action = _action(evaluation.plan, "ollama-model")
+    assert action.required is False
+    assert action.mode == "automated"
+    assert action.command == ("ollama", "pull", state.ollama.model)
+
+
+def test_detection_probes_ollama_on_path_when_it_is_an_optional_dependency(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    runner = _FakeRunner()
+
+    state = detect_local_installation_state(
+        settings,
+        runner=runner,
+        command_identity=_identity(),
+        hardware=_hardware(),
+        profile=get_mistral_summary_profile(),
+        env={"MENA_MISTRAL_API_KEY": "mena-key"},
+        mistral_probe=lambda *, env: _mistral_state(),
+    )
+
+    # `ollama` is not a required command for the Mistral-primary profile, but
+    # the optional semantic-review stage still detects it directly from PATH.
+    assert state.ollama.command.present
+    assert state.ollama.model_present

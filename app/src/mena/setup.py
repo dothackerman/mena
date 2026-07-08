@@ -604,7 +604,12 @@ def default_profile_catalog(ollama_model: str = OLLAMA_DEFAULT_MODEL) -> tuple[S
                     install_extra="diarization",
                 ),
             ),
-            required_commands=REQUIRED_COMMANDS,
+            # Ollama serves only the optional local semantic-review stage in
+            # this profile, so its absence must degrade (semantic review
+            # skipped) instead of blocking the direct-Mistral shape.
+            required_commands=tuple(
+                command for command in REQUIRED_COMMANDS if command != "ollama"
+            ),
             playback_commands=PLAYBACK_COMMANDS,
             minimum_ram_gb=MINIMUM_RAM_GB,
             minimum_cuda_vram_gb=MINIMUM_CUDA_VRAM_GB,
@@ -729,10 +734,16 @@ def detect_local_installation_state(
         for requirement in evaluated_profile.python_surfaces
     )
     if _profile_has_local_llm_stage(evaluated_profile):
+        # Ollama may be an optional stage dependency (semantic review) rather
+        # than a required command, so probe PATH directly when it is absent
+        # from the profile's required-command checks.
+        ollama_command = _command_check(commands, "ollama")
+        if not ollama_command.present and "ollama" not in evaluated_profile.required_commands:
+            ollama_command = CommandCheck(name="ollama", path=command_runner.which("ollama"))
         ollama = _detect_ollama_state(
             settings=settings,
             model=_local_llm_model(evaluated_profile),
-            command=_command_check(commands, "ollama"),
+            command=ollama_command,
             runner=command_runner,
         )
     else:
@@ -805,8 +816,10 @@ def evaluate_setup(
     _evaluate_required_commands(profile, state, readiness, actions)
     _evaluate_playback_commands(state, readiness, actions)
     _evaluate_python_surfaces(state, readiness, actions)
-    if _profile_has_local_llm_stage(profile):
+    if _profile_requires_local_llm(profile):
         _evaluate_ollama_model(state, readiness, actions)
+    elif _profile_has_local_llm_stage(profile):
+        _evaluate_optional_semantic_ollama(state, readiness, actions)
     if _profile_has_mistral_summary_stage(profile):
         _evaluate_mistral_summary(state, readiness, actions)
     if _profile_has_stage(profile, "transcription"):
@@ -1311,6 +1324,54 @@ def _evaluate_ollama_model(
         )
 
 
+def _evaluate_optional_semantic_ollama(
+    state: LocalInstallationState,
+    readiness: list[ReadinessItem],
+    actions: list[SetupAction],
+) -> None:
+    """Report Ollama readiness for an optional semantic-review-only stage.
+
+    Semantic review is optional and local (ADR-033/#29): a missing Ollama
+    runtime degrades to skipped semantic review at processing time, so this
+    item never blocks readiness and only offers an optional pull action.
+    """
+
+    label = f"optional semantic-review Ollama model {state.ollama.model}"
+    if state.ollama.model_present:
+        readiness.append(
+            ReadinessItem(
+                id="ollama-model",
+                label=label,
+                ready=True,
+                detail=state.ollama.detail,
+            )
+        )
+        return
+    readiness.append(
+        ReadinessItem(
+            id="ollama-model",
+            label=label,
+            ready=True,
+            detail=(
+                f"optional local semantic review is unavailable ({state.ollama.detail}); "
+                "processing will continue with semantic review skipped"
+            ),
+        )
+    )
+    if state.ollama.command.present and state.ollama.reachable:
+        actions.append(
+            SetupAction(
+                id="ollama-model",
+                label=f"Pull Ollama model {state.ollama.model}",
+                mode="automated",
+                detail="Optional: download the local semantic-review model with Ollama.",
+                command=("ollama", "pull", state.ollama.model),
+                env=_action_env({"OLLAMA_HOST": state.ollama.endpoint}),
+                required=False,
+            )
+        )
+
+
 def _evaluate_mistral_summary(
     state: LocalInstallationState,
     readiness: list[ReadinessItem],
@@ -1704,6 +1765,19 @@ def _profile_has_local_llm_stage(profile: SetupProfile) -> bool:
     return any(
         stage.stage in {"summarization", "semantic-review"}
         and stage.provider == OLLAMA_STAGE_PROVIDER
+        for stage in profile.stages
+    )
+
+
+def _profile_requires_local_llm(profile: SetupProfile) -> bool:
+    """Return whether Ollama is readiness-blocking for this profile.
+
+    Ollama summarization is route-bearing and blocks readiness; an Ollama
+    semantic-review stage alone is optional and degrades gracefully.
+    """
+
+    return any(
+        stage.stage == "summarization" and stage.provider == OLLAMA_STAGE_PROVIDER
         for stage in profile.stages
     )
 
