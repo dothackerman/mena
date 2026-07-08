@@ -1279,6 +1279,15 @@ class _CliSetupInteraction(InteractionPort):
         elif request.topic == "setup.fallback_actions":
             prompt = "Proceed with automated fallback setup actions? [y/N] "
         elif request.topic == "setup.mistral_summary_disclosure":
+            # Render the disclosure here, not only via buffered workflow
+            # events: setup events are printed after the workflow returns, so
+            # the prompt must carry the disclosure itself to satisfy the
+            # PDR-004 "disclose before selecting or authorizing" requirement.
+            disclosure = request.context.get("disclosure", ())
+            print("Mistral summarization disclosure:")
+            if isinstance(disclosure, tuple):
+                for line in disclosure:
+                    print(f"  - {line}")
             role = str(request.context.get("role", "provider"))
             prompt = (
                 f"Accept the Mistral summarization disclosure above and enable "

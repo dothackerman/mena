@@ -69,7 +69,7 @@ from mena.merge_timing import (
     SpeakerIdentity,
     persist_merged_transcript_artifact,
 )
-from mena.mistral_llm import MistralSummaryState
+from mena.mistral_llm import MISTRAL_SUMMARY_DISCLOSURE, MistralSummaryState
 from mena.processing import (
     ArtifactRef,
     ProcessingErrorInfo,
@@ -5090,3 +5090,29 @@ def test_console_summarize_interaction_rejects_unknown_confirmation_topics() -> 
 
     with pytest.raises(ValueError, match="Unsupported summarize confirmation topic"):
         interaction.confirm(ConfirmationRequest(topic="summarize.other"))
+
+
+def test_cli_setup_interaction_renders_the_disclosure_before_prompting(
+    capsys: CaptureFixture[str],
+) -> None:
+    prompts: list[str] = []
+
+    def _answer(prompt: str) -> str:
+        # The disclosure must already be on screen when the prompt runs;
+        # buffered workflow events are only printed after the workflow ends.
+        captured = capsys.readouterr()
+        assert "Mistral summarization disclosure:" in captured.out
+        assert "special-category" in captured.out
+        prompts.append(prompt)
+        return "y"
+
+    interaction = cli_module._CliSetupInteraction(input_fn=_answer)
+    accepted = interaction.confirm(
+        ConfirmationRequest(
+            topic="setup.mistral_summary_disclosure",
+            context={"role": "primary", "disclosure": MISTRAL_SUMMARY_DISCLOSURE},
+        )
+    )
+
+    assert accepted is True
+    assert "Accept the Mistral summarization disclosure above" in prompts[0]

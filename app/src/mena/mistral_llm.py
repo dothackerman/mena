@@ -57,6 +57,14 @@ MISTRAL_SUMMARY_DISCLOSURE = (
     "Mistral use may incur API charges. Account, quota, subscription, ZDR "
     "activation, and legal posture are your responsibility; Mena cannot "
     "verify them.",
+    "ZDR does not remove all residuals: Mistral may retain non-content "
+    "account, support, billing, abuse-prevention, or operational metadata, "
+    "and Mistral-controlled routing or terms may still affect jurisdictional "
+    "risk.",
+    "Do not use remote summarization for meetings likely to contain "
+    "special-category or similarly sensitive personal data unless you have "
+    "confirmed that your Mistral account, legal basis, and contractual "
+    "posture are appropriate for that content.",
     "Artifacts and runtime provenance record when Mistral was used.",
 )
 
