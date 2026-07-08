@@ -272,10 +272,11 @@ def run_summarization_command(
                     ),
                     authorize_remote_summarization_fallback=authorize_remote_fallback,
                 )
+                fallback_attempt = attempt + 1
                 runtime_profile_store_fn(
                     store=store,
                     run_id=run_id,
-                    attempt=attempt,
+                    attempt=fallback_attempt,
                     selection=fallback_selection,
                     name_suffix="stage-fallback",
                 )
@@ -297,7 +298,7 @@ def run_summarization_command(
                     settings=settings,
                 )
                 selection = fallback_selection
-                attempt += 1
+                attempt = fallback_attempt
     finally:
         if terminal_llm_release_fn is not None:
             terminal_llm_release_fn(

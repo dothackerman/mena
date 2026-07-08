@@ -681,6 +681,7 @@ def test_summarize_workflow_reenters_the_fallback_ladder_when_the_fallback_fails
         SimpleNamespace(accepted="accepted-state", summarization=fallback_plan),
     )
     selector_plans: list[SummarizationRuntimePlan] = []
+    stored_attempts: list[tuple[int, str]] = []
 
     def _stage(**_kwargs: object) -> SimpleNamespace:
         raise SummarizationProviderUnavailable("provider is unavailable")
@@ -700,7 +701,12 @@ def test_summarize_workflow_reenters_the_fallback_ladder_when_the_fallback_fails
             language=None,
             settings=AppSettings.from_env(env={}, home=tmp_path),
             runtime_profile_selector_fn=lambda **_kwargs: primary_selection,
-            runtime_profile_store_fn=lambda **_kwargs: None,
+            runtime_profile_store_fn=lambda **kwargs: stored_attempts.append(
+                (
+                    cast(int, kwargs["attempt"]),
+                    cast(str, kwargs.get("name_suffix") or "initial"),
+                )
+            ),
             runtime_summarization_binder_fn=lambda **_kwargs: SimpleNamespace(),
             run_summarization_stage_fn=_stage,
             summarization_stage_fallback_selector_fn=_fallback_selector,
@@ -709,3 +715,4 @@ def test_summarize_workflow_reenters_the_fallback_ladder_when_the_fallback_fails
     # The second failure consulted the ladder with the fallback plan, so the
     # selector could compute the remaining entries after the failed fallback.
     assert selector_plans == [plan, fallback_plan]
+    assert stored_attempts == [(1, "initial"), (2, "stage-fallback")]
