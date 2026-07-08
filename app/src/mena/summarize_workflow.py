@@ -225,83 +225,79 @@ def run_summarization_command(
 
     ledger = ProcessingStageLedger(store=store, session_id=session_id_value, run_id=run_id)
     attempt = 1
+    selection = runtime_selection
     try:
-        try:
-            result = cast(
-                SummarizationStageResult,
-                run_summarization_stage_fn(
-                    store=store,
-                    ledger=ledger,
-                    merged_transcript_record=merged_transcript_record,
-                    correction_overlay_record=resolved_overlay[0],
-                    manual_notes_record=manual_notes_record,
-                    provider=provider,
-                    policy=SummarizationPolicy(language=summary_language),
-                    attempt=attempt,
-                ),
-            )
-        except SummarizationProviderUnavailable as exc:
-            used_plan = cast(
-                SummarizationRuntimePlan | None,
-                getattr(runtime_selection, "summarization", None),
-            )
-            if used_plan is None:
-                raise
-            # Provoked fallback (ADR-033): the bound provider failed at
-            # provider time; consume the next accepted ordered fallback entry.
-            fallback_selection = summarization_stage_fallback_selector_fn(
-                settings=settings,
-                runner=setup_runner,
-                command_identity=setup_command_identity,
-                hardware=setup_hardware,
-                accepted=runtime_selection.accepted,
-                used_plan=used_plan,
-                failure_reason=str(exc),
-                failure_class=exc.__class__.__name__,
-                failed_input_artifacts=_stage_input_artifact_ids(
-                    merged_transcript_record,
-                    resolved_overlay[0],
-                    manual_notes_record,
-                ),
-                authorize_remote_summarization_fallback=authorize_remote_fallback,
-            )
-            runtime_profile_store_fn(
-                store=store,
-                run_id=run_id,
-                attempt=attempt,
-                selection=fallback_selection,
-                name_suffix="stage-fallback",
-            )
-            # Release the failed provider only after a fallback was actually
-            # selected; when no fallback is available the shared finally block
-            # performs the single release for the failed provider.
-            if terminal_llm_release_fn is not None:
-                terminal_llm_release_fn(
+        while True:
+            try:
+                result = cast(
+                    SummarizationStageResult,
+                    run_summarization_stage_fn(
+                        store=store,
+                        ledger=ledger,
+                        merged_transcript_record=merged_transcript_record,
+                        correction_overlay_record=resolved_overlay[0],
+                        manual_notes_record=manual_notes_record,
+                        provider=provider,
+                        policy=SummarizationPolicy(language=summary_language),
+                        attempt=attempt,
+                    ),
+                )
+                break
+            except SummarizationProviderUnavailable as exc:
+                used_plan = cast(
+                    SummarizationRuntimePlan | None,
+                    getattr(selection, "summarization", None),
+                )
+                if used_plan is None:
+                    raise
+                # Provoked fallback (ADR-033): the bound provider failed at
+                # provider time; consume the next accepted ordered fallback
+                # entry. A failing fallback provider re-enters this ladder
+                # until the accepted list is exhausted, at which point the
+                # selector raises RuntimeFallbackUnavailable (recoverable
+                # exit-code-3 contract at the CLI).
+                fallback_selection = summarization_stage_fallback_selector_fn(
+                    settings=settings,
+                    runner=setup_runner,
+                    command_identity=setup_command_identity,
+                    hardware=setup_hardware,
+                    accepted=runtime_selection.accepted,
+                    used_plan=used_plan,
+                    failure_reason=str(exc),
+                    failure_class=exc.__class__.__name__,
+                    failed_input_artifacts=_stage_input_artifact_ids(
+                        merged_transcript_record,
+                        resolved_overlay[0],
+                        manual_notes_record,
+                    ),
+                    authorize_remote_summarization_fallback=authorize_remote_fallback,
+                )
+                runtime_profile_store_fn(
                     store=store,
                     run_id=run_id,
                     attempt=attempt,
-                    provider=provider,
-                    stage="summarization",
-                    boundary="summarize",
+                    selection=fallback_selection,
+                    name_suffix="stage-fallback",
                 )
-            provider = runtime_summarization_binder_fn(
-                selection=fallback_selection,
-                settings=settings,
-            )
-            attempt += 1
-            result = cast(
-                SummarizationStageResult,
-                run_summarization_stage_fn(
-                    store=store,
-                    ledger=ledger,
-                    merged_transcript_record=merged_transcript_record,
-                    correction_overlay_record=resolved_overlay[0],
-                    manual_notes_record=manual_notes_record,
-                    provider=provider,
-                    policy=SummarizationPolicy(language=summary_language),
-                    attempt=attempt,
-                ),
-            )
+                # Release the failed provider only after a fallback was
+                # actually selected; when no fallback is available the shared
+                # finally block performs the single release for the failed
+                # provider.
+                if terminal_llm_release_fn is not None:
+                    terminal_llm_release_fn(
+                        store=store,
+                        run_id=run_id,
+                        attempt=attempt,
+                        provider=provider,
+                        stage="summarization",
+                        boundary="summarize",
+                    )
+                provider = runtime_summarization_binder_fn(
+                    selection=fallback_selection,
+                    settings=settings,
+                )
+                selection = fallback_selection
+                attempt += 1
     finally:
         if terminal_llm_release_fn is not None:
             terminal_llm_release_fn(

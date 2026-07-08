@@ -16,7 +16,11 @@ from mena.interaction import (
 )
 from mena.merge_timing import MERGED_TRANSCRIPT_ARTIFACT_TYPE
 from mena.mistral_llm import MistralSummaryState
-from mena.runtime_profile import RuntimeProfileSelection, SummarizationRuntimePlan
+from mena.runtime_profile import (
+    RuntimeFallbackUnavailable,
+    RuntimeProfileSelection,
+    SummarizationRuntimePlan,
+)
 from mena.sessions import resolve_session, session_language_or_default
 from mena.settings import AppSettings
 from mena.setup import StageProfile, mistral_summary_stage_profile
@@ -660,3 +664,48 @@ def test_summarize_workflow_remote_fallback_authorizer_declines_without_interact
     )
 
     assert authorize("ollama is down", probe_state) is False
+
+
+def test_summarize_workflow_reenters_the_fallback_ladder_when_the_fallback_fails(
+    tmp_path: Path,
+) -> None:
+    session_dir, _, _, _ = _build_summarize_session_bundle(tmp_path)
+    plan = _fallback_plan()
+    primary_selection = cast(
+        RuntimeProfileSelection,
+        SimpleNamespace(accepted="accepted-state", summarization=plan),
+    )
+    fallback_plan = replace(plan, actual_stage=plan.ordered_fallback[0])
+    fallback_selection = cast(
+        RuntimeProfileSelection,
+        SimpleNamespace(accepted="accepted-state", summarization=fallback_plan),
+    )
+    selector_plans: list[SummarizationRuntimePlan] = []
+
+    def _stage(**_kwargs: object) -> SimpleNamespace:
+        raise SummarizationProviderUnavailable("provider is unavailable")
+
+    def _fallback_selector(**kwargs: object) -> RuntimeProfileSelection:
+        selector_plans.append(cast(SummarizationRuntimePlan, kwargs["used_plan"]))
+        if len(selector_plans) == 1:
+            return fallback_selection
+        # The accepted ordered list is exhausted: surface the recoverable
+        # fallback-unavailable contract instead of a generic failure.
+        raise RuntimeFallbackUnavailable("no further accepted fallback provider")
+
+    with pytest.raises(RuntimeFallbackUnavailable, match="no further accepted fallback"):
+        run_summarization_command(
+            session_path=session_dir,
+            manual_notes=None,
+            language=None,
+            settings=AppSettings.from_env(env={}, home=tmp_path),
+            runtime_profile_selector_fn=lambda **_kwargs: primary_selection,
+            runtime_profile_store_fn=lambda **_kwargs: None,
+            runtime_summarization_binder_fn=lambda **_kwargs: SimpleNamespace(),
+            run_summarization_stage_fn=_stage,
+            summarization_stage_fallback_selector_fn=_fallback_selector,
+        )
+
+    # The second failure consulted the ladder with the fallback plan, so the
+    # selector could compute the remaining entries after the failed fallback.
+    assert selector_plans == [plan, fallback_plan]
