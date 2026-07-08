@@ -55,6 +55,10 @@ def _models_body(*entries: dict[str, object]) -> bytes:
     return json.dumps({"object": "list", "data": list(entries)}).encode("utf-8")
 
 
+def _models_array_body(*entries: dict[str, object]) -> bytes:
+    return json.dumps(list(entries)).encode("utf-8")
+
+
 def _no_sleep(_seconds: float) -> None:
     return None
 
@@ -214,7 +218,7 @@ def test_mistral_json_request_rejects_contract_violations(
     with pytest.raises(MistralContractError, match=match):
         mistral_json_request(
             method="GET",
-            path=MISTRAL_MODELS_PATH,
+            path=MISTRAL_CHAT_COMPLETIONS_PATH,
             api_key=API_KEY,
             transport=transport,
             sleep=_no_sleep,
@@ -244,6 +248,31 @@ def test_resolve_mistral_summary_model_accepts_the_recorded_snapshot(
     assert resolution.allowed is True
     assert resolution.policy == MISTRAL_SUMMARY_ALLOWLIST_POLICY
     assert MISTRAL_SUMMARY_ALLOWLIST_POLICY in resolution.detail
+
+
+def test_resolve_mistral_summary_model_accepts_documented_models_array() -> None:
+    transport = _FakeTransport(
+        [
+            (
+                200,
+                _models_array_body(
+                    {
+                        "id": "mistral-small-2603",
+                        "aliases": [MISTRAL_SUMMARY_REQUEST_MODEL],
+                    }
+                ),
+            )
+        ]
+    )
+
+    resolution = resolve_mistral_summary_model(
+        api_key=API_KEY,
+        transport=transport,
+        sleep=_no_sleep,
+    )
+
+    assert resolution.resolved_model == "mistral-small-2603"
+    assert resolution.allowed is True
 
 
 def test_resolve_mistral_summary_model_fails_closed_on_alias_drift() -> None:

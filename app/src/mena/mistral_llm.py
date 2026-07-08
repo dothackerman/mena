@@ -210,7 +210,11 @@ def mistral_json_request(
             continue
         if status >= 400:
             raise _classify_http_failure(status, raw, api_key)
-        return _decode_json_object(raw, api_key)
+        return _decode_json_object(
+            raw,
+            api_key,
+            allow_models_array=path == MISTRAL_MODELS_PATH,
+        )
     raise MistralUnavailableError(
         "Mistral API is unavailable after "
         f"{1 + MISTRAL_MAX_TRANSIENT_RETRIES} attempts: {last_transient}"
@@ -505,11 +509,18 @@ def _looks_like_quota(excerpt: str) -> bool:
     return any(marker in lowered for marker in _QUOTA_BODY_MARKERS)
 
 
-def _decode_json_object(raw: bytes, api_key: str) -> Mapping[str, object]:
+def _decode_json_object(
+    raw: bytes,
+    api_key: str,
+    *,
+    allow_models_array: bool = False,
+) -> Mapping[str, object]:
     try:
         decoded = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise MistralContractError("Mistral response envelope was not JSON.") from exc
+    if allow_models_array and isinstance(decoded, list):
+        return {"data": decoded}
     if not isinstance(decoded, Mapping):
         raise MistralContractError("Mistral response envelope must be a JSON object.")
     _ = api_key
