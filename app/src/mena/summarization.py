@@ -1499,7 +1499,9 @@ def _require_timeline_grounding(
         return
     if any(candidate.get(product) for candidate in candidates):
         return
-    if manual_notes:
+    # Manual-notes ingestion accepts raw UTF-8 without content checks, so a
+    # whitespace-only notes file must not count as grounding material.
+    if manual_notes and manual_notes.strip():
         return
     raise SummarizationContractError(
         "Ollama timeline map calls returned no timeline candidates and no "

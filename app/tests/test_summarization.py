@@ -1331,9 +1331,13 @@ def test_ollama_provider_reducer_fails_loudly_before_map_calls_when_notes_never_
     assert calls == []
 
 
+@pytest.mark.parametrize("manual_notes", [None, "   \n\t"])
 def test_ollama_provider_reducer_rejects_empty_timeline_candidates_without_notes(
     monkeypatch: pytest.MonkeyPatch,
+    manual_notes: str | None,
 ) -> None:
+    # A whitespace-only notes file is ingested as a truthy string but carries
+    # no grounding facts; it must not bypass the empty-candidate guard.
     provider = OllamaSummarizationProvider(model="test-model")
     empty_map_responses = _reducer_map_responses()
     empty_map_responses["timeline"] = {
@@ -1350,7 +1354,7 @@ def test_ollama_provider_reducer_rejects_empty_timeline_candidates_without_notes
             calls=[],
         ),
     )
-    request = replace(_long_summary_request(), manual_notes=None)
+    request = replace(_long_summary_request(), manual_notes=manual_notes)
 
     with pytest.raises(
         SummarizationContractError,
