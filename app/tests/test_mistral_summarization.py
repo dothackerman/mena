@@ -263,7 +263,7 @@ def test_mistral_provider_fails_closed_when_the_serving_model_drifts() -> None:
         provider.summarize(_summary_request())
 
 
-def test_mistral_provider_reverifies_an_alias_echo_before_accepting_it() -> None:
+def test_mistral_provider_reverifies_every_alias_echo_before_accepting_it() -> None:
     result = _summary_result()
     allowed_models = _models_body(
         {"id": "mistral-small-2603", "aliases": [MISTRAL_SUMMARY_REQUEST_MODEL]}
@@ -281,16 +281,47 @@ def test_mistral_provider_reverifies_an_alias_echo_before_accepting_it() -> None
                 model=MISTRAL_SUMMARY_REQUEST_MODEL,
             ),
         ),
+        (200, allowed_models),
         (200, _chat_body({"general_summary": result.general_summary})),
     ]
     transport = _FakeTransport(bodies)
     provider = _provider(transport)
 
     assert provider.summarize(_summary_request()).timeline == result.timeline
-    # The alias echo triggers exactly one /v1/models re-verification, cached
-    # for later products in the same run.
+    # Every alias-echoing response is re-verified through /v1/models: the
+    # alias can drift between the per-product calls of one run, so earlier
+    # evidence is never reused. Dated responses need no re-verification.
     models_calls = [call for call in transport.calls if call[1].endswith("/v1/models")]
-    assert len(models_calls) == 1
+    assert len(models_calls) == 2
+
+
+def test_mistral_provider_fails_closed_when_the_alias_drifts_between_products() -> None:
+    result = _summary_result()
+    allowed_models = _models_body(
+        {"id": "mistral-small-2603", "aliases": [MISTRAL_SUMMARY_REQUEST_MODEL]}
+    )
+    drifted_models = _models_body(
+        {"id": "mistral-small-2707", "aliases": [MISTRAL_SUMMARY_REQUEST_MODEL]}
+    )
+    bodies = [
+        (
+            200,
+            _chat_body({"timeline": list(result.timeline)}, model=MISTRAL_SUMMARY_REQUEST_MODEL),
+        ),
+        (200, allowed_models),
+        (
+            200,
+            _chat_body(
+                {"action_items": [action.to_dict() for action in result.action_items]},
+                model=MISTRAL_SUMMARY_REQUEST_MODEL,
+            ),
+        ),
+        (200, drifted_models),
+    ]
+    provider = _provider(_FakeTransport(bodies))
+
+    with pytest.raises(SummarizationError, match="mistral-small-2707"):
+        provider.summarize(_summary_request())
 
 
 def test_mistral_provider_rejects_an_alias_echo_that_resolved_outside_the_allowlist() -> None:

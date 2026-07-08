@@ -87,7 +87,6 @@ class MistralSummarizationProvider:
         self._timeout_seconds = timeout_seconds
         self._transport = transport
         self._sleep = sleep
-        self._alias_verification: MistralModelResolution | None = None
 
     def summarize(self, request: SummarizationRequest) -> SummaryResult:
         if self._api_key is None:
@@ -223,7 +222,9 @@ class MistralSummarizationProvider:
         mutable; the response-time model identity is the last line of defense
         against silent drift between readiness and the actual call. An echo of
         the mutable alias is not evidence, so it is re-resolved through
-        ``/v1/models`` (once per provider instance) before being accepted.
+        ``/v1/models`` for every alias-echoing response — the alias can drift
+        between the per-product calls of a single run, so earlier evidence is
+        never reused.
         """
 
         response_model = mistral_response_model(response)
@@ -247,11 +248,9 @@ class MistralSummarizationProvider:
         )
 
     def _verified_alias_resolution(self, product: str) -> MistralModelResolution:
-        if self._alias_verification is not None:
-            return self._alias_verification
         assert self._api_key is not None
         try:
-            self._alias_verification = resolve_mistral_summary_model(
+            return resolve_mistral_summary_model(
                 api_key=self._api_key,
                 timeout_seconds=self._timeout_seconds,
                 transport=self._transport,
@@ -268,4 +267,3 @@ class MistralSummarizationProvider:
             ) from exc
         except MistralContractError as exc:
             raise SummarizationContractError(str(exc)) from exc
-        return self._alias_verification
