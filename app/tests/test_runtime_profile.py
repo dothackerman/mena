@@ -1278,6 +1278,46 @@ def test_summarization_runtime_selection_uses_accepted_mistral_fallback(
     assert plan.resolved_model == "mistral-small-2603"
 
 
+def test_summarization_runtime_selection_does_not_remote_fallback_on_setup_guard_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    ready_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = _accepted_local_state_with_mistral_fallback(
+        settings=settings, setup_state=ready_state
+    )
+    persist_runtime_profile_state(accepted, paths=settings.paths)
+    repo_invocation_state = _setup_state(
+        settings=settings,
+        command_identity=CommandIdentity(
+            current_executable=Path("/tmp/mena/app/.venv/bin/mena"),
+            plain_mena_path=Path("/tmp/mena/app/.venv/bin/mena"),
+            version="0.1.0",
+            invocation_mode="repo-checkout",
+        ),
+        pyannote_token_present=True,
+    )
+    monkeypatch.setattr(
+        "mena.runtime_profile.detect_local_installation_state",
+        lambda *_args, **_kwargs: repo_invocation_state,
+    )
+
+    def _mistral_probe(**_kwargs: object) -> MistralSummaryState:
+        raise AssertionError("setup guard failures must not probe remote fallback")
+
+    with pytest.raises(RuntimeFallbackUnavailable, match="setup guard failed"):
+        select_summarization_runtime_profile(
+            settings=settings,
+            runner=None,
+            command_identity=None,
+            hardware=None,
+            allow_runtime_fallback=False,
+            env={},
+            mistral_probe=_mistral_probe,
+        )
+
+
 def test_summarization_runtime_selection_local_authorization_never_authorizes_remote(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

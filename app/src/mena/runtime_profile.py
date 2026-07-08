@@ -376,6 +376,12 @@ def select_summarization_runtime_profile(
             ),
         )
 
+    if not _summarization_provider_revalidation_failed(evaluation, accepted_stage):
+        raise RuntimeFallbackUnavailable(
+            "Accepted summarization runtime setup guard failed; re-run setup before "
+            f"using an accepted remote fallback: {accepted_failure}"
+        )
+
     plan, authorization_source = _resolve_summarization_fallback(
         accepted=accepted,
         accepted_stage=accepted_stage,
@@ -594,6 +600,20 @@ def _accepted_local_llm_model(accepted: RuntimeProfileState) -> str:
 def _mistral_resolved_model(evaluation: SetupEvaluation) -> str | None:
     mistral = evaluation.state.mistral_summary
     return None if mistral is None else mistral.resolved_model
+
+
+def _summarization_provider_revalidation_failed(
+    evaluation: SetupEvaluation,
+    accepted_stage: StageProfile,
+) -> bool:
+    failed_ids = {item.id for item in evaluation.readiness if not item.ready}
+    if not failed_ids:
+        return False
+    if accepted_stage.provider == OLLAMA_STAGE_PROVIDER:
+        return failed_ids <= {"command:ollama", "ollama-model"}
+    if accepted_stage.provider == MISTRAL_STAGE_PROVIDER:
+        return failed_ids <= {"mistral-summary-model"}
+    return False
 
 
 def resolve_processing_runtime(
