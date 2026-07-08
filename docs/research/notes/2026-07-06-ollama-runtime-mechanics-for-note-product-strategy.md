@@ -2,9 +2,9 @@
 
 Intended repo path: `docs/research/notes/2026-07-06-ollama-runtime-mechanics-for-note-product-strategy.md`
 
-Date: 2026-07-06
+Date: 2026-07-06; local observation updated 2026-07-08
 
-Status: verification note against current official Ollama documentation, required by #113 and the #108 "re-read Ollama docs before coding" blocker. No private session content.
+Status: verification note against current official Ollama documentation and a local Ollama smoke check, required by #113 and the #108 "re-read Ollama docs before coding" blocker. No private session content.
 
 ## Scope
 
@@ -12,7 +12,7 @@ Issue #113 requires verifying current official Ollama behavior before coding aro
 
 ## Evidence Sources
 
-The environment used for #113 implementation cannot reach `docs.ollama.com` (network policy) and has no local Ollama install, so the same documentation was read from its source of truth, the official `ollama/ollama` repository (`main` branch, fetched 2026-07-06):
+The environment used for #113 implementation could not reach `docs.ollama.com` (network policy), so the same documentation was read from its source of truth, the official `ollama/ollama` repository (`main` branch, fetched 2026-07-06):
 
 - `docs/capabilities/structured-outputs.mdx` (renders as docs.ollama.com/capabilities/structured-outputs)
 - `docs/context-length.mdx` (renders as docs.ollama.com/context-length)
@@ -20,13 +20,19 @@ The environment used for #113 implementation cannot reach `docs.ollama.com` (net
 - `docs/api.md` (API reference for `/api/generate`, `/api/chat`)
 - `docs/cli.mdx`
 
-Local observed behavior (`ollama ps` output, server logs) could not be exercised in this environment; the "Verify locally" section lists the exact operator checks for the dev machine.
+Local observed behavior was checked on 2026-07-08 with Ollama client `0.30.7` and locally installed `llama3.2:3b` (`a80c4f17acd5`):
+
+- `/api/chat` accepted a JSON Schema `format` request with `options.num_ctx: 8192` and returned schema-shaped content `{"ok": true}`.
+- The response included `prompt_eval_count: 54` and `eval_count: 6`, matching the documented per-call token-count fields Mena persists in `summary.v3`.
+- `ollama ps` after the request showed `llama3.2:3b`, `PROCESSOR` = `100% GPU`, `CONTEXT` = `8192`, and an `UNTIL` lease deadline, confirming the documented runtime-observation columns on this dev machine.
+
+This smoke check validates the assumptions #113 relies on without using private session content. It does not validate long-session quality or the target `llama3.1:8b` policy model under real load; #114 owns fixture benchmarking.
 
 ## Findings
 
 ### Structured outputs
 
-- `format` on `/api/chat` accepts either `"json"` or a full JSON schema; constrained decoding guarantees shape only.
+- `format` on `/api/chat` accepts either `"json"` or a full JSON schema; constrained decoding guarantees shape only. The 2026-07-08 local smoke check confirmed that a full JSON Schema `format` request produces schema-shaped content.
 - The docs explicitly recommend prompt grounding in addition to `format`: "It is ideal to also pass the JSON schema as a string in the prompt to ground the model's response." This answers the #108 open question — `format` alone is *not* the recommended usage.
 - The docs recommend `temperature: 0` ("Lower the temperature (e.g., set it to 0) for more deterministic completions"), matching the existing #112 request discipline.
 
@@ -46,7 +52,7 @@ Consequence for #113: every summarization call (one-shot, map, reduce) now embed
 
 ### Runtime observability
 
-- `ollama ps` lists running models with `SIZE`, `PROCESSOR` (CPU/GPU split), `CONTEXT` (allocated context length), and `UNTIL`. This is the documented way to verify both the effective context allocation and whether the model was offloaded to CPU.
+- `ollama ps` lists running models with `SIZE`, `PROCESSOR` (CPU/GPU split), `CONTEXT` (allocated context length), and `UNTIL`. The 2026-07-08 local smoke check observed these columns after an 8192-context request, with `PROCESSOR` = `100% GPU` and `CONTEXT` = `8192`.
 - `keep_alive: 0` unloads a model immediately (used by Mena's runtime-stewardship release path); `keep_alive: -1` pins it.
 
 ### Model support
@@ -60,8 +66,8 @@ Consequence for #113: every summarization call (one-shot, map, reduce) now embed
 3. Every call persists `prompt_eval_count`/`eval_count` in a per-call `request_records` entry (`summary.v3`), so truncation and cost stay auditable per map/reduce call, not only per product.
 4. `num_ctx` stays an explicit per-request option; nothing relies on server or Modelfile defaults.
 
-## Verify locally (dev machine, outside this environment)
+## Follow-up verification
 
-- `ollama ps` during a summarize run: confirm `CONTEXT` shows 8192 for the summarization model and `PROCESSOR` is not unexpectedly CPU-heavy.
+- `ollama ps` during a real summarize run with the selected summarization model: confirm `CONTEXT` shows 8192 and `PROCESSOR` is not unexpectedly CPU-heavy.
 - Compare persisted `prompt_eval_count` values against the byte estimates in provenance for one long session: values pinned at/near `num_ctx` with much larger estimates would indicate the guard fraction needs lowering.
 - If the target machine cannot allocate 8192 context on GPU, revisit `OLLAMA_SUMMARIZATION_NUM_CTX` (policy constant) rather than letting Ollama fall back silently.
