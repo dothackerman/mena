@@ -36,9 +36,9 @@ Internal Mena docs:
 - Recording, transcription, and diarization are local-only by accepted architecture decision: [ADR-009](../../decisions/ADR-009-recording-transcription-and-diarization-local-only.md).
 - Direct ZDR Mistral routing is permitted only for specific text stages under explicit policy and disclosure constraints: [ADR-033](../../decisions/ADR-033-stage-focused-direct-zdr-mistral-routes.md), [PDR-004](../../decisions/PDR-004-mistral-summarization-disclosure-and-consent.md).
 
-Public/product sources observed on 2026-07-07:
+Public/product sources observed on 2026-07-07, with Meetily and OpenWhispr claims rechecked on 2026-07-09 after PR review feedback:
 
-- Meetily: <https://github.com/Zackriya-Solutions/meetily>, <https://meetily.ai/>
+- Meetily: <https://github.com/Zackriya-Solutions/meetily>, <https://meetily.ai/>, <https://meetily.ai/downloads>
 - Notion AI Meeting Notes: <https://www.notion.com/help/ai-meeting-notes>
 - Granola: <https://www.granola.ai/>
 - Fathom: <https://www.fathom.ai/>
@@ -46,7 +46,7 @@ Public/product sources observed on 2026-07-07:
 - Read.ai: <https://www.read.ai/>
 - Otter: <https://otter.ai/>
 - Anarlog/Hyprnote lineage: <https://anarlog.so/>
-- OpenWhispr: <https://openwhispr.com/notepad>
+- OpenWhispr: <https://openwhispr.com/notepad>, <https://openwhispr.com/compare/meetily>, <https://openwhispr.com/compare/granola>
 - Vexa: <https://vexa.ai/>
 
 Public pricing, distribution, and roadmap claims are time-sensitive and should be revalidated before any external-facing positioning or roadmap commitment.
@@ -97,9 +97,9 @@ Meetily appears substantially ahead in distribution and market proof:
 - free/community edition plus paid Pro positioning
 - clear alternative-to-Otter/Granola message
 
-Meetily's current weakness, based on observed product pages, is that speaker identification/advanced diarization appears marketed or roadmapped rather than clearly shipped in the main product. The older Mena doc claim that Meetily lacked shipped diarization still appears directionally true, but this is a weak and temporary advantage. If Meetily ships strong diarization before Mena proves its own trust workflow, that gap closes.
+Meetily's diarization status is no longer a reliable Mena advantage. Its public GitHub and product pages now market speaker diarization or speaker identification in at least some form, while some Pro-facing copy still distinguishes between planned/coming-soon speaker features and available core transcription. That ambiguity is enough to remove "Meetily lacks diarization" as a strategic assumption. Mena should treat diarization as a quality and workflow benchmark, not as a durable positioning gap.
 
-Meetily also appears better described as local-first rather than strictly local-only. Its summary path can involve local models, BYOK, or Pro/cloud-like capabilities depending on configuration. This is where Mena can draw a stricter stage boundary, but only if users care and the product makes that boundary understandable.
+Meetily also appears better described as local-first rather than strictly local-only. Its summary path can involve local models, BYOK, or Pro/cloud-like capabilities depending on configuration, and its public FAQ describes a similar high-level boundary: audio/transcription stay local while summary text may use local or configured remote AI. Mena should not claim differentiation from the existence of a stage boundary alone. Its possible advantage is narrower: explicit ZDR/account-posture disclosure, consent, and policy controls around which text stages can leave the machine.
 
 ## Mena assumptions under attack
 
@@ -232,12 +232,12 @@ For sensitive meetings, a small amount of clear setup and verification friction 
 | Desktop distribution | Strong on macOS/Windows; Linux weaker | Linux CLI alpha | Mena is behind for mainstream users |
 | Bot-free capture | Strong | Strong through OS-level capture | Table stakes for this segment |
 | Live transcription | Stronger current product signal | Out of initial PoC, future health signal | Do not chase live UI first |
-| Diarization | Roadmapped/unclear shipped state | Explicit product requirement | Temporary Mena opportunity |
+| Diarization | Marketed or partially available; exact shipped quality/configuration needs revalidation | Explicit product requirement | Benchmark requirement, not a positioning gap |
 | Correction workflow | Not clearly central | Central requirement | Potential differentiator |
 | Sealed source artifacts | Not clearly central | Central architecture principle | Strong differentiator if surfaced |
 | Provenance and traceability | Not clearly central | Implied by architecture, not yet productized | Must become explicit |
 | Manual notes reconciliation | Not clearly central | In Mena scope | Potential differentiator |
-| Strict stage privacy boundary | Local-first with optional cloud paths | Local-only audio/ASR/diarization, explicit text-stage remote policy | Differentiator if communicated well |
+| Stage privacy boundary | Similar high-level local-audio/optional-remote-summary pattern | Local-only audio/ASR/diarization, explicit text-stage remote policy | Differentiator only through disclosure, consent, and policy controls |
 | EU/Swiss sovereignty framing | Generic privacy/compliance language | More precise jurisdiction/posture decisions | Differentiator only for narrow ICP |
 
 ## Roadmap cuts and deferments
@@ -267,7 +267,7 @@ Preserve or sharpen:
 
 ## Competitive validation benchmark
 
-The next product validation should compare Mena directly against Meetily and at least one polished bot-free product such as Granola or Notion AI Meeting Notes.
+The next product validation should compare Mena directly against Meetily, OpenWhispr, and at least one polished bot-free product such as Granola or Notion AI Meeting Notes. OpenWhispr must be included because it also claims local-first transcription, speaker diarization, and native Linux support; excluding it would make the benchmark too easy for Mena.
 
 Use the same recordings across tools where legally and technically possible:
 
@@ -296,7 +296,7 @@ Score each product on:
 
 The benchmark should include user judgment, not only technical metrics. The central question is:
 
-> Would a privacy-sensitive user choose Mena over Meetily/Granola/Notion for sensitive meetings because the resulting record is more trustworthy?
+> Would a privacy-sensitive user choose Mena over Meetily/OpenWhispr/Granola/Notion for sensitive meetings because the resulting record is more trustworthy?
 
 ## Go/no-go criteria
 
@@ -305,7 +305,7 @@ Continue Mena as a product only if the validation shows at least one narrow targ
 Strong go signals:
 
 - Users say they would use Mena for sensitive meetings where they would not use a SaaS notetaker.
-- Users trust Mena's final record more than Meetily's output on the same meeting.
+- Users trust Mena's final record more than Meetily's and OpenWhispr's output on the same meeting.
 - Correction materially improves the final summary without taking longer than manual notes.
 - Important summary claims can be inspected or traced well enough for user confidence.
 - The stage-specific privacy story is understandable without PM explanation.
@@ -313,7 +313,7 @@ Strong go signals:
 
 No-go or reduce-to-personal-tool signals:
 
-- Meetily is "good enough" for the same recordings.
+- Meetily or OpenWhispr is "good enough" for the same recordings.
 - Users do not care about provenance or correction.
 - Correction takes too long.
 - Mena's best summaries require remote routing by default.
@@ -355,7 +355,7 @@ The current "pipeline works" standard is too weak. Add explicit trust-grade succ
 - correction improves final output
 - summary trust can be evaluated
 - privacy boundary is visible
-- Mena is benchmarked against Meetily on the same fixtures
+- Mena is benchmarked against Meetily and OpenWhispr on the same fixtures
 
 ### 4. Design the benchmark protocol
 
