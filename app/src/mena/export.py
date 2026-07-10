@@ -3,18 +3,13 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 from mena.artifacts import ArtifactRecord, ArtifactStore
-from mena.processing import ProcessingStateError
+from mena.exportable_summary import ExportableSummaryError, resolve_exportable_summary
 from mena.summarization import (
-    SUMMARY_ARTIFACT_CONTRACT,
-    SUMMARY_ARTIFACT_TYPE,
-    SUMMARY_ARTIFACT_VERSION,
-    SummarizationContractError,
     SummaryArtifact,
 )
 from mena.summary_markdown import format_summary_markdown
@@ -27,10 +22,6 @@ SUMMARY_MARKDOWN_EXPORT_CONTRACT = "summary-markdown-note-package-v3"
 
 class SummaryMarkdownExportError(RuntimeError):
     """Raised when markdown export cannot be produced."""
-
-
-class _IncompatibleSummaryMarkdownInput(SummaryMarkdownExportError):
-    """Raised when a sealed summary payload is not compatible with markdown export."""
 
 
 @dataclass(frozen=True)
@@ -93,84 +84,15 @@ def resolve_summary_markdown_input(
 ) -> tuple[ArtifactRecord, SummaryArtifact]:
     """Return the latest valid summary artifact for export."""
 
-    records = tuple(store.list(artifact_type=SUMMARY_ARTIFACT_TYPE, status="sealed"))
-
-    if summary_record_id is not None:
-        for record in records:
-            if record.id == summary_record_id:
-                return _load_summary_artifact(record=record, store=store)
-        raise SummaryMarkdownExportError(f"Summary artifact not found: {summary_record_id}.")
-
-    candidates: list[tuple[datetime, str, str, ArtifactRecord, SummaryArtifact]] = []
-    for record in records:
-        if record.version != SUMMARY_ARTIFACT_VERSION:
-            continue
-        try:
-            _, summary = _load_summary_artifact(record=record, store=store)
-        except _IncompatibleSummaryMarkdownInput:
-            # Older summary artifacts (and any payload that no longer satisfies the
-            # current strict summary contract) remain sealed in the manifest by
-            # design. When auto-selecting export input, skip incompatible payloads
-            # so a valid current summary from a rerun can still be chosen; only
-            # fail if none exist.
-            continue
-        candidates.append(
-            (
-                _summary_created_at(summary),
-                record.path,
-                record.id,
-                record,
-                summary,
-            )
-        )
-
-    if not candidates:
-        raise SummaryMarkdownExportError(
-            f"No valid {SUMMARY_ARTIFACT_CONTRACT} artifact was found for export."
-        )
-
-    _, _, _, selected_record, selected_summary = max(candidates)
-    return selected_record, selected_summary
-
-
-def _load_summary_artifact(
-    *,
-    record: ArtifactRecord,
-    store: ArtifactStore,
-) -> tuple[ArtifactRecord, SummaryArtifact]:
-    verification = store.verify(record.id)
-    if not verification.ok:
-        raise SummaryMarkdownExportError(
-            f"Summary artifact {record.id} failed integrity verification."
-        )
-
     try:
-        payload_bytes = store.retrieve(record.id)
-    except KeyError as exc:
-        raise SummaryMarkdownExportError(
-            f"Summary artifact payload is missing for {record.id}."
-        ) from exc
-
-    try:
-        payload = json.loads(payload_bytes.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise SummaryMarkdownExportError(
-            f"Summary artifact {record.id} is not valid JSON."
-        ) from exc
-
-    try:
-        summary = SummaryArtifact.from_dict(payload)
-    except (SummarizationContractError, ProcessingStateError) as exc:
-        raise _IncompatibleSummaryMarkdownInput(
-            f"Summary artifact {record.id} is not a valid {SUMMARY_ARTIFACT_CONTRACT} payload."
-        ) from exc
-
-    if summary.session_id != record.session_id:
-        raise SummaryMarkdownExportError(
-            "Summary payload session id does not match artifact session id."
+        selection = resolve_exportable_summary(
+            store=store,
+            summary_record_id=summary_record_id,
         )
+    except ExportableSummaryError as exc:
+        raise SummaryMarkdownExportError(str(exc)) from exc
 
-    return record, summary
+    return selection.record, selection.summary
 
 
 def _matching_existing_export(
@@ -249,10 +171,6 @@ def _export_artifact_name(*, summary_record: ArtifactRecord, summary: SummaryArt
         / SUMMARY_MARKDOWN_EXPORT_CONTRACT
         / f"{created_at_token}-{normalized_path}.md"
     )
-
-
-def _summary_created_at(summary: SummaryArtifact) -> datetime:
-    return _parse_iso_timestamp(summary.created_at) or datetime.min.replace(tzinfo=UTC)
 
 
 def _parse_iso_timestamp(value: str) -> datetime | None:
