@@ -374,6 +374,17 @@ def test_setup_workflow_accepts_mistral_primary_after_disclosure(tmp_path: Path)
     # PDR-004 also requires the residual-metadata and sensitive-content warnings.
     assert "non-content" in messages
     assert "special-category" in messages
+    for required_fragment in (
+        "ZDR approval",
+        "plan tier",
+        "training opt-out",
+        "subprocessor posture",
+        "legal isolation",
+        "endpoint routing",
+        "account funds",
+        "appropriate for the meeting content",
+    ):
+        assert required_fragment in messages
     assert "Accepted summarization primary: Mistral (mistral-small-latest)" in messages
     assert "Accepted summarization fallback order: none" in messages
 

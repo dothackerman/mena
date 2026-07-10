@@ -54,9 +54,11 @@ MISTRAL_SUMMARY_DISCLOSURE = (
     "Audio, ASR and diarization processing, raw local artifacts, speaker "
     "embeddings, and other speaker-sensitive artifacts stay local; nothing "
     "beyond the summarization text above is uploaded.",
-    "Mistral use may incur API charges. Account, quota, subscription, ZDR "
-    "activation, and legal posture are your responsibility; Mena cannot "
-    "verify them.",
+    "Mistral use may incur API charges and depends on your account, quota, "
+    "subscription, workspace, ZDR posture, and legal terms.",
+    "Mena cannot verify ZDR approval, plan tier, training opt-out, "
+    "subprocessor posture, legal isolation, endpoint routing, account funds, "
+    "or whether your account is appropriate for the meeting content.",
     "ZDR does not remove all residuals: Mistral may retain non-content "
     "account, support, billing, abuse-prevention, or operational metadata, "
     "and Mistral-controlled routing or terms may still affect jurisdictional "
