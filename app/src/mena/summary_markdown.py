@@ -6,7 +6,13 @@ from collections.abc import Iterable, Mapping
 from typing import Protocol
 
 from mena.settings import normalize_summary_language
-from mena.summarization import DEFAULT_LANGUAGE, SummaryActionItem, SummaryArtifact, SummaryResult
+from mena.summarization import (
+    DEFAULT_LANGUAGE,
+    SummaryActionItem,
+    SummaryArtifact,
+    SummaryResult,
+    SummaryTimelineEntry,
+)
 
 SummaryMarkdownSource = SummaryArtifact | SummaryResult | Mapping[str, object]
 
@@ -23,7 +29,10 @@ def format_summary_markdown(summary: SummaryMarkdownSource) -> str:
     payload = _validated_payload(summary)
     labels = _labels_for_language(_payload_language(payload))
     sections = (
-        (labels.timeline, _bullet_list(payload.timeline)),
+        (
+            labels.timeline,
+            _bullet_list(_format_timeline_entry(entry) for entry in payload.timeline),
+        ),
         (
             labels.action_items,
             _bullet_list(
@@ -65,6 +74,19 @@ def _format_action_item(action: SummaryActionItem | _ActionItemPayload, *, label
     if not details:
         return text
     return f"{text} ({'; '.join(details)})"
+
+
+def _format_timeline_entry(entry: SummaryTimelineEntry) -> str:
+    return f"[{_format_seconds(entry.start_seconds)}] {entry.text}"
+
+
+def _format_seconds(value: float) -> str:
+    total_seconds = int(value)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
 
 
 def _indent_continuation(text: str) -> str:

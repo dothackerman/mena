@@ -160,7 +160,11 @@ class OllamaSummarizationProvider:
             )
             for product in PRODUCT_RESPONSE_SCHEMAS
         }
-        result = assemble_summary_result(product_payloads=payloads, request_records=records)
+        result = assemble_summary_result(
+            product_payloads=payloads,
+            request_records=records,
+            merged_transcript=request.merged_transcript,
+        )
         assert_summary_output_language(result, request.policy.language)
         return result
 
@@ -407,9 +411,10 @@ class OllamaSummarizationProvider:
 
 _MAP_INSTRUCTIONS: dict[str, str] = {
     "timeline": (
-        "Return only key timeline (array of strings). Each entry is a meaningful "
-        "chronological event from this transcript chunk, not a bare date; return "
-        "an empty array when the chunk contains no meaningful events."
+        "Return only key timeline (array of objects with text and source_segment_ids). "
+        "Each entry is a meaningful chronological event from this transcript chunk, "
+        "not a bare date; source_segment_ids must cite the provided segment id values; "
+        "return an empty array when the chunk contains no meaningful events."
     ),
     "action_items": (
         "Return only key action_items (array of objects with text, owner, due). "
@@ -425,9 +430,10 @@ _MAP_INSTRUCTIONS: dict[str, str] = {
 
 _REDUCE_INSTRUCTIONS: dict[str, str] = {
     "timeline": (
-        "Return only key timeline (array of strings): merge the chunk timeline "
-        "candidates into one chronological timeline for the whole meeting, "
-        "preserving chunk order and dropping duplicates."
+        "Return only key timeline (array of objects with text and source_segment_ids): "
+        "merge the chunk timeline candidates into one chronological timeline for the "
+        "whole meeting, preserving cited source_segment_ids, chunk order, and dropping "
+        "duplicates."
     ),
     "action_items": (
         "Return only key action_items (array of objects with text, owner, due): "
@@ -467,6 +473,7 @@ def _reduce_system_prompt(product: str, language: str, schema: Mapping[str, obje
 
 def _segment_payload(segment: MergedTranscriptSegment) -> dict[str, object]:
     return {
+        "id": segment.id,
         "speaker": segment.speaker.label,
         "start_seconds": segment.start_seconds,
         "end_seconds": segment.end_seconds,

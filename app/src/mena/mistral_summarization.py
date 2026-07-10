@@ -108,7 +108,11 @@ class MistralSummarizationProvider:
             )
             for product, schema in PRODUCT_RESPONSE_SCHEMAS.items()
         }
-        result = assemble_summary_result(product_payloads=payloads, request_records=records)
+        result = assemble_summary_result(
+            product_payloads=payloads,
+            request_records=records,
+            merged_transcript=request.merged_transcript,
+        )
         assert_summary_output_language(result, request.policy.language)
         return result
 

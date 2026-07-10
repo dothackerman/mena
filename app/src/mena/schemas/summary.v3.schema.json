@@ -35,6 +35,29 @@
       "required": ["text", "owner", "due"],
       "type": "object"
     },
+    "timeline_entry": {
+      "additionalProperties": false,
+      "properties": {
+        "source_segment_ids": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "start_seconds": {
+          "minimum": 0,
+          "type": "number"
+        },
+        "text": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": ["text", "source_segment_ids", "start_seconds"],
+      "type": "object"
+    },
     "artifact_ref": {
       "additionalProperties": false,
       "properties": {
@@ -603,8 +626,7 @@
     },
     "timeline": {
       "items": {
-        "minLength": 1,
-        "type": "string"
+        "$ref": "#/$defs/timeline_entry"
       },
       "minItems": 1,
       "type": "array"

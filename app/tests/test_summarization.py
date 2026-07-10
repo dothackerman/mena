@@ -51,6 +51,7 @@ from mena.summarization import (
     SummaryActionItem,
     SummaryArtifact,
     SummaryResult,
+    SummaryTimelineEntry,
     persist_summary_artifact,
     run_summarization_stage,
 )
@@ -140,7 +141,8 @@ def test_summarization_stage_persists_summary_and_checkpoint(tmp_path: Path) -> 
     assert artifact.policy["prompt_policy"] == PROMPT_POLICY
     assert artifact.provider.prompt_policy == PROMPT_POLICY
     assert "provider_config_id" not in artifact.policy
-    assert artifact.timeline == ("Discussed database migration before Friday.",)
+    assert artifact.timeline[0].text == "Discussed database migration before Friday."
+    assert artifact.timeline[0].start_seconds == 0.0
     assert artifact.action_items[0].owner == "You"
     assert provider.requests[0].manual_notes == "- Manual note: release is blocked."
     assert provider.requests[0].policy.language == "de-CH"
@@ -736,7 +738,7 @@ def _fake_product_responses(
 
     result = _summary_result()
     payloads: dict[str, dict[str, object]] = {
-        "timeline": {"timeline": list(result.timeline)},
+        "timeline": _timeline_provider_payload(result),
         "action_items": {"action_items": [action.to_dict() for action in result.action_items]},
         "general_summary": {"general_summary": result.general_summary},
     }
@@ -757,7 +759,14 @@ def _german_product_responses(
     """Per-product Ollama envelopes whose user-facing strings are in German."""
 
     payloads: dict[str, dict[str, object]] = {
-        "timeline": {"timeline": ["Diskussion über die Datenbankmigration vor Freitag."]},
+        "timeline": {
+            "timeline": [
+                {
+                    "text": "Diskussion über die Datenbankmigration vor Freitag.",
+                    "source_segment_ids": ["merged_segment_000001"],
+                }
+            ]
+        },
         "action_items": {
             "action_items": [
                 {"text": "Datenbankmigration bis Freitag abschließen.", "owner": "Du", "due": None}
@@ -778,6 +787,10 @@ def _german_product_responses(
 def _product_key(payload: dict[str, object]) -> str:
     schema = cast(dict[str, object], payload["format"])
     return cast(list[str], schema["required"])[0]
+
+
+def _timeline_provider_payload(result: SummaryResult) -> dict[str, object]:
+    return {"timeline": [entry.to_provider_dict() for entry in result.timeline]}
 
 
 def test_ollama_summarization_provider_runs_one_shot_per_product(
@@ -810,7 +823,7 @@ def test_ollama_summarization_provider_runs_one_shot_per_product(
     result = provider.summarize(_summary_request())
 
     assert seen == ["timeline", "action_items", "general_summary"]
-    assert result.timeline == ("Discussed database migration before Friday.",)
+    assert result.timeline[0].text == "Discussed database migration before Friday."
     assert result.action_items[0].owner == "You"
     assert result.general_summary == "The meeting focused on database migration risk."
 
@@ -997,7 +1010,7 @@ def test_ollama_summarization_provider_accepts_german_output(
     request = replace(_summary_request(), policy=SummarizationPolicy(language="de-CH"))
     result = provider.summarize(request)
 
-    assert result.timeline[0].startswith("Diskussion")
+    assert result.timeline[0].text.startswith("Diskussion")
 
 
 def test_ollama_summarization_provider_accepts_german_output_with_english_terms(
@@ -1136,7 +1149,14 @@ def _long_merged_transcript_fixture(*, segment_count: int = 60) -> MergedTranscr
 
 def _reducer_map_responses() -> dict[str, dict[str, object]]:
     payloads: dict[str, dict[str, object]] = {
-        "timeline": {"timeline": ["Reviewed one synthetic agenda topic."]},
+        "timeline": {
+            "timeline": [
+                {
+                    "text": "Reviewed one synthetic agenda topic.",
+                    "source_segment_ids": ["merged_segment_000000"],
+                }
+            ]
+        },
         "action_items": {
             "action_items": [
                 {"text": "Answer the open follow-up questions.", "owner": None, "due": None}
@@ -1221,7 +1241,7 @@ def test_ollama_provider_routes_long_input_to_reducer_per_product(
             "satisfies this JSON schema" in cast(str, call["system_content"])
             for call in product_calls
         )
-    assert result.timeline == ("Discussed database migration before Friday.",)
+    assert result.timeline[0].text == "Discussed database migration before Friday."
     assert result.general_summary == "The meeting focused on database migration risk."
 
 
@@ -1292,7 +1312,18 @@ def test_ollama_provider_reducer_fails_loudly_when_reduce_candidates_exceed_budg
     provider = OllamaSummarizationProvider(model="test-model")
     oversized_map_responses = _reducer_map_responses()
     oversized_map_responses["timeline"] = {
-        "message": {"content": json.dumps({"timeline": ["An oversized event entry. " * 400]})},
+        "message": {
+            "content": json.dumps(
+                {
+                    "timeline": [
+                        {
+                            "text": "An oversized event entry. " * 400,
+                            "source_segment_ids": ["merged_segment_000000"],
+                        }
+                    ]
+                }
+            )
+        },
         "prompt_eval_count": 222,
         "eval_count": 33,
     }
@@ -1409,7 +1440,7 @@ def test_ollama_provider_reducer_allows_manual_notes_to_ground_empty_timeline(
     ]
     assert len(timeline_reduce_calls) == 1
     assert timeline_reduce_calls[0]["has_manual_notes"] is True
-    assert result.timeline == ("Discussed database migration before Friday.",)
+    assert result.timeline[0].text == "Discussed database migration before Friday."
 
 
 def test_ollama_provider_reducer_rejects_invalid_map_payload_with_raw_content(
@@ -1437,7 +1468,7 @@ def test_ollama_provider_reducer_rejects_invalid_map_payload_with_raw_content(
         provider.summarize(_long_summary_request())
 
     message = str(exc_info.value)
-    assert "Timeline chunk candidates must contain non-empty strings." in message
+    assert "Summary timeline chunk candidates[0] must be a JSON object." in message
     assert raw_content in message
 
 
@@ -2172,7 +2203,13 @@ def _summary_request() -> SummarizationRequest:
 
 def _summary_result() -> SummaryResult:
     return SummaryResult(
-        timeline=("Discussed database migration before Friday.",),
+        timeline=(
+            SummaryTimelineEntry(
+                text="Discussed database migration before Friday.",
+                source_segment_ids=("merged_segment_000001",),
+                start_seconds=0.0,
+            ),
+        ),
         action_items=(
             SummaryActionItem(text="Finish database migration.", owner="You", due="Friday"),
         ),

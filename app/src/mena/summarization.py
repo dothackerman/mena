@@ -42,6 +42,7 @@ from mena.note_package import (
     SummarizationTokenBudgetError,
     SummaryActionItem,
     SummaryResult,
+    SummaryTimelineEntry,
     assemble_summary_result,
     assert_summary_output_language,
     guard_summarization_token_budget,
@@ -99,6 +100,7 @@ __all__ = [
     "SummaryActionItem",
     "SummaryArtifact",
     "SummaryResult",
+    "SummaryTimelineEntry",
     "TIMELINE_RESPONSE_SCHEMA",
     "assemble_summary_result",
     "assert_summary_output_language",
@@ -192,7 +194,7 @@ class SummaryArtifact:
     manual_notes_artifact: ArtifactRef | None
     policy: Mapping[str, object]
     provider: SummarizationProviderMetadata
-    timeline: tuple[str, ...]
+    timeline: tuple[SummaryTimelineEntry, ...]
     action_items: tuple[SummaryActionItem, ...]
     general_summary: str
     created_at: str
@@ -214,7 +216,9 @@ class SummaryArtifact:
             ),
             policy=_summary_policy_payload(item.get("policy")),
             provider=_provider_from_dict(item.get("provider")),
-            timeline=tuple(_str_list(item, "timeline", "Summary timeline")),
+            timeline=tuple(
+                SummaryTimelineEntry.from_dict(entry) for entry in _list(item, "timeline")
+            ),
             action_items=tuple(
                 SummaryActionItem.from_dict(action) for action in _list(item, "action_items")
             ),
@@ -238,7 +242,7 @@ class SummaryArtifact:
             ),
             "policy": dict(self.policy),
             "provider": self.provider.to_dict(),
-            "timeline": list(self.timeline),
+            "timeline": [entry.to_dict() for entry in self.timeline],
             "action_items": [action.to_dict() for action in self.action_items],
             "general_summary": self.general_summary,
             "created_at": self.created_at,

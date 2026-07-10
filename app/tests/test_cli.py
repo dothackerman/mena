@@ -141,6 +141,7 @@ from mena.summarization import (
     SummarizationProvider,
     SummaryArtifact,
     SummaryResult,
+    SummaryTimelineEntry,
     persist_summary_artifact,
 )
 from mena.transcription import (
@@ -4173,7 +4174,13 @@ def _mark_semantic_provider_unavailable_skip(session: CreatedSession) -> None:
 
 def _summary_result_for_export() -> SummaryResult:
     return SummaryResult(
-        timeline=("Agenda covered.",),
+        timeline=(
+            SummaryTimelineEntry(
+                text="Agenda covered.",
+                source_segment_ids=("merged_segment_000001",),
+                start_seconds=0.0,
+            ),
+        ),
         action_items=(),
         general_summary="The team aligned on the plan.",
         request_records=_request_records_for_products(REQUIRED_NOTE_PRODUCTS),

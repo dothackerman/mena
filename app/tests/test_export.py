@@ -25,6 +25,7 @@ from mena.summarization import (
     SummarizationPolicy,
     SummaryArtifact,
     SummaryResult,
+    SummaryTimelineEntry,
     persist_summary_artifact,
 )
 
@@ -363,7 +364,18 @@ def test_export_summary_markdown_rejects_existing_export_metadata_drift(
 
 def _summary_result_for_export() -> SummaryResult:
     return SummaryResult(
-        timeline=("Discussed milestones.", "Aligned on deliverables."),
+        timeline=(
+            SummaryTimelineEntry(
+                text="Discussed milestones.",
+                source_segment_ids=("merged_segment_000001",),
+                start_seconds=0.0,
+            ),
+            SummaryTimelineEntry(
+                text="Aligned on deliverables.",
+                source_segment_ids=("merged_segment_000002",),
+                start_seconds=2.1,
+            ),
+        ),
         action_items=(),
         general_summary="The meeting was productive.",
         request_records=_request_records_for_products(REQUIRED_NOTE_PRODUCTS),
