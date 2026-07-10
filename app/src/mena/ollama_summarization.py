@@ -21,10 +21,8 @@ from mena.local_llm import (
 )
 from mena.merge_timing import MergedTranscriptSegment
 from mena.note_package import (
-    ACTION_ITEMS_RESPONSE_SCHEMA,
-    GENERAL_SUMMARY_RESPONSE_SCHEMA,
+    PRODUCT_MAP_RESPONSE_SCHEMAS,
     PRODUCT_RESPONSE_SCHEMAS,
-    TIMELINE_MAP_RESPONSE_SCHEMA,
     ProductRequestRecord,
     SummarizationContractError,
     SummarizationRequest,
@@ -35,6 +33,7 @@ from mena.note_package import (
     product_system_prompt,
     product_user_prompt,
     schema_grounding,
+    validate_product_map_payload,
     validate_product_payload,
 )
 from mena.note_product_strategy import (
@@ -60,11 +59,6 @@ OLLAMA_DETERMINISTIC_OPTIONS: dict[str, object] = {
     "temperature": OLLAMA_SUMMARIZATION_TEMPERATURE,
     "seed": OLLAMA_SUMMARIZATION_SEED,
     "num_ctx": OLLAMA_SUMMARIZATION_NUM_CTX,
-}
-_MAP_RESPONSE_SCHEMAS: dict[str, dict[str, object]] = {
-    "timeline": TIMELINE_MAP_RESPONSE_SCHEMA,
-    "action_items": ACTION_ITEMS_RESPONSE_SCHEMA,
-    "general_summary": GENERAL_SUMMARY_RESPONSE_SCHEMA,
 }
 
 
@@ -243,7 +237,7 @@ class OllamaSummarizationProvider:
             reduce_system_content=reduce_system,
             request=request,
         )
-        map_schema = _MAP_RESPONSE_SCHEMAS[product]
+        map_schema = PRODUCT_MAP_RESPONSE_SCHEMAS[product]
         map_system = _map_system_prompt(product, language, map_schema)
         chunks = _plan_reducer_chunks(
             product=product,
@@ -265,7 +259,7 @@ class OllamaSummarizationProvider:
                     segments=segments,
                 ),
             )
-            _validate_call_payload(_validate_map_payload, product, call)
+            _validate_call_payload(validate_product_map_payload, product, call)
             records.append(
                 self._request_record(
                     product=product,
@@ -526,23 +520,6 @@ def _output_language_instruction(language: str) -> str:
         f"Write all user-facing strings in {language}: timeline entries, "
         "action item text, generated owner/due wording, and the general summary."
     )
-
-
-def _validate_map_payload(product: str, payload: Mapping[str, object]) -> None:
-    """Validate one reducer map response; unlike the final product, a chunk may be empty."""
-
-    if product == "timeline":
-        values = payload.get("timeline")
-        if not isinstance(values, list) or any(
-            not isinstance(value, str) or not value for value in values
-        ):
-            raise SummarizationContractError(
-                "Timeline chunk candidates must contain non-empty strings."
-            )
-    elif product == "action_items":
-        validate_product_payload(product, payload)
-    else:
-        validate_product_payload(product, payload)
 
 
 def _require_timeline_grounding(

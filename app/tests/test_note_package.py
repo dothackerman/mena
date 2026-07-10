@@ -17,6 +17,7 @@ from mena.note_package import (
     assert_summary_output_language,
     product_system_prompt,
     product_user_prompt,
+    validate_product_map_payload,
     validate_product_payload,
 )
 from test_summarization import _summary_request, _summary_result
@@ -123,6 +124,17 @@ def test_note_package_rejects_extra_action_item_fields() -> None:
                 ]
             },
         )
+
+
+def test_note_package_map_payload_validation_allows_empty_chunk_results() -> None:
+    validate_product_map_payload("timeline", {"timeline": []})
+    validate_product_map_payload("action_items", {"action_items": []})
+    validate_product_map_payload("general_summary", {"general_summary": ""})
+
+
+def test_note_package_map_payload_validation_rejects_invalid_empty_candidate_shape() -> None:
+    with pytest.raises(SummarizationContractError, match="chunk candidate must be a string"):
+        validate_product_map_payload("general_summary", {"general_summary": None})
 
 
 def test_note_package_keeps_policy_result_and_language_validation_together() -> None:

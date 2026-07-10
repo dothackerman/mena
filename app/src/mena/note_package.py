@@ -98,8 +98,8 @@ GENERAL_SUMMARY_RESPONSE_SCHEMA: dict[str, object] = {
 }
 
 # Reducer map-step schemas keep the per-product keys so map and reduce stay
-# aligned, but one chunk may legitimately contain no timeline events, so the
-# map timeline drops the final schema's minItems requirement.
+# aligned, but one chunk may legitimately contain no useful result. Map schemas
+# therefore allow empty candidates while final product schemas stay strict.
 TIMELINE_MAP_RESPONSE_SCHEMA: dict[str, object] = {
     "type": "object",
     "additionalProperties": False,
@@ -108,10 +108,22 @@ TIMELINE_MAP_RESPONSE_SCHEMA: dict[str, object] = {
         "timeline": {"type": "array", "items": {"type": "string"}},
     },
 }
+ACTION_ITEMS_MAP_RESPONSE_SCHEMA = ACTION_ITEMS_RESPONSE_SCHEMA
+GENERAL_SUMMARY_MAP_RESPONSE_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["general_summary"],
+    "properties": {"general_summary": {"type": "string"}},
+}
 PRODUCT_RESPONSE_SCHEMAS: dict[str, dict[str, object]] = {
     "timeline": TIMELINE_RESPONSE_SCHEMA,
     "action_items": ACTION_ITEMS_RESPONSE_SCHEMA,
     "general_summary": GENERAL_SUMMARY_RESPONSE_SCHEMA,
+}
+PRODUCT_MAP_RESPONSE_SCHEMAS: dict[str, dict[str, object]] = {
+    "timeline": TIMELINE_MAP_RESPONSE_SCHEMA,
+    "action_items": ACTION_ITEMS_MAP_RESPONSE_SCHEMA,
+    "general_summary": GENERAL_SUMMARY_MAP_RESPONSE_SCHEMA,
 }
 PRODUCT_RESPONSE_SCHEMA_NAMES: dict[str, str] = {
     product: f"mena_summary_{product}" for product in REQUIRED_NOTE_PRODUCTS
@@ -493,6 +505,33 @@ def validate_product_payload(product: str, payload: Mapping[str, object]) -> Non
     elif product == "general_summary":
         _require_exact_keys(payload, ("general_summary",), "Summary general-summary payload")
         _required_str(payload, "general_summary", "Summary result")
+
+
+def validate_product_map_payload(product: str, payload: Mapping[str, object]) -> None:
+    """Validate one reducer map response; unlike final products, chunks may be empty."""
+
+    if product not in REQUIRED_NOTE_PRODUCTS:
+        raise SummarizationContractError(f"Unsupported note product: {product}.")
+    if product == "timeline":
+        _require_exact_keys(payload, ("timeline",), "Summary timeline chunk payload")
+        values = _list(payload, "timeline")
+        if any(not isinstance(value, str) or not value for value in values):
+            raise SummarizationContractError(
+                "Timeline chunk candidates must contain non-empty strings."
+            )
+    elif product == "action_items":
+        validate_product_payload(product, payload)
+    elif product == "general_summary":
+        _require_exact_keys(
+            payload,
+            ("general_summary",),
+            "Summary general-summary chunk payload",
+        )
+        value = payload.get("general_summary")
+        if not isinstance(value, str):
+            raise SummarizationContractError(
+                "Summary general-summary chunk candidate must be a string."
+            )
 
 
 def assert_summary_output_language(result: SummaryResult, language: str) -> None:
