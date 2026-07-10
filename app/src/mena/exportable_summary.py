@@ -177,7 +177,7 @@ def resolve_exportable_summary_session(
                         session_dir=session_dir,
                         summary_artifact_id=summary_artifact_id,
                     )
-                if _session_id_matches_artifact_id(
+                if _requested_summary_artifact_file_exists(
                     session_dir=session_dir,
                     artifact_id=summary_artifact_id,
                 ):
@@ -435,6 +435,29 @@ def _raw_manifest_record_matches_summary_request(
     if item.get("id") != artifact_id:
         return False
     return not _raw_artifact_type_is_known_non_summary(item)
+
+
+def _requested_summary_artifact_file_exists(*, session_dir: Path, artifact_id: str) -> bool:
+    relative_path = _requested_summary_artifact_path(artifact_id)
+    if relative_path is None:
+        return False
+    if not _session_id_matches_artifact_id(session_dir=session_dir, artifact_id=artifact_id):
+        return False
+    return (session_dir / relative_path).is_file()
+
+
+def _requested_summary_artifact_path(artifact_id: str) -> Path | None:
+    _session_id_value, separator, raw_path = artifact_id.partition(":")
+    if not separator or not raw_path:
+        return None
+    relative_path = Path(raw_path)
+    if relative_path.is_absolute() or any(part in {"", ".", ".."} for part in relative_path.parts):
+        return None
+    if len(relative_path.parts) < 3:
+        return None
+    if relative_path.parts[0] != "artifacts" or relative_path.parts[1] != SUMMARY_ARTIFACT_TYPE:
+        return None
+    return relative_path
 
 
 def _raw_artifact_type_is_known_non_summary(item: Mapping[str, object]) -> bool:

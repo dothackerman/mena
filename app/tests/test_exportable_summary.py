@@ -141,6 +141,21 @@ def test_resolve_exportable_summary_session_ignores_copied_requested_id(
     assert selected.summary_artifact_id == requested_summary.id
 
 
+def test_resolve_exportable_summary_session_rejects_fabricated_requested_id(
+    tmp_path: Path,
+) -> None:
+    unsummarized_dir = _create_session_record(tmp_path / "session-unsummarized")
+    fabricated_summary_id = f"{SESSION_ID}:artifacts/summary/missing.json"
+
+    selected = resolve_exportable_summary_session(
+        sessions_root=tmp_path,
+        summary_artifact_id=fabricated_summary_id,
+    )
+
+    assert selected is None
+    assert not (unsummarized_dir / "artifacts").exists()
+
+
 def test_resolve_exportable_summary_session_preserves_corrupt_newest_selection(
     tmp_path: Path,
 ) -> None:

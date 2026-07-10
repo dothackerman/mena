@@ -654,6 +654,27 @@ def test_export_workflow_requested_artifact_skips_malformed_unrelated_session(
     assert str(result.export_path).startswith(str(target_dir))
 
 
+def test_export_workflow_rejects_fabricated_requested_artifact_without_mutating_session(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    unsummarized_dir = _create_session_record(settings.paths.sessions_dir / "session-unsummarized")
+    fabricated_summary_id = f"{SESSION_ID}:artifacts/summary/missing.json"
+
+    with pytest.raises(ValueError, match="Summary artifact not found"):
+        run_export_workflow(
+            ExportCommandInput(
+                session_path=None,
+                summary_artifact_id=fabricated_summary_id,
+                export_format="markdown",
+            ),
+            settings=settings,
+            interaction=ScriptedInteraction(()),
+        )
+
+    assert not (unsummarized_dir / "artifacts").exists()
+
+
 def test_export_workflow_reports_requested_artifact_with_malformed_session_record(
     tmp_path: Path,
 ) -> None:
