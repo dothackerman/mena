@@ -57,6 +57,8 @@ Adapters may expose typed capabilities and failures, such as how Ollama releases
 
 For example, the runtime steward may decide that a terminal local-LLM lease must be released after `process` or `summarize`; the Ollama adapter decides the concrete Ollama request needed to release that model residency.
 
+The same split governs note-product generation (ADR-035): the capability resolver owns provider *policy* — which provider profile serves a stage, authorization, fallback, route provenance — while the bound provider owns execution-strategy *mechanics* — whether one note product runs as `one_shot` or `reducer` given its own model/context constraints, decided by the same token-budget arithmetic as the pre-send hard-fail guard. Do not add a second provider-selection mechanism next to the resolver, and do not teach the resolver about context windows or chunking.
+
 This keeps future provider replacement from requiring a rewrite of setup evaluation, resource ownership, fallback authorization, or provenance semantics.
 
 ## Persisted Contract Rule

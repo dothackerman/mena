@@ -1,0 +1,676 @@
+{
+  "$id": "https://dothackerman.github.io/mena/schemas/summary.v3.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "action_item": {
+      "additionalProperties": false,
+      "properties": {
+        "due": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "owner": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "text": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": ["text", "owner", "due"],
+      "type": "object"
+    },
+    "timeline_entry": {
+      "additionalProperties": false,
+      "properties": {
+        "source_segment_ids": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "start_seconds": {
+          "minimum": 0,
+          "type": "number"
+        },
+        "text": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": ["text", "source_segment_ids", "start_seconds"],
+      "type": "object"
+    },
+    "artifact_ref": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_type": {
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_:-]*$",
+          "type": "string"
+        },
+        "id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "version": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": ["id", "artifact_type", "version", "sha256"],
+      "type": "object"
+    },
+    "request_record": {
+      "additionalProperties": false,
+      "properties": {
+        "product": {
+          "enum": ["timeline", "action_items", "general_summary"],
+          "type": "string"
+        },
+        "model": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "num_ctx": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "temperature": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "prompt_eval_count": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "eval_count": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "strategy": {
+          "enum": ["one_shot", "reducer"],
+          "type": "string"
+        },
+        "call": {
+          "enum": ["one_shot", "map", "reduce"],
+          "type": "string"
+        },
+        "chunk_index": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "chunk_count": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "product",
+        "model",
+        "num_ctx",
+        "temperature",
+        "seed",
+        "prompt_eval_count",
+        "eval_count",
+        "strategy",
+        "call",
+        "chunk_index",
+        "chunk_count"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "call": {
+                "const": "one_shot"
+              }
+            },
+            "required": ["call"]
+          },
+          "then": {
+            "properties": {
+              "strategy": {
+                "const": "one_shot"
+              },
+              "chunk_index": {
+                "type": "null"
+              },
+              "chunk_count": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "call": {
+                "const": "map"
+              }
+            },
+            "required": ["call"]
+          },
+          "then": {
+            "properties": {
+              "strategy": {
+                "const": "reducer"
+              },
+              "chunk_index": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "chunk_count": {
+                "minimum": 1,
+                "type": "integer"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "call": {
+                "const": "reduce"
+              }
+            },
+            "required": ["call"]
+          },
+          "then": {
+            "properties": {
+              "strategy": {
+                "const": "reducer"
+              },
+              "chunk_index": {
+                "type": "null"
+              },
+              "chunk_count": {
+                "minimum": 1,
+                "type": "integer"
+              }
+            }
+          }
+        }
+      ],
+      "type": "object"
+    },
+    "policy": {
+      "additionalProperties": false,
+      "properties": {
+        "include_manual_notes": {
+          "type": "boolean"
+        },
+        "language": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "policy_version": {
+          "const": 1,
+          "type": "integer"
+        },
+        "prompt_policy": {
+          "enum": [
+            "meeting-summary-json-v1",
+            "meeting-summary-json-schema-v1",
+            "meeting-summary-json-schema-language-output-v2",
+            "note-package-three-product-v1",
+            "note-package-three-product-strategy-v2"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "policy_version",
+        "prompt_policy",
+        "language",
+        "include_manual_notes"
+      ],
+      "type": "object"
+    },
+    "provider": {
+      "additionalProperties": false,
+      "properties": {
+        "endpoint": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "model": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "name": {
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_:-]*$",
+          "type": "string"
+        },
+        "prompt_policy": {
+          "enum": [
+            "meeting-summary-json-v1",
+            "meeting-summary-json-schema-v1",
+            "meeting-summary-json-schema-language-output-v2",
+            "note-package-three-product-v1",
+            "note-package-three-product-strategy-v2"
+          ],
+          "type": "string"
+        },
+        "resolved_model": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "account_scope": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": ["name", "model", "endpoint", "prompt_policy"],
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Versioned three-product note-package summary artifact with per-call strategy provenance emitted by the summarization port.",
+  "properties": {
+    "action_items": {
+      "items": {
+        "$ref": "#/$defs/action_item"
+      },
+      "type": "array"
+    },
+    "created_at": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "general_summary": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "manual_notes_artifact": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/artifact_ref"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "merged_transcript_artifact": {
+      "$ref": "#/$defs/artifact_ref"
+    },
+    "policy": {
+      "$ref": "#/$defs/policy"
+    },
+    "provider": {
+      "$ref": "#/$defs/provider"
+    },
+    "request_records": {
+      "description": "Per-call provenance records. Each product must follow one strategy shape: exactly one one_shot call, or one or more map calls plus exactly one reduce call. Gap-free chunk_index coverage, chunk_index < chunk_count, and cross-record chunk_count consistency exceed JSON Schema expressiveness; SummaryArtifact.from_dict enforces them and is authoritative for this contract.",
+      "allOf": [
+        {
+          "anyOf": [
+            {
+              "allOf": [
+                {
+                  "contains": {
+                    "properties": {
+                      "product": {
+                        "const": "timeline"
+                      },
+                      "call": {
+                        "const": "one_shot"
+                      }
+                    },
+                    "required": ["product", "call"]
+                  },
+                  "minContains": 1,
+                  "maxContains": 1
+                },
+                {
+                  "contains": {
+                    "properties": {
+                      "product": {
+                        "const": "timeline"
+                      },
+                      "call": {
+                        "enum": ["map", "reduce"]
+                      }
+                    },
+                    "required": ["product", "call"]
+                  },
+                  "minContains": 0,
+                  "maxContains": 0
+                }
+              ]
+            },
+            {
+              "allOf": [
+                {
+                  "contains": {
+                    "properties": {
+                      "product": {
+                        "const": "timeline"
+                      },
+                      "call": {
+                        "const": "one_shot"
+                      }
+                    },
+                    "required": ["product", "call"]
+                  },
+                  "minContains": 0,
+                  "maxContains": 0
+                },
+                {
+                  "contains": {
+                    "properties": {
+                      "product": {
+                        "const": "timeline"
+                      },
+                      "call": {
+                        "const": "map"
+                      }
+                    },
+                    "required": ["product", "call"]
+                  },
+                  "minContains": 1
+                },
+                {
+                  "contains": {
+                    "properties": {
+                      "product": {
+                        "const": "timeline"
+                      },
+                      "call": {
+                        "const": "reduce"
+                      }
+                    },
+                    "required": ["product", "call"]
+                  },
+                  "minContains": 1,
+                  "maxContains": 1
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "anyOf": [
+            {
+              "allOf": [
+                {
+                  "contains": {
+                    "properties": {
+                      "product": {
+                        "const": "action_items"
+                      },
+                      "call": {
+                        "const": "one_shot"
+                      }
+                    },
+                    "required": ["product", "call"]
+                  },
+                  "minContains": 1,
+                  "maxContains": 1
+                },
+                {
+                  "contains": {
+                    "properties": {
+                      "product": {
+                        "const": "action_items"
+                      },
+                      "call": {
+                        "enum": ["map", "reduce"]
+                      }
+                    },
+                    "required": ["product", "call"]
+                  },
+                  "minContains": 0,
+                  "maxContains": 0
+                }
+              ]
+            },
+            {
+              "allOf": [
+                {
+                  "contains": {
+                    "properties": {
+                      "product": {
+                        "const": "action_items"
+                      },
+                      "call": {
+                        "const": "one_shot"
+                      }
+                    },
+                    "required": ["product", "call"]
+                  },
+                  "minContains": 0,
+                  "maxContains": 0
+                },
+                {
+                  "contains": {
+                    "properties": {
+                      "product": {
+                        "const": "action_items"
+                      },
+                      "call": {
+                        "const": "map"
+                      }
+                    },
+                    "required": ["product", "call"]
+                  },
+                  "minContains": 1
+                },
+                {
+                  "contains": {
+                    "properties": {
+                      "product": {
+                        "const": "action_items"
+                      },
+                      "call": {
+                        "const": "reduce"
+                      }
+                    },
+                    "required": ["product", "call"]
+                  },
+                  "minContains": 1,
+                  "maxContains": 1
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "anyOf": [
+            {
+              "allOf": [
+                {
+                  "contains": {
+                    "properties": {
+                      "product": {
+                        "const": "general_summary"
+                      },
+                      "call": {
+                        "const": "one_shot"
+                      }
+                    },
+                    "required": ["product", "call"]
+                  },
+                  "minContains": 1,
+                  "maxContains": 1
+                },
+                {
+                  "contains": {
+                    "properties": {
+                      "product": {
+                        "const": "general_summary"
+                      },
+                      "call": {
+                        "enum": ["map", "reduce"]
+                      }
+                    },
+                    "required": ["product", "call"]
+                  },
+                  "minContains": 0,
+                  "maxContains": 0
+                }
+              ]
+            },
+            {
+              "allOf": [
+                {
+                  "contains": {
+                    "properties": {
+                      "product": {
+                        "const": "general_summary"
+                      },
+                      "call": {
+                        "const": "one_shot"
+                      }
+                    },
+                    "required": ["product", "call"]
+                  },
+                  "minContains": 0,
+                  "maxContains": 0
+                },
+                {
+                  "contains": {
+                    "properties": {
+                      "product": {
+                        "const": "general_summary"
+                      },
+                      "call": {
+                        "const": "map"
+                      }
+                    },
+                    "required": ["product", "call"]
+                  },
+                  "minContains": 1
+                },
+                {
+                  "contains": {
+                    "properties": {
+                      "product": {
+                        "const": "general_summary"
+                      },
+                      "call": {
+                        "const": "reduce"
+                      }
+                    },
+                    "required": ["product", "call"]
+                  },
+                  "minContains": 1,
+                  "maxContains": 1
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "items": {
+        "$ref": "#/$defs/request_record"
+      },
+      "minItems": 3,
+      "type": "array"
+    },
+    "session_id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "timeline": {
+      "items": {
+        "$ref": "#/$defs/timeline_entry"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "version": {
+      "const": 3,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version",
+    "session_id",
+    "merged_transcript_artifact",
+    "manual_notes_artifact",
+    "policy",
+    "provider",
+    "timeline",
+    "action_items",
+    "general_summary",
+    "created_at",
+    "request_records"
+  ],
+  "title": "Mena Summary v3",
+  "type": "object"
+}

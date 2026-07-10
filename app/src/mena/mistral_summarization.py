@@ -108,7 +108,11 @@ class MistralSummarizationProvider:
             )
             for product, schema in PRODUCT_RESPONSE_SCHEMAS.items()
         }
-        result = assemble_summary_result(product_payloads=payloads, request_records=records)
+        result = assemble_summary_result(
+            product_payloads=payloads,
+            request_records=records,
+            merged_transcript=request.merged_transcript,
+        )
         assert_summary_output_language(result, request.policy.language)
         return result
 
@@ -120,7 +124,7 @@ class MistralSummarizationProvider:
         request: SummarizationRequest,
         records: list[ProductRequestRecord],
     ) -> Mapping[str, object]:
-        system_content = product_system_prompt(product, request.policy.language)
+        system_content = product_system_prompt(product, request.policy.language, schema)
         user_content = product_user_prompt(request)
         guard_summarization_token_budget(
             product=product,

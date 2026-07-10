@@ -11,6 +11,7 @@ from pathlib import Path
 from mena.artifacts import ArtifactRecord, ArtifactStore
 from mena.processing import ProcessingStateError
 from mena.summarization import (
+    SUMMARY_ARTIFACT_CONTRACT,
     SUMMARY_ARTIFACT_TYPE,
     SUMMARY_ARTIFACT_VERSION,
     SummarizationContractError,
@@ -107,10 +108,11 @@ def resolve_summary_markdown_input(
         try:
             _, summary = _load_summary_artifact(record=record, store=store)
         except _IncompatibleSummaryMarkdownInput:
-            # Old summary.v1 artifacts (and any payload that no longer satisfies the
-            # strict summary.v2 contract) remain sealed in the manifest by design.
-            # When auto-selecting export input, skip incompatible payloads so a valid
-            # summary.v2 from a rerun can still be chosen; only fail if none exist.
+            # Older summary artifacts (and any payload that no longer satisfies the
+            # current strict summary contract) remain sealed in the manifest by
+            # design. When auto-selecting export input, skip incompatible payloads
+            # so a valid current summary from a rerun can still be chosen; only
+            # fail if none exist.
             continue
         candidates.append(
             (
@@ -123,7 +125,9 @@ def resolve_summary_markdown_input(
         )
 
     if not candidates:
-        raise SummaryMarkdownExportError("No valid summary.v2 artifact was found for export.")
+        raise SummaryMarkdownExportError(
+            f"No valid {SUMMARY_ARTIFACT_CONTRACT} artifact was found for export."
+        )
 
     _, _, _, selected_record, selected_summary = max(candidates)
     return selected_record, selected_summary
@@ -158,7 +162,7 @@ def _load_summary_artifact(
         summary = SummaryArtifact.from_dict(payload)
     except (SummarizationContractError, ProcessingStateError) as exc:
         raise _IncompatibleSummaryMarkdownInput(
-            f"Summary artifact {record.id} is not a valid summary.v2 payload."
+            f"Summary artifact {record.id} is not a valid {SUMMARY_ARTIFACT_CONTRACT} payload."
         ) from exc
 
     if summary.session_id != record.session_id:

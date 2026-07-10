@@ -7,12 +7,14 @@ from mena.ollama_summarization import (
 from mena.processing import ArtifactRef
 from mena.summarization import (
     REQUIRED_NOTE_PRODUCTS,
+    SUMMARY_SCHEMA_VERSION,
     FakeSummarizationProvider,
     ProductRequestRecord,
     SummarizationPolicy,
     SummaryActionItem,
     SummaryArtifact,
     SummaryResult,
+    SummaryTimelineEntry,
 )
 from mena.summary_markdown import format_summary_markdown
 
@@ -30,8 +32,8 @@ def test_summary_markdown_renders_sections_in_order_with_exact_headings() -> Non
     assert markdown == (
         "## Timeline\n"
         "\n"
-        "- Discussed database migration before Friday.\n"
-        "- Confirmed release risk.\n"
+        "- [00:00] Discussed database migration before Friday.\n"
+        "- [00:02] Confirmed release risk.\n"
         "\n"
         "## Action items\n"
         "\n"
@@ -112,19 +114,25 @@ def test_summary_markdown_uses_german_chrome_for_regional_german_codes() -> None
 def test_summary_markdown_accepts_summary_result_payload() -> None:
     markdown = format_summary_markdown(_summary_result())
 
-    assert markdown.startswith("## Timeline\n\n- Discussed database migration before Friday.")
+    assert markdown.startswith(
+        "## Timeline\n\n- [00:00] Discussed database migration before Friday."
+    )
 
 
 def test_summary_markdown_accepts_summary_artifact_mapping() -> None:
     markdown = format_summary_markdown(_summary_artifact().to_dict())
 
-    assert markdown.startswith("## Timeline\n\n- Discussed database migration before Friday.")
+    assert markdown.startswith(
+        "## Timeline\n\n- [00:00] Discussed database migration before Friday."
+    )
 
 
 def test_summary_markdown_accepts_summary_result_mapping() -> None:
     markdown = format_summary_markdown(_summary_result().to_dict())
 
-    assert markdown.startswith("## Timeline\n\n- Discussed database migration before Friday.")
+    assert markdown.startswith(
+        "## Timeline\n\n- [00:00] Discussed database migration before Friday."
+    )
 
 
 def _summary_artifact(
@@ -134,7 +142,7 @@ def _summary_artifact(
 ) -> SummaryArtifact:
     result = _summary_result(action_items=action_items)
     return SummaryArtifact(
-        version=2,
+        version=SUMMARY_SCHEMA_VERSION,
         session_id=SESSION_ID,
         merged_transcript_artifact=ArtifactRef(
             id=f"{SESSION_ID}:artifacts/merged_transcript/merged.json",
@@ -159,8 +167,16 @@ def _summary_result(
 ) -> SummaryResult:
     return SummaryResult(
         timeline=(
-            "Discussed database migration before Friday.",
-            "Confirmed release risk.",
+            SummaryTimelineEntry(
+                text="Discussed database migration before Friday.",
+                source_segment_ids=("merged_segment_000001",),
+                start_seconds=0.0,
+            ),
+            SummaryTimelineEntry(
+                text="Confirmed release risk.",
+                source_segment_ids=("merged_segment_000002",),
+                start_seconds=2.1,
+            ),
         ),
         action_items=(
             action_items

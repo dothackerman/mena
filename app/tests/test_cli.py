@@ -133,6 +133,7 @@ from mena.setup import (
 )
 from mena.summarization import (
     REQUIRED_NOTE_PRODUCTS,
+    SUMMARY_SCHEMA_VERSION,
     FakeSummarizationProvider,
     ProductRequestRecord,
     SummarizationError,
@@ -140,6 +141,7 @@ from mena.summarization import (
     SummarizationProvider,
     SummaryArtifact,
     SummaryResult,
+    SummaryTimelineEntry,
     persist_summary_artifact,
 )
 from mena.transcription import (
@@ -4172,7 +4174,13 @@ def _mark_semantic_provider_unavailable_skip(session: CreatedSession) -> None:
 
 def _summary_result_for_export() -> SummaryResult:
     return SummaryResult(
-        timeline=("Agenda covered.",),
+        timeline=(
+            SummaryTimelineEntry(
+                text="Agenda covered.",
+                source_segment_ids=("merged_segment_000001",),
+                start_seconds=0.0,
+            ),
+        ),
         action_items=(),
         general_summary="The team aligned on the plan.",
         request_records=_request_records_for_products(REQUIRED_NOTE_PRODUCTS),
@@ -4199,7 +4207,7 @@ def _persist_summary_artifact_for_cli(
     return persist_summary_artifact(
         store=store,
         artifact=SummaryArtifact(
-            version=2,
+            version=SUMMARY_SCHEMA_VERSION,
             session_id=SESSION_ID,
             merged_transcript_artifact=merged_artifact_ref,
             manual_notes_artifact=None,
