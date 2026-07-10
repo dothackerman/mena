@@ -205,6 +205,168 @@ def test_resolve_exportable_summary_session_skips_incompatible_payload(
     assert selected.session_dir == valid_dir
 
 
+def test_resolve_exportable_summary_session_skips_legacy_record_version(
+    tmp_path: Path,
+) -> None:
+    legacy_dir, legacy_store, _ = _build_export_session(tmp_path / "session-newer-legacy")
+    legacy_summary = _persist_summary(
+        store=legacy_store,
+        created_at="2026-07-03T09:00:00Z",
+    )
+    _update_artifact_manifest_record(
+        legacy_dir,
+        artifact_id=legacy_summary.id,
+        updates={"version": 1},
+    )
+    valid_dir, valid_store, _ = _build_export_session(tmp_path / "session-older-valid")
+    _persist_summary(store=valid_store, created_at="2026-07-03T08:00:00Z")
+
+    selected = resolve_exportable_summary_session(sessions_root=tmp_path)
+
+    assert selected is not None
+    assert selected.session_dir == valid_dir
+
+
+def test_resolve_exportable_summary_session_skips_incompatible_payload_version(
+    tmp_path: Path,
+) -> None:
+    incompatible_dir, incompatible_store, _ = _build_export_session(
+        tmp_path / "session-newer-incompatible-version"
+    )
+    incompatible_summary = _persist_summary(
+        store=incompatible_store,
+        created_at="2026-07-03T09:00:00Z",
+    )
+    payload_path = incompatible_dir / incompatible_summary.path
+    payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    payload["version"] = payload["version"] + 999
+    payload_bytes = (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
+    payload_path.write_bytes(payload_bytes)
+    _update_artifact_manifest_record(
+        incompatible_dir,
+        artifact_id=incompatible_summary.id,
+        updates={
+            "sha256": hashlib.sha256(payload_bytes).hexdigest(),
+            "byte_count": len(payload_bytes),
+        },
+    )
+    valid_dir, valid_store, _ = _build_export_session(tmp_path / "session-older-valid")
+    _persist_summary(store=valid_store, created_at="2026-07-03T08:00:00Z")
+
+    selected = resolve_exportable_summary_session(sessions_root=tmp_path)
+
+    assert selected is not None
+    assert selected.session_dir == valid_dir
+
+
+def test_resolve_exportable_summary_session_skips_non_object_payload(
+    tmp_path: Path,
+) -> None:
+    incompatible_dir, incompatible_store, _ = _build_export_session(
+        tmp_path / "session-newer-non-object"
+    )
+    incompatible_summary = _persist_summary(
+        store=incompatible_store,
+        created_at="2026-07-03T09:00:00Z",
+    )
+    payload_bytes = b"[]\n"
+    (incompatible_dir / incompatible_summary.path).write_bytes(payload_bytes)
+    _update_artifact_manifest_record(
+        incompatible_dir,
+        artifact_id=incompatible_summary.id,
+        updates={
+            "sha256": hashlib.sha256(payload_bytes).hexdigest(),
+            "byte_count": len(payload_bytes),
+        },
+    )
+    valid_dir, valid_store, _ = _build_export_session(tmp_path / "session-older-valid")
+    _persist_summary(store=valid_store, created_at="2026-07-03T08:00:00Z")
+
+    selected = resolve_exportable_summary_session(sessions_root=tmp_path)
+
+    assert selected is not None
+    assert selected.session_dir == valid_dir
+
+
+def test_resolve_exportable_summary_session_preserves_malformed_selected_record(
+    tmp_path: Path,
+) -> None:
+    older_dir, older_store, _ = _build_export_session(tmp_path / "session-older")
+    _persist_summary(store=older_store, created_at="2026-07-03T08:00:00Z")
+    malformed_dir, malformed_store, _ = _build_export_session(tmp_path / "session-newer-malformed")
+    malformed_summary = _persist_summary(
+        store=malformed_store,
+        created_at="2026-07-03T09:00:00Z",
+    )
+    _update_artifact_manifest_record(
+        malformed_dir,
+        artifact_id=malformed_summary.id,
+        updates={"status": "sealedd"},
+    )
+
+    selected = resolve_exportable_summary_session(sessions_root=tmp_path)
+
+    assert selected is not None
+    assert selected.session_dir == malformed_dir
+    assert selected.session_dir != older_dir
+    assert selected.summary_artifact_id == malformed_summary.id
+    assert selected.reason == "verify_selected_session"
+
+
+def test_resolve_exportable_summary_session_uses_summary_path_tie_break(
+    tmp_path: Path,
+) -> None:
+    first_dir, first_store, _ = _build_export_session(tmp_path / "session-first")
+    _persist_summary(
+        store=first_store,
+        created_at="2026-06-15T10:00:00Z",
+        name="summary/a-final.json",
+    )
+    second_dir, second_store, _ = _build_export_session(tmp_path / "session-second")
+    second_summary = _persist_summary(
+        store=second_store,
+        created_at="2026-06-15T10:00:00Z",
+        name="summary/z-final.json",
+    )
+
+    selected = resolve_exportable_summary_session(sessions_root=tmp_path)
+
+    assert selected is not None
+    assert selected.session_dir == second_dir
+    assert selected.session_dir != first_dir
+    assert selected.summary_artifact_id == second_summary.id
+
+
+def test_resolve_exportable_summary_session_uses_artifact_id_tie_break(
+    tmp_path: Path,
+) -> None:
+    low_dir, low_store, _ = _build_export_session(
+        tmp_path / "session-z-low-id",
+        session_id_value="00000000-0000-0000-0000-000000000001",
+    )
+    _persist_summary(
+        store=low_store,
+        created_at="2026-06-15T10:00:00Z",
+        name="summary/final.json",
+    )
+    high_dir, high_store, _ = _build_export_session(
+        tmp_path / "session-a-high-id",
+        session_id_value="00000000-0000-0000-0000-000000000002",
+    )
+    high_summary = _persist_summary(
+        store=high_store,
+        created_at="2026-06-15T10:00:00Z",
+        name="summary/final.json",
+    )
+
+    selected = resolve_exportable_summary_session(sessions_root=tmp_path)
+
+    assert selected is not None
+    assert selected.session_dir == high_dir
+    assert selected.session_dir != low_dir
+    assert selected.summary_artifact_id == high_summary.id
+
+
 def test_resolve_exportable_summary_session_does_not_mutate_unsummarized_sessions(
     tmp_path: Path,
 ) -> None:
