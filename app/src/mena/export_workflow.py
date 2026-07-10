@@ -221,8 +221,7 @@ def _session_summary_records(
             return None
         if data.get("version") != ARTIFACT_MANIFEST_VERSION:
             return None
-        if data.get("session_id") != resolved_session_id:
-            return None
+        manifest_session_matches = data.get("session_id") == resolved_session_id
         artifacts = data.get("artifacts")
         if not isinstance(artifacts, list):
             return None
@@ -242,14 +241,16 @@ def _session_summary_records(
                 if invalid_record is not None:
                     records.append(invalid_record)
                 continue
-            if record.session_id != resolved_session_id:
-                # A summary manifest record whose session id does not match
-                # session.json is fail-closed corruption: explicit export of the
-                # bundle raises artifact_record_session_mismatch. Preserve it as an
-                # invalid candidate for the requested artifact and for pathless
-                # default discovery so the corrupt session is still selected and
-                # verification surfaces the mismatch instead of the session looking
-                # unsummarized and an older valid session being exported silently.
+            if not manifest_session_matches or record.session_id != resolved_session_id:
+                # A manifest whose top-level session id — or an individual summary
+                # record whose session id — does not match session.json is
+                # fail-closed corruption: explicit export of the bundle raises
+                # artifact_manifest_session_mismatch / artifact_record_session_mismatch.
+                # Preserve summary records as invalid candidates for the requested
+                # artifact and for pathless default discovery so the corrupt session
+                # is still discovered and selection surfaces the mismatch instead of
+                # the session looking unsummarized and an older valid session being
+                # exported silently.
                 if record.artifact_type == SUMMARY_ARTIFACT_TYPE and (
                     requested_summary_artifact_id is None
                     or record.id == requested_summary_artifact_id

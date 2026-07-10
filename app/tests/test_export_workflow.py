@@ -898,6 +898,39 @@ def test_export_workflow_reports_session_id_mismatch_summary_during_default_disc
         )
 
 
+def test_export_workflow_reports_manifest_session_mismatch_during_default_discovery(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    mismatch_dir, mismatch_store, mismatch_merged = _build_export_session(
+        settings.paths.sessions_dir / "session-newer-manifest-mismatch"
+    )
+    _persist_summary(
+        store=mismatch_store,
+        merged_transcript_record=mismatch_merged,
+        summary_created_at="2026-07-03T09:00:00Z",
+    )
+    manifest_path = session_artifact_manifest_path(mismatch_dir)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["session_id"] = "00000000-0000-0000-0000-000000000099"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    _, valid_store, valid_merged = _build_export_session(
+        settings.paths.sessions_dir / "session-older-valid"
+    )
+    _persist_summary(
+        store=valid_store,
+        merged_transcript_record=valid_merged,
+        summary_created_at="2026-07-03T08:00:00Z",
+    )
+
+    with pytest.raises(SessionIntegrityError, match="artifact_manifest_session_mismatch"):
+        run_export_workflow(
+            ExportCommandInput(session_path=None, export_format="markdown"),
+            settings=settings,
+            interaction=ScriptedInteraction(()),
+        )
+
+
 def test_export_workflow_reports_requested_summary_session_with_unreadable_manifest(
     tmp_path: Path,
 ) -> None:
