@@ -284,6 +284,7 @@ def persist_summary_artifact(
             policy_config_id=_policy_config_id(artifact.policy),
             provider_config_id=artifact.provider.config_id,
         ),
+        "summary_created_at": artifact.created_at,
         "merged_transcript_artifact_id": artifact.merged_transcript_artifact.id,
         "manual_notes_artifact_id": (
             None if artifact.manual_notes_artifact is None else artifact.manual_notes_artifact.id

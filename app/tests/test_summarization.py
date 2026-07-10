@@ -134,6 +134,7 @@ def test_summarization_stage_persists_summary_and_checkpoint(tmp_path: Path) -> 
     assert result.state.status == "completed"
     assert result.summary_record.artifact_type == "summary"
     assert result.summary_record.metadata["contract"] == "summary.v3"
+    assert result.summary_record.metadata["summary_created_at"] == "2026-05-18T17:00:00Z"
     payload = json.loads(store.retrieve(result.summary_record.id))
     Draft202012Validator(_load_summary_schema(), format_checker=FormatChecker()).validate(payload)
     artifact = SummaryArtifact.from_dict(payload)

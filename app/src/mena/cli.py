@@ -7,13 +7,14 @@ import json
 import os
 import sys
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from shlex import quote
 from typing import Any, TypeVar, cast
 from uuid import uuid4
 
-from mena import processing, processing_orchestration, summarize_workflow
+from mena import export_workflow, processing, processing_orchestration, summarize_workflow
 from mena.artifacts import (
     ArtifactRecord,
     ArtifactStore,
@@ -42,7 +43,6 @@ from mena.discovery import (
 )
 from mena.export import (
     SummaryMarkdownExportError,
-    export_summary_markdown,
 )
 from mena.fields import optional_str, required_int, required_str
 from mena.interaction import (
@@ -110,7 +110,6 @@ from mena.semantic_coherence import (
 )
 from mena.session_integrity import (
     SessionIntegrityError,
-    load_verified_session_bundle,
     verify_session_bundle,
 )
 from mena.sessions import (
@@ -590,6 +589,41 @@ class ConsoleSummarizeInteraction:
             raise ValueError(f"Unsupported summarize notice topic '{topic}'.")
 
 
+class ConsoleExportInteraction:
+    """Console adapter for export workflow interaction topics."""
+
+    def __init__(self, input_fn: Callable[[str], str] | None) -> None:
+        self._input_fn = input_fn
+
+    def choose(self, request: ChoiceRequest) -> ChoiceOption:
+        raise ValueError(f"Unsupported export choice topic '{request.topic}'.")
+
+    def confirm(self, request: ConfirmationRequest) -> bool:
+        if request.topic != "export.format.markdown":
+            raise ValueError(f"Unsupported export confirmation topic '{request.topic}'.")
+        if self._input_fn is None:
+            return True
+        print("Available export format:")
+        print("  1) Markdown (.md)")
+        answer = self._input_fn("Export as Markdown notes? [Y/n]: ")
+        return answer.strip().lower() in {"", "1", "y", "yes"}
+
+    def request_text(self, request: TextRequest) -> str:
+        raise ValueError(f"Unsupported export text topic '{request.topic}'.")
+
+    def notify(self, notice: WorkflowNotice) -> None:
+        topic = notice.topic
+        context = notice.context
+        if topic == "export.session_selected.latest":
+            print(f"Using latest summarized session: {context['session_path']}")
+        elif topic == "export.session_selected.summary_artifact":
+            print(f"Using session containing requested summary artifact: {context['session_path']}")
+        elif topic == "export.completed":
+            print(f"Markdown notes exported to: {context['export_path']}")
+        else:
+            raise ValueError(f"Unsupported export notice topic '{topic}'.")
+
+
 def _correction_action_option_id(raw: str) -> str | None:
     if raw in {"p", "play", "playback"}:
         return "playback"
@@ -702,7 +736,13 @@ def build_parser() -> argparse.ArgumentParser:
             continue
         subparser = subparsers.add_parser(command)
         if command in {"correct", "process", "resume", "summarize", "export", "inspect"}:
-            if command == "process":
+            if command == "export":
+                subparser.add_argument(
+                    "session_path",
+                    nargs="?",
+                    help="Path to the session directory or session.json.",
+                )
+            elif command == "process":
                 subparser.add_argument(
                     "session_path",
                     nargs="?",
@@ -734,6 +774,13 @@ def build_parser() -> argparse.ArgumentParser:
             )
 
         if command == "export":
+            subparser.add_argument(
+                "--format",
+                choices=("markdown",),
+                dest="export_format",
+                default=None,
+                help="Export output format.",
+            )
             subparser.add_argument(
                 "--summary-artifact-id",
                 dest="summary_artifact_id",
@@ -916,8 +963,11 @@ def main(
     if args.command == "export":
         try:
             return _run_export_command(
-                session_path=Path(args.session_path),
+                session_path=Path(args.session_path) if args.session_path else None,
                 summary_artifact_id=args.summary_artifact_id,
+                export_format=args.export_format,
+                settings=_settings_with_sessions_root(app_settings, sessions_root),
+                input_fn=input_fn,
             )
         except (
             ArtifactStoreError,
@@ -927,6 +977,9 @@ def main(
             ValueError,
         ) as exc:
             print(f"Cannot export session summary markdown: {exc}")
+            return 1
+        except (EOFError, KeyboardInterrupt):
+            print("Export cancelled.")
             return 1
 
     if args.command == "inspect":
@@ -1383,40 +1436,38 @@ def _run_summarize_command(
 
 def _run_export_command(
     *,
-    session_path: Path,
+    session_path: Path | None,
     summary_artifact_id: str | None,
+    export_format: export_workflow.ExportFormat | None,
+    settings: AppSettings,
+    input_fn: Callable[[str], str] | None,
 ) -> int:
-    verified = load_verified_session_bundle(session_path)
-    session_record = dict(verified.record)
-    session_id_value = session_id(session_record)
-
-    export_result = export_summary_markdown(
-        store=FileSystemArtifactStore(
-            session_id=session_id_value,
-            session_dir=verified.session_dir,
+    result = export_workflow.run_export_workflow(
+        export_workflow.ExportCommandInput(
+            session_path=session_path,
+            summary_artifact_id=summary_artifact_id,
+            export_format=export_format,
         ),
-        summary_record_id=summary_artifact_id,
+        settings=settings,
+        interaction=_resolve_export_interaction(input_fn),
+    )
+    if result.status == "cancelled":
+        print("Export cancelled.")
+        return 1
+    return 0
+
+
+def _settings_with_sessions_root(settings: AppSettings, sessions_root: Path) -> AppSettings:
+    return replace(
+        settings,
+        paths=replace(settings.paths, sessions_dir=sessions_root),
     )
 
-    print(f"Export written to: {export_result.export_record.path}")
-    print(f"Export contract: {export_result.export_record.metadata.get('contract', '(unknown)')}")
-    print(
-        f"Summary artifact: {export_result.summary_record.path} ({export_result.summary_record.id})"
-    )
-    provenance = {
-        key: value
-        for key, value in export_result.export_record.metadata.items()
-        if key
-        in {
-            "summary_artifact_id",
-            "summary_created_at",
-            "merged_transcript_artifact_id",
-            "manual_notes_artifact_id",
-            "correction_overlay_artifact_id",
-        }
-    }
-    print(f"Export provenance: {json.dumps(provenance, sort_keys=True)}")
-    return 0
+
+def _resolve_export_interaction(
+    input_fn: Callable[[str], str] | None,
+) -> InteractionPort:
+    return ConsoleExportInteraction(_record_input(input_fn))
 
 
 def _record_terminal_local_llm_release(
