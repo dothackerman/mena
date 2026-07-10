@@ -17,6 +17,7 @@ from mena.note_package import (
     assert_summary_output_language,
     product_system_prompt,
     product_user_prompt,
+    validate_product_payload,
 )
 from test_summarization import _summary_request, _summary_result
 
@@ -88,6 +89,11 @@ def test_note_package_builds_provider_independent_one_shot_prompt() -> None:
     assert user["language"] == request.policy.language
     assert user["transcript"]["segments"][0]["speaker"] == "You"
     assert user["manual_notes"] == request.manual_notes
+
+
+def test_note_package_rejects_unsupported_product_payload() -> None:
+    with pytest.raises(SummarizationContractError, match="Unsupported note product"):
+        validate_product_payload("typo", {"general_summary": "Looks valid otherwise."})
 
 
 def test_note_package_keeps_policy_result_and_language_validation_together() -> None:

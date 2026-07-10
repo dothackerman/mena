@@ -373,13 +373,15 @@ def _output_language_instruction(language: str) -> str:
 
 
 def validate_product_payload(product: str, payload: Mapping[str, object]) -> None:
+    if product not in REQUIRED_NOTE_PRODUCTS:
+        raise SummarizationContractError(f"Unsupported note product: {product}.")
     if product == "timeline":
         if not _str_list(payload, "timeline", "Summary timeline"):
             raise SummarizationContractError("Summary timeline must not be empty.")
     elif product == "action_items":
         for action in _list(payload, "action_items"):
             SummaryActionItem.from_dict(action)
-    else:
+    elif product == "general_summary":
         _required_str(payload, "general_summary", "Summary result")
 
 
