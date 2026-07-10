@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 from mena.artifacts import (
     ARTIFACT_MANIFEST_VERSION,
@@ -29,6 +29,7 @@ from mena.summarization import (
 from mena.timestamps import parse_utc_timestamp
 
 _INVALID_SUMMARY_CREATED_AT = datetime.min.replace(tzinfo=UTC)
+SummarySelectionReason = Literal["exportable", "verify_selected_session"]
 
 
 class ExportableSummaryError(RuntimeError):
@@ -53,6 +54,7 @@ class ExportableSummarySessionSelection:
 
     session_dir: Path
     summary_artifact_id: str | None
+    reason: SummarySelectionReason = "exportable"
 
 
 @dataclass(frozen=True)
@@ -61,6 +63,32 @@ class _SummaryManifestRecord:
     path: str | None
     metadata: Mapping[str, object]
     record: ArtifactRecord | None = None
+
+
+@dataclass(frozen=True, order=True)
+class _SummaryCandidate:
+    created_at: datetime
+    path: str
+    artifact_id: str
+    record: ArtifactRecord = field(compare=False)
+    summary: SummaryArtifact = field(compare=False)
+
+
+@dataclass(frozen=True, order=True)
+class _SessionSummaryCandidate:
+    created_at: datetime
+    path: str
+    artifact_id: str
+    session_path: str
+    session_dir: Path = field(compare=False)
+    summary_artifact_id: str | None = field(compare=False)
+    reason: SummarySelectionReason = field(compare=False)
+
+
+@dataclass(frozen=True)
+class _SummaryRecordRank:
+    created_at: datetime
+    reason: SummarySelectionReason
 
 
 def resolve_exportable_summary(
@@ -79,7 +107,7 @@ def resolve_exportable_summary(
                 return ExportableSummarySelection(record=record, summary=summary)
         raise ExportableSummaryError(f"Summary artifact not found: {summary_record_id}.")
 
-    candidates: list[tuple[datetime, str, str, ArtifactRecord, SummaryArtifact]] = []
+    candidates: list[_SummaryCandidate] = []
     for record in records:
         if record.version != SUMMARY_ARTIFACT_VERSION:
             continue
@@ -91,12 +119,12 @@ def resolve_exportable_summary(
             # Auto-selection skips them so a valid current rerun can still win.
             continue
         candidates.append(
-            (
-                _summary_created_at(summary),
-                record.path,
-                record.id,
-                record,
-                summary,
+            _SummaryCandidate(
+                created_at=_summary_created_at(summary),
+                path=record.path,
+                artifact_id=record.id,
+                record=record,
+                summary=summary,
             )
         )
 
@@ -105,8 +133,8 @@ def resolve_exportable_summary(
             f"No valid {SUMMARY_ARTIFACT_CONTRACT} artifact was found for export."
         )
 
-    _, _, _, selected_record, selected_summary = max(candidates)
-    return ExportableSummarySelection(record=selected_record, summary=selected_summary)
+    selected = max(candidates)
+    return ExportableSummarySelection(record=selected.record, summary=selected.summary)
 
 
 def load_exportable_summary(
@@ -176,6 +204,7 @@ def resolve_exportable_summary_session(
                     return ExportableSummarySessionSelection(
                         session_dir=session_dir,
                         summary_artifact_id=summary_artifact_id,
+                        reason="verify_selected_session",
                     )
                 if _requested_summary_artifact_file_exists(
                     session_dir=session_dir,
@@ -184,51 +213,63 @@ def resolve_exportable_summary_session(
                     return ExportableSummarySessionSelection(
                         session_dir=session_dir,
                         summary_artifact_id=summary_artifact_id,
+                        reason="verify_selected_session",
                     )
                 continue
-            if all(record.id != summary_artifact_id for record in records):
+            matching_record = next(
+                (record for record in records if record.id == summary_artifact_id),
+                None,
+            )
+            if matching_record is None:
                 continue
             return ExportableSummarySessionSelection(
                 session_dir=session_dir,
                 summary_artifact_id=summary_artifact_id,
+                reason=_summary_record_rank(
+                    session_dir=session_dir,
+                    record=matching_record,
+                ).reason,
             )
         return None
 
-    newest: tuple[datetime, str, str, str, Path, str | None] | None = None
+    newest: _SessionSummaryCandidate | None = None
     for session_dir in _iter_session_directories(sessions_root):
-        summary_key = _session_summary_created_at(session_dir=session_dir)
-        if summary_key is None:
+        candidate = _session_summary_candidate(session_dir=session_dir)
+        if candidate is None:
             continue
-        if newest is None or summary_key > newest:
-            newest = summary_key
+        if newest is None or candidate > newest:
+            newest = candidate
 
     if newest is None:
         return None
-    return ExportableSummarySessionSelection(session_dir=newest[4], summary_artifact_id=newest[5])
+    return ExportableSummarySessionSelection(
+        session_dir=newest.session_dir,
+        summary_artifact_id=newest.summary_artifact_id,
+        reason=newest.reason,
+    )
 
 
-def _session_summary_created_at(
+def _session_summary_candidate(
     session_dir: Path,
-) -> tuple[datetime, str, str, str, Path, str | None] | None:
+) -> _SessionSummaryCandidate | None:
     records = _session_summary_records(session_dir=session_dir)
     if not records:
         return None
 
-    newest: tuple[datetime, str, str, str, Path, str | None] | None = None
+    newest: _SessionSummaryCandidate | None = None
     for record in records:
-        summary_created_at = _summary_record_created_at(session_dir=session_dir, record=record)
-        if summary_created_at is None:
-            continue
-        summary_key = (
-            summary_created_at,
-            record.path or "",
-            record.id or "",
-            session_dir.as_posix(),
-            session_dir,
-            record.id,
+        rank = _summary_record_rank(session_dir=session_dir, record=record)
+        candidate = _SessionSummaryCandidate(
+            created_at=rank.created_at,
+            path=record.path or "",
+            artifact_id=record.id or "",
+            session_path=session_dir.as_posix(),
+            session_dir=session_dir,
+            summary_artifact_id=record.id,
+            reason=rank.reason,
         )
-        if newest is None or summary_key > newest:
-            newest = summary_key
+        if newest is None or candidate > newest:
+            newest = candidate
     return newest
 
 
@@ -380,28 +421,50 @@ def _invalid_summary_manifest_record(
     )
 
 
-def _summary_record_created_at(
+def _summary_record_rank(
     *,
     session_dir: Path,
     record: _SummaryManifestRecord,
-) -> datetime | None:
+) -> _SummaryRecordRank:
     if record.record is not None and record.path is not None:
         if record.record.version != SUMMARY_ARTIFACT_VERSION:
-            return _INVALID_SUMMARY_CREATED_AT
+            return _SummaryRecordRank(
+                created_at=_INVALID_SUMMARY_CREATED_AT,
+                reason="verify_selected_session",
+            )
         try:
             data = json.loads((session_dir / record.path).read_text(encoding="utf-8"))
             if not isinstance(data, dict):
-                return _INVALID_SUMMARY_CREATED_AT
+                return _SummaryRecordRank(
+                    created_at=_INVALID_SUMMARY_CREATED_AT,
+                    reason="verify_selected_session",
+                )
             created_at = data.get("created_at")
             if not isinstance(created_at, str):
-                return _INVALID_SUMMARY_CREATED_AT
+                return _SummaryRecordRank(
+                    created_at=_INVALID_SUMMARY_CREATED_AT,
+                    reason="verify_selected_session",
+                )
             if not _summary_payload_is_export_compatible(data):
-                return _INVALID_SUMMARY_CREATED_AT
-            return _parse_iso_timestamp(created_at) or _INVALID_SUMMARY_CREATED_AT
+                return _SummaryRecordRank(
+                    created_at=_INVALID_SUMMARY_CREATED_AT,
+                    reason="verify_selected_session",
+                )
+            parsed_created_at = _parse_iso_timestamp(created_at)
+            return _SummaryRecordRank(
+                created_at=parsed_created_at or _INVALID_SUMMARY_CREATED_AT,
+                reason="exportable" if parsed_created_at is not None else "verify_selected_session",
+            )
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            return _summary_metadata_created_at(record) or _INVALID_SUMMARY_CREATED_AT
+            return _SummaryRecordRank(
+                created_at=_summary_metadata_created_at(record) or _INVALID_SUMMARY_CREATED_AT,
+                reason="verify_selected_session",
+            )
 
-    return _summary_metadata_created_at(record) or _INVALID_SUMMARY_CREATED_AT
+    return _SummaryRecordRank(
+        created_at=_summary_metadata_created_at(record) or _INVALID_SUMMARY_CREATED_AT,
+        reason="verify_selected_session",
+    )
 
 
 def _summary_payload_is_export_compatible(payload: Mapping[str, object]) -> bool:
