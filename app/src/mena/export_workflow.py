@@ -161,6 +161,11 @@ def resolve_default_export_session(
 
     if summary_artifact_id is not None:
         for session_dir in _iter_session_directories(sessions_root):
+            if not _session_can_own_artifact_id(
+                session_dir=session_dir,
+                artifact_id=summary_artifact_id,
+            ):
+                continue
             records = _session_summary_records(
                 session_dir=session_dir,
                 requested_summary_artifact_id=summary_artifact_id,
@@ -182,7 +187,7 @@ def resolve_default_export_session(
             return session_dir
         return None
 
-    newest: tuple[datetime, Path] | None = None
+    newest: tuple[datetime, str, str, Path] | None = None
     for session_dir in _iter_session_directories(sessions_root):
         summary_key = _session_summary_created_at(session_dir=session_dir)
         if summary_key is None:
@@ -190,10 +195,10 @@ def resolve_default_export_session(
         if newest is None or summary_key > newest:
             newest = summary_key
 
-    return newest[1] if newest is not None else None
+    return newest[3] if newest is not None else None
 
 
-def _session_summary_created_at(session_dir: Path) -> tuple[datetime, Path] | None:
+def _session_summary_created_at(session_dir: Path) -> tuple[datetime, str, str, Path] | None:
     records = _session_summary_records(session_dir=session_dir)
     if not records:
         return None
@@ -206,7 +211,7 @@ def _session_summary_created_at(session_dir: Path) -> tuple[datetime, Path] | No
         summary_key = (summary_created_at, record.path or "", record.id or "")
         if newest is None or summary_key > newest:
             newest = summary_key
-    return (newest[0], session_dir) if newest is not None else None
+    return (*newest, session_dir) if newest is not None else None
 
 
 def _session_summary_records(
@@ -311,6 +316,32 @@ def _session_id_matches_artifact_id(*, session_dir: Path, artifact_id: str) -> b
     return artifact_id.startswith(f"{resolved_session_id}:")
 
 
+def _session_can_own_artifact_id(*, session_dir: Path, artifact_id: str) -> bool:
+    artifact_session_id = _artifact_id_session_id(artifact_id)
+    if artifact_session_id is None:
+        return True
+    if _session_id_matches_artifact_id(session_dir=session_dir, artifact_id=artifact_id):
+        return True
+    return _manifest_session_id_matches(
+        session_dir=session_dir, session_id_value=artifact_session_id
+    )
+
+
+def _artifact_id_session_id(artifact_id: str) -> str | None:
+    session_id_value, separator, _relative_path = artifact_id.partition(":")
+    if not separator or not session_id_value:
+        return None
+    return session_id_value
+
+
+def _manifest_session_id_matches(*, session_dir: Path, session_id_value: str) -> bool:
+    try:
+        data = json.loads(session_artifact_manifest_path(session_dir).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return isinstance(data, dict) and data.get("session_id") == session_id_value
+
+
 def _invalid_summary_manifest_record(
     *,
     item: Mapping[str, object],
@@ -328,7 +359,7 @@ def _invalid_summary_manifest_record(
             return None
         if item.get("artifact_type") != SUMMARY_ARTIFACT_TYPE:
             return None
-    elif _raw_artifact_type_is_known_non_summary(item.get("artifact_type")):
+    elif _raw_artifact_type_is_known_non_summary(item):
         return None
     raw_status = item.get("status")
     if isinstance(raw_status, str) and raw_status in ARTIFACT_STATUSES and raw_status != "sealed":
@@ -420,11 +451,24 @@ def _raw_manifest_record_matches_summary_request(
 ) -> bool:
     if item.get("id") != artifact_id:
         return False
-    return not _raw_artifact_type_is_known_non_summary(item.get("artifact_type"))
+    return not _raw_artifact_type_is_known_non_summary(item)
 
 
-def _raw_artifact_type_is_known_non_summary(value: object) -> bool:
-    return isinstance(value, str) and value != SUMMARY_ARTIFACT_TYPE
+def _raw_artifact_type_is_known_non_summary(item: Mapping[str, object]) -> bool:
+    value = item.get("artifact_type")
+    return (
+        isinstance(value, str)
+        and value != SUMMARY_ARTIFACT_TYPE
+        and not _raw_record_path_looks_like_summary(item)
+    )
+
+
+def _raw_record_path_looks_like_summary(item: Mapping[str, object]) -> bool:
+    path = item.get("path")
+    if isinstance(path, str) and path.startswith(f"artifacts/{SUMMARY_ARTIFACT_TYPE}/"):
+        return True
+    artifact_id = item.get("id")
+    return isinstance(artifact_id, str) and f":artifacts/{SUMMARY_ARTIFACT_TYPE}/" in artifact_id
 
 
 def _summary_metadata_created_at(record: _SummaryManifestRecord) -> datetime | None:

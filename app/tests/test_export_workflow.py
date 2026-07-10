@@ -32,6 +32,7 @@ from mena.summarization import (
 )
 
 SESSION_ID = "00000000-0000-0000-0000-000000000001"
+OTHER_SESSION_ID = "00000000-0000-0000-0000-000000000002"
 
 
 def test_export_workflow_exports_latest_session_with_markdown_confirmation(
@@ -177,6 +178,41 @@ def test_export_workflow_payload_timestamp_overrides_stale_metadata(
     assert result.status == "success"
     assert result.export_path is not None
     assert str(result.export_path).startswith(str(current_dir))
+
+
+def test_export_workflow_uses_summary_path_tie_break_across_sessions(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    first_dir, first_store, first_merged = _build_export_session(
+        settings.paths.sessions_dir / "session-first"
+    )
+    _persist_summary(
+        store=first_store,
+        merged_transcript_record=first_merged,
+        summary_created_at="2026-06-15T10:00:00Z",
+        summary_name="summary/a-final.json",
+    )
+    second_dir, second_store, second_merged = _build_export_session(
+        settings.paths.sessions_dir / "session-second"
+    )
+    _persist_summary(
+        store=second_store,
+        merged_transcript_record=second_merged,
+        summary_created_at="2026-06-15T10:00:00Z",
+        summary_name="summary/z-final.json",
+    )
+
+    result = run_export_workflow(
+        ExportCommandInput(session_path=None, export_format="markdown"),
+        settings=settings,
+        interaction=ScriptedInteraction(()),
+    )
+
+    assert result.status == "success"
+    assert result.export_path is not None
+    assert str(result.export_path).startswith(str(second_dir))
+    assert not str(result.export_path).startswith(str(first_dir))
 
 
 def test_export_workflow_skips_malformed_unrelated_session_during_default_discovery(
@@ -532,6 +568,52 @@ def test_export_workflow_selects_requested_summary_artifact_session(
     ]
 
 
+def test_export_workflow_requested_artifact_ignores_copied_id_in_other_session(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    target_dir, target_store, target_merged = _build_export_session(
+        settings.paths.sessions_dir / "session-target"
+    )
+    requested_summary = _persist_summary(
+        store=target_store,
+        merged_transcript_record=target_merged,
+        summary_name="summary/requested.json",
+    )
+    stale_dir, stale_store, stale_merged = _build_export_session(
+        settings.paths.sessions_dir / "session-stale-copy",
+        session_id_value=OTHER_SESSION_ID,
+    )
+    stale_summary = _persist_summary(
+        store=stale_store,
+        merged_transcript_record=stale_merged,
+        summary_name="summary/copied.json",
+    )
+    _update_artifact_manifest_record(
+        stale_dir,
+        artifact_id=stale_summary.id,
+        updates={
+            "id": requested_summary.id,
+            "session_id": SESSION_ID,
+        },
+    )
+
+    result = run_export_workflow(
+        ExportCommandInput(
+            session_path=None,
+            summary_artifact_id=requested_summary.id,
+            export_format="markdown",
+        ),
+        settings=settings,
+        interaction=ScriptedInteraction(()),
+    )
+
+    assert result.status == "success"
+    assert result.export_path is not None
+    assert str(result.export_path).startswith(str(target_dir))
+    assert not str(result.export_path).startswith(str(stale_dir))
+
+
 def test_export_workflow_requested_artifact_skips_malformed_unrelated_session(
     tmp_path: Path,
 ) -> None:
@@ -647,7 +729,7 @@ def test_export_workflow_reports_requested_summary_artifact_with_malformed_statu
         )
 
 
-@pytest.mark.parametrize("artifact_type", [None, ["summary"]])
+@pytest.mark.parametrize("artifact_type", [None, ["summary"], "not a valid artifact type"])
 def test_export_workflow_reports_requested_summary_artifact_with_malformed_type(
     tmp_path: Path,
     artifact_type: object,
@@ -687,7 +769,7 @@ def test_export_workflow_reports_requested_summary_artifact_with_malformed_type(
         )
 
 
-def test_export_workflow_reports_requested_summary_artifact_with_session_id_mismatch(
+def test_export_workflow_rejects_requested_summary_artifact_with_unknown_owner_session(
     tmp_path: Path,
 ) -> None:
     settings = AppSettings.from_env(env={}, home=tmp_path)
@@ -718,7 +800,7 @@ def test_export_workflow_reports_requested_summary_artifact_with_session_id_mism
         summary_name="summary/valid.json",
     )
 
-    with pytest.raises(SessionIntegrityError, match="artifact_record_session_mismatch"):
+    with pytest.raises(ValueError, match="Summary artifact not found"):
         run_export_workflow(
             ExportCommandInput(
                 session_path=None,
@@ -1206,9 +1288,11 @@ def test_export_workflow_reports_requested_summary_session_with_unreadable_manif
 
 def _build_export_session(
     session_dir: Path,
+    *,
+    session_id_value: str = SESSION_ID,
 ) -> tuple[Path, FileSystemArtifactStore, ArtifactRecord]:
-    session_dir = _create_session_record(session_dir)
-    store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=session_dir)
+    session_dir = _create_session_record(session_dir, session_id_value=session_id_value)
+    store = FileSystemArtifactStore(session_id=session_id_value, session_dir=session_dir)
     merged_record = store.store(
         artifact_type=MERGED_TRANSCRIPT_ARTIFACT_TYPE,
         name="merged/merged.json",
@@ -1220,13 +1304,13 @@ def _build_export_session(
     return session_dir, store, merged_record
 
 
-def _create_session_record(session_dir: Path) -> Path:
+def _create_session_record(session_dir: Path, *, session_id_value: str = SESSION_ID) -> Path:
     session_dir.mkdir(parents=True)
     (session_dir / SESSION_RECORD_FILENAME).write_text(
         json.dumps(
             {
                 "version": SESSION_RECORD_VERSION,
-                "id": SESSION_ID,
+                "id": session_id_value,
                 "created_at": "2026-05-19T15:00:00Z",
                 "name": None,
                 "status": "created",
@@ -1281,7 +1365,7 @@ def _persist_summary(
         store=store,
         artifact=SummaryArtifact(
             version=SUMMARY_ARTIFACT_VERSION,
-            session_id=SESSION_ID,
+            session_id=store.session_id,
             merged_transcript_artifact=ArtifactRef.from_record(merged_transcript_record),
             manual_notes_artifact=None,
             policy=SummarizationPolicy(language="en").to_dict(),
