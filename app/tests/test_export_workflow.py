@@ -10,13 +10,15 @@ from mena.export import SUMMARY_MARKDOWN_EXPORT_ARTIFACT_TYPE
 from mena.export_workflow import ExportCommandInput, run_export_workflow
 from mena.interaction import ScriptedInteraction, ScriptedResponse
 from mena.merge_timing import MERGED_TRANSCRIPT_ARTIFACT_TYPE
+from mena.ollama_summarization import (
+    OLLAMA_SUMMARIZATION_NUM_CTX,
+    OLLAMA_SUMMARIZATION_SEED,
+)
 from mena.processing import ArtifactRef
 from mena.session_integrity import SessionIntegrityError
 from mena.sessions import SESSION_RECORD_FILENAME, SESSION_RECORD_VERSION
 from mena.settings import AppSettings
 from mena.summarization import (
-    OLLAMA_SUMMARIZATION_NUM_CTX,
-    OLLAMA_SUMMARIZATION_SEED,
     REQUIRED_NOTE_PRODUCTS,
     FakeSummarizationProvider,
     ProductRequestRecord,
