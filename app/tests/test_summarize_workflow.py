@@ -1,4 +1,6 @@
 import json
+from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -6,12 +8,27 @@ from typing import cast
 import pytest
 
 from mena.artifacts import ArtifactStore, FileSystemArtifactStore, InMemoryArtifactStore
-from mena.interaction import ChoiceRequest, ScriptedInteraction, ScriptedResponse
+from mena.interaction import (
+    ChoiceRequest,
+    ConfirmationRequest,
+    ScriptedInteraction,
+    ScriptedResponse,
+)
 from mena.merge_timing import MERGED_TRANSCRIPT_ARTIFACT_TYPE
-from mena.runtime_profile import RuntimeProfileSelection
+from mena.mistral_llm import MistralSummaryState
+from mena.runtime_profile import (
+    RuntimeFallbackUnavailable,
+    RuntimeProfileSelection,
+    SummarizationRuntimePlan,
+)
 from mena.sessions import resolve_session, session_language_or_default
 from mena.settings import AppSettings
-from mena.summarization import SummarizationError, SummarizationPolicy
+from mena.setup import StageProfile, mistral_summary_stage_profile
+from mena.summarization import (
+    SummarizationError,
+    SummarizationPolicy,
+    SummarizationProviderUnavailable,
+)
 from mena.summarize_workflow import (
     _merged_transcript_timestamp_key,
     _parse_iso_timestamp,
@@ -443,3 +460,259 @@ def test_summarize_workflow_releases_terminal_runtime_after_stage_failure(
     assert releases[0]["stage"] == "summarization"
     assert releases[0]["boundary"] == "summarize"
     assert releases[0]["attempt"] == 1
+
+
+def _fallback_plan() -> SummarizationRuntimePlan:
+    accepted_stage = StageProfile(
+        stage="summarization",
+        provider="Ollama",
+        model="llama3.1:8b",
+        device="local-service",
+        policy="local-preferred",
+    )
+    return SummarizationRuntimePlan(
+        accepted_stage=accepted_stage,
+        actual_stage=accepted_stage,
+        ordered_fallback=(mistral_summary_stage_profile(),),
+    )
+
+
+def test_summarize_workflow_provokes_fallback_to_the_next_accepted_provider(
+    tmp_path: Path,
+) -> None:
+    session_dir, _, _, _ = _build_summarize_session_bundle(tmp_path)
+    plan = _fallback_plan()
+    primary_selection = cast(
+        RuntimeProfileSelection,
+        SimpleNamespace(accepted="accepted-state", summarization=plan),
+    )
+    fallback_selection = cast(
+        RuntimeProfileSelection,
+        SimpleNamespace(
+            accepted="accepted-state",
+            summarization=replace(plan, actual_stage=plan.ordered_fallback[0]),
+        ),
+    )
+    stage_calls: list[dict[str, object]] = []
+    store_calls: list[dict[str, object]] = []
+    bind_calls: list[object] = []
+    fallback_kwargs: dict[str, object] = {}
+    release_calls: list[tuple[object, int]] = []
+
+    def _stage(**kwargs: object) -> SimpleNamespace:
+        stage_calls.append(kwargs)
+        if len(stage_calls) == 1:
+            raise SummarizationProviderUnavailable("Ollama summarization provider is unavailable.")
+        store = cast(ArtifactStore, kwargs["store"])
+        return SimpleNamespace(
+            summary_record=store.store(
+                artifact_type="summary",
+                name="summary/final.json",
+                data=b"{}",
+                version=1,
+            ),
+        )
+
+    def _fallback_selector(**kwargs: object) -> RuntimeProfileSelection:
+        fallback_kwargs.update(kwargs)
+        return fallback_selection
+
+    def _bind(**kwargs: object) -> SimpleNamespace:
+        bind_calls.append(kwargs["selection"])
+        return SimpleNamespace(label=f"provider-{len(bind_calls)}")
+
+    def _release(**kwargs: object) -> None:
+        release_calls.append((kwargs["provider"], cast(int, kwargs["attempt"])))
+
+    exit_code = run_summarization_command(
+        session_path=session_dir,
+        manual_notes=None,
+        language=None,
+        settings=AppSettings.from_env(env={}, home=tmp_path),
+        runtime_profile_selector_fn=lambda **_kwargs: primary_selection,
+        runtime_profile_store_fn=lambda **kwargs: store_calls.append(kwargs),
+        runtime_summarization_binder_fn=_bind,
+        run_summarization_stage_fn=_stage,
+        summarization_stage_fallback_selector_fn=_fallback_selector,
+        terminal_llm_release_fn=_release,
+    )
+
+    assert exit_code == 0
+    assert len(stage_calls) == 2
+    assert stage_calls[0]["attempt"] == 1
+    assert stage_calls[1]["attempt"] == 2
+    assert bind_calls == [primary_selection, fallback_selection]
+    assert fallback_kwargs["accepted"] == "accepted-state"
+    assert fallback_kwargs["used_plan"] is plan
+    assert (
+        cast(str, fallback_kwargs["failure_reason"])
+        == "Ollama summarization provider is unavailable."
+    )
+    assert fallback_kwargs["failure_class"] == "SummarizationProviderUnavailable"
+    assert len(cast(tuple[str, ...], fallback_kwargs["failed_input_artifacts"])) >= 2
+    assert [call.get("name_suffix") for call in store_calls] == [None, "stage-fallback"]
+    # The failed primary provider is released before switching, and the
+    # fallback provider is released at the end.
+    assert [attempt for _provider, attempt in release_calls] == [1, 2]
+    assert release_calls[0][0] is not release_calls[1][0]
+
+
+def test_summarize_workflow_reraises_when_no_summarization_plan_is_available(
+    tmp_path: Path,
+) -> None:
+    session_dir, _, _, _ = _build_summarize_session_bundle(tmp_path)
+
+    def _stage(**_kwargs: object) -> SimpleNamespace:
+        raise SummarizationProviderUnavailable("Ollama summarization provider is unavailable.")
+
+    with pytest.raises(SummarizationProviderUnavailable):
+        run_summarization_command(
+            session_path=session_dir,
+            manual_notes=None,
+            language=None,
+            settings=AppSettings.from_env(env={}, home=tmp_path),
+            runtime_profile_selector_fn=_runtime_selection,
+            runtime_profile_store_fn=lambda **_kwargs: None,
+            runtime_summarization_binder_fn=lambda **_kwargs: SimpleNamespace(),
+            run_summarization_stage_fn=_stage,
+            summarization_stage_fallback_selector_fn=lambda **_kwargs: pytest.fail(
+                "no fallback selection without a summarization plan"
+            ),
+        )
+
+
+def test_summarize_workflow_remote_fallback_authorizer_uses_the_interaction_port(
+    tmp_path: Path,
+) -> None:
+    session_dir, _, _, _ = _build_summarize_session_bundle(tmp_path)
+    interaction = ScriptedInteraction(
+        [
+            ScriptedResponse(
+                kind="confirm",
+                topic="runtime_fallback.summarization_remote",
+                value=True,
+            )
+        ]
+    )
+    probe_state = MistralSummaryState(
+        key_present=True,
+        reachable=True,
+        request_model="mistral-small-latest",
+        resolved_model="mistral-small-2603",
+        model_allowed=True,
+        policy="mena-mistral-summary-allowlist-2026-06-29-v1",
+        detail="resolved inside the accepted snapshot",
+    )
+    authorized: dict[str, object] = {}
+
+    def _selector(**kwargs: object) -> RuntimeProfileSelection:
+        authorize = cast(
+            Callable[[str, MistralSummaryState], bool],
+            kwargs["authorize_remote_summarization_fallback"],
+        )
+        authorized["result"] = authorize("ollama is down", probe_state)
+        return _runtime_selection()
+
+    def _stage(**kwargs: object) -> SimpleNamespace:
+        store = cast(ArtifactStore, kwargs["store"])
+        return SimpleNamespace(
+            summary_record=store.store(
+                artifact_type="summary",
+                name="summary/final.json",
+                data=b"{}",
+                version=1,
+            ),
+        )
+
+    assert (
+        run_summarization_command(
+            session_path=session_dir,
+            manual_notes=None,
+            language=None,
+            settings=AppSettings.from_env(env={}, home=tmp_path),
+            runtime_profile_selector_fn=_selector,
+            runtime_profile_store_fn=lambda **_kwargs: None,
+            runtime_summarization_binder_fn=lambda **_kwargs: SimpleNamespace(),
+            run_summarization_stage_fn=_stage,
+            interaction=interaction,
+        )
+        == 0
+    )
+
+    assert authorized["result"] is True
+    request = cast(ConfirmationRequest, interaction.requests[0])
+    assert request.topic == "runtime_fallback.summarization_remote"
+    assert request.context["reason"] == "ollama is down"
+    assert request.context["resolved_model"] == "mistral-small-2603"
+    assert isinstance(request.context["disclosure"], tuple)
+
+
+def test_summarize_workflow_remote_fallback_authorizer_declines_without_interaction(
+    tmp_path: Path,
+) -> None:
+    from mena.summarize_workflow import _remote_fallback_authorizer
+
+    authorize = _remote_fallback_authorizer(None)
+    probe_state = MistralSummaryState(
+        key_present=True,
+        reachable=True,
+        request_model="mistral-small-latest",
+        resolved_model="mistral-small-2603",
+        model_allowed=True,
+        policy="mena-mistral-summary-allowlist-2026-06-29-v1",
+        detail="resolved inside the accepted snapshot",
+    )
+
+    assert authorize("ollama is down", probe_state) is False
+
+
+def test_summarize_workflow_reenters_the_fallback_ladder_when_the_fallback_fails(
+    tmp_path: Path,
+) -> None:
+    session_dir, _, _, _ = _build_summarize_session_bundle(tmp_path)
+    plan = _fallback_plan()
+    primary_selection = cast(
+        RuntimeProfileSelection,
+        SimpleNamespace(accepted="accepted-state", summarization=plan),
+    )
+    fallback_plan = replace(plan, actual_stage=plan.ordered_fallback[0])
+    fallback_selection = cast(
+        RuntimeProfileSelection,
+        SimpleNamespace(accepted="accepted-state", summarization=fallback_plan),
+    )
+    selector_plans: list[SummarizationRuntimePlan] = []
+    stored_attempts: list[tuple[int, str]] = []
+
+    def _stage(**_kwargs: object) -> SimpleNamespace:
+        raise SummarizationProviderUnavailable("provider is unavailable")
+
+    def _fallback_selector(**kwargs: object) -> RuntimeProfileSelection:
+        selector_plans.append(cast(SummarizationRuntimePlan, kwargs["used_plan"]))
+        if len(selector_plans) == 1:
+            return fallback_selection
+        # The accepted ordered list is exhausted: surface the recoverable
+        # fallback-unavailable contract instead of a generic failure.
+        raise RuntimeFallbackUnavailable("no further accepted fallback provider")
+
+    with pytest.raises(RuntimeFallbackUnavailable, match="no further accepted fallback"):
+        run_summarization_command(
+            session_path=session_dir,
+            manual_notes=None,
+            language=None,
+            settings=AppSettings.from_env(env={}, home=tmp_path),
+            runtime_profile_selector_fn=lambda **_kwargs: primary_selection,
+            runtime_profile_store_fn=lambda **kwargs: stored_attempts.append(
+                (
+                    cast(int, kwargs["attempt"]),
+                    cast(str, kwargs.get("name_suffix") or "initial"),
+                )
+            ),
+            runtime_summarization_binder_fn=lambda **_kwargs: SimpleNamespace(),
+            run_summarization_stage_fn=_stage,
+            summarization_stage_fallback_selector_fn=_fallback_selector,
+        )
+
+    # The second failure consulted the ladder with the fallback plan, so the
+    # selector could compute the remaining entries after the failed fallback.
+    assert selector_plans == [plan, fallback_plan]
+    assert stored_attempts == [(1, "initial"), (2, "stage-fallback")]
