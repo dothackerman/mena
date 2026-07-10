@@ -8,7 +8,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Self
 
-from mena.fields import optional_str, required_bool, required_int, required_str
+from mena.fields import (
+    optional_str,
+    require_exact_keys,
+    required_bool,
+    required_int,
+    required_str,
+)
 from mena.merge_timing import MergedTranscriptArtifact
 from mena.settings import SettingsError, normalize_summary_language
 
@@ -306,6 +312,8 @@ def assemble_summary_result(
             "Summary result payloads must contain exactly the required note products "
             f"({'; '.join(detail)})."
         )
+    for product in REQUIRED_NOTE_PRODUCTS:
+        validate_product_payload(product, product_payloads[product])
     combined = {
         "timeline": product_payloads["timeline"].get("timeline"),
         "action_items": product_payloads["action_items"].get("action_items"),
@@ -376,12 +384,17 @@ def validate_product_payload(product: str, payload: Mapping[str, object]) -> Non
     if product not in REQUIRED_NOTE_PRODUCTS:
         raise SummarizationContractError(f"Unsupported note product: {product}.")
     if product == "timeline":
+        _require_exact_keys(payload, ("timeline",), "Summary timeline payload")
         if not _str_list(payload, "timeline", "Summary timeline"):
             raise SummarizationContractError("Summary timeline must not be empty.")
     elif product == "action_items":
+        _require_exact_keys(payload, ("action_items",), "Summary action-items payload")
         for action in _list(payload, "action_items"):
+            item = _mapping(action, "Summary action item")
+            _require_exact_keys(item, ("text", "owner", "due"), "Summary action item")
             SummaryActionItem.from_dict(action)
     elif product == "general_summary":
+        _require_exact_keys(payload, ("general_summary",), "Summary general-summary payload")
         _required_str(payload, "general_summary", "Summary result")
 
 
@@ -490,6 +503,15 @@ def _mapping(data: object, label: str) -> Mapping[str, object]:
     if not isinstance(data, Mapping):
         raise SummarizationContractError(f"{label} must be a JSON object.")
     return data
+
+
+def _require_exact_keys(data: Mapping[str, object], keys: tuple[str, ...], label: str) -> None:
+    require_exact_keys(
+        data,
+        keys,
+        error=SummarizationContractError,
+        message=f"{label} contains unsupported fields.",
+    )
 
 
 def _list(data: Mapping[str, object], field_name: str) -> list[object]:

@@ -77,6 +77,18 @@ def test_note_package_rejects_incomplete_product_assembly() -> None:
         )
 
 
+def test_note_package_assembly_validates_product_payload_shape() -> None:
+    with pytest.raises(SummarizationContractError, match="unsupported fields"):
+        assemble_summary_result(
+            product_payloads={
+                "timeline": {"timeline": ["One event."], "extra": True},
+                "action_items": {"action_items": []},
+                "general_summary": {"general_summary": "A short summary."},
+            },
+            request_records=_request_records(),
+        )
+
+
 def test_note_package_builds_provider_independent_one_shot_prompt() -> None:
     request = _summary_request()
 
@@ -94,6 +106,23 @@ def test_note_package_builds_provider_independent_one_shot_prompt() -> None:
 def test_note_package_rejects_unsupported_product_payload() -> None:
     with pytest.raises(SummarizationContractError, match="Unsupported note product"):
         validate_product_payload("typo", {"general_summary": "Looks valid otherwise."})
+
+
+def test_note_package_rejects_extra_product_payload_fields() -> None:
+    with pytest.raises(SummarizationContractError, match="unsupported fields"):
+        validate_product_payload("timeline", {"timeline": ["One event."], "extra": True})
+
+
+def test_note_package_rejects_extra_action_item_fields() -> None:
+    with pytest.raises(SummarizationContractError, match="unsupported fields"):
+        validate_product_payload(
+            "action_items",
+            {
+                "action_items": [
+                    {"text": "Finish the migration.", "owner": None, "due": None, "extra": True}
+                ]
+            },
+        )
 
 
 def test_note_package_keeps_policy_result_and_language_validation_together() -> None:
