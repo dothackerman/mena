@@ -1483,7 +1483,7 @@ def test_ollama_summarization_provider_releases_runtime_resource(
         return "unload"
 
     monkeypatch.setattr(
-        "mena.summarization.unload_ollama_model",
+        "mena.ollama_summarization.unload_ollama_model",
         fake_unload_ollama_model,
     )
     lease = RuntimeLease(
