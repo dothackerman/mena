@@ -19,10 +19,16 @@ from mena.artifacts import (
 )
 from mena.export import export_summary_markdown
 from mena.interaction import ConfirmationRequest, InteractionPort, WorkflowNotice
+from mena.processing import ProcessingStateError
 from mena.session_integrity import load_verified_session_bundle
 from mena.sessions import SessionRecordError, resolve_session, session_id
 from mena.settings import AppSettings
-from mena.summarization import SUMMARY_ARTIFACT_TYPE, SUMMARY_SCHEMA_VERSION
+from mena.summarization import (
+    SUMMARY_ARTIFACT_TYPE,
+    SUMMARY_SCHEMA_VERSION,
+    SummarizationContractError,
+    SummaryArtifact,
+)
 from mena.timestamps import parse_utc_timestamp
 
 _INVALID_SUMMARY_CREATED_AT = datetime.min.replace(tzinfo=UTC)
@@ -237,9 +243,16 @@ def _session_summary_records(
                     records.append(invalid_record)
                 continue
             if record.session_id != resolved_session_id:
-                if (
-                    record.id == requested_summary_artifact_id
-                    and record.artifact_type == SUMMARY_ARTIFACT_TYPE
+                # A summary manifest record whose session id does not match
+                # session.json is fail-closed corruption: explicit export of the
+                # bundle raises artifact_record_session_mismatch. Preserve it as an
+                # invalid candidate for the requested artifact and for pathless
+                # default discovery so the corrupt session is still selected and
+                # verification surfaces the mismatch instead of the session looking
+                # unsummarized and an older valid session being exported silently.
+                if record.artifact_type == SUMMARY_ARTIFACT_TYPE and (
+                    requested_summary_artifact_id is None
+                    or record.id == requested_summary_artifact_id
                 ):
                     records.append(
                         _SummaryManifestRecord(
@@ -332,11 +345,34 @@ def _summary_record_created_at(
             created_at = data.get("created_at")
             if not isinstance(created_at, str):
                 return _INVALID_SUMMARY_CREATED_AT
+            if not _summary_payload_is_export_compatible(data):
+                # Export input selection skips sealed summary.v2 payloads that no
+                # longer satisfy the strict summary contract (for example a
+                # pre-note-package payload missing request_records) and only fails
+                # when no valid summary exists. Rank such a payload as oldest so a
+                # genuinely exportable summary in another session is preferred
+                # instead of selecting an unexportable one and failing the run.
+                return _INVALID_SUMMARY_CREATED_AT
             return _parse_iso_timestamp(created_at) or _INVALID_SUMMARY_CREATED_AT
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return _summary_metadata_created_at(record) or _INVALID_SUMMARY_CREATED_AT
 
     return _summary_metadata_created_at(record) or _INVALID_SUMMARY_CREATED_AT
+
+
+def _summary_payload_is_export_compatible(payload: Mapping[str, object]) -> bool:
+    """Return whether a summary payload still satisfies the export contract.
+
+    Mirrors the exportability check applied by ``resolve_summary_markdown_input``:
+    a readable, version-matched payload that ``SummaryArtifact.from_dict`` rejects
+    is skipped during export selection, so discovery must not rank it by its
+    payload timestamp as if it were the newest exportable summary.
+    """
+    try:
+        SummaryArtifact.from_dict(payload)
+    except (SummarizationContractError, ProcessingStateError):
+        return False
+    return True
 
 
 def _manifest_contains_summary_artifact_id(*, session_dir: Path, artifact_id: str) -> bool:

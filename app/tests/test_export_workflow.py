@@ -1,3 +1,4 @@
+import hashlib
 import json
 from collections.abc import Mapping
 from pathlib import Path
@@ -808,6 +809,93 @@ def test_export_workflow_ranks_invalid_summary_payload_timestamp_as_oldest(
     assert result.status == "success"
     assert result.export_path is not None
     assert str(result.export_path).startswith(str(current_dir))
+
+
+def test_export_workflow_skips_incompatible_summary_payload_during_default_discovery(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    valid_dir, valid_store, valid_merged = _build_export_session(
+        settings.paths.sessions_dir / "session-older-valid"
+    )
+    _persist_summary(
+        store=valid_store,
+        merged_transcript_record=valid_merged,
+        summary_created_at="2026-07-03T08:00:00Z",
+    )
+    incompatible_dir, incompatible_store, incompatible_merged = _build_export_session(
+        settings.paths.sessions_dir / "session-newer-incompatible"
+    )
+    incompatible_summary = _persist_summary(
+        store=incompatible_store,
+        merged_transcript_record=incompatible_merged,
+        summary_created_at="2026-07-03T09:00:00Z",
+    )
+    # A sealed summary.v2 payload that stays readable and version-matched but no
+    # longer satisfies the strict contract (here missing request_records, as a
+    # pre-note-package payload would). Keep the sealed record consistent with the
+    # rewritten bytes so this is a contract incompatibility, not sha corruption.
+    incompatible_payload_path = incompatible_dir / incompatible_summary.path
+    incompatible_payload = json.loads(incompatible_payload_path.read_text(encoding="utf-8"))
+    del incompatible_payload["request_records"]
+    incompatible_bytes = (json.dumps(incompatible_payload, sort_keys=True) + "\n").encode("utf-8")
+    incompatible_payload_path.write_bytes(incompatible_bytes)
+    _update_artifact_manifest_record(
+        incompatible_dir,
+        artifact_id=incompatible_summary.id,
+        updates={
+            "sha256": hashlib.sha256(incompatible_bytes).hexdigest(),
+            "byte_count": len(incompatible_bytes),
+        },
+    )
+
+    result = run_export_workflow(
+        ExportCommandInput(session_path=None, export_format="markdown"),
+        settings=settings,
+        interaction=ScriptedInteraction(()),
+    )
+
+    assert result.status == "success"
+    assert result.export_path is not None
+    assert str(result.export_path).startswith(str(valid_dir))
+
+
+def test_export_workflow_reports_session_id_mismatch_summary_during_default_discovery(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    mismatch_dir, mismatch_store, mismatch_merged = _build_export_session(
+        settings.paths.sessions_dir / "session-newer-mismatch"
+    )
+    mismatch_summary = _persist_summary(
+        store=mismatch_store,
+        merged_transcript_record=mismatch_merged,
+        summary_created_at="2026-07-03T09:00:00Z",
+    )
+    mismatched_session_id = "00000000-0000-0000-0000-000000000099"
+    _update_artifact_manifest_record(
+        mismatch_dir,
+        artifact_id=mismatch_summary.id,
+        updates={
+            "id": f"{mismatched_session_id}:{mismatch_summary.path}",
+            "session_id": mismatched_session_id,
+        },
+    )
+    _, valid_store, valid_merged = _build_export_session(
+        settings.paths.sessions_dir / "session-older-valid"
+    )
+    _persist_summary(
+        store=valid_store,
+        merged_transcript_record=valid_merged,
+        summary_created_at="2026-07-03T08:00:00Z",
+    )
+
+    with pytest.raises(SessionIntegrityError, match="artifact_record_session_mismatch"):
+        run_export_workflow(
+            ExportCommandInput(session_path=None, export_format="markdown"),
+            settings=settings,
+            interaction=ScriptedInteraction(()),
+        )
 
 
 def test_export_workflow_reports_requested_summary_session_with_unreadable_manifest(
