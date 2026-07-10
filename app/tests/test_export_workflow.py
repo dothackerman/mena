@@ -964,6 +964,137 @@ def test_export_workflow_reports_manifest_version_mismatch_during_default_discov
         )
 
 
+def test_export_workflow_skips_legacy_record_version_during_default_discovery(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    legacy_dir, legacy_store, legacy_merged = _build_export_session(
+        settings.paths.sessions_dir / "session-newer-legacy-record"
+    )
+    legacy_summary = _persist_summary(
+        store=legacy_store,
+        merged_transcript_record=legacy_merged,
+        summary_created_at="2026-07-03T09:00:00Z",
+    )
+    # A sealed summary record whose artifact-record version is not the current
+    # SUMMARY_ARTIFACT_VERSION, while its payload stays a readable v2. Export
+    # selection filters such records out, so discovery must rank it oldest.
+    _update_artifact_manifest_record(
+        legacy_dir,
+        artifact_id=legacy_summary.id,
+        updates={"version": 1},
+    )
+    valid_dir, valid_store, valid_merged = _build_export_session(
+        settings.paths.sessions_dir / "session-older-valid"
+    )
+    _persist_summary(
+        store=valid_store,
+        merged_transcript_record=valid_merged,
+        summary_created_at="2026-07-03T08:00:00Z",
+    )
+
+    result = run_export_workflow(
+        ExportCommandInput(session_path=None, export_format="markdown"),
+        settings=settings,
+        interaction=ScriptedInteraction(()),
+    )
+
+    assert result.status == "success"
+    assert result.export_path is not None
+    assert str(result.export_path).startswith(str(valid_dir))
+
+
+def test_export_workflow_skips_incompatible_payload_version_during_default_discovery(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    incompatible_dir, incompatible_store, incompatible_merged = _build_export_session(
+        settings.paths.sessions_dir / "session-newer-bad-payload-version"
+    )
+    incompatible_summary = _persist_summary(
+        store=incompatible_store,
+        merged_transcript_record=incompatible_merged,
+        summary_created_at="2026-07-03T09:00:00Z",
+    )
+    # A sealed summary whose payload version is not SUMMARY_SCHEMA_VERSION, kept
+    # hash-consistent so this is a version incompatibility, not corruption.
+    incompatible_payload_path = incompatible_dir / incompatible_summary.path
+    incompatible_payload = json.loads(incompatible_payload_path.read_text(encoding="utf-8"))
+    incompatible_payload["version"] = incompatible_payload["version"] + 999
+    incompatible_bytes = (json.dumps(incompatible_payload, sort_keys=True) + "\n").encode("utf-8")
+    incompatible_payload_path.write_bytes(incompatible_bytes)
+    _update_artifact_manifest_record(
+        incompatible_dir,
+        artifact_id=incompatible_summary.id,
+        updates={
+            "sha256": hashlib.sha256(incompatible_bytes).hexdigest(),
+            "byte_count": len(incompatible_bytes),
+        },
+    )
+    valid_dir, valid_store, valid_merged = _build_export_session(
+        settings.paths.sessions_dir / "session-older-valid"
+    )
+    _persist_summary(
+        store=valid_store,
+        merged_transcript_record=valid_merged,
+        summary_created_at="2026-07-03T08:00:00Z",
+    )
+
+    result = run_export_workflow(
+        ExportCommandInput(session_path=None, export_format="markdown"),
+        settings=settings,
+        interaction=ScriptedInteraction(()),
+    )
+
+    assert result.status == "success"
+    assert result.export_path is not None
+    assert str(result.export_path).startswith(str(valid_dir))
+
+
+def test_export_workflow_skips_non_sealed_summary_in_untrusted_manifest(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    untrusted_dir, untrusted_store, untrusted_merged = _build_export_session(
+        settings.paths.sessions_dir / "session-newer-untrusted-nonsealed"
+    )
+    untrusted_summary = _persist_summary(
+        store=untrusted_store,
+        merged_transcript_record=untrusted_merged,
+        summary_created_at="2026-07-03T09:00:00Z",
+    )
+    # Untrusted manifest (session-id mismatch) whose only summary record is
+    # non-sealed. It is not an export candidate, so it must not drive fail-closed
+    # selection over a genuinely exportable older session.
+    _update_artifact_manifest_record(
+        untrusted_dir,
+        artifact_id=untrusted_summary.id,
+        updates={"status": "staged"},
+    )
+    manifest_path = session_artifact_manifest_path(untrusted_dir)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["session_id"] = "00000000-0000-0000-0000-000000000099"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    valid_dir, valid_store, valid_merged = _build_export_session(
+        settings.paths.sessions_dir / "session-older-valid"
+    )
+    _persist_summary(
+        store=valid_store,
+        merged_transcript_record=valid_merged,
+        summary_created_at="2026-07-03T08:00:00Z",
+    )
+
+    result = run_export_workflow(
+        ExportCommandInput(session_path=None, export_format="markdown"),
+        settings=settings,
+        interaction=ScriptedInteraction(()),
+    )
+
+    assert result.status == "success"
+    assert result.export_path is not None
+    assert str(result.export_path).startswith(str(valid_dir))
+
+
 def test_export_workflow_reports_requested_summary_session_with_unreadable_manifest(
     tmp_path: Path,
 ) -> None:

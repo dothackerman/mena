@@ -25,7 +25,7 @@ from mena.sessions import SessionRecordError, resolve_session, session_id
 from mena.settings import AppSettings
 from mena.summarization import (
     SUMMARY_ARTIFACT_TYPE,
-    SUMMARY_SCHEMA_VERSION,
+    SUMMARY_ARTIFACT_VERSION,
     SummarizationContractError,
     SummaryArtifact,
 )
@@ -248,14 +248,20 @@ def _session_summary_records(
                 # session.json — is fail-closed corruption: explicit export of the
                 # bundle raises artifact_manifest_version_unsupported /
                 # artifact_manifest_session_mismatch / artifact_record_session_mismatch.
-                # Preserve summary records as invalid candidates for the requested
-                # artifact and for pathless default discovery so the corrupt session
-                # is still discovered and selection surfaces the failure instead of
-                # the session looking unsummarized and an older valid session being
-                # exported silently.
-                if record.artifact_type == SUMMARY_ARTIFACT_TYPE and (
-                    requested_summary_artifact_id is None
-                    or record.id == requested_summary_artifact_id
+                # Preserve sealed summary records as invalid candidates for the
+                # requested artifact and for pathless default discovery so the
+                # corrupt session is still discovered and selection surfaces the
+                # failure instead of the session looking unsummarized and an older
+                # valid session being exported silently. Only sealed records are
+                # export candidates, so a non-sealed summary must not drive
+                # fail-closed selection over a genuinely exportable older session.
+                if (
+                    record.artifact_type == SUMMARY_ARTIFACT_TYPE
+                    and record.status == "sealed"
+                    and (
+                        requested_summary_artifact_id is None
+                        or record.id == requested_summary_artifact_id
+                    )
                 ):
                     records.append(
                         _SummaryManifestRecord(
@@ -339,22 +345,28 @@ def _summary_record_created_at(
     record: _SummaryManifestRecord,
 ) -> datetime | None:
     if record.record is not None and record.path is not None:
+        if record.record.version != SUMMARY_ARTIFACT_VERSION:
+            # Export input selection skips summary artifact records whose version is
+            # not the current SUMMARY_ARTIFACT_VERSION (a v1 record with a readable
+            # v2 payload is still skipped). Rank them as oldest so a genuinely
+            # exportable summary elsewhere is preferred rather than selecting this
+            # session and failing with "No valid summary.v2 artifact".
+            return _INVALID_SUMMARY_CREATED_AT
         try:
             data = json.loads((session_dir / record.path).read_text(encoding="utf-8"))
             if not isinstance(data, dict):
-                return _summary_metadata_created_at(record) or _INVALID_SUMMARY_CREATED_AT
-            if data.get("version") != SUMMARY_SCHEMA_VERSION:
                 return _summary_metadata_created_at(record) or _INVALID_SUMMARY_CREATED_AT
             created_at = data.get("created_at")
             if not isinstance(created_at, str):
                 return _INVALID_SUMMARY_CREATED_AT
             if not _summary_payload_is_export_compatible(data):
-                # Export input selection skips sealed summary.v2 payloads that no
-                # longer satisfy the strict summary contract (for example a
-                # pre-note-package payload missing request_records) and only fails
-                # when no valid summary exists. Rank such a payload as oldest so a
-                # genuinely exportable summary in another session is preferred
-                # instead of selecting an unexportable one and failing the run.
+                # Export input selection skips sealed summary payloads that no longer
+                # satisfy the strict summary contract — including a payload whose
+                # version is not SUMMARY_SCHEMA_VERSION or a pre-note-package payload
+                # missing request_records — and only fails when no valid summary
+                # exists. Rank such a payload as oldest so a genuinely exportable
+                # summary in another session is preferred instead of selecting an
+                # unexportable one and failing the run.
                 return _INVALID_SUMMARY_CREATED_AT
             return _parse_iso_timestamp(created_at) or _INVALID_SUMMARY_CREATED_AT
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
