@@ -219,9 +219,10 @@ def _session_summary_records(
         )
         if not isinstance(data, dict):
             return None
-        if data.get("version") != ARTIFACT_MANIFEST_VERSION:
-            return None
-        manifest_session_matches = data.get("session_id") == resolved_session_id
+        manifest_trusted = (
+            data.get("version") == ARTIFACT_MANIFEST_VERSION
+            and data.get("session_id") == resolved_session_id
+        )
         artifacts = data.get("artifacts")
         if not isinstance(artifacts, list):
             return None
@@ -241,14 +242,15 @@ def _session_summary_records(
                 if invalid_record is not None:
                     records.append(invalid_record)
                 continue
-            if not manifest_session_matches or record.session_id != resolved_session_id:
-                # A manifest whose top-level session id — or an individual summary
-                # record whose session id — does not match session.json is
-                # fail-closed corruption: explicit export of the bundle raises
+            if not manifest_trusted or record.session_id != resolved_session_id:
+                # A manifest whose top-level version or session id is untrusted — or
+                # an individual summary record whose session id does not match
+                # session.json — is fail-closed corruption: explicit export of the
+                # bundle raises artifact_manifest_version_unsupported /
                 # artifact_manifest_session_mismatch / artifact_record_session_mismatch.
                 # Preserve summary records as invalid candidates for the requested
                 # artifact and for pathless default discovery so the corrupt session
-                # is still discovered and selection surfaces the mismatch instead of
+                # is still discovered and selection surfaces the failure instead of
                 # the session looking unsummarized and an older valid session being
                 # exported silently.
                 if record.artifact_type == SUMMARY_ARTIFACT_TYPE and (
