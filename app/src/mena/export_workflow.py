@@ -355,7 +355,12 @@ def _summary_record_created_at(
         try:
             data = json.loads((session_dir / record.path).read_text(encoding="utf-8"))
             if not isinstance(data, dict):
-                return _summary_metadata_created_at(record) or _INVALID_SUMMARY_CREATED_AT
+                # A payload that parses as JSON but is not an object (for example a
+                # JSON array) is skipped by export input selection just like any
+                # other contract-incompatible payload, so rank it as oldest. Only
+                # an unreadable payload (the except branch) falls back to the
+                # manifest recency metadata.
+                return _INVALID_SUMMARY_CREATED_AT
             created_at = data.get("created_at")
             if not isinstance(created_at, str):
                 return _INVALID_SUMMARY_CREATED_AT

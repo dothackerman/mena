@@ -1097,6 +1097,52 @@ def test_export_workflow_skips_non_sealed_summary_in_untrusted_manifest(
     assert str(result.export_path).startswith(str(valid_dir))
 
 
+def test_export_workflow_skips_non_object_summary_payload_during_default_discovery(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    incompatible_dir, incompatible_store, incompatible_merged = _build_export_session(
+        settings.paths.sessions_dir / "session-newer-non-object-payload"
+    )
+    incompatible_summary = _persist_summary(
+        store=incompatible_store,
+        merged_transcript_record=incompatible_merged,
+        summary_created_at="2026-07-03T09:00:00Z",
+    )
+    # A sealed summary whose payload is valid JSON but not an object. Export
+    # selection skips it, so discovery must rank it oldest rather than trusting
+    # the manifest recency metadata. Keep the record hash-consistent.
+    incompatible_payload_path = incompatible_dir / incompatible_summary.path
+    incompatible_bytes = b"[]\n"
+    incompatible_payload_path.write_bytes(incompatible_bytes)
+    _update_artifact_manifest_record(
+        incompatible_dir,
+        artifact_id=incompatible_summary.id,
+        updates={
+            "sha256": hashlib.sha256(incompatible_bytes).hexdigest(),
+            "byte_count": len(incompatible_bytes),
+        },
+    )
+    valid_dir, valid_store, valid_merged = _build_export_session(
+        settings.paths.sessions_dir / "session-older-valid"
+    )
+    _persist_summary(
+        store=valid_store,
+        merged_transcript_record=valid_merged,
+        summary_created_at="2026-07-03T08:00:00Z",
+    )
+
+    result = run_export_workflow(
+        ExportCommandInput(session_path=None, export_format="markdown"),
+        settings=settings,
+        interaction=ScriptedInteraction(()),
+    )
+
+    assert result.status == "success"
+    assert result.export_path is not None
+    assert str(result.export_path).startswith(str(valid_dir))
+
+
 def test_export_workflow_reports_requested_summary_session_with_unreadable_manifest(
     tmp_path: Path,
 ) -> None:
