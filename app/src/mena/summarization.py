@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Protocol, Self, runtime_checkable
+from typing import Protocol, Self, runtime_checkable
 
 from mena.artifacts import ArtifactRecord, ArtifactStore
 from mena.correction_overlay import (
@@ -73,10 +73,6 @@ __all__ = [
     "LEGACY_PROMPT_POLICY",
     "MANUAL_NOTES_ARTIFACT_TYPE",
     "MANUAL_NOTES_CONTRACT",
-    "OLLAMA_SUMMARIZATION_NUM_CTX",
-    "OLLAMA_SUMMARIZATION_SEED",
-    "OLLAMA_SUMMARIZATION_TEMPERATURE",
-    "OllamaSummarizationProvider",
     "PRODUCT_RESPONSE_SCHEMA_NAMES",
     "PRODUCT_RESPONSE_SCHEMAS",
     "PROMPT_POLICY",
@@ -707,29 +703,19 @@ def _timestamp(now: datetime | None) -> str:
     return utc_timestamp(now or datetime.now(UTC))
 
 
-def _load_ollama_compat_exports() -> tuple[int, int, int, Any]:
-    # Compatibility exports for callers that historically imported the local
-    # adapter through mena.summarization. Provider mechanics live in
-    # ollama_summarization, and this delayed import avoids a module cycle while
-    # summarization.py defines the provider metadata/port.
-    from mena.ollama_summarization import (
-        OLLAMA_SUMMARIZATION_NUM_CTX,
-        OLLAMA_SUMMARIZATION_SEED,
-        OLLAMA_SUMMARIZATION_TEMPERATURE,
-        OllamaSummarizationProvider,
-    )
-
-    return (
-        OLLAMA_SUMMARIZATION_NUM_CTX,
-        OLLAMA_SUMMARIZATION_SEED,
-        OLLAMA_SUMMARIZATION_TEMPERATURE,
-        OllamaSummarizationProvider,
-    )
+_OLLAMA_COMPAT_EXPORTS = frozenset(
+    {
+        "OLLAMA_SUMMARIZATION_NUM_CTX",
+        "OLLAMA_SUMMARIZATION_SEED",
+        "OLLAMA_SUMMARIZATION_TEMPERATURE",
+        "OllamaSummarizationProvider",
+    }
+)
 
 
-(
-    OLLAMA_SUMMARIZATION_NUM_CTX,
-    OLLAMA_SUMMARIZATION_SEED,
-    OLLAMA_SUMMARIZATION_TEMPERATURE,
-    OllamaSummarizationProvider,
-) = _load_ollama_compat_exports()
+def __getattr__(name: str) -> object:
+    if name not in _OLLAMA_COMPAT_EXPORTS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from mena import ollama_summarization
+
+    return getattr(ollama_summarization, name)

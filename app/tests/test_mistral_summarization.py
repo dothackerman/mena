@@ -16,9 +16,9 @@ from mena.mistral_summarization import (
     MISTRAL_SUMMARIZATION_TEMPERATURE,
     MistralSummarizationProvider,
 )
+from mena.ollama_summarization import OllamaSummarizationProvider
 from mena.summarization import (
     PROMPT_POLICY,
-    OllamaSummarizationProvider,
     SummarizationContractError,
     SummarizationError,
     SummarizationPolicy,

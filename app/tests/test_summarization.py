@@ -26,17 +26,19 @@ from mena.merge_timing import (
     SpeakerIdentity,
     persist_merged_transcript_artifact,
 )
+from mena.ollama_summarization import (
+    OLLAMA_SUMMARIZATION_NUM_CTX,
+    OLLAMA_SUMMARIZATION_SEED,
+    OllamaSummarizationProvider,
+)
 from mena.processing import ArtifactRef, ProcessingStageLedger
 from mena.runtime_stewardship import RuntimeLease
 from mena.summarization import (
-    OLLAMA_SUMMARIZATION_NUM_CTX,
-    OLLAMA_SUMMARIZATION_SEED,
     PROMPT_POLICY,
     REQUIRED_NOTE_PRODUCTS,
     SCHEMA_PROMPT_POLICY,
     SUMMARIZATION_STAGE,
     FakeSummarizationProvider,
-    OllamaSummarizationProvider,
     ProductRequestRecord,
     SummarizationContractError,
     SummarizationError,
