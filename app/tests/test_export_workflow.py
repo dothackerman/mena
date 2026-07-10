@@ -7,7 +7,7 @@ from typing import cast
 import pytest
 
 from mena.artifacts import ArtifactRecord, FileSystemArtifactStore, session_artifact_manifest_path
-from mena.export import SUMMARY_MARKDOWN_EXPORT_ARTIFACT_TYPE
+from mena.export import SUMMARY_MARKDOWN_EXPORT_ARTIFACT_TYPE, SummaryMarkdownExportError
 from mena.export_workflow import ExportCommandInput, ExportFormat, run_export_workflow
 from mena.interaction import ScriptedInteraction, ScriptedResponse
 from mena.merge_timing import MERGED_TRANSCRIPT_ARTIFACT_TYPE
@@ -614,6 +614,48 @@ def test_export_workflow_requested_artifact_ignores_copied_id_in_other_session(
     assert not str(result.export_path).startswith(str(stale_dir))
 
 
+def test_export_workflow_requested_legacy_record_does_not_fall_back_to_current_summary(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    target_dir, target_store, target_merged = _build_export_session(
+        settings.paths.sessions_dir / "session-target"
+    )
+    requested_summary = _persist_summary(
+        store=target_store,
+        merged_transcript_record=target_merged,
+        summary_name="summary/requested-legacy.json",
+        summary_created_at="2026-07-03T08:00:00Z",
+    )
+    _persist_summary(
+        store=target_store,
+        merged_transcript_record=target_merged,
+        summary_name="summary/current.json",
+        summary_created_at="2026-07-03T09:00:00Z",
+    )
+    _update_artifact_manifest_record(
+        target_dir,
+        artifact_id=requested_summary.id,
+        updates={"version": 1},
+    )
+
+    with pytest.raises(
+        SummaryMarkdownExportError,
+        match="not current summary artifact version",
+    ):
+        run_export_workflow(
+            ExportCommandInput(
+                session_path=None,
+                summary_artifact_id=requested_summary.id,
+                export_format="markdown",
+            ),
+            settings=settings,
+            interaction=ScriptedInteraction(()),
+        )
+
+    assert target_store.list(artifact_type=SUMMARY_MARKDOWN_EXPORT_ARTIFACT_TYPE) == ()
+
+
 def test_export_workflow_requested_artifact_skips_malformed_unrelated_session(
     tmp_path: Path,
 ) -> None:
@@ -1132,6 +1174,34 @@ def test_export_workflow_skips_legacy_record_version_during_default_discovery(
     assert result.status == "success"
     assert result.export_path is not None
     assert str(result.export_path).startswith(str(valid_dir))
+
+
+def test_export_workflow_rejects_only_legacy_record_version_during_default_discovery(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    legacy_dir, legacy_store, legacy_merged = _build_export_session(
+        settings.paths.sessions_dir / "session-only-legacy-record"
+    )
+    legacy_summary = _persist_summary(
+        store=legacy_store,
+        merged_transcript_record=legacy_merged,
+        summary_created_at="2026-07-03T09:00:00Z",
+    )
+    _update_artifact_manifest_record(
+        legacy_dir,
+        artifact_id=legacy_summary.id,
+        updates={"version": 1},
+    )
+
+    with pytest.raises(SummaryMarkdownExportError, match="No valid summary.v3 artifact"):
+        run_export_workflow(
+            ExportCommandInput(session_path=None, export_format="markdown"),
+            settings=settings,
+            interaction=ScriptedInteraction(()),
+        )
+
+    assert legacy_store.list(artifact_type=SUMMARY_MARKDOWN_EXPORT_ARTIFACT_TYPE) == ()
 
 
 def test_export_workflow_skips_incompatible_payload_version_during_default_discovery(

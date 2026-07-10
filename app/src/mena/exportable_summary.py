@@ -144,6 +144,11 @@ def load_exportable_summary(
 ) -> tuple[ArtifactRecord, SummaryArtifact]:
     """Load one sealed summary payload and validate it for export."""
 
+    if record.version != SUMMARY_ARTIFACT_VERSION:
+        raise ExportableSummaryError(
+            f"Summary artifact {record.id} is not current summary artifact version."
+        )
+
     verification = store.verify(record.id)
     if not verification.ok:
         raise ExportableSummaryError(f"Summary artifact {record.id} failed integrity verification.")

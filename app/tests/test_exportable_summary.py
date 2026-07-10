@@ -90,6 +90,25 @@ def test_resolve_exportable_summary_rejects_corrupt_current_payload(
         resolve_exportable_summary(store=store)
 
 
+def test_resolve_exportable_summary_rejects_explicit_legacy_record_version(
+    tmp_path: Path,
+) -> None:
+    store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=tmp_path)
+    legacy_record = _persist_summary(
+        store=store,
+        created_at="2026-05-20T17:00:00Z",
+        name="summary/legacy.json",
+    )
+    _update_artifact_manifest_record(
+        tmp_path,
+        artifact_id=legacy_record.id,
+        updates={"version": 1},
+    )
+
+    with pytest.raises(ExportableSummaryError, match="not current summary artifact version"):
+        resolve_exportable_summary(store=store, summary_record_id=legacy_record.id)
+
+
 def test_resolve_exportable_summary_session_uses_payload_timestamp_over_manifest_metadata(
     tmp_path: Path,
 ) -> None:

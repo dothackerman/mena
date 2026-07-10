@@ -133,5 +133,9 @@ def resolve_export_session(
 
     return _ResolvedExportSession(
         session_path=selected.session_dir,
-        summary_artifact_id=selected.summary_artifact_id,
+        summary_artifact_id=(
+            selected.summary_artifact_id
+            if summary_artifact_id is not None or selected.reason == "exportable"
+            else None
+        ),
     )
