@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from mena.interaction import ConfirmationRequest, InteractionPort
+from mena.mistral_llm import MISTRAL_SUMMARY_DISCLOSURE
 from mena.settings import AppSettings
 from mena.setup import (
     CommandRunner,
+    ReadinessItem,
     RuntimeProfileState,
     SetupActionResult,
     SetupEvaluation,
+    StageProfile,
     SubprocessCommandRunner,
     build_runtime_profile_state,
     default_profile_catalog,
@@ -20,9 +23,14 @@ from mena.setup import (
     execute_setup_plan,
     format_setup_report,
     get_alpha_local_profile,
+    get_mistral_summary_profile,
+    mistral_summary_stage_profile,
     persist_runtime_profile_state,
 )
 from mena.setup_detection import DefaultSetupDetector, SetupDetector
+
+LOCAL_SUMMARIZATION_PROVIDER_OPTION = "local"
+MISTRAL_SUMMARIZATION_PROVIDER_OPTION = "mistral"
 
 
 @dataclass(frozen=True)
@@ -32,6 +40,14 @@ class SetupWorkflowOptions:
     check_only: bool = False
     assume_yes: bool = False
     authorize_local_fallback: bool = False
+    # ADR-033 summarization shapes: "local" or "mistral" primary, plus an
+    # optional Mistral entry in the ordered summarization fallback list.
+    summarization_provider: str = LOCAL_SUMMARIZATION_PROVIDER_OPTION
+    mistral_summary_fallback: bool = False
+    # Non-interactive acknowledgement of the PDR-004 disclosure. `assume_yes`
+    # deliberately does not imply it: remote-provider acceptance must be its
+    # own explicit decision.
+    accept_mistral_disclosure: bool = False
 
 
 @dataclass(frozen=True)
@@ -83,10 +99,34 @@ def run_setup_workflow(
     command_runner = runner or SubprocessCommandRunner()
     setup_detector = detector or DefaultSetupDetector()
     events: list[SetupWorkflowEvent] = []
-    profile = get_alpha_local_profile(settings.local_llm.ollama_model)
+    if options.summarization_provider not in {
+        LOCAL_SUMMARIZATION_PROVIDER_OPTION,
+        MISTRAL_SUMMARIZATION_PROVIDER_OPTION,
+    }:
+        events.append(
+            SetupMessageEvent(
+                f"Unsupported summarization provider option "
+                f"{options.summarization_provider!r}; use 'local' or 'mistral'."
+            )
+        )
+        return SetupWorkflowResult(exit_code=1, events=tuple(events))
+    mistral_primary = options.summarization_provider == MISTRAL_SUMMARIZATION_PROVIDER_OPTION
+    if mistral_primary and options.mistral_summary_fallback:
+        events.append(
+            SetupMessageEvent(
+                "Mistral cannot be both the accepted summarization primary and a "
+                "fallback entry; choose one shape."
+            )
+        )
+        return SetupWorkflowResult(exit_code=1, events=tuple(events))
+    profile = (
+        get_mistral_summary_profile(settings.local_llm.ollama_model)
+        if mistral_primary
+        else get_alpha_local_profile(settings.local_llm.ollama_model)
+    )
 
     try:
-        state = setup_detector.detect(settings, runner=command_runner)
+        state = setup_detector.detect(settings, runner=command_runner, profile=profile)
     except KeyboardInterrupt:
         return _interrupted(events)
 
@@ -139,7 +179,7 @@ def run_setup_workflow(
     except KeyboardInterrupt:
         return _interrupted(events)
     try:
-        refreshed_state = setup_detector.detect(settings, runner=command_runner)
+        refreshed_state = setup_detector.detect(settings, runner=command_runner, profile=profile)
     except KeyboardInterrupt:
         return _interrupted(events)
 
@@ -176,6 +216,62 @@ def _persist_ready_setup(
     primary_evaluation: SetupEvaluation,
     events: list[SetupWorkflowEvent],
 ) -> SetupWorkflowResult:
+    mistral_primary = options.summarization_provider == MISTRAL_SUMMARIZATION_PROVIDER_OPTION
+    if mistral_primary and not _accept_mistral_disclosure(
+        options=options,
+        interaction=interaction,
+        events=events,
+        role="primary",
+    ):
+        return SetupWorkflowResult(exit_code=1, events=tuple(events))
+
+    summarization_fallback_providers: tuple[StageProfile, ...] = ()
+    if options.mistral_summary_fallback:
+        try:
+            mistral_evaluation = evaluate_setup(
+                get_mistral_summary_profile(settings.local_llm.ollama_model),
+                detector.detect(
+                    settings,
+                    runner=runner,
+                    profile=get_mistral_summary_profile(settings.local_llm.ollama_model),
+                ),
+            )
+        except KeyboardInterrupt:
+            return _interrupted(events)
+        mistral_readiness = _mistral_readiness_item(mistral_evaluation)
+        if mistral_readiness is None or not mistral_readiness.ready:
+            detail = (
+                "Mistral summarization readiness was not evaluated."
+                if mistral_readiness is None
+                else mistral_readiness.detail
+            )
+            events.append(
+                SetupMessageEvent(f"Mistral summarization fallback was not accepted: {detail}")
+            )
+            return SetupWorkflowResult(exit_code=1, events=tuple(events))
+        if not _accept_mistral_disclosure(
+            options=options,
+            interaction=interaction,
+            events=events,
+            role="fallback",
+        ):
+            return SetupWorkflowResult(exit_code=1, events=tuple(events))
+        events.append(
+            SetupMessageEvent(
+                f"Mistral summarization fallback readiness: {mistral_readiness.detail}"
+            )
+        )
+        summarization_fallback_providers = (mistral_summary_stage_profile(),)
+        # Carry the resolved-model evidence into the persisted setup evidence
+        # even though the accepted primary profile is local-only.
+        primary_evaluation = replace(
+            primary_evaluation,
+            state=replace(
+                primary_evaluation.state,
+                mistral_summary=mistral_evaluation.state.mistral_summary,
+            ),
+        )
+
     try:
         fallback_evaluation = _evaluate_fallback_authorization(
             settings=settings,
@@ -197,10 +293,12 @@ def _persist_ready_setup(
         primary_evaluation,
         fallback_evaluation=fallback_evaluation,
         authorize_local_fallback=options.authorize_local_fallback,
+        summarization_fallback_providers=summarization_fallback_providers,
     )
     state_path = persist_runtime_profile_state(accepted_state, paths=settings.paths)
     _append_setup_completion_notice(events, accepted_state)
     _append_runtime_fallback_authorization_notice(events, accepted_state)
+    _append_summarization_route_notice(events, accepted_state)
     events.append(SetupMessageEvent(f"Accepted runtime profile state: {state_path}"))
     return SetupWorkflowResult(
         exit_code=0,
@@ -208,6 +306,72 @@ def _persist_ready_setup(
         state_path=state_path,
         accepted_state=accepted_state,
     )
+
+
+def _accept_mistral_disclosure(
+    *,
+    options: SetupWorkflowOptions,
+    interaction: InteractionPort,
+    events: list[SetupWorkflowEvent],
+    role: str,
+) -> bool:
+    """Show the PDR-004 minimum disclosure and require explicit acceptance."""
+
+    events.append(SetupMessageEvent(f"Mistral summarization disclosure ({role} provider):"))
+    for line in MISTRAL_SUMMARY_DISCLOSURE:
+        events.append(SetupMessageEvent(f"  - {line}"))
+    if options.accept_mistral_disclosure:
+        events.append(
+            SetupMessageEvent(
+                "Mistral summarization disclosure accepted via explicit setup option."
+            )
+        )
+        return True
+    try:
+        accepted = interaction.confirm(
+            ConfirmationRequest(
+                topic="setup.mistral_summary_disclosure",
+                context={"role": role, "disclosure": MISTRAL_SUMMARY_DISCLOSURE},
+                default=False,
+            )
+        )
+    except (EOFError, KeyboardInterrupt):
+        accepted = False
+    if not accepted:
+        events.append(
+            SetupMessageEvent(
+                "Mistral summarization was declined; setup did not accept Mistral. "
+                "Re-run setup without the Mistral option or accept the disclosure."
+            )
+        )
+    return accepted
+
+
+def _mistral_readiness_item(evaluation: SetupEvaluation) -> ReadinessItem | None:
+    for item in evaluation.readiness:
+        if item.id == "mistral-summary-model":
+            return item
+    return None
+
+
+def _append_summarization_route_notice(
+    events: list[SetupWorkflowEvent],
+    state: RuntimeProfileState,
+) -> None:
+    for policy in state.stage_policies:
+        if policy.stage == "summarization":
+            events.append(
+                SetupMessageEvent(
+                    f"Accepted summarization primary: {policy.provider} ({policy.model})"
+                )
+            )
+    if state.summarization_fallback_providers:
+        ordered = ", ".join(
+            f"{entry.provider} ({entry.model})" for entry in state.summarization_fallback_providers
+        )
+        events.append(SetupMessageEvent(f"Accepted summarization fallback order: {ordered}"))
+    else:
+        events.append(SetupMessageEvent("Accepted summarization fallback order: none"))
 
 
 def _evaluate_fallback_authorization(

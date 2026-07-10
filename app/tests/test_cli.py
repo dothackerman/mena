@@ -2,7 +2,7 @@ import hashlib
 import inspect
 import json
 import queue
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -69,6 +69,7 @@ from mena.merge_timing import (
     SpeakerIdentity,
     persist_merged_transcript_artifact,
 )
+from mena.mistral_llm import MISTRAL_SUMMARY_DISCLOSURE, MistralSummaryState
 from mena.processing import (
     ArtifactRef,
     ProcessingErrorInfo,
@@ -2472,7 +2473,10 @@ def test_main_correct_does_not_select_runtime_profile(
         raise AssertionError("correction must not acquire runtime resources")
 
     monkeypatch.setattr("mena.cli.run_correction_workflow", _fake_run_correction_workflow)
-    monkeypatch.setattr("mena.cli.select_runtime_profile", _fail_runtime_profile_selection)
+    monkeypatch.setattr(
+        "mena.cli.select_summarization_runtime_profile",
+        _fail_runtime_profile_selection,
+    )
 
     assert main(["correct", str(tmp_path)]) == 0
     assert calls == [tmp_path]
@@ -4897,3 +4901,218 @@ def _main_process_with_fake_providers(argv: Sequence[str]) -> int:
         diarization_provider_factory=FakeDiarizationProvider,
         semantic_coherence_provider_factory=lambda: FakeSemanticCoherenceProvider(results={}),
     )
+
+
+def _mistral_ready_summary_state() -> MistralSummaryState:
+    return MistralSummaryState(
+        key_present=True,
+        reachable=True,
+        request_model="mistral-small-latest",
+        resolved_model="mistral-small-2603",
+        model_allowed=True,
+        policy="mena-mistral-summary-allowlist-2026-06-29-v1",
+        detail=(
+            "Request model 'mistral-small-latest' resolved to 'mistral-small-2603' "
+            "inside the accepted snapshot."
+        ),
+    )
+
+
+def _mistral_aware_detection(
+    settings: AppSettings,
+) -> Callable[..., LocalInstallationState]:
+    base = _setup_state(settings=settings, pyannote_token_present=True)
+
+    def _detect(_settings: AppSettings, **kwargs: object) -> LocalInstallationState:
+        profile = kwargs.get("profile")
+        stages = getattr(profile, "stages", ())
+        has_mistral = any(
+            stage.stage == "summarization" and stage.provider == "Mistral" for stage in stages
+        )
+        if has_mistral:
+            return replace(base, mistral_summary=_mistral_ready_summary_state())
+        return base
+
+    return _detect
+
+
+def test_setup_mistral_primary_prompts_disclosure_and_persists_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    monkeypatch.setattr(
+        "mena.setup_detection.detect_local_installation_state",
+        _mistral_aware_detection(settings),
+    )
+    prompts: list[str] = []
+
+    def _answer(prompt: str) -> str:
+        prompts.append(prompt)
+        return "y"
+
+    exit_code = main(
+        ["setup", "--summarization-provider", "mistral"],
+        settings=settings,
+        input_fn=_answer,
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert any("Accept the Mistral summarization disclosure" in prompt for prompt in prompts)
+    assert "sent to your configured Mistral account" in captured.out
+    assert "Accepted summarization primary: Mistral (mistral-small-latest)" in captured.out
+    accepted = load_runtime_profile_state(settings.paths)
+    assert accepted.accepted_profile_id == "linux-alpha-mistral-summary-v1"
+    assert accepted.summarization_fallback_providers == ()
+
+
+def test_setup_mistral_primary_declined_disclosure_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    monkeypatch.setattr(
+        "mena.setup_detection.detect_local_installation_state",
+        _mistral_aware_detection(settings),
+    )
+
+    exit_code = main(
+        ["setup", "--summarization-provider", "mistral"],
+        settings=settings,
+        input_fn=lambda _prompt: "n",
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "Mistral summarization was declined" in captured.out
+    assert not (settings.paths.state_home / "setup-state.json").exists()
+
+
+def test_setup_mistral_fallback_flag_persists_the_ordered_fallback_list(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    monkeypatch.setattr(
+        "mena.setup_detection.detect_local_installation_state",
+        _mistral_aware_detection(settings),
+    )
+
+    exit_code = main(
+        [
+            "setup",
+            "--authorize-mistral-summary-fallback",
+            "--accept-mistral-summary-disclosure",
+        ],
+        settings=settings,
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "disclosure accepted via explicit setup option" in captured.out
+    assert "Accepted summarization fallback order: Mistral (mistral-small-latest)" in captured.out
+    accepted = load_runtime_profile_state(settings.paths)
+    assert accepted.accepted_profile_id == "linux-alpha-local-v1"
+    assert [entry.provider for entry in accepted.summarization_fallback_providers] == ["Mistral"]
+    assert accepted.fallback_authorization.remote_status == "authorized"
+    assert accepted.fallback_authorization.remote_stage_scope == ("summarization",)
+
+
+def test_main_summarize_exits_3_when_summarization_fallback_is_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    session_dir, _, _, _ = _build_summarize_session_bundle(tmp_path)
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+
+    def _raise_unavailable(**_kwargs: object) -> object:
+        raise RuntimeFallbackUnavailable(
+            "Accepted summarization provider is unavailable and the accepted ordered "
+            "fallback-provider list is empty: ollama is down"
+        )
+
+    monkeypatch.setattr("mena.cli.select_summarization_runtime_profile", _raise_unavailable)
+
+    exit_code = main(["summarize", str(session_dir)], settings=settings)
+
+    captured = capsys.readouterr()
+    assert exit_code == 3
+    assert "Cannot summarize session:" in captured.out
+    assert "fallback-provider list is empty" in captured.out
+
+
+def test_console_summarize_interaction_confirms_remote_fallback(
+    capsys: CaptureFixture[str],
+) -> None:
+    answers = iter(["y"])
+    interaction = cli_module.ConsoleSummarizeInteraction(lambda _prompt: next(answers))
+
+    accepted = interaction.confirm(
+        ConfirmationRequest(
+            topic="runtime_fallback.summarization_remote",
+            context={
+                "reason": "ollama is down",
+                "disclosure": ("Text goes to your Mistral account.",),
+            },
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert accepted is True
+    assert "ollama is down" in captured.out
+    assert "Text goes to your Mistral account." in captured.out
+
+
+def test_console_summarize_interaction_declines_remote_fallback_non_interactively(
+    capsys: CaptureFixture[str],
+) -> None:
+    interaction = cli_module.ConsoleSummarizeInteraction(None)
+
+    accepted = interaction.confirm(
+        ConfirmationRequest(
+            topic="runtime_fallback.summarization_remote",
+            context={"reason": "ollama is down", "disclosure": ()},
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert accepted is False
+    assert "--authorize-mistral-summary-fallback" in captured.out
+
+
+def test_console_summarize_interaction_rejects_unknown_confirmation_topics() -> None:
+    interaction = cli_module.ConsoleSummarizeInteraction(lambda _prompt: "y")
+
+    with pytest.raises(ValueError, match="Unsupported summarize confirmation topic"):
+        interaction.confirm(ConfirmationRequest(topic="summarize.other"))
+
+
+def test_cli_setup_interaction_renders_the_disclosure_before_prompting(
+    capsys: CaptureFixture[str],
+) -> None:
+    prompts: list[str] = []
+
+    def _answer(prompt: str) -> str:
+        # The disclosure must already be on screen when the prompt runs;
+        # buffered workflow events are only printed after the workflow ends.
+        captured = capsys.readouterr()
+        assert "Mistral summarization disclosure:" in captured.out
+        assert "special-category" in captured.out
+        prompts.append(prompt)
+        return "y"
+
+    interaction = cli_module._CliSetupInteraction(input_fn=_answer)
+    accepted = interaction.confirm(
+        ConfirmationRequest(
+            topic="setup.mistral_summary_disclosure",
+            context={"role": "primary", "disclosure": MISTRAL_SUMMARY_DISCLOSURE},
+        )
+    )
+
+    assert accepted is True
+    assert "Accept the Mistral summarization disclosure above" in prompts[0]

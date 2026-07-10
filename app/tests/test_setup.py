@@ -7,13 +7,20 @@ from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
+from mena.mistral_llm import (
+    MISTRAL_SUMMARY_ALLOWLIST_POLICY,
+    MISTRAL_SUMMARY_REQUEST_MODEL,
+    MistralSummaryState,
+)
 from mena.settings import AppSettings, RuntimePaths
 from mena.setup import (
     ALPHA_LOCAL_PROFILE_ID,
     FALLBACK_LOCAL_PROFILE_ID,
+    MISTRAL_SUMMARY_PROFILE_ID,
     PYANNOTE_COMMUNITY_CHECKPOINT,
     RUNTIME_PROFILE_CATALOG_VERSION,
     CommandCheck,
@@ -24,6 +31,7 @@ from mena.setup import (
     OllamaState,
     PythonSurfaceCheck,
     ReadinessItem,
+    RuntimeProfileState,
     SetupAction,
     SetupActionResult,
     SetupEvaluation,
@@ -43,7 +51,10 @@ from mena.setup import (
     final_provider_readiness,
     format_setup_report,
     get_alpha_local_profile,
+    get_mistral_summary_profile,
     load_runtime_profile_state,
+    local_llm_stage_model,
+    mistral_summary_stage_profile,
     persist_runtime_profile_state,
 )
 
@@ -1029,3 +1040,303 @@ def _action(plan: SetupPlan, action_id: str) -> SetupAction:
         if item.id == action_id:
             return item
     raise AssertionError(f"missing action {action_id}")
+
+
+def _mistral_state(
+    *,
+    key_present: bool = True,
+    reachable: bool = True,
+    resolved_model: str | None = "mistral-small-2603",
+    model_allowed: bool = True,
+    detail: str = "resolved inside the accepted snapshot",
+) -> MistralSummaryState:
+    return MistralSummaryState(
+        key_present=key_present,
+        reachable=reachable,
+        request_model=MISTRAL_SUMMARY_REQUEST_MODEL,
+        resolved_model=resolved_model,
+        model_allowed=model_allowed,
+        policy=MISTRAL_SUMMARY_ALLOWLIST_POLICY,
+        detail=detail,
+    )
+
+
+def test_profile_catalog_exposes_the_mistral_summary_profile() -> None:
+    profile = get_mistral_summary_profile("llama3.2:3b")
+
+    assert profile.id == MISTRAL_SUMMARY_PROFILE_ID
+    assert profile.catalog_version == RUNTIME_PROFILE_CATALOG_VERSION
+    assert profile.fallback is False
+    summarization = next(stage for stage in profile.stages if stage.stage == "summarization")
+    assert summarization.provider == "Mistral"
+    assert summarization.model == MISTRAL_SUMMARY_REQUEST_MODEL
+    assert summarization.device == "remote-api"
+    semantic = next(stage for stage in profile.stages if stage.stage == "semantic-review")
+    assert semantic.provider == "Ollama"
+    assert semantic.model == "llama3.2:3b"
+    assert summarization == mistral_summary_stage_profile()
+
+
+def test_local_llm_stage_model_is_provider_aware() -> None:
+    mistral_profile = get_mistral_summary_profile("llama3.2:3b")
+
+    assert local_llm_stage_model(mistral_profile.stages, "default-model") == "llama3.2:3b"
+    assert local_llm_stage_model((), "default-model") == "default-model"
+    assert (
+        local_llm_stage_model(get_alpha_local_profile("llama3.1:8b").stages, "default")
+        == "llama3.1:8b"
+    )
+
+
+def test_evaluate_setup_probes_mistral_readiness_for_the_mistral_profile() -> None:
+    profile = get_mistral_summary_profile()
+    state = replace(_state(), mistral_summary=_mistral_state())
+
+    evaluation = evaluate_setup(profile, state)
+
+    item = _readiness(evaluation, "mistral-summary-model")
+    assert item.ready
+    assert "resolved inside the accepted snapshot" in item.detail
+    # Semantic review remains local, so the Ollama model is still evaluated.
+    assert _readiness(evaluation, "ollama-model").ready
+
+
+def test_evaluate_setup_requires_the_mena_scoped_key_before_accepting_mistral() -> None:
+    profile = get_mistral_summary_profile()
+    state = replace(
+        _state(),
+        mistral_summary=_mistral_state(
+            key_present=False,
+            reachable=False,
+            resolved_model=None,
+            model_allowed=False,
+            detail="MENA_MISTRAL_API_KEY is not set.",
+        ),
+    )
+
+    evaluation = evaluate_setup(profile, state)
+
+    item = _readiness(evaluation, "mistral-summary-model")
+    assert not item.ready
+    action = _action(evaluation.plan, "mistral-summary-model")
+    assert action.mode == "manual"
+    assert "MENA_MISTRAL_API_KEY" in action.detail
+    assert "never persisted" in action.detail
+
+
+def test_evaluate_setup_fails_closed_on_mistral_alias_drift() -> None:
+    profile = get_mistral_summary_profile()
+    state = replace(
+        _state(),
+        mistral_summary=_mistral_state(
+            resolved_model="mistral-small-2707",
+            model_allowed=False,
+            detail="resolved outside the accepted snapshot; failing closed",
+        ),
+    )
+
+    evaluation = evaluate_setup(profile, state)
+
+    item = _readiness(evaluation, "mistral-summary-model")
+    assert not item.ready
+    action = _action(evaluation.plan, "mistral-summary-model")
+    assert MISTRAL_SUMMARY_ALLOWLIST_POLICY in action.detail
+
+
+def test_evaluate_setup_reports_unevaluated_mistral_readiness() -> None:
+    profile = get_mistral_summary_profile()
+
+    evaluation = evaluate_setup(profile, _state())
+
+    item = _readiness(evaluation, "mistral-summary-model")
+    assert not item.ready
+    assert "not evaluated" in item.detail
+
+
+def test_detect_local_installation_state_probes_mistral_only_for_mistral_profiles(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    runner = _FakeRunner()
+    probes: list[Mapping[str, str]] = []
+
+    def _probe(*, env: Mapping[str, str]) -> MistralSummaryState:
+        probes.append(env)
+        return _mistral_state()
+
+    local_state = detect_local_installation_state(
+        settings,
+        runner=runner,
+        command_identity=_identity(),
+        hardware=_hardware(),
+        profile=get_alpha_local_profile(),
+        env={"MENA_MISTRAL_API_KEY": "mena-key"},
+        mistral_probe=_probe,
+    )
+    mistral_state = detect_local_installation_state(
+        settings,
+        runner=runner,
+        command_identity=_identity(),
+        hardware=_hardware(),
+        profile=get_mistral_summary_profile(),
+        env={"MENA_MISTRAL_API_KEY": "mena-key"},
+        mistral_probe=_probe,
+    )
+
+    assert local_state.mistral_summary is None
+    assert mistral_state.mistral_summary is not None
+    assert mistral_state.mistral_summary.model_allowed
+    assert len(probes) == 1
+
+
+def test_runtime_profile_state_round_trips_the_ordered_fallback_list(tmp_path: Path) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    state = replace(
+        _state(runtime_paths=settings.paths, pyannote_token_present=True),
+        mistral_summary=_mistral_state(),
+    )
+    accepted = build_runtime_profile_state(
+        evaluate_setup(get_alpha_local_profile(), state),
+        summarization_fallback_providers=(mistral_summary_stage_profile(),),
+    )
+
+    persist_runtime_profile_state(accepted, paths=settings.paths)
+    loaded = load_runtime_profile_state(settings.paths)
+
+    assert loaded.summarization_fallback_providers == (mistral_summary_stage_profile(),)
+    assert loaded.fallback_authorization.remote_status == "authorized"
+    assert loaded.fallback_authorization.remote_stage_scope == ("summarization",)
+    evidence = loaded.evidence
+    mistral_evidence = cast(Mapping[str, object], evidence["mistral_summary"])
+    assert mistral_evidence["resolved_model"] == "mistral-small-2603"
+    assert "mena-key" not in (settings.paths.state_home / "setup-state.json").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_runtime_profile_state_defaults_to_an_empty_fallback_list(tmp_path: Path) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    state = _state(runtime_paths=settings.paths, pyannote_token_present=True)
+    accepted = build_runtime_profile_state(evaluate_setup(get_alpha_local_profile(), state))
+
+    payload = accepted.to_dict()
+    assert payload["summarization_fallback_providers"] == []
+    # Legacy persisted states have no fallback-provider field at all.
+    del payload["summarization_fallback_providers"]
+    loaded = RuntimeProfileState.from_dict(payload)
+
+    assert loaded.summarization_fallback_providers == ()
+    assert loaded.fallback_authorization.remote_status == "not_configured"
+
+
+def test_runtime_profile_state_rejects_non_summarization_fallback_entries(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    state = _state(runtime_paths=settings.paths, pyannote_token_present=True)
+
+    with pytest.raises(ValueError, match="must be summarization stage entries"):
+        build_runtime_profile_state(
+            evaluate_setup(get_alpha_local_profile(), state),
+            summarization_fallback_providers=(
+                replace(mistral_summary_stage_profile(), stage="diarization"),
+            ),
+        )
+
+
+def _identity() -> CommandIdentity:
+    return CommandIdentity(
+        current_executable=Path("/home/user/.local/bin/mena"),
+        plain_mena_path=Path("/home/user/.local/bin/mena"),
+        version="0.1.0",
+        invocation_mode="installed-product",
+    )
+
+
+def _hardware() -> HardwareFacts:
+    return HardwareFacts(
+        system="Linux",
+        ram_gb=32.0,
+        cuda_available=True,
+        vram_gb=12.0,
+        avx2_available=True,
+    )
+
+
+class _FakeRunner:
+    def which(self, command: str) -> Path | None:
+        return Path("/usr/bin") / command
+
+    def run(
+        self,
+        args: Sequence[str],
+        *,
+        timeout_seconds: float = 30.0,
+        env: Mapping[str, str] | None = None,
+    ) -> CommandRun:
+        _ = timeout_seconds, env
+        command = tuple(str(arg) for arg in args)
+        if command[:2] == ("ollama", "list"):
+            return CommandRun(command, 0, stdout="NAME\nllama3.1:8b latest")
+        return CommandRun(command, 0, stdout="ok")
+
+
+def test_mistral_primary_profile_does_not_require_ollama() -> None:
+    profile = get_mistral_summary_profile()
+    assert "ollama" not in profile.required_commands
+
+    state = replace(
+        _state(
+            missing_commands={"ollama"},
+            ollama_reachable=False,
+            ollama_model_present=False,
+        ),
+        mistral_summary=_mistral_state(),
+    )
+
+    evaluation = evaluate_setup(profile, state)
+
+    assert evaluation.ready
+    item = _readiness(evaluation, "ollama-model")
+    assert item.ready
+    assert "semantic review skipped" in item.detail
+    assert all(action.id != "command:ollama" for action in evaluation.plan.actions)
+    assert not evaluation.plan.has_required_actions
+
+
+def test_mistral_primary_profile_offers_optional_semantic_model_pull() -> None:
+    profile = get_mistral_summary_profile()
+    state = replace(
+        _state(ollama_model_present=False),
+        mistral_summary=_mistral_state(),
+    )
+
+    evaluation = evaluate_setup(profile, state)
+
+    assert evaluation.ready
+    action = _action(evaluation.plan, "ollama-model")
+    assert action.required is False
+    assert action.mode == "automated"
+    assert action.command == ("ollama", "pull", state.ollama.model)
+
+
+def test_detection_probes_ollama_on_path_when_it_is_an_optional_dependency(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    runner = _FakeRunner()
+
+    state = detect_local_installation_state(
+        settings,
+        runner=runner,
+        command_identity=_identity(),
+        hardware=_hardware(),
+        profile=get_mistral_summary_profile(),
+        env={"MENA_MISTRAL_API_KEY": "mena-key"},
+        mistral_probe=lambda *, env: _mistral_state(),
+    )
+
+    # `ollama` is not a required command for the Mistral-primary profile, but
+    # the optional semantic-review stage still detects it directly from PATH.
+    assert state.ollama.command.present
+    assert state.ollama.model_present
