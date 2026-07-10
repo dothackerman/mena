@@ -701,21 +701,3 @@ def _required_int(data: Mapping[str, object], field_name: str, label: str) -> in
 
 def _timestamp(now: datetime | None) -> str:
     return utc_timestamp(now or datetime.now(UTC))
-
-
-_OLLAMA_COMPAT_EXPORTS = frozenset(
-    {
-        "OLLAMA_SUMMARIZATION_NUM_CTX",
-        "OLLAMA_SUMMARIZATION_SEED",
-        "OLLAMA_SUMMARIZATION_TEMPERATURE",
-        "OllamaSummarizationProvider",
-    }
-)
-
-
-def __getattr__(name: str) -> object:
-    if name not in _OLLAMA_COMPAT_EXPORTS:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    from mena import ollama_summarization
-
-    return getattr(ollama_summarization, name)
