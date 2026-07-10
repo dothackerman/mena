@@ -350,7 +350,7 @@ def _summary_record_created_at(
             # not the current SUMMARY_ARTIFACT_VERSION (a v1 record with a readable
             # v2 payload is still skipped). Rank them as oldest so a genuinely
             # exportable summary elsewhere is preferred rather than selecting this
-            # session and failing with "No valid summary.v2 artifact".
+            # session and failing with "No valid summary artifact".
             return _INVALID_SUMMARY_CREATED_AT
         try:
             data = json.loads((session_dir / record.path).read_text(encoding="utf-8"))

@@ -27,7 +27,7 @@ from mena.summarization import (
     SummarizationTokenBudgetError,
 )
 from test_mistral_llm import API_KEY, _FakeTransport, _models_body
-from test_summarization import _summary_request, _summary_result
+from test_summarization import _summary_request, _summary_result, _timeline_provider_payload
 
 RESOLVED_MODEL = "mistral-small-2603"
 
@@ -61,7 +61,7 @@ def _chat_body(
 def _product_bodies(**overrides: bytes) -> list[tuple[int, bytes]]:
     result = _summary_result()
     defaults = {
-        "timeline": _chat_body({"timeline": list(result.timeline)}),
+        "timeline": _chat_body(_timeline_provider_payload(result)),
         "action_items": _chat_body(
             {"action_items": [action.to_dict() for action in result.action_items]}
         ),
@@ -96,7 +96,7 @@ def test_mistral_provider_runs_one_structured_call_per_product() -> None:
 
     result = provider.summarize(_summary_request())
 
-    assert result.timeline == ("Discussed database migration before Friday.",)
+    assert result.timeline[0].text == "Discussed database migration before Friday."
     assert result.action_items[0].owner == "You"
     assert result.general_summary == "The meeting focused on database migration risk."
     assert len(transport.calls) == 3
@@ -235,7 +235,10 @@ def test_mistral_provider_rejects_schema_violating_content() -> None:
 
 def test_mistral_provider_rejects_truncated_responses() -> None:
     bodies = _product_bodies(
-        timeline=_chat_body({"timeline": ["x"]}, finish_reason="length"),
+        timeline=_chat_body(
+            {"timeline": [{"text": "x", "source_segment_ids": ["merged_segment_000001"]}]},
+            finish_reason="length",
+        ),
     )
     provider = _provider(_FakeTransport(bodies))
 
@@ -245,7 +248,10 @@ def test_mistral_provider_rejects_truncated_responses() -> None:
 
 def test_mistral_provider_requires_token_counts() -> None:
     bodies = _product_bodies(
-        timeline=_chat_body({"timeline": ["x"]}, usage={"prompt_tokens": 1}),
+        timeline=_chat_body(
+            {"timeline": [{"text": "x", "source_segment_ids": ["merged_segment_000001"]}]},
+            usage={"prompt_tokens": 1},
+        ),
     )
     provider = _provider(_FakeTransport(bodies))
 
@@ -255,7 +261,10 @@ def test_mistral_provider_requires_token_counts() -> None:
 
 def test_mistral_provider_fails_closed_when_the_serving_model_drifts() -> None:
     bodies = _product_bodies(
-        timeline=_chat_body({"timeline": ["x"]}, model="mistral-large-2512"),
+        timeline=_chat_body(
+            {"timeline": [{"text": "x", "source_segment_ids": ["merged_segment_000001"]}]},
+            model="mistral-large-2512",
+        ),
     )
     provider = _provider(_FakeTransport(bodies))
 
@@ -271,7 +280,7 @@ def test_mistral_provider_reverifies_every_alias_echo_before_accepting_it() -> N
     bodies = [
         (
             200,
-            _chat_body({"timeline": list(result.timeline)}, model=MISTRAL_SUMMARY_REQUEST_MODEL),
+            _chat_body(_timeline_provider_payload(result), model=MISTRAL_SUMMARY_REQUEST_MODEL),
         ),
         (200, allowed_models),
         (
@@ -306,7 +315,7 @@ def test_mistral_provider_fails_closed_when_the_alias_drifts_between_products() 
     bodies = [
         (
             200,
-            _chat_body({"timeline": list(result.timeline)}, model=MISTRAL_SUMMARY_REQUEST_MODEL),
+            _chat_body(_timeline_provider_payload(result), model=MISTRAL_SUMMARY_REQUEST_MODEL),
         ),
         (200, allowed_models),
         (
@@ -332,7 +341,7 @@ def test_mistral_provider_rejects_an_alias_echo_that_resolved_outside_the_allowl
     bodies = [
         (
             200,
-            _chat_body({"timeline": list(result.timeline)}, model=MISTRAL_SUMMARY_REQUEST_MODEL),
+            _chat_body(_timeline_provider_payload(result), model=MISTRAL_SUMMARY_REQUEST_MODEL),
         ),
         (200, drifted_models),
     ]
@@ -349,7 +358,7 @@ def test_mistral_provider_reports_unavailable_when_alias_reverification_cannot_r
     bodies: list[tuple[int, bytes] | Exception] = [
         (
             200,
-            _chat_body({"timeline": list(result.timeline)}, model=MISTRAL_SUMMARY_REQUEST_MODEL),
+            _chat_body(_timeline_provider_payload(result), model=MISTRAL_SUMMARY_REQUEST_MODEL),
         ),
         OSError("down"),
         OSError("down"),
@@ -404,7 +413,7 @@ def test_mistral_provider_guards_the_context_budget_before_sending() -> None:
 def test_mistral_provider_enforces_the_output_language_guard() -> None:
     english = _summary_result()
     bodies = [
-        (200, _chat_body({"timeline": list(english.timeline)})),
+        (200, _chat_body(_timeline_provider_payload(english))),
         (
             200,
             _chat_body({"action_items": [action.to_dict() for action in english.action_items]}),

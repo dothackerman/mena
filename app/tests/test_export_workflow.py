@@ -20,11 +20,13 @@ from mena.sessions import SESSION_RECORD_FILENAME, SESSION_RECORD_VERSION
 from mena.settings import AppSettings
 from mena.summarization import (
     REQUIRED_NOTE_PRODUCTS,
+    SUMMARY_ARTIFACT_VERSION,
     FakeSummarizationProvider,
     ProductRequestRecord,
     SummarizationPolicy,
     SummaryArtifact,
     SummaryResult,
+    SummaryTimelineEntry,
     persist_summary_artifact,
 )
 
@@ -833,7 +835,7 @@ def test_export_workflow_skips_incompatible_summary_payload_during_default_disco
         merged_transcript_record=incompatible_merged,
         summary_created_at="2026-07-03T09:00:00Z",
     )
-    # A sealed summary.v2 payload that stays readable and version-matched but no
+    # A sealed summary payload that stays readable and version-matched but no
     # longer satisfies the strict contract (here missing request_records, as a
     # pre-note-package payload would). Keep the sealed record consistent with the
     # rewritten bytes so this is a contract incompatibility, not sha corruption.
@@ -1231,7 +1233,13 @@ def _create_session_record(session_dir: Path) -> Path:
 
 def _summary_result() -> SummaryResult:
     return SummaryResult(
-        timeline=("Agenda covered.",),
+        timeline=(
+            SummaryTimelineEntry(
+                text="Agenda covered.",
+                source_segment_ids=("merged_segment_000001",),
+                start_seconds=0.0,
+            ),
+        ),
         action_items=(),
         general_summary="The team aligned on the plan.",
         request_records=_request_records_for_products(REQUIRED_NOTE_PRODUCTS),
@@ -1249,7 +1257,7 @@ def _persist_summary(
     return persist_summary_artifact(
         store=store,
         artifact=SummaryArtifact(
-            version=2,
+            version=SUMMARY_ARTIFACT_VERSION,
             session_id=SESSION_ID,
             merged_transcript_artifact=ArtifactRef.from_record(merged_transcript_record),
             manual_notes_artifact=None,

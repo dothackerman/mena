@@ -42,6 +42,7 @@ from mena.note_package import (
     SummarizationTokenBudgetError,
     SummaryActionItem,
     SummaryResult,
+    SummaryTimelineEntry,
     assemble_summary_result,
     assert_summary_output_language,
     guard_summarization_token_budget,
@@ -59,8 +60,9 @@ from mena.processing import (
 from mena.timestamps import utc_timestamp
 
 SUMMARY_ARTIFACT_TYPE = "summary"
-SUMMARY_ARTIFACT_VERSION = 2
-SUMMARY_SCHEMA_VERSION = 2
+SUMMARY_ARTIFACT_VERSION = 3
+SUMMARY_SCHEMA_VERSION = 3
+SUMMARY_ARTIFACT_CONTRACT = f"summary.v{SUMMARY_SCHEMA_VERSION}"
 MANUAL_NOTES_ARTIFACT_TYPE = "manual_notes"
 MANUAL_NOTES_CONTRACT = "manual-notes.raw"
 SUMMARIZATION_STAGE = "summarization"
@@ -81,6 +83,7 @@ __all__ = [
     "SCHEMA_PROMPT_POLICY",
     "SUMMARY_ARTIFACT_TYPE",
     "SUMMARY_ARTIFACT_VERSION",
+    "SUMMARY_ARTIFACT_CONTRACT",
     "SUMMARY_SCHEMA_VERSION",
     "SUMMARIZATION_POLICY_VERSION",
     "SUMMARIZATION_STAGE",
@@ -97,6 +100,7 @@ __all__ = [
     "SummaryActionItem",
     "SummaryArtifact",
     "SummaryResult",
+    "SummaryTimelineEntry",
     "TIMELINE_RESPONSE_SCHEMA",
     "assemble_summary_result",
     "assert_summary_output_language",
@@ -182,7 +186,7 @@ class FakeSummarizationProvider:
 
 @dataclass(frozen=True)
 class SummaryArtifact:
-    """Persisted `summary.v2` three-product note-package artifact."""
+    """Persisted `summary.v3` three-product note-package artifact."""
 
     version: int
     session_id: str
@@ -190,7 +194,7 @@ class SummaryArtifact:
     manual_notes_artifact: ArtifactRef | None
     policy: Mapping[str, object]
     provider: SummarizationProviderMetadata
-    timeline: tuple[str, ...]
+    timeline: tuple[SummaryTimelineEntry, ...]
     action_items: tuple[SummaryActionItem, ...]
     general_summary: str
     created_at: str
@@ -212,7 +216,9 @@ class SummaryArtifact:
             ),
             policy=_summary_policy_payload(item.get("policy")),
             provider=_provider_from_dict(item.get("provider")),
-            timeline=tuple(_str_list(item, "timeline", "Summary timeline")),
+            timeline=tuple(
+                SummaryTimelineEntry.from_dict(entry) for entry in _list(item, "timeline")
+            ),
             action_items=tuple(
                 SummaryActionItem.from_dict(action) for action in _list(item, "action_items")
             ),
@@ -236,7 +242,7 @@ class SummaryArtifact:
             ),
             "policy": dict(self.policy),
             "provider": self.provider.to_dict(),
-            "timeline": list(self.timeline),
+            "timeline": [entry.to_dict() for entry in self.timeline],
             "action_items": [action.to_dict() for action in self.action_items],
             "general_summary": self.general_summary,
             "created_at": self.created_at,
@@ -270,7 +276,8 @@ def persist_summary_artifact(
     SummaryArtifact.from_dict(artifact.to_dict())
     metadata: dict[str, object] = {
         "category": "summary",
-        "contract": "summary.v2",
+        "contract": SUMMARY_ARTIFACT_CONTRACT,
+        "note_product_strategies": _note_product_strategies_metadata(artifact.request_records),
         "policy_config_id": _policy_config_id(artifact.policy),
         "provider_config_id": artifact.provider.config_id,
         "stage_config_id": _stage_config_id(
@@ -650,6 +657,15 @@ def _stage_config_id(*, policy_config_id: str, provider_config_id: str) -> str:
         },
         sort_keys=True,
         separators=(",", ":"),
+    )
+
+
+def _note_product_strategies_metadata(records: tuple[ProductRequestRecord, ...]) -> str:
+    strategies = {record.product: record.strategy for record in records}
+    return ",".join(
+        f"{product}={strategies[product]}"
+        for product in REQUIRED_NOTE_PRODUCTS
+        if product in strategies
     )
 
 
