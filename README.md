@@ -1,5 +1,9 @@
 # mena
 
+## Positioning draft
+
+Mena turns sensitive meetings into local, correctable, auditable records. It preserves source audio, separates machine output from human correction, and makes summaries traceable instead of magical.
+
 `mena` is a privacy-first local meeting notes project.
 
 The repository root is the product suite and knowledge base, not the Python package root.

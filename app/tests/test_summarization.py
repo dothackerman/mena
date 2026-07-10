@@ -26,18 +26,20 @@ from mena.merge_timing import (
     SpeakerIdentity,
     persist_merged_transcript_artifact,
 )
+from mena.ollama_summarization import (
+    OLLAMA_SUMMARIZATION_NUM_CTX,
+    OLLAMA_SUMMARIZATION_SEED,
+    OllamaSummarizationProvider,
+)
 from mena.processing import ArtifactRef, ProcessingStageLedger
 from mena.runtime_stewardship import RuntimeLease
 from mena.summarization import (
-    OLLAMA_SUMMARIZATION_NUM_CTX,
-    OLLAMA_SUMMARIZATION_SEED,
     PROMPT_POLICY,
     REQUIRED_NOTE_PRODUCTS,
     SCHEMA_PROMPT_POLICY,
     SUMMARIZATION_STAGE,
     SUMMARY_SCHEMA_VERSION,
     FakeSummarizationProvider,
-    OllamaSummarizationProvider,
     ProductRequestRecord,
     SummarizationContractError,
     SummarizationError,
@@ -56,6 +58,17 @@ from mena.summarization import (
 SESSION_ID = "00000000-0000-0000-0000-000000000001"
 RUN_ID = "run-20260518-summary"
 NOW = datetime(2026, 5, 18, 17, 0, 0, tzinfo=UTC)
+
+
+def test_summarization_facade_does_not_expose_ollama_adapter_details() -> None:
+    import mena.summarization as summarization
+
+    assert "OllamaSummarizationProvider" not in summarization.__all__
+    assert not hasattr(summarization, "OllamaSummarizationProvider")
+    assert not hasattr(summarization, "OLLAMA_SUMMARIZATION_NUM_CTX")
+    assert not hasattr(summarization, "OLLAMA_SUMMARIZATION_SEED")
+    assert not hasattr(summarization, "OLLAMA_SUMMARIZATION_TEMPERATURE")
+    assert not hasattr(summarization, "OLLAMA_DETERMINISTIC_OPTIONS")
 
 
 @pytest.mark.parametrize(
@@ -2083,7 +2096,7 @@ def test_ollama_summarization_provider_releases_runtime_resource(
         return "unload"
 
     monkeypatch.setattr(
-        "mena.summarization.unload_ollama_model",
+        "mena.ollama_summarization.unload_ollama_model",
         fake_unload_ollama_model,
     )
     lease = RuntimeLease(

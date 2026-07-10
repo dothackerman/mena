@@ -1,9 +1,11 @@
 from dataclasses import replace
 
-from mena.processing import ArtifactRef
-from mena.summarization import (
+from mena.ollama_summarization import (
     OLLAMA_SUMMARIZATION_NUM_CTX,
     OLLAMA_SUMMARIZATION_SEED,
+)
+from mena.processing import ArtifactRef
+from mena.summarization import (
     REQUIRED_NOTE_PRODUCTS,
     SUMMARY_SCHEMA_VERSION,
     FakeSummarizationProvider,
