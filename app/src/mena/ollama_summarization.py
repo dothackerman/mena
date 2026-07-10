@@ -34,6 +34,7 @@ from mena.note_package import (
     assert_summary_output_language,
     product_system_prompt,
     product_user_prompt,
+    schema_grounding,
     validate_product_payload,
 )
 from mena.note_product_strategy import (
@@ -42,6 +43,7 @@ from mena.note_product_strategy import (
     ONE_SHOT_STRATEGY,
     REDUCE_CALL,
     REDUCER_STRATEGY,
+    TOKEN_BUDGET_FRACTION,
     NoteProductStrategyError,
     estimate_prompt_tokens,
     plan_chunk_spans,
@@ -59,8 +61,6 @@ OLLAMA_DETERMINISTIC_OPTIONS: dict[str, object] = {
     "seed": OLLAMA_SUMMARIZATION_SEED,
     "num_ctx": OLLAMA_SUMMARIZATION_NUM_CTX,
 }
-TOKEN_BUDGET_FRACTION = 0.85
-
 _MAP_RESPONSE_SCHEMAS: dict[str, dict[str, object]] = {
     "timeline": TIMELINE_MAP_RESPONSE_SCHEMA,
     "action_items": ACTION_ITEMS_RESPONSE_SCHEMA,
@@ -448,11 +448,6 @@ _REDUCE_INSTRUCTIONS: dict[str, str] = {
 }
 
 
-def _schema_grounding(schema: Mapping[str, object]) -> str:
-    schema_json = json.dumps(schema, sort_keys=True, separators=(",", ":"))
-    return f"Respond only with one JSON object that satisfies this JSON schema: {schema_json}"
-
-
 def _map_system_prompt(product: str, language: str, schema: Mapping[str, object]) -> str:
     return (
         "You extract candidate meeting notes from one chunk of a longer meeting "
@@ -460,7 +455,7 @@ def _map_system_prompt(product: str, language: str, schema: Mapping[str, object]
         f"{_MAP_INSTRUCTIONS[product]} "
         "Be faithful to the transcript chunk. "
         f"Write every user-facing string in {language}. "
-        f"{_schema_grounding(schema)}"
+        f"{schema_grounding(schema)}"
     )
 
 
@@ -472,7 +467,7 @@ def _reduce_system_prompt(product: str, language: str, schema: Mapping[str, obje
         "Use only the provided chunk candidates and manual notes; do not invent "
         "content. "
         f"Write every user-facing string in {language}. "
-        f"{_schema_grounding(schema)}"
+        f"{schema_grounding(schema)}"
     )
 
 

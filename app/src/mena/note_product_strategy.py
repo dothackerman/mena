@@ -25,6 +25,7 @@ ONE_SHOT_CALL = "one_shot"
 MAP_CALL = "map"
 REDUCE_CALL = "reduce"
 NOTE_PRODUCT_CALLS = frozenset({ONE_SHOT_CALL, MAP_CALL, REDUCE_CALL})
+TOKEN_BUDGET_FRACTION = 0.85
 
 
 class NoteProductStrategyError(RuntimeError):

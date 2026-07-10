@@ -24,6 +24,9 @@ from mena.note_product_strategy import (
     ONE_SHOT_STRATEGY,
     REDUCE_CALL,
     REDUCER_STRATEGY,
+    TOKEN_BUDGET_FRACTION,
+    estimate_prompt_tokens,
+    prompt_token_budget,
 )
 from mena.settings import SettingsError, normalize_summary_language
 
@@ -113,7 +116,6 @@ PRODUCT_RESPONSE_SCHEMAS: dict[str, dict[str, object]] = {
 PRODUCT_RESPONSE_SCHEMA_NAMES: dict[str, str] = {
     product: f"mena_summary_{product}" for product in REQUIRED_NOTE_PRODUCTS
 }
-TOKEN_BUDGET_FRACTION = 0.85
 
 _ENGLISH_DRIFT_STOPWORDS = frozenset(
     {
@@ -436,10 +438,10 @@ def product_system_prompt(
     )
     if schema is None:
         return prompt
-    return f"{prompt} {_schema_grounding(schema)}"
+    return f"{prompt} {schema_grounding(schema)}"
 
 
-def _schema_grounding(schema: Mapping[str, object]) -> str:
+def schema_grounding(schema: Mapping[str, object]) -> str:
     schema_json = json.dumps(schema, sort_keys=True, separators=(",", ":"))
     return f"Respond only with one JSON object that satisfies this JSON schema: {schema_json}"
 
@@ -514,8 +516,11 @@ def guard_summarization_token_budget(
     user_content: str,
     num_ctx: int,
 ) -> None:
-    estimate = _estimate_prompt_tokens(system_content) + _estimate_prompt_tokens(user_content)
-    budget = int(num_ctx * TOKEN_BUDGET_FRACTION)
+    estimate = estimate_prompt_tokens(system_content) + estimate_prompt_tokens(user_content)
+    budget = prompt_token_budget(
+        num_ctx=num_ctx,
+        budget_fraction=TOKEN_BUDGET_FRACTION,
+    )
     if estimate > budget:
         raise SummarizationTokenBudgetError(
             f"Estimated {product} prompt tokens ({estimate}) exceed the configured "
@@ -629,13 +634,6 @@ def _looks_like_english_drift(text: str) -> bool:
     if len(set(hits)) < _ENGLISH_DRIFT_MIN_DISTINCT:
         return False
     return len(hits) / len(tokens) >= _ENGLISH_DRIFT_MIN_RATIO
-
-
-def _estimate_prompt_tokens(text: str) -> int:
-    # The provider-specific tokenizer is not available at this contract layer.
-    # Counting UTF-8 bytes is a hard upper bound for byte-fallback tokenizers and
-    # avoids len(text)/4 undercounts for short words, IDs, and punctuation-heavy notes.
-    return len(text.encode("utf-8"))
 
 
 def _mapping(data: object, label: str) -> Mapping[str, object]:
