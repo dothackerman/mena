@@ -32,13 +32,14 @@ from mena.summarization import (
 from mena.timestamps import parse_utc_timestamp
 
 _INVALID_SUMMARY_CREATED_AT = datetime.min.replace(tzinfo=UTC)
+ExportFormat = Literal["markdown"]
 
 
 @dataclass(frozen=True)
 class ExportCommandInput:
     session_path: Path | None
     summary_artifact_id: str | None = None
-    export_format: str | None = None
+    export_format: ExportFormat | None = None
 
 
 @dataclass(frozen=True)
@@ -116,9 +117,11 @@ def resolve_export_format(
     *,
     export_format: str | None,
     interaction: InteractionPort | None,
-) -> str | None:
+) -> ExportFormat | None:
     if export_format is not None:
-        return export_format
+        if export_format != "markdown":
+            raise ValueError(f"Unsupported export format: {export_format}.")
+        return "markdown"
     if interaction is None:
         return "markdown"
     confirmed = interaction.confirm(

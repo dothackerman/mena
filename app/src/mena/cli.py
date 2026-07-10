@@ -1438,7 +1438,7 @@ def _run_export_command(
     *,
     session_path: Path | None,
     summary_artifact_id: str | None,
-    export_format: str | None,
+    export_format: export_workflow.ExportFormat | None,
     settings: AppSettings,
     input_fn: Callable[[str], str] | None,
 ) -> int:

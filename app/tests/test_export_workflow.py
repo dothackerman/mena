@@ -2,12 +2,13 @@ import hashlib
 import json
 from collections.abc import Mapping
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 from mena.artifacts import ArtifactRecord, FileSystemArtifactStore, session_artifact_manifest_path
 from mena.export import SUMMARY_MARKDOWN_EXPORT_ARTIFACT_TYPE
-from mena.export_workflow import ExportCommandInput, run_export_workflow
+from mena.export_workflow import ExportCommandInput, ExportFormat, run_export_workflow
 from mena.interaction import ScriptedInteraction, ScriptedResponse
 from mena.merge_timing import MERGED_TRANSCRIPT_ARTIFACT_TYPE
 from mena.ollama_summarization import (
@@ -117,6 +118,28 @@ def test_export_workflow_format_flag_skips_confirmation(
     assert result.status == "success"
     assert interaction.requests == []
     assert [notice.topic for notice in interaction.notices] == ["export.completed"]
+
+
+def test_export_workflow_rejects_unsupported_format_without_cli_parser(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    session_dir, store, merged_record = _build_export_session(
+        settings.paths.sessions_dir / "session"
+    )
+    _persist_summary(store=store, merged_transcript_record=merged_record)
+
+    with pytest.raises(ValueError, match="Unsupported export format: pdf"):
+        run_export_workflow(
+            ExportCommandInput(
+                session_path=session_dir,
+                export_format=cast(ExportFormat, "pdf"),
+            ),
+            settings=settings,
+            interaction=ScriptedInteraction(()),
+        )
+
+    assert store.list(artifact_type=SUMMARY_MARKDOWN_EXPORT_ARTIFACT_TYPE) == ()
 
 
 def test_export_workflow_payload_timestamp_overrides_stale_metadata(
