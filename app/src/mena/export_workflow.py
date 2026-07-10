@@ -122,30 +122,16 @@ def resolve_export_session(
             summary_artifact_id=summary_artifact_id,
         )
 
-    resolved = resolve_default_export_session(
+    selected = resolve_exportable_summary_session(
         sessions_root=settings.paths.sessions_dir,
         summary_artifact_id=summary_artifact_id,
     )
-    if resolved is None:
+    if selected is None:
         if summary_artifact_id is not None:
             raise ValueError(f"Summary artifact not found: {summary_artifact_id}.")
         raise ValueError("No summarized sessions were found. Run `mena summarize` first.")
 
-    return resolved
-
-
-def resolve_default_export_session(
-    *,
-    sessions_root: Path,
-    summary_artifact_id: str | None,
-) -> _ResolvedExportSession | None:
-    resolved = resolve_exportable_summary_session(
-        sessions_root=sessions_root,
-        summary_artifact_id=summary_artifact_id,
-    )
-    if resolved is None:
-        return None
     return _ResolvedExportSession(
-        session_path=resolved.session_dir,
-        summary_artifact_id=resolved.summary_artifact_id,
+        session_path=selected.session_dir,
+        summary_artifact_id=selected.summary_artifact_id,
     )
