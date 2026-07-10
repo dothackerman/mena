@@ -1,6 +1,6 @@
 """Direct Mistral adapter behind Mena's existing summarization provider port.
 
-Peer provider to :class:`mena.summarization.OllamaSummarizationProvider`: same
+Peer provider to :class:`mena.ollama_summarization.OllamaSummarizationProvider`: same
 provider-independent request content, same per-product structured-output
 schemas, same ``SummaryResult`` contract, same provider metadata shape. Only
 the transport, request envelope, and error classification are Mistral-owned
@@ -36,20 +36,24 @@ from mena.mistral_llm import (
     mistral_token_counts,
     resolve_mistral_summary_model,
 )
-from mena.summarization import (
+from mena.note_package import (
+    PRODUCT_RESPONSE_SCHEMA_NAMES,
     PRODUCT_RESPONSE_SCHEMAS,
     ProductRequestRecord,
     SummarizationContractError,
-    SummarizationError,
-    SummarizationProviderMetadata,
-    SummarizationProviderUnavailable,
     SummarizationRequest,
     SummaryResult,
+    assemble_summary_result,
     assert_summary_output_language,
     guard_summarization_token_budget,
     product_system_prompt,
     product_user_prompt,
     validate_product_payload,
+)
+from mena.summarization import (
+    SummarizationError,
+    SummarizationProviderMetadata,
+    SummarizationProviderUnavailable,
 )
 
 MISTRAL_PROVIDER_NAME = "mistral"
@@ -104,13 +108,7 @@ class MistralSummarizationProvider:
             )
             for product, schema in PRODUCT_RESPONSE_SCHEMAS.items()
         }
-        combined = {
-            "timeline": payloads["timeline"].get("timeline"),
-            "action_items": payloads["action_items"].get("action_items"),
-            "general_summary": payloads["general_summary"].get("general_summary"),
-            "request_records": [record.to_dict() for record in records],
-        }
-        result = SummaryResult.from_dict(combined)
+        result = assemble_summary_result(product_payloads=payloads, request_records=records)
         assert_summary_output_language(result, request.policy.language)
         return result
 
@@ -140,7 +138,7 @@ class MistralSummarizationProvider:
                     {"role": "user", "content": user_content},
                 ),
                 schema=schema,
-                schema_name=f"mena_summary_{product}",
+                schema_name=PRODUCT_RESPONSE_SCHEMA_NAMES[product],
                 temperature=MISTRAL_SUMMARIZATION_TEMPERATURE,
                 random_seed=MISTRAL_SUMMARIZATION_SEED,
                 timeout_seconds=self._timeout_seconds,

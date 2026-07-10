@@ -70,6 +70,10 @@ from mena.merge_timing import (
     persist_merged_transcript_artifact,
 )
 from mena.mistral_llm import MISTRAL_SUMMARY_DISCLOSURE, MistralSummaryState
+from mena.ollama_summarization import (
+    OLLAMA_SUMMARIZATION_NUM_CTX,
+    OLLAMA_SUMMARIZATION_SEED,
+)
 from mena.processing import (
     ArtifactRef,
     ProcessingErrorInfo,
@@ -128,8 +132,6 @@ from mena.setup import (
     persist_runtime_profile_state,
 )
 from mena.summarization import (
-    OLLAMA_SUMMARIZATION_NUM_CTX,
-    OLLAMA_SUMMARIZATION_SEED,
     REQUIRED_NOTE_PRODUCTS,
     FakeSummarizationProvider,
     ProductRequestRecord,

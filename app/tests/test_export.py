@@ -12,10 +12,12 @@ from mena.export import (
     export_summary_markdown,
     resolve_summary_markdown_input,
 )
-from mena.processing import ArtifactRef
-from mena.summarization import (
+from mena.ollama_summarization import (
     OLLAMA_SUMMARIZATION_NUM_CTX,
     OLLAMA_SUMMARIZATION_SEED,
+)
+from mena.processing import ArtifactRef
+from mena.summarization import (
     REQUIRED_NOTE_PRODUCTS,
     FakeSummarizationProvider,
     ProductRequestRecord,

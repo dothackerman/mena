@@ -22,6 +22,7 @@ from mena.mistral_llm import (
     load_mena_mistral_api_key,
 )
 from mena.mistral_summarization import MistralSummarizationProvider
+from mena.ollama_summarization import OllamaSummarizationProvider
 from mena.provider_validation import require_provider, require_provider_instance
 from mena.semantic_coherence import OllamaSemanticCoherenceProvider, SemanticCoherenceProvider
 from mena.settings import AppSettings
@@ -47,7 +48,7 @@ from mena.setup import (
 )
 from mena.stage_policy import stage_device as lookup_stage_device
 from mena.stage_policy import stage_model as lookup_stage_model
-from mena.summarization import OllamaSummarizationProvider, SummarizationProvider
+from mena.summarization import SummarizationProvider
 from mena.transcription import (
     TRANSCRIPTION_STAGE,
     FasterWhisperTranscriptionProvider,
