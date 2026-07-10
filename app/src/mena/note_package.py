@@ -341,6 +341,7 @@ class ProductRequestRecord:
     @classmethod
     def from_dict(cls, data: object) -> Self:
         item = _mapping(data, "Product request record")
+        _require_chunk_coordinate_keys(item)
         record = cls(
             product=_required_str(item, "product", "Product request record"),
             model=_required_str(item, "model", "Product request record"),
@@ -922,3 +923,14 @@ def _optional_nonnegative_int(
     if value is not None and value < 0:
         raise SummarizationContractError(f"Field '{field_name}' in {label} must be at least 0.")
     return value
+
+
+def _require_chunk_coordinate_keys(data: Mapping[str, object]) -> None:
+    missing = [
+        field_name for field_name in ("chunk_index", "chunk_count") if field_name not in data
+    ]
+    if missing:
+        raise SummarizationContractError(
+            "Product request record must include chunk_index and chunk_count; "
+            f"missing fields: {', '.join(missing)}."
+        )

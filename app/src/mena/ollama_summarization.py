@@ -264,6 +264,11 @@ class OllamaSummarizationProvider:
                 ),
             )
             _validate_call_payload(validate_product_map_payload, product, call)
+            _validate_timeline_map_source_segments(
+                product=product,
+                payload=call.payload,
+                segments=segments,
+            )
             records.append(
                 self._request_record(
                     product=product,
@@ -544,6 +549,38 @@ def _require_timeline_grounding(
         "Ollama timeline map calls returned no timeline candidates and no "
         "manual notes are available; refusing to reduce an empty timeline."
     )
+
+
+def _validate_timeline_map_source_segments(
+    *,
+    product: str,
+    payload: Mapping[str, object],
+    segments: tuple[MergedTranscriptSegment, ...],
+) -> None:
+    if product != "timeline":
+        return
+
+    allowed_ids = {segment.id for segment in segments}
+    timeline = payload.get("timeline")
+    if not isinstance(timeline, list):
+        return
+    for entry in timeline:
+        if not isinstance(entry, Mapping):
+            return
+        source_segment_ids = entry.get("source_segment_ids")
+        if not isinstance(source_segment_ids, list):
+            return
+        out_of_chunk = [
+            source_id
+            for source_id in source_segment_ids
+            if isinstance(source_id, str) and source_id not in allowed_ids
+        ]
+        if out_of_chunk:
+            raise SummarizationContractError(
+                "Summary timeline chunk candidates source_segment_ids must cite "
+                "segments from the same reducer chunk; out-of-chunk ids: "
+                f"{', '.join(out_of_chunk)}."
+            )
 
 
 def _summarization_prompt_budget() -> int:

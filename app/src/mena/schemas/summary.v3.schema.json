@@ -310,6 +310,28 @@
             "note-package-three-product-strategy-v2"
           ],
           "type": "string"
+        },
+        "resolved_model": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "account_scope": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": ["name", "model", "endpoint", "prompt_policy"],

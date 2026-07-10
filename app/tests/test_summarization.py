@@ -1197,7 +1197,19 @@ def _strategy_aware_post_json(
             }
         )
         if user_payload["task"] == "meeting_notes_chunk":
-            return map_responses[product]
+            response = json.loads(json.dumps(map_responses[product]))
+            if product == "timeline":
+                response_payload = json.loads(response["message"]["content"])
+                transcript = cast(dict[str, object], user_payload["transcript"])
+                segments = cast(list[dict[str, object]], transcript["segments"])
+                first_segment_id = segments[0]["id"]
+                for entry in response_payload["timeline"]:
+                    if isinstance(entry, dict) and entry.get("source_segment_ids") == [
+                        "merged_segment_000000"
+                    ]:
+                        entry["source_segment_ids"] = [first_segment_id]
+                response["message"]["content"] = json.dumps(response_payload)
+            return cast(dict[str, object], response)
         return reduce_responses[product]
 
     return fake_post_json
@@ -1470,6 +1482,43 @@ def test_ollama_provider_reducer_rejects_invalid_map_payload_with_raw_content(
     message = str(exc_info.value)
     assert "Summary timeline chunk candidates[0] must be a JSON object." in message
     assert raw_content in message
+
+
+def test_ollama_provider_reducer_rejects_timeline_map_source_outside_chunk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OllamaSummarizationProvider(model="test-model")
+    invalid_map_responses = _reducer_map_responses()
+    invalid_map_responses["timeline"] = {
+        "message": {
+            "content": json.dumps(
+                {
+                    "timeline": [
+                        {
+                            "text": "Cited a segment from a different chunk.",
+                            "source_segment_ids": ["merged_segment_000059"],
+                        }
+                    ]
+                }
+            )
+        },
+        "prompt_eval_count": 222,
+        "eval_count": 33,
+    }
+    monkeypatch.setattr(
+        provider,
+        "_post_json",
+        _strategy_aware_post_json(
+            reduce_responses=_fake_product_responses(),
+            map_responses=invalid_map_responses,
+            calls=[],
+        ),
+    )
+
+    with pytest.raises(SummarizationContractError) as exc_info:
+        provider.summarize(_long_summary_request())
+
+    assert "out-of-chunk ids: merged_segment_000059" in str(exc_info.value)
 
 
 def test_summarization_stage_persists_reducer_provenance_and_metadata(
@@ -1802,6 +1851,19 @@ def test_product_request_record_rejects_incoherent_strategy_fields(
         ProductRequestRecord.from_dict(base)
 
 
+@pytest.mark.parametrize("missing_field", ["chunk_index", "chunk_count"])
+def test_product_request_record_requires_explicit_nullable_chunk_fields(
+    missing_field: str,
+) -> None:
+    payload = _request_records_for_products(("timeline",))[0].to_dict()
+    payload.pop(missing_field)
+
+    with pytest.raises(
+        SummarizationContractError, match="must include chunk_index and chunk_count"
+    ):
+        ProductRequestRecord.from_dict(payload)
+
+
 def test_persist_summary_artifact_records_note_product_strategies_metadata() -> None:
     store = InMemoryArtifactStore(session_id=SESSION_ID)
     records = (
@@ -2068,6 +2130,38 @@ def test_summary_schema_rejects_legacy_provider_config_inside_policy() -> None:
     validator = Draft202012Validator(_load_summary_schema(), format_checker=FormatChecker())
     with pytest.raises(ValidationError, match="Additional properties"):
         validator.validate(payload)
+
+
+def test_summary_schema_accepts_mistral_provider_provenance() -> None:
+    artifact = SummaryArtifact(
+        version=SUMMARY_SCHEMA_VERSION,
+        session_id=SESSION_ID,
+        merged_transcript_artifact=ArtifactRef(
+            id=f"{SESSION_ID}:artifacts/merged_transcript/merged.json",
+            artifact_type="merged_transcript",
+            version=1,
+            sha256="1" * 64,
+        ),
+        manual_notes_artifact=None,
+        policy=SummarizationPolicy(language="en").to_dict(),
+        provider=SummarizationProviderMetadata(
+            name="mistral",
+            model="mistral-small-latest",
+            endpoint="https://api.mistral.ai",
+            prompt_policy=PROMPT_POLICY,
+            resolved_model="mistral-small-2603",
+            account_scope="mistral-account:abc123",
+        ),
+        timeline=_summary_result().timeline,
+        action_items=_summary_result().action_items,
+        general_summary=_summary_result().general_summary,
+        created_at="2026-05-18T17:00:00Z",
+        request_records=_summary_result().request_records,
+    )
+
+    Draft202012Validator(_load_summary_schema(), format_checker=FormatChecker()).validate(
+        artifact.to_dict()
+    )
 
 
 @pytest.mark.parametrize(
