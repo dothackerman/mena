@@ -122,6 +122,7 @@ Use `docs/ideas/` for:
 - Preserve the difference between source inputs, architecture synthesis, research backlog, and research outputs.
 - Keep repository structure legible for future coding and research agents.
 - Follow the repository workflow in `docs/repository-workflow.md` for branch naming and issue references.
+- For GitHub issue relationships, use native GitHub metadata. Do not encode parent/child, blocking, or related-issue lists in issue bodies when GitHub can represent the relationship directly.
 - Treat `develop` as the active integration branch. Do not target `main` until the first shippable version or unless the user explicitly instructs it.
 
 ## Developer vs Product Usage

@@ -85,9 +85,10 @@ fix/18-session-lock-recovery
 If no issue exists yet, create or request an issue before starting substantial work.
 Tiny documentation corrections or early architecture/scaffolding updates may be committed directly to `develop` when the user explicitly asks to sync `develop`.
 
-## Commit and Pull Request References
+## Commit and Pull Request Issue Links
 
-Commits and pull requests should reference the issue number.
+Branch names and pull request bodies carry GitHub issue linkage.
+Commit messages should not include issue references; the branch name already provides the trace for local history, and the pull request body provides the GitHub-closing or related-work link.
 
 Preferred PR body references:
 
@@ -101,11 +102,7 @@ or, when the PR is partial:
 Refs #12
 ```
 
-Commit messages should stay concise and may include the issue number when useful:
-
-```text
-Implement capture worker start command (#12)
-```
+Commit messages should stay concise and describe the change without `#NNN` issue references.
 
 ## Issue Discipline
 
@@ -123,6 +120,16 @@ Issues should cite:
 
 Issues are the executable work contract for coding agents.
 The architecture remains the reference manual; issues name the specific slice to implement.
+
+## GitHub Issue Relationships
+
+Represent issue relationships with GitHub native metadata, not issue-body scaffolding.
+
+- Parent/child work uses native sub-issues.
+- Ordering constraints use native issue dependency relationships.
+- Do not add `## Parent`, `## Blocked by`, `Blocks:`, `Related:`, or equivalent relationship lists to issue bodies when the relationship can be represented natively.
+- Keep issue bodies focused on scope, context, acceptance criteria, and references to durable project documents.
+- If GitHub cannot represent a relationship natively, keep any body text minimal and explain why it must live there.
 
 ## Decision Persistence
 
