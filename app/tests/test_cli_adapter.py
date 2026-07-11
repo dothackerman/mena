@@ -10,7 +10,6 @@ import pytest
 
 import mena.cli as cli
 from mena.artifacts import ArtifactRecord
-from mena.diarization import DiarizationProviderUnavailable
 from mena.interaction import (
     ChoiceOption,
     ChoiceRequest,
@@ -372,11 +371,6 @@ def test_prompt_and_runtime_adapter_helpers(
     with pytest.raises(ValueError, match="no recorded sessions"):
         cli._resolve_process_session_path(None, settings)
 
-    cli._print_semantic_review_skip_notice(cast(Any, SimpleNamespace()))
-    assert "Semantic review skipped" in capsys.readouterr().out
-    assert cli._requires_runtime_profile(None, None, None)
-    assert not cli._requires_runtime_profile(lambda: object(), lambda: object(), lambda: object())
-
 
 def test_record_choice_and_data_root_adapter_branches(
     tmp_path: Path,
@@ -436,39 +430,7 @@ def test_record_choice_and_data_root_adapter_branches(
     assert cli._effective_record_data_root(None, settings) is None
 
 
-def test_processing_and_merged_transcript_adapter_edge_branches(tmp_path: Path) -> None:
-    artifact = SimpleNamespace(id="artifact-1")
-    failed_state = SimpleNamespace(
-        status="failed",
-        input_artifacts=(artifact,),
-    )
-    ledger = SimpleNamespace(latest=lambda _stage: failed_state)
-
-    assert cli._latest_failed_stage_input_artifacts(
-        ledger=cast(Any, ledger),
-        stage="transcription",
-    ) == ("artifact-1",)
-    assert (
-        cli._latest_failed_stage_input_artifacts(
-            ledger=cast(Any, SimpleNamespace(latest=lambda _stage: None)),
-            stage="transcription",
-        )
-        == ()
-    )
-    assert (
-        cli._runtime_fallback_stage_for_provider_failure(DiarizationProviderUnavailable("gpu"))
-        == "diarization"
-    )
-
-    invalid_profile = SimpleNamespace(
-        sources=(
-            SimpleNamespace(logical_id=SimpleNamespace(value="local_mic")),
-            SimpleNamespace(logical_id=SimpleNamespace(value="extra_source")),
-        )
-    )
-    with pytest.raises(ValueError, match="Processing currently supports"):
-        cli._validate_processing_profile_support(cast(Any, invalid_profile))
-
+def test_merged_transcript_adapter_edge_branches(tmp_path: Path) -> None:
     record = cast(ArtifactRecord, SimpleNamespace(id="merged-1", path="merged.json"))
     unverifiable_store = SimpleNamespace(verify=lambda _record_id: SimpleNamespace(ok=False))
     assert (
@@ -518,8 +480,7 @@ def test_main_reports_adapter_cancellations_and_errors(
     assert "Cannot inspect session: manifest missing" in capsys.readouterr().out
 
     monkeypatch.setattr(
-        cli,
-        "_run_processing_command",
+        "mena.processing_orchestration.run_processing_command",
         lambda **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt),
     )
     assert cli.main(["process", str(tmp_path)], settings=settings) == 1
@@ -611,11 +572,9 @@ def test_setup_cli_interaction_and_command_adapter(
     assert "setup message" in capsys.readouterr().out
 
 
-def test_cli_session_field_and_asr_language_adapters() -> None:
+def test_cli_session_field_adapters() -> None:
     # Adapter-local helpers with no delegation to the processing workflow
     # modules; unreachable through build_parser/main, so covered directly.
-    assert cli._asr_language_from_session_language("de-CH") == "de"
-    assert cli._asr_language_from_session_language(None) is None
     assert cli._required_str({"id": "session"}, "id") == "session"
     assert cli._required_int({"count": 2}, "count") == 2
     assert cli._optional_metadata_str({"route": None}, "route") is None

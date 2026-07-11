@@ -489,7 +489,7 @@ def _capture_plan_from_start_payload(
     return plan
 
 
-def _format_record_diagnostics(payload: StartCapturePayload) -> str:
+def format_record_diagnostics(payload: StartCapturePayload) -> str:
     lines = [
         "Record diagnostics:",
         f"  profile: {payload.profile}",

@@ -14,7 +14,7 @@ from shlex import quote
 from typing import Any, TypeVar, cast
 from uuid import uuid4
 
-from mena import export_workflow, processing, processing_orchestration, summarize_workflow
+from mena import export_workflow, processing_orchestration, summarize_workflow
 from mena.artifacts import (
     ArtifactRecord,
     ArtifactStore,
@@ -30,10 +30,7 @@ from mena.correction_workflow import (
     run_correction_workflow,
 )
 from mena.diarization import (
-    DIARIZATION_STAGE,
     DiarizationError,
-    DiarizationProvider,
-    DiarizationProviderUnavailable,
     run_diarization_stage,
 )
 from mena.discovery import (
@@ -55,7 +52,6 @@ from mena.interaction import (
 )
 from mena.manual_notes import ManualNotesIngestionError
 from mena.merge_timing import (
-    MERGE_TIMING_STAGE,
     MERGED_TRANSCRIPT_ARTIFACT_TYPE,
     MergedTranscriptArtifact,
     MergeTimingContractError,
@@ -65,12 +61,12 @@ from mena.merge_timing import (
 )
 from mena.processing import (
     PROCESSING_STATE_ARTIFACT_TYPE,
-    ProcessingStageLedger,
     ProcessingStageState,
     ProcessingStateError,
+    latest_non_retryable_processing_failure,
+    latest_resumable_processing_state,
 )
 from mena.profiles import (
-    CaptureProfile,
     CaptureProfileSelection,
     capture_profile_choices,
     parse_capture_profile,
@@ -79,20 +75,19 @@ from mena.protocol import (
     StartCapturePayload,
     WorkerProcess,
 )
+from mena.provider_validation import ProviderValidationError
 from mena.recording_control import (
     RecordCommandInput,
-    _format_record_diagnostics,
+    format_record_diagnostics,
     run_recording_control_workflow,
 )
 from mena.review_flagging import (
-    CONFIDENCE_FLAGGING_STAGE,
     ReviewFlaggingError,
     run_confidence_flagging_stage,
 )
 from mena.runtime_profile import (
     RuntimeFallbackUnavailable,
     bind_summarization_runtime,
-    production_runtime_required,
     select_summarization_runtime_profile,
     store_runtime_profile_provenance,
 )
@@ -104,8 +99,6 @@ from mena.runtime_stewardship import (
 from mena.semantic_coherence import (
     SEMANTIC_COHERENCE_STAGE,
     SemanticCoherenceError,
-    SemanticCoherenceProvider,
-    SemanticCoherenceStageResult,
     run_semantic_coherence_stage,
 )
 from mena.session_integrity import (
@@ -139,10 +132,7 @@ from mena.summarization import (
 )
 from mena.timestamps import parse_utc_timestamp
 from mena.transcription import (
-    TRANSCRIPTION_STAGE,
     TranscriptionError,
-    TranscriptionProvider,
-    TranscriptionProviderUnavailable,
     run_transcription_stage,
 )
 
@@ -159,27 +149,8 @@ COMMANDS = (
     "resume",
 )
 WORKER_EXIT_TIMEOUT_SECONDS = 30.0
-PROCESSING_PIPELINE_STAGES = frozenset(
-    {
-        TRANSCRIPTION_STAGE,
-        DIARIZATION_STAGE,
-        MERGE_TIMING_STAGE,
-        CONFIDENCE_FLAGGING_STAGE,
-        SEMANTIC_COHERENCE_STAGE,
-    }
-)
-
-
 ProviderFactory = Callable[[], Any]
 ChoiceT = TypeVar("ChoiceT")
-
-
-ProviderValidationError = processing_orchestration.ProviderValidationError
-
-
-SourceAudioInput = processing_orchestration.SourceAudioInput
-CaptureSegmentInput = processing_orchestration.CaptureSegmentInput
-ProcessingPipelineResult = processing_orchestration.ProcessingPipelineResult
 
 
 class ConsoleRecordInteraction:
@@ -243,7 +214,7 @@ class ConsoleRecordInteraction:
         elif topic == "record.setup_cancelled":
             print("Recording setup cancelled.")
         elif topic == "record.diagnostics":
-            print(_format_record_diagnostics(cast(StartCapturePayload, context["start_payload"])))
+            print(format_record_diagnostics(cast(StartCapturePayload, context["start_payload"])))
         elif topic == "record.consent_notice":
             print(
                 "Recording notice: you are responsible for obtaining consent "
@@ -1011,12 +982,12 @@ def main(
                     session_id=session_id_value,
                     session_dir=resolved_session.session_dir,
                 )
-                resumable = _latest_resumable_processing_state(
+                resumable = latest_resumable_processing_state(
                     store,
                     session_id=session_id_value,
                 )
                 if resumable is None:
-                    blocked = _latest_non_retryable_processing_failure(
+                    blocked = latest_non_retryable_processing_failure(
                         store,
                         session_id=session_id_value,
                     )
@@ -1046,7 +1017,7 @@ def main(
 
             if args.command == "process":
                 print(f"Processing recording: {session_path}")
-            exit_code = _run_processing_command(
+            exit_code = processing_orchestration.run_processing_command(
                 session_path=session_path,
                 run_id=invocation_run_id,
                 attempt=invocation_attempt,
@@ -1060,6 +1031,13 @@ def main(
                 setup_hardware=setup_hardware,
                 allow_runtime_fallback=args.allow_runtime_fallback,
                 interaction=_resolve_runtime_fallback_interaction(input_fn),
+                terminal_llm_release=_record_terminal_local_llm_release,
+                transcription_stage_runner=run_transcription_stage,
+                diarization_stage_runner=run_diarization_stage,
+                merge_timing_stage_runner=run_merge_timing_stage,
+                room_mic_merge_timing_stage_runner=run_room_mic_merge_timing_stage,
+                confidence_flagging_stage_runner=run_confidence_flagging_stage,
+                semantic_coherence_stage_runner=run_semantic_coherence_stage,
             )
             if args.command == "process" and exit_code == 0:
                 print("Processing completed successfully.")
@@ -1384,26 +1362,6 @@ def _resolve_runtime_fallback_interaction(
     return ConsoleProcessingInteraction(reader)
 
 
-def _print_semantic_review_skip_notice(result: SemanticCoherenceStageResult) -> None:
-    _ = result
-    print(
-        "Semantic review skipped: local semantic LLM provider is unavailable. "
-        "Processing completed without semantic incoherence flags."
-    )
-
-
-def _requires_runtime_profile(
-    transcription_provider_factory: ProviderFactory | None,
-    diarization_provider_factory: ProviderFactory | None,
-    semantic_coherence_provider_factory: ProviderFactory | None,
-) -> bool:
-    return production_runtime_required(
-        transcription_provider_factory=transcription_provider_factory,
-        diarization_provider_factory=diarization_provider_factory,
-        semantic_coherence_provider_factory=semantic_coherence_provider_factory,
-    )
-
-
 def _run_summarize_command(
     *,
     session_path: Path,
@@ -1518,302 +1476,6 @@ def _run_inspect_command(
     return 0 if report.ok else 1
 
 
-def _run_processing_command(
-    *,
-    session_path: Path,
-    run_id: str,
-    attempt: int,
-    now: datetime | None,
-    transcription_provider_factory: ProviderFactory | None,
-    diarization_provider_factory: ProviderFactory | None,
-    semantic_coherence_provider_factory: ProviderFactory | None,
-    settings: AppSettings | None = None,
-    setup_runner: CommandRunner | None = None,
-    setup_command_identity: CommandIdentity | None = None,
-    setup_hardware: HardwareFacts | None = None,
-    allow_runtime_fallback: bool = False,
-    interaction: InteractionPort | None = None,
-) -> int:
-    def _processing_stages_adapter(
-        *,
-        session_id: str,
-        profile: CaptureProfile,
-        source_inputs: dict[str, SourceAudioInput],
-        store: FileSystemArtifactStore,
-        ledger: ProcessingStageLedger,
-        attempt: int,
-        now: datetime,
-        transcription_provider: TranscriptionProvider,
-        diarization_provider: DiarizationProvider,
-        semantic_coherence_provider: SemanticCoherenceProvider,
-        session_language: str | None = None,
-        **_kwargs: object,
-    ) -> object:
-        return _run_processing_stages(
-            session_id=session_id,
-            profile=profile,
-            source_inputs=source_inputs,
-            store=store,
-            ledger=ledger,
-            attempt=attempt,
-            now=now,
-            transcription_provider=transcription_provider,
-            diarization_provider=diarization_provider,
-            semantic_coherence_provider=semantic_coherence_provider,
-            session_language=session_language,
-        )
-
-    return processing_orchestration.run_processing_command(
-        session_path=session_path,
-        run_id=run_id,
-        attempt=attempt,
-        now=now,
-        transcription_provider_factory=transcription_provider_factory,
-        diarization_provider_factory=diarization_provider_factory,
-        semantic_coherence_provider_factory=semantic_coherence_provider_factory,
-        settings=settings,
-        setup_runner=setup_runner,
-        setup_command_identity=setup_command_identity,
-        setup_hardware=setup_hardware,
-        allow_runtime_fallback=allow_runtime_fallback,
-        interaction=interaction,
-        terminal_llm_release=_record_terminal_local_llm_release,
-        processing_stages_runner=_processing_stages_adapter,
-        transcription_stage_runner=run_transcription_stage,
-        diarization_stage_runner=run_diarization_stage,
-        merge_timing_stage_runner=run_merge_timing_stage,
-        room_mic_merge_timing_stage_runner=run_room_mic_merge_timing_stage,
-        confidence_flagging_stage_runner=run_confidence_flagging_stage,
-        semantic_coherence_stage_runner=run_semantic_coherence_stage,
-    )
-
-
-def _runtime_fallback_stage_for_provider_failure(
-    exc: TranscriptionProviderUnavailable | DiarizationProviderUnavailable,
-) -> str:
-    if isinstance(exc, TranscriptionProviderUnavailable):
-        return TRANSCRIPTION_STAGE
-    return DIARIZATION_STAGE
-
-
-def _latest_failed_stage_input_artifacts(
-    *,
-    ledger: ProcessingStageLedger,
-    stage: str,
-) -> tuple[str, ...]:
-    state = ledger.latest(stage)
-    if state is None or state.status != "failed":
-        return ()
-    return tuple(artifact.id for artifact in state.input_artifacts)
-
-
-def _run_processing_stages(
-    *,
-    session_id: str,
-    profile: CaptureProfile,
-    source_inputs: dict[str, SourceAudioInput],
-    store: FileSystemArtifactStore,
-    ledger: ProcessingStageLedger,
-    attempt: int,
-    now: datetime,
-    transcription_provider: TranscriptionProvider,
-    diarization_provider: DiarizationProvider,
-    semantic_coherence_provider: SemanticCoherenceProvider,
-    session_language: str | None = None,
-) -> ProcessingPipelineResult:
-    return processing_orchestration.run_processing_stages(
-        session_id=session_id,
-        profile=profile,
-        source_inputs=source_inputs,
-        store=store,
-        ledger=ledger,
-        attempt=attempt,
-        now=now,
-        transcription_provider=transcription_provider,
-        diarization_provider=diarization_provider,
-        semantic_coherence_provider=semantic_coherence_provider,
-        session_language=session_language,
-        transcription_stage_runner=run_transcription_stage,
-        diarization_stage_runner=run_diarization_stage,
-        merge_timing_stage_runner=run_merge_timing_stage,
-        room_mic_merge_timing_stage_runner=run_room_mic_merge_timing_stage,
-        confidence_flagging_stage_runner=run_confidence_flagging_stage,
-        semantic_coherence_stage_runner=run_semantic_coherence_stage,
-    )
-
-
-def _validate_processing_profile_support(profile: CaptureProfile) -> None:
-    source_ids = tuple(source.logical_id.value for source in profile.sources)
-    if source_ids not in {("local_mic", "system_audio"), ("room_mic",)}:
-        raise ValueError(
-            "Processing currently supports online_dual_stream and in_person_single_mic profiles."
-        )
-
-
-def _prepare_source_audio_inputs(
-    *,
-    session_dir: Path,
-    profile: CaptureProfile,
-    session_record: dict[str, object],
-    store: FileSystemArtifactStore,
-) -> dict[str, SourceAudioInput]:
-    return processing_orchestration.prepare_source_audio_inputs(
-        session_dir=session_dir,
-        profile=profile,
-        session_record=session_record,
-        store=store,
-    )
-
-
-def _collect_capture_segments(
-    session_record: dict[str, object],
-    required_sources: tuple[str, ...],
-) -> dict[str, tuple[dict[str, object], ...]]:
-    return processing_orchestration.collect_capture_segments(
-        session_record=session_record,
-        required_sources=required_sources,
-    )
-
-
-def _validate_capture_segment_alignment(
-    selected: dict[str, tuple[dict[str, object], ...]],
-    required_sources: tuple[str, ...],
-) -> None:
-    processing_orchestration.validate_capture_segment_alignment(
-        selected=selected,
-        required_sources=required_sources,
-    )
-
-
-def _segment_metadata_index(segment: dict[str, object]) -> int:
-    return processing_orchestration._segment_metadata_index(segment)
-
-
-def _ensure_source_audio_artifact(
-    *,
-    store: FileSystemArtifactStore,
-    source_id: str,
-    index: int,
-    path: Path,
-    artifact_sha: str,
-    payload: bytes,
-    route_id: str | None,
-    route_label: str | None,
-    capture_mode: str | None,
-) -> ArtifactRecord:
-    return processing_orchestration._ensure_source_audio_artifact(
-        store=store,
-        source_id=source_id,
-        index=index,
-        path=path,
-        artifact_sha=artifact_sha,
-        payload=payload,
-        route_id=route_id,
-        route_label=route_label,
-        capture_mode=capture_mode,
-    )
-
-
-def _stitch_provider_prep_audio(
-    *,
-    source_id: str,
-    segments: tuple[CaptureSegmentInput, ...],
-    output_path: Path,
-) -> dict[str, object]:
-    return processing_orchestration._stitch_provider_prep_audio(
-        source_id=source_id,
-        segments=segments,
-        output_path=output_path,
-    )
-
-
-def _ensure_provider_prep_audio_artifact(
-    *,
-    store: FileSystemArtifactStore,
-    source_id: str,
-    source_path: Path,
-    artifact_sha: str,
-    metadata: dict[str, object],
-) -> ArtifactRecord:
-    return processing_orchestration._ensure_provider_prep_audio_artifact(
-        store=store,
-        source_id=source_id,
-        source_path=source_path,
-        artifact_sha=artifact_sha,
-        metadata=metadata,
-    )
-
-
-def _sha256_file(path: Path) -> str:
-    return processing_orchestration._sha256_file(path)
-
-
-def _replace_file_from_path(*, source_path: Path, destination_path: Path) -> None:
-    processing_orchestration._replace_file_from_path(
-        source_path=source_path,
-        destination_path=destination_path,
-    )
-
-
-def _store_provider_prep_audio_artifact(
-    *,
-    store: FileSystemArtifactStore,
-    source_id: str,
-    source_path: Path,
-    metadata: dict[str, object],
-) -> ArtifactRecord:
-    return processing_orchestration._store_provider_prep_audio_artifact(
-        store=store,
-        source_id=source_id,
-        source_path=source_path,
-        metadata=metadata,
-    )
-
-
-def _latest_processing_state(
-    store: FileSystemArtifactStore,
-    session_id: str,
-    *,
-    allowed_statuses: frozenset[str],
-    require_retryable_error: bool | None = None,
-) -> ProcessingStageState | None:
-    return processing._latest_processing_state(
-        store=store,
-        session_id=session_id,
-        allowed_statuses=allowed_statuses,
-        require_retryable_error=require_retryable_error,
-    )
-
-
-def _processing_state_order(record: ArtifactRecord) -> int:
-    return processing._processing_state_order(record)
-
-
-def _latest_retryable_processing_state(
-    store: FileSystemArtifactStore,
-    session_id: str,
-) -> ProcessingStageState | None:
-    return processing.latest_retryable_processing_state(store, session_id)
-
-
-def _latest_resumable_processing_state(
-    store: FileSystemArtifactStore,
-    session_id: str,
-) -> ProcessingStageState | None:
-    return processing.latest_resumable_processing_state(store, session_id)
-
-
-def _is_final_processing_stage(state: ProcessingStageState) -> bool:
-    return processing._is_final_processing_stage(state)
-
-
-def _latest_non_retryable_processing_failure(
-    store: FileSystemArtifactStore,
-    session_id: str,
-) -> ProcessingStageState | None:
-    return processing.latest_non_retryable_processing_failure(store, session_id)
-
-
 def _resolve_latest_merged_transcript_record(
     *,
     store: ArtifactStore,
@@ -1857,13 +1519,6 @@ def _parse_iso_timestamp(value: str) -> datetime | None:
         return None
 
 
-def _asr_language_from_session_language(language: str | None) -> str | None:
-    if language is None:
-        return None
-    normalized = language.replace("_", "-").split("-", 1)[0].lower()
-    return normalized or None
-
-
 def _required_str(payload: dict[str, object] | object, key: str) -> str:
     if not isinstance(payload, dict):
         raise ValueError(f"Session field '{key}' is required and must be a non-empty string.")
@@ -1893,16 +1548,4 @@ def _optional_metadata_str(payload: dict[str, object], key: str) -> str | None:
         key,
         error=ValueError,
         message=f"Session field '{key}' must be a non-empty string or null.",
-    )
-
-
-def _require_provider(
-    provider_factory: ProviderFactory,
-    provider_type: type[Any],
-    provider_name: str,
-) -> Any:
-    return processing_orchestration._require_provider(
-        provider_factory,
-        provider_type,
-        provider_name,
     )
