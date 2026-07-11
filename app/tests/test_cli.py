@@ -1269,7 +1269,7 @@ model = "semantic-model:latest"
         captured["semantic_factory"] = kwargs["semantic_coherence_provider_factory"]
         return 0
 
-    monkeypatch.setattr("mena.cli._run_processing_command", _fake_run_processing_command)
+    monkeypatch.setattr("mena.processing_orchestration.run_processing_command", _fake_run_processing_command)
 
     exit_code = main(["process", str(session_dir)], config_path=config_path)
 
@@ -1296,7 +1296,7 @@ def test_main_process_without_session_path_uses_latest_recorded_session(
         calls.append(cast(Path, kwargs["session_path"]))
         return 0
 
-    monkeypatch.setattr("mena.cli._run_processing_command", _fake_run_processing_command)
+    monkeypatch.setattr("mena.processing_orchestration.run_processing_command", _fake_run_processing_command)
 
     exit_code = main(["process"], settings=settings)
 
@@ -1327,7 +1327,7 @@ def test_main_process_without_session_path_prefers_unprocessed_recording(
         calls.append(cast(Path, kwargs["session_path"]))
         return 0
 
-    monkeypatch.setattr("mena.cli._run_processing_command", _fake_run_processing_command)
+    monkeypatch.setattr("mena.processing_orchestration.run_processing_command", _fake_run_processing_command)
 
     exit_code = main(["process"], settings=settings)
 
@@ -1359,7 +1359,7 @@ def test_main_process_without_session_path_skips_record_with_malformed_id(
         calls.append(cast(Path, kwargs["session_path"]))
         return 0
 
-    monkeypatch.setattr("mena.cli._run_processing_command", _fake_run_processing_command)
+    monkeypatch.setattr("mena.processing_orchestration.run_processing_command", _fake_run_processing_command)
 
     exit_code = main(["process"], settings=settings)
 
@@ -1389,7 +1389,7 @@ def test_main_process_without_session_path_skips_provider_unavailable_semantic_s
         calls.append(cast(Path, kwargs["session_path"]))
         return 0
 
-    monkeypatch.setattr("mena.cli._run_processing_command", _fake_run_processing_command)
+    monkeypatch.setattr("mena.processing_orchestration.run_processing_command", _fake_run_processing_command)
 
     exit_code = main(["process"], settings=settings)
 
@@ -1416,7 +1416,7 @@ def test_main_process_without_session_path_keeps_completed_session_with_corrupt_
         calls.append(cast(Path, kwargs["session_path"]))
         return 0
 
-    monkeypatch.setattr("mena.cli._run_processing_command", _fake_run_processing_command)
+    monkeypatch.setattr("mena.processing_orchestration.run_processing_command", _fake_run_processing_command)
 
     exit_code = main(["process"], settings=settings)
 
@@ -1451,7 +1451,7 @@ def test_main_process_without_session_path_reports_corrupt_completed_manifest(
         calls.append(cast(Path, kwargs["session_path"]))
         return 0
 
-    monkeypatch.setattr("mena.cli._run_processing_command", _fake_run_processing_command)
+    monkeypatch.setattr("mena.processing_orchestration.run_processing_command", _fake_run_processing_command)
 
     exit_code = main(["process"], settings=settings)
     captured = capsys.readouterr()
@@ -1488,7 +1488,7 @@ def test_main_process_without_session_path_reports_unreadable_completed_manifest
         calls.append(cast(Path, kwargs["session_path"]))
         return 0
 
-    monkeypatch.setattr("mena.cli._run_processing_command", _fake_run_processing_command)
+    monkeypatch.setattr("mena.processing_orchestration.run_processing_command", _fake_run_processing_command)
 
     exit_code = main(["process"], settings=settings)
     captured = capsys.readouterr()
@@ -1517,7 +1517,7 @@ def test_main_process_without_session_path_keeps_failed_processing_candidate(
         calls.append(cast(Path, kwargs["session_path"]))
         return 0
 
-    monkeypatch.setattr("mena.cli._run_processing_command", _fake_run_processing_command)
+    monkeypatch.setattr("mena.processing_orchestration.run_processing_command", _fake_run_processing_command)
 
     exit_code = main(["process"], settings=settings)
 
@@ -1547,7 +1547,7 @@ def test_main_process_without_session_path_prompts_for_multiple_candidates(
         calls.append(cast(Path, kwargs["session_path"]))
         return 0
 
-    monkeypatch.setattr("mena.cli._run_processing_command", _fake_run_processing_command)
+    monkeypatch.setattr("mena.processing_orchestration.run_processing_command", _fake_run_processing_command)
 
     exit_code = main(["process"], settings=settings, input_fn=lambda _prompt: "")
     captured = capsys.readouterr()
@@ -1580,7 +1580,7 @@ def test_main_process_without_session_path_can_select_older_candidate(
         calls.append(cast(Path, kwargs["session_path"]))
         return 0
 
-    monkeypatch.setattr("mena.cli._run_processing_command", _fake_run_processing_command)
+    monkeypatch.setattr("mena.processing_orchestration.run_processing_command", _fake_run_processing_command)
 
     exit_code = main(["process"], settings=settings, input_fn=lambda _prompt: "2")
 
@@ -1638,7 +1638,7 @@ def test_main_process_without_session_path_uses_latest_completed_recording(
         calls.append(cast(Path, kwargs["session_path"]))
         return 0
 
-    monkeypatch.setattr("mena.cli._run_processing_command", _fake_run_processing_command)
+    monkeypatch.setattr("mena.processing_orchestration.run_processing_command", _fake_run_processing_command)
 
     exit_code = main(["process"], settings=settings)
 
@@ -1753,7 +1753,7 @@ def test_main_process_explicit_session_path_overrides_latest_recorded_session(
         calls.append(cast(Path, kwargs["session_path"]))
         return 0
 
-    monkeypatch.setattr("mena.cli._run_processing_command", _fake_run_processing_command)
+    monkeypatch.setattr("mena.processing_orchestration.run_processing_command", _fake_run_processing_command)
 
     exit_code = main(["process", str(explicit.record_path)], settings=settings)
 
@@ -1778,7 +1778,7 @@ def test_main_process_prints_start_and_success_handoff(
         print("third-party dependency warning")
         return 0
 
-    monkeypatch.setattr("mena.cli._run_processing_command", _fake_run_processing_command)
+    monkeypatch.setattr("mena.processing_orchestration.run_processing_command", _fake_run_processing_command)
 
     exit_code = main(["process"], settings=settings)
     captured = capsys.readouterr()
@@ -1809,7 +1809,7 @@ def test_main_process_omits_correction_handoff_after_semantic_provider_skip(
         _mark_semantic_provider_unavailable_skip(session)
         return 0
 
-    monkeypatch.setattr("mena.cli._run_processing_command", _fake_run_processing_command)
+    monkeypatch.setattr("mena.processing_orchestration.run_processing_command", _fake_run_processing_command)
 
     exit_code = main(["process"], settings=settings)
     captured = capsys.readouterr()
@@ -1834,7 +1834,7 @@ def test_main_process_does_not_print_success_handoff_on_failure(
     def _fake_run_processing_command(**_kwargs: object) -> int:
         raise ValueError("processing failed")
 
-    monkeypatch.setattr("mena.cli._run_processing_command", _fake_run_processing_command)
+    monkeypatch.setattr("mena.processing_orchestration.run_processing_command", _fake_run_processing_command)
 
     exit_code = main(["process"], settings=settings)
     captured = capsys.readouterr()
@@ -1906,7 +1906,7 @@ def test_main_summarize_auto_selects_ready_session_when_session_path_is_omitted(
         return 0
 
     monkeypatch.setattr(
-        "mena.cli.summarize_workflow.run_summarization_command",
+        "mena.summarize_workflow.run_summarization_command",
         _fake_run_summarization_command,
     )
 
@@ -1942,7 +1942,7 @@ def test_main_summarize_prompts_and_recommends_newest_ready_session(
         return 0
 
     monkeypatch.setattr(
-        "mena.cli.summarize_workflow.run_summarization_command",
+        "mena.summarize_workflow.run_summarization_command",
         _fake_run_summarization_command,
     )
 
@@ -1998,7 +1998,7 @@ def test_main_summarize_ignores_invalid_ready_session_records(
         return 0
 
     monkeypatch.setattr(
-        "mena.cli.summarize_workflow.run_summarization_command",
+        "mena.summarize_workflow.run_summarization_command",
         _fake_run_summarization_command,
     )
 
@@ -3044,7 +3044,7 @@ def test_main_process_stores_runtime_profile_provenance_before_processing_stages
     def _fail_processing_stages(**_kwargs: object) -> None:
         raise RuntimeError("stage should see existing runtime provenance")
 
-    monkeypatch.setattr("mena.cli._run_processing_stages", _fail_processing_stages)
+    monkeypatch.setattr("mena.processing_orchestration.run_processing_stages", _fail_processing_stages)
 
     with pytest.raises(RuntimeError, match="stage should see existing runtime provenance"):
         main(["process", str(session.record_path)], settings=settings, run_id="run-before-stage")
@@ -3090,7 +3090,7 @@ def test_main_process_maps_unauthorized_runtime_fallback_to_exit_3(
             "one-run fallback when supported."
         )
 
-    monkeypatch.setattr("mena.cli._run_processing_command", _raise_unavailable)
+    monkeypatch.setattr("mena.processing_orchestration.run_processing_command", _raise_unavailable)
 
     exit_code = main(["process", str(session.record_path)], settings=settings)
     captured = capsys.readouterr()
@@ -3123,7 +3123,7 @@ def test_main_process_records_terminal_runtime_stewardship_release(
         )
 
     monkeypatch.setattr("mena.semantic_coherence.unload_ollama_model", _fake_unload_ollama_model)
-    monkeypatch.setattr("mena.cli._run_processing_stages", _fake_run_processing_stages)
+    monkeypatch.setattr("mena.processing_orchestration.run_processing_stages", _fake_run_processing_stages)
 
     exit_code = main(
         ["process", str(session.record_path)],
@@ -4858,6 +4858,7 @@ def _patch_processing_stages(
         diarization_provider: object,
         semantic_coherence_provider: object,
         session_language: str | None = None,
+        **_kwargs: object,
     ) -> object:
         invocation["session_id"] = session_id
         invocation["run_id"] = getattr(ledger, "run_id", None)
@@ -4875,7 +4876,7 @@ def _patch_processing_stages(
             semantic_coherence_result=SimpleNamespace(skipped=False, skip_reason=None)
         )
 
-    monkeypatch.setattr("mena.cli._run_processing_stages", _fake_run_processing_stages)
+    monkeypatch.setattr("mena.processing_orchestration.run_processing_stages", _fake_run_processing_stages)
     return invocation
 
 
