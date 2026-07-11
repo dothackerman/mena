@@ -9,8 +9,6 @@ from typing import Any, cast
 import pytest
 
 import mena.cli as cli
-import mena.processing as processing
-import mena.processing_orchestration as processing_orchestration
 from mena.artifacts import ArtifactRecord
 from mena.diarization import DiarizationProviderUnavailable
 from mena.interaction import (
@@ -20,10 +18,8 @@ from mena.interaction import (
     TextRequest,
     WorkflowNotice,
 )
-from mena.processing import ProcessingStageState
 from mena.settings import AppSettings
 from mena.setup_workflow import SetupMessageEvent, SetupWorkflowResult
-from mena.transcription import TranscriptionProviderUnavailable
 
 
 def test_console_record_interaction_reports_adapter_notices(
@@ -615,218 +611,9 @@ def test_setup_cli_interaction_and_command_adapter(
     assert "setup message" in capsys.readouterr().out
 
 
-def test_cli_processing_wrapper_functions_delegate_to_workflow_modules(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    calls: list[str] = []
-    prepared = {"local_mic": object()}
-
-    def _run_processing_stages(**_kwargs: object) -> object:
-        calls.append("run_processing_stages")
-        return "pipeline"
-
-    def _prepare_source_audio_inputs(**_kwargs: object) -> object:
-        calls.append("prepare_source_audio_inputs")
-        return prepared
-
-    def _collect_capture_segments(**_kwargs: object) -> object:
-        calls.append("collect_capture_segments")
-        return {"local_mic": ()}
-
-    def _validate_capture_segment_alignment(**_kwargs: object) -> None:
-        calls.append("validate_capture_segment_alignment")
-
-    def _stitch_provider_prep_audio(**_kwargs: object) -> object:
-        calls.append("stitch")
-        return {"source_id": "local_mic"}
-
-    def _replace_file_from_path(**_kwargs: object) -> None:
-        calls.append("replace")
-
-    artifact_record = cast(ArtifactRecord, SimpleNamespace(id="artifact"))
-
-    def _ensure_source_audio_artifact(**_kwargs: object) -> ArtifactRecord:
-        calls.append("ensure_source_audio")
-        return artifact_record
-
-    def _ensure_provider_prep_audio_artifact(**_kwargs: object) -> ArtifactRecord:
-        calls.append("ensure_provider_prep")
-        return artifact_record
-
-    def _store_provider_prep_audio_artifact(**_kwargs: object) -> ArtifactRecord:
-        calls.append("store_provider_prep")
-        return artifact_record
-
-    monkeypatch.setattr(
-        processing_orchestration,
-        "run_processing_stages",
-        _run_processing_stages,
-    )
-    monkeypatch.setattr(
-        processing_orchestration,
-        "prepare_source_audio_inputs",
-        _prepare_source_audio_inputs,
-    )
-    monkeypatch.setattr(
-        processing_orchestration,
-        "collect_capture_segments",
-        _collect_capture_segments,
-    )
-    monkeypatch.setattr(
-        processing_orchestration,
-        "validate_capture_segment_alignment",
-        _validate_capture_segment_alignment,
-    )
-    monkeypatch.setattr(processing_orchestration, "_segment_metadata_index", lambda _seg: 7)
-    monkeypatch.setattr(
-        processing_orchestration,
-        "_stitch_provider_prep_audio",
-        _stitch_provider_prep_audio,
-    )
-    monkeypatch.setattr(processing_orchestration, "_sha256_file", lambda _path: "abc")
-    monkeypatch.setattr(
-        processing_orchestration,
-        "_replace_file_from_path",
-        _replace_file_from_path,
-    )
-    monkeypatch.setattr(
-        processing_orchestration,
-        "_ensure_source_audio_artifact",
-        _ensure_source_audio_artifact,
-    )
-    monkeypatch.setattr(
-        processing_orchestration,
-        "_ensure_provider_prep_audio_artifact",
-        _ensure_provider_prep_audio_artifact,
-    )
-    monkeypatch.setattr(
-        processing_orchestration,
-        "_store_provider_prep_audio_artifact",
-        _store_provider_prep_audio_artifact,
-    )
-
-    assert (
-        cli._runtime_fallback_stage_for_provider_failure(TranscriptionProviderUnavailable("gpu"))
-        == "transcription"
-    )
-    assert (
-        cast(
-            Any,
-            cli._run_processing_stages(
-                session_id="session",
-                profile=cast(Any, SimpleNamespace()),
-                source_inputs={},
-                store=cast(Any, SimpleNamespace()),
-                ledger=cast(Any, SimpleNamespace()),
-                attempt=1,
-                now=cast(Any, SimpleNamespace()),
-                transcription_provider=cast(Any, SimpleNamespace()),
-                diarization_provider=cast(Any, SimpleNamespace()),
-                semantic_coherence_provider=cast(Any, SimpleNamespace()),
-            ),
-        )
-        == "pipeline"
-    )
-    assert (
-        cli._prepare_source_audio_inputs(
-            session_dir=tmp_path,
-            profile=cast(Any, SimpleNamespace()),
-            session_record={},
-            store=cast(Any, SimpleNamespace()),
-        )
-        is prepared
-    )
-    assert cli._collect_capture_segments({}, ("local_mic",)) == {"local_mic": ()}
-    cli._validate_capture_segment_alignment({}, ("local_mic",))
-    assert cli._segment_metadata_index({"index": 7}) == 7
-    assert cli._stitch_provider_prep_audio(
-        source_id="local_mic",
-        segments=(),
-        output_path=tmp_path / "prep.wav",
-    ) == {"source_id": "local_mic"}
-    assert cli._sha256_file(tmp_path / "missing.wav") == "abc"
-    cli._replace_file_from_path(source_path=tmp_path / "a", destination_path=tmp_path / "b")
-    assert (
-        cli._ensure_source_audio_artifact(
-            store=cast(Any, SimpleNamespace()),
-            source_id="local_mic",
-            index=1,
-            path=tmp_path / "source.wav",
-            artifact_sha="abc",
-            payload=b"audio",
-            route_id=None,
-            route_label=None,
-            capture_mode=None,
-        )
-        is artifact_record
-    )
-    assert (
-        cli._ensure_provider_prep_audio_artifact(
-            store=cast(Any, SimpleNamespace()),
-            source_id="local_mic",
-            source_path=tmp_path / "source.wav",
-            artifact_sha="abc",
-            metadata={},
-        )
-        is artifact_record
-    )
-    assert (
-        cli._store_provider_prep_audio_artifact(
-            store=cast(Any, SimpleNamespace()),
-            source_id="local_mic",
-            source_path=tmp_path / "source.wav",
-            metadata={},
-        )
-        is artifact_record
-    )
-    assert calls == [
-        "run_processing_stages",
-        "prepare_source_audio_inputs",
-        "collect_capture_segments",
-        "validate_capture_segment_alignment",
-        "stitch",
-        "replace",
-        "ensure_source_audio",
-        "ensure_provider_prep",
-        "store_provider_prep",
-    ]
-
-
-def test_cli_processing_state_and_session_field_adapters(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    state = cast(ProcessingStageState, SimpleNamespace(status="failed"))
-    record = cast(ArtifactRecord, SimpleNamespace(metadata={"attempt": 3}))
-
-    monkeypatch.setattr(processing, "_latest_processing_state", lambda *_args, **_kwargs: state)
-    monkeypatch.setattr(processing, "_processing_state_order", lambda _record: 3)
-    monkeypatch.setattr(processing, "latest_retryable_processing_state", lambda *_args: state)
-    monkeypatch.setattr(processing, "latest_resumable_processing_state", lambda *_args: state)
-    monkeypatch.setattr(processing, "_is_final_processing_stage", lambda _state: True)
-    monkeypatch.setattr(
-        processing,
-        "latest_non_retryable_processing_failure",
-        lambda *_args: state,
-    )
-
-    assert (
-        cli._latest_processing_state(
-            cast(Any, SimpleNamespace()),
-            "session",
-            allowed_statuses=frozenset({"failed"}),
-        )
-        is state
-    )
-    assert cli._processing_state_order(record) == 3
-    assert cli._latest_retryable_processing_state(cast(Any, SimpleNamespace()), "session") is state
-    assert cli._latest_resumable_processing_state(cast(Any, SimpleNamespace()), "session") is state
-    assert cli._is_final_processing_stage(state)
-    assert (
-        cli._latest_non_retryable_processing_failure(cast(Any, SimpleNamespace()), "session")
-        is state
-    )
-
+def test_cli_session_field_and_asr_language_adapters() -> None:
+    # Adapter-local helpers with no delegation to the processing workflow
+    # modules; unreachable through build_parser/main, so covered directly.
     assert cli._asr_language_from_session_language("de-CH") == "de"
     assert cli._asr_language_from_session_language(None) is None
     assert cli._required_str({"id": "session"}, "id") == "session"
