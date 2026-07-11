@@ -10,6 +10,7 @@ from typing import Any, Protocol
 from mena.artifacts import ArtifactRecord, ArtifactStore
 
 RUNTIME_STEWARDSHIP_PROVENANCE_CONTRACT = "runtime-stewardship-provenance.v1"
+RUNTIME_STEWARDSHIP_RELEASE_NOTICE_TOPIC = "runtime_stewardship.release"
 RUNTIME_RELEASE_STATUSES = frozenset({"released", "not_supported", "failed"})
 
 

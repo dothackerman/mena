@@ -37,14 +37,13 @@ from mena.merge_timing import (
 from mena.mistral_llm import MISTRAL_SUMMARY_DISCLOSURE, MistralSummaryState
 from mena.processing import ProcessingStageLedger
 from mena.runtime_profile import (
-    RuntimeProfileSelection,
-    SummarizationRuntimePlan,
-    bind_summarization_runtime,
-    select_summarization_runtime_after_stage_failure,
-    select_summarization_runtime_profile,
-    store_runtime_profile_provenance,
+    SummarizationRuntimeRunResult,
+    run_summarization_with_runtime_fallback,
 )
-from mena.runtime_stewardship import RuntimeReleaseResult
+from mena.runtime_stewardship import (
+    RUNTIME_STEWARDSHIP_RELEASE_NOTICE_TOPIC,
+    RuntimeReleaseResult,
+)
 from mena.sessions import (
     SESSION_RECORD_FILENAME,
     ResolvedSession,
@@ -57,17 +56,12 @@ from mena.setup import CommandIdentity, CommandRunner, HardwareFacts
 from mena.summarization import (
     SummarizationError,
     SummarizationPolicy,
-    SummarizationProviderUnavailable,
     SummarizationStageResult,
     run_summarization_stage,
 )
 from mena.timestamps import parse_utc_timestamp
 
-RuntimeProfileSelector = Callable[..., RuntimeProfileSelection]
-RuntimeProfileStoreFn = Callable[..., object]
-RuntimeSummarizationBinderFn = Callable[..., object]
-SummarizationStageFn = Callable[..., object]
-TerminalReleaseFn = Callable[..., RuntimeReleaseResult | None]
+SummarizationRuntimeRunnerFn = Callable[..., SummarizationRuntimeRunResult]
 ResolveSessionFn = Callable[[Path], ResolvedSession]
 
 
@@ -148,15 +142,10 @@ def run_summarization_command(
     setup_command_identity: CommandIdentity | None = None,
     setup_hardware: HardwareFacts | None = None,
     allow_runtime_fallback: bool = False,
-    runtime_profile_selector_fn: RuntimeProfileSelector = select_summarization_runtime_profile,
-    runtime_profile_store_fn: RuntimeProfileStoreFn = store_runtime_profile_provenance,
-    runtime_summarization_binder_fn: RuntimeSummarizationBinderFn = bind_summarization_runtime,
-    run_summarization_stage_fn: SummarizationStageFn = run_summarization_stage,
-    summarization_stage_fallback_selector_fn: RuntimeProfileSelector = (
-        select_summarization_runtime_after_stage_failure
+    summarization_runtime_runner_fn: SummarizationRuntimeRunnerFn = (
+        run_summarization_with_runtime_fallback
     ),
     resolve_session_fn: ResolveSessionFn | None = None,
-    terminal_llm_release_fn: TerminalReleaseFn | None = None,
     interaction: InteractionPort | None = None,
 ) -> int:
     if resolve_session_fn is None:
@@ -201,114 +190,41 @@ def run_summarization_command(
         notes_path=manual_notes,
     )
     authorize_remote_fallback = _remote_fallback_authorizer(interaction)
-    runtime_selection: RuntimeProfileSelection = runtime_profile_selector_fn(
+
+    run_id = f"summarize-{uuid4()}"
+    ledger = ProcessingStageLedger(store=store, session_id=session_id_value, run_id=run_id)
+    runtime_result = summarization_runtime_runner_fn(
         settings=settings,
+        store=store,
+        run_id=run_id,
+        attempt=1,
         runner=setup_runner,
         command_identity=setup_command_identity,
         hardware=setup_hardware,
         allow_runtime_fallback=allow_runtime_fallback,
         authorize_remote_summarization_fallback=authorize_remote_fallback,
+        failed_input_artifacts=_stage_input_artifact_ids(
+            merged_transcript_record,
+            resolved_overlay[0],
+            manual_notes_record,
+        ),
+        run=lambda provider, attempt: run_summarization_stage(
+            store=store,
+            ledger=ledger,
+            merged_transcript_record=merged_transcript_record,
+            correction_overlay_record=resolved_overlay[0],
+            manual_notes_record=manual_notes_record,
+            provider=provider,
+            policy=SummarizationPolicy(language=summary_language),
+            attempt=attempt,
+        ),
     )
-
-    run_id = f"summarize-{uuid4()}"
-    runtime_profile_store_fn(
-        store=store,
-        run_id=run_id,
-        attempt=1,
-        selection=runtime_selection,
-    )
-
-    provider = runtime_summarization_binder_fn(
-        selection=runtime_selection,
-        settings=settings,
-    )
-
-    ledger = ProcessingStageLedger(store=store, session_id=session_id_value, run_id=run_id)
-    attempt = 1
-    selection = runtime_selection
-    try:
-        while True:
-            try:
-                result = cast(
-                    SummarizationStageResult,
-                    run_summarization_stage_fn(
-                        store=store,
-                        ledger=ledger,
-                        merged_transcript_record=merged_transcript_record,
-                        correction_overlay_record=resolved_overlay[0],
-                        manual_notes_record=manual_notes_record,
-                        provider=provider,
-                        policy=SummarizationPolicy(language=summary_language),
-                        attempt=attempt,
-                    ),
-                )
-                break
-            except SummarizationProviderUnavailable as exc:
-                used_plan = cast(
-                    SummarizationRuntimePlan | None,
-                    getattr(selection, "summarization", None),
-                )
-                if used_plan is None:
-                    raise
-                # Provoked fallback (ADR-033): the bound provider failed at
-                # provider time; consume the next accepted ordered fallback
-                # entry. A failing fallback provider re-enters this ladder
-                # until the accepted list is exhausted, at which point the
-                # selector raises RuntimeFallbackUnavailable (recoverable
-                # exit-code-3 contract at the CLI).
-                fallback_selection = summarization_stage_fallback_selector_fn(
-                    settings=settings,
-                    runner=setup_runner,
-                    command_identity=setup_command_identity,
-                    hardware=setup_hardware,
-                    accepted=runtime_selection.accepted,
-                    used_plan=used_plan,
-                    failure_reason=str(exc),
-                    failure_class=exc.__class__.__name__,
-                    failed_input_artifacts=_stage_input_artifact_ids(
-                        merged_transcript_record,
-                        resolved_overlay[0],
-                        manual_notes_record,
-                    ),
-                    authorize_remote_summarization_fallback=authorize_remote_fallback,
-                )
-                fallback_attempt = attempt + 1
-                runtime_profile_store_fn(
-                    store=store,
-                    run_id=run_id,
-                    attempt=fallback_attempt,
-                    selection=fallback_selection,
-                    name_suffix="stage-fallback",
-                )
-                # Release the failed provider only after a fallback was
-                # actually selected; when no fallback is available the shared
-                # finally block performs the single release for the failed
-                # provider.
-                if terminal_llm_release_fn is not None:
-                    terminal_llm_release_fn(
-                        store=store,
-                        run_id=run_id,
-                        attempt=attempt,
-                        provider=provider,
-                        stage="summarization",
-                        boundary="summarize",
-                    )
-                provider = runtime_summarization_binder_fn(
-                    selection=fallback_selection,
-                    settings=settings,
-                )
-                selection = fallback_selection
-                attempt = fallback_attempt
-    finally:
-        if terminal_llm_release_fn is not None:
-            terminal_llm_release_fn(
-                store=store,
-                run_id=run_id,
-                attempt=attempt,
-                provider=provider,
-                stage="summarization",
-                boundary="summarize",
-            )
+    for release_result in runtime_result.release_results:
+        _notify_runtime_stewardship_release(
+            interaction=interaction,
+            result=release_result,
+        )
+    result = cast(SummarizationStageResult, runtime_result.value)
 
     _notify_or_print(
         interaction=interaction,
@@ -370,6 +286,22 @@ def _stage_input_artifact_ids(
     if manual_notes_record is not None:
         ids.append(manual_notes_record.id)
     return tuple(ids)
+
+
+def _notify_runtime_stewardship_release(
+    *,
+    interaction: InteractionPort | None,
+    result: RuntimeReleaseResult,
+) -> None:
+    if interaction is None:
+        return
+    interaction.notify(
+        WorkflowNotice(
+            topic=RUNTIME_STEWARDSHIP_RELEASE_NOTICE_TOPIC,
+            severity=("warning" if result.status in {"failed", "not_supported"} else "info"),
+            context={"result": result},
+        )
+    )
 
 
 def _choose_summarize_session(

@@ -24,6 +24,11 @@ from mena.mistral_llm import (
 from mena.mistral_summarization import MistralSummarizationProvider
 from mena.ollama_summarization import OllamaSummarizationProvider
 from mena.provider_validation import require_provider, require_provider_instance
+from mena.runtime_stewardship import (
+    RuntimeReleaseResult,
+    release_terminal_local_llm,
+    store_runtime_stewardship_provenance,
+)
 from mena.semantic_coherence import OllamaSemanticCoherenceProvider, SemanticCoherenceProvider
 from mena.settings import AppSettings
 from mena.setup import (
@@ -48,7 +53,7 @@ from mena.setup import (
 )
 from mena.stage_policy import stage_device as lookup_stage_device
 from mena.stage_policy import stage_model as lookup_stage_model
-from mena.summarization import SummarizationProvider
+from mena.summarization import SummarizationProvider, SummarizationProviderUnavailable
 from mena.transcription import (
     TRANSCRIPTION_STAGE,
     FasterWhisperTranscriptionProvider,
@@ -60,7 +65,9 @@ ProviderFactory = Callable[[], Any]
 ProviderFactoryInput = ProviderFactory | None
 RuntimeProfileStore = Callable[..., Any]
 ProcessingRuntimeRunner = Callable[["BoundProcessingRuntime"], Any]
+SummarizationRuntimeRunner = Callable[[SummarizationProvider, int], Any]
 FailedInputArtifactsResolver = Callable[[str], tuple[str, ...]]
+TerminalRuntimeRelease = Callable[..., RuntimeReleaseResult | None]
 RUNTIME_PROFILE_PROVENANCE_CONTRACT = "runtime-profile-provenance.v1"
 PROCESSING_REQUIRED_RUNTIME_STAGES = frozenset({"transcription", "diarization"})
 PROCESSING_OPTIONAL_RUNTIME_STAGES = frozenset({"semantic-review"})
@@ -110,6 +117,14 @@ class RuntimeProfileSelection:
 
 
 @dataclass(frozen=True)
+class ResolvedSummarizationFallback:
+    plan: SummarizationRuntimePlan
+    authorization_source: str
+    actual: RuntimeProfileState | None = None
+    revalidation: SetupEvaluation | None = None
+
+
+@dataclass(frozen=True)
 class BoundProcessingRuntime:
     selection: RuntimeProfileSelection
     transcription_provider: TranscriptionProvider
@@ -121,6 +136,14 @@ class BoundProcessingRuntime:
 class ProcessingRuntimeRunResult:
     value: Any
     runtime: BoundProcessingRuntime
+
+
+@dataclass(frozen=True)
+class SummarizationRuntimeRunResult:
+    value: Any
+    selection: RuntimeProfileSelection
+    provider: SummarizationProvider
+    release_results: tuple[RuntimeReleaseResult, ...] = ()
 
 
 class RuntimeFallbackUnavailable(ValueError):
@@ -383,7 +406,11 @@ def select_summarization_runtime_profile(
             f"using an accepted remote fallback: {accepted_failure}"
         )
 
-    plan, authorization_source = _resolve_summarization_fallback(
+    fallback = _resolve_summarization_fallback(
+        settings=settings,
+        runner=runner,
+        command_identity=command_identity,
+        hardware=hardware,
         accepted=accepted,
         accepted_stage=accepted_stage,
         ordered=ordered,
@@ -394,14 +421,18 @@ def select_summarization_runtime_profile(
     )
     return RuntimeProfileSelection(
         accepted=accepted,
-        actual=accepted,
+        actual=fallback.actual or accepted,
         fallback_used=True,
-        current_command_identity=evaluation.state.command_identity,
-        revalidation=evaluation,
+        current_command_identity=(
+            fallback.revalidation.state.command_identity
+            if fallback.revalidation is not None
+            else evaluation.state.command_identity
+        ),
+        revalidation=fallback.revalidation or evaluation,
         fallback_reason=accepted_failure,
         fallback_status="used",
-        fallback_authorization_source=authorization_source,
-        summarization=plan,
+        fallback_authorization_source=fallback.authorization_source,
+        summarization=fallback.plan,
     )
 
 
@@ -438,7 +469,11 @@ def select_summarization_runtime_after_stage_failure(
         scope=scope,
         mistral_probe=mistral_probe,
     )
-    plan, authorization_source = _resolve_summarization_fallback(
+    fallback = _resolve_summarization_fallback(
+        settings=settings,
+        runner=runner,
+        command_identity=command_identity,
+        hardware=hardware,
         accepted=accepted,
         accepted_stage=used_plan.accepted_stage,
         ordered=remaining,
@@ -447,25 +482,33 @@ def select_summarization_runtime_after_stage_failure(
         env=env,
         mistral_probe=mistral_probe,
     )
-    plan = replace(plan, ordered_fallback=used_plan.ordered_fallback)
+    plan = replace(fallback.plan, ordered_fallback=used_plan.ordered_fallback)
     return RuntimeProfileSelection(
         accepted=accepted,
-        actual=accepted,
+        actual=fallback.actual or accepted,
         fallback_used=True,
-        current_command_identity=evaluation.state.command_identity,
-        revalidation=evaluation,
+        current_command_identity=(
+            fallback.revalidation.state.command_identity
+            if fallback.revalidation is not None
+            else evaluation.state.command_identity
+        ),
+        revalidation=fallback.revalidation or evaluation,
         fallback_reason=failure_reason,
         fallback_status="used_after_stage_failure",
         fallback_failed_stage="summarization",
         fallback_failed_input_artifacts=failed_input_artifacts,
         fallback_failure_class=failure_class,
-        fallback_authorization_source=authorization_source,
+        fallback_authorization_source=fallback.authorization_source,
         summarization=plan,
     )
 
 
 def _resolve_summarization_fallback(
     *,
+    settings: AppSettings,
+    runner: CommandRunner | None,
+    command_identity: CommandIdentity | None,
+    hardware: HardwareFacts | None,
     accepted: RuntimeProfileState,
     accepted_stage: StageProfile,
     ordered: tuple[StageProfile, ...],
@@ -473,7 +516,7 @@ def _resolve_summarization_fallback(
     authorize_remote_summarization_fallback: AuthorizeRemoteSummarizationFallback | None,
     env: Mapping[str, str] | None,
     mistral_probe: MistralSummaryProbe | None,
-) -> tuple[SummarizationRuntimePlan, str]:
+) -> ResolvedSummarizationFallback:
     """Resolve the first viable, authorized entry of the accepted ordered list.
 
     Raises ``RuntimeFallbackUnavailable`` with every per-entry reason when no
@@ -491,6 +534,21 @@ def _resolve_summarization_fallback(
     probe_env: Mapping[str, str] = os.environ if env is None else env
     reasons: list[str] = []
     for entry in ordered:
+        if entry.provider == OLLAMA_STAGE_PROVIDER:
+            local = _resolve_local_summarization_fallback(
+                settings=settings,
+                runner=runner,
+                command_identity=command_identity,
+                hardware=hardware,
+                accepted=accepted,
+                accepted_stage=accepted_stage,
+                entry=entry,
+                ordered=ordered,
+            )
+            if isinstance(local, ResolvedSummarizationFallback):
+                return local
+            reasons.append(local)
+            continue
         if entry.provider != MISTRAL_STAGE_PROVIDER:
             reasons.append(
                 f"accepted fallback provider {entry.provider!r} is not supported by this runtime"
@@ -516,18 +574,66 @@ def _resolve_summarization_fallback(
                 "accept Mistral summarization fallback or confirm interactively"
             )
             continue
-        return (
-            SummarizationRuntimePlan(
+        return ResolvedSummarizationFallback(
+            plan=SummarizationRuntimePlan(
                 accepted_stage=accepted_stage,
                 actual_stage=entry,
                 ordered_fallback=ordered,
                 resolved_model=state.resolved_model,
             ),
-            source,
+            authorization_source=source,
         )
     raise RuntimeFallbackUnavailable(
         "Accepted summarization provider is unavailable and no accepted fallback "
         f"provider can run: {failure_reason} Fallback blockers: {'; '.join(reasons)}"
+    )
+
+
+def _resolve_local_summarization_fallback(
+    *,
+    settings: AppSettings,
+    runner: CommandRunner | None,
+    command_identity: CommandIdentity | None,
+    hardware: HardwareFacts | None,
+    accepted: RuntimeProfileState,
+    accepted_stage: StageProfile,
+    entry: StageProfile,
+    ordered: tuple[StageProfile, ...],
+) -> ResolvedSummarizationFallback | str:
+    catalog = default_profile_catalog(_accepted_local_llm_model(accepted))
+    local_profile = next(
+        (
+            profile
+            for profile in catalog
+            if _summarization_provider(profile.stages) == OLLAMA_STAGE_PROVIDER
+            and not profile.fallback
+        ),
+        None,
+    )
+    if local_profile is None:
+        return "Ollama fallback is not supported by this runtime"
+    scope = _runtime_revalidation_scope(SUMMARIZATION_RUNTIME_STAGES, accepted.stage_policies)
+    command_runner = runner or SubprocessCommandRunner()
+    detection_profile = _profile_for_scope(local_profile, scope)
+    state = detect_local_installation_state(
+        settings,
+        runner=command_runner,
+        command_identity=command_identity,
+        hardware=hardware,
+        profile=detection_profile,
+    )
+    evaluation = _scope_evaluation(evaluate_setup(detection_profile, state), scope)
+    if not evaluation.ready:
+        return f"Ollama fallback is not viable: {'; '.join(evaluation.blocking_reasons)}"
+    return ResolvedSummarizationFallback(
+        plan=SummarizationRuntimePlan(
+            accepted_stage=accepted_stage,
+            actual_stage=entry,
+            ordered_fallback=ordered,
+        ),
+        authorization_source="setup_authorized",
+        actual=build_runtime_profile_state(evaluation),
+        revalidation=evaluation,
     )
 
 
@@ -777,6 +883,163 @@ def run_processing_with_runtime_fallback(
             semantic_coherence_provider=runtime.semantic_coherence_provider,
         )
         return ProcessingRuntimeRunResult(value=run(fallback_runtime), runtime=fallback_runtime)
+
+
+def run_summarization_with_runtime_fallback(
+    *,
+    settings: AppSettings,
+    store: FileSystemArtifactStore,
+    run_id: str,
+    attempt: int,
+    runner: CommandRunner | None,
+    command_identity: CommandIdentity | None,
+    hardware: HardwareFacts | None,
+    allow_runtime_fallback: bool,
+    authorize_remote_summarization_fallback: AuthorizeRemoteSummarizationFallback | None,
+    run: SummarizationRuntimeRunner,
+    failed_input_artifacts: tuple[str, ...],
+    summarization_provider_factory: ProviderFactoryInput = None,
+    env: Mapping[str, str] | None = None,
+    mistral_probe: MistralSummaryProbe | None = None,
+    runtime_profile_selector_fn: Callable[..., RuntimeProfileSelection] = (
+        select_summarization_runtime_profile
+    ),
+    runtime_profile_selector_after_failure_fn: Callable[..., RuntimeProfileSelection] = (
+        select_summarization_runtime_after_stage_failure
+    ),
+    runtime_profile_store_fn: RuntimeProfileStore | None = None,
+    terminal_release_fn: TerminalRuntimeRelease = release_terminal_local_llm,
+) -> SummarizationRuntimeRunResult:
+    """Run summarization with resolver-owned provider selection and fallback."""
+
+    if runtime_profile_store_fn is None:
+        runtime_profile_store_fn = store_runtime_profile_provenance
+    release_results: list[RuntimeReleaseResult] = []
+    selection = runtime_profile_selector_fn(
+        settings=settings,
+        runner=runner,
+        command_identity=command_identity,
+        hardware=hardware,
+        allow_runtime_fallback=allow_runtime_fallback,
+        authorize_remote_summarization_fallback=authorize_remote_summarization_fallback,
+        env=env,
+        mistral_probe=mistral_probe,
+    )
+    runtime_profile_store_fn(
+        store=store,
+        run_id=run_id,
+        attempt=attempt,
+        selection=selection,
+    )
+    provider = bind_summarization_runtime(
+        selection=selection,
+        settings=settings,
+        summarization_provider_factory=summarization_provider_factory,
+        env=env,
+    )
+    current_attempt = attempt
+    value: Any | None = None
+    try:
+        while True:
+            try:
+                value = run(provider, current_attempt)
+                break
+            except SummarizationProviderUnavailable as exc:
+                used_plan = selection.summarization
+                if used_plan is None:
+                    raise
+                fallback_selection = runtime_profile_selector_after_failure_fn(
+                    settings=settings,
+                    runner=runner,
+                    command_identity=command_identity,
+                    hardware=hardware,
+                    accepted=selection.accepted,
+                    used_plan=used_plan,
+                    failure_reason=str(exc),
+                    failure_class=exc.__class__.__name__,
+                    failed_input_artifacts=failed_input_artifacts,
+                    authorize_remote_summarization_fallback=(
+                        authorize_remote_summarization_fallback
+                    ),
+                    env=env,
+                    mistral_probe=mistral_probe,
+                )
+                fallback_attempt = current_attempt + 1
+                runtime_profile_store_fn(
+                    store=store,
+                    run_id=run_id,
+                    attempt=fallback_attempt,
+                    selection=fallback_selection,
+                    name_suffix="stage-fallback",
+                )
+                released = _record_terminal_runtime_release(
+                    store=store,
+                    run_id=run_id,
+                    attempt=current_attempt,
+                    provider=provider,
+                    stage="summarization",
+                    boundary="summarize",
+                    terminal_release_fn=terminal_release_fn,
+                )
+                if released is not None:
+                    release_results.append(released)
+                provider = bind_summarization_runtime(
+                    selection=fallback_selection,
+                    settings=settings,
+                    summarization_provider_factory=summarization_provider_factory,
+                    env=env,
+                )
+                selection = fallback_selection
+                current_attempt = fallback_attempt
+    finally:
+        released = _record_terminal_runtime_release(
+            store=store,
+            run_id=run_id,
+            attempt=current_attempt,
+            provider=provider,
+            stage="summarization",
+            boundary="summarize",
+            terminal_release_fn=terminal_release_fn,
+        )
+        if released is not None:
+            release_results.append(released)
+    return SummarizationRuntimeRunResult(
+        value=value,
+        selection=selection,
+        provider=provider,
+        release_results=tuple(release_results),
+    )
+
+
+def _record_terminal_runtime_release(
+    *,
+    store: FileSystemArtifactStore,
+    run_id: str,
+    attempt: int,
+    provider: object,
+    stage: str,
+    boundary: str,
+    terminal_release_fn: TerminalRuntimeRelease,
+) -> RuntimeReleaseResult | None:
+    result = terminal_release_fn(provider=provider, stage=stage, boundary=boundary)
+    if result is None or _release_skipped_without_observed_resource_use(result):
+        return None
+    store_runtime_stewardship_provenance(
+        store=store,
+        run_id=run_id,
+        attempt=attempt,
+        boundary=boundary,
+        release_results=(result,),
+    )
+    return result
+
+
+def _release_skipped_without_observed_resource_use(result: RuntimeReleaseResult) -> bool:
+    return (
+        result.status == "not_supported"
+        and result.detail
+        == "Provider did not observe Mena-owned runtime resource use for this lease."
+    )
 
 
 def runtime_fallback_stage_for_provider_failure(
