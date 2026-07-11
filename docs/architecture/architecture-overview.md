@@ -801,7 +801,7 @@ Allowed future refinement:
 
 Status: Provisional
 
-The first architecture-level protocol catalog is intentionally small.
+The implemented PoC protocol catalog is intentionally small.
 
 The protocol currently assumes:
 
@@ -810,25 +810,28 @@ The protocol currently assumes:
 - explicit asynchronous events for capture facts
 - versioned schemas from day one
 
+The earlier aspirational names map to the current protocol as follows:
+`InitializeCaptureWorker` is performed by `hello`/`hello_ack`; `StartCapture` by
+`start_capture`/`capture_started`; `StopCapture` by `stop_capture`/`capture_finalized`;
+`SegmentFlushed` by `segment_flushed`/`segments_flushed`; `CaptureStatus` by
+`capture_status`; `CaptureError` by `error`; and `CaptureFinalized` by `capture_finalized`.
+
 #### Host-to-Capture Commands
 
-- `InitializeCaptureWorker`, including protocol version agreement and minimal capability declaration
-- `StartCapture`
-- `StopCapture`
-- `GetCaptureStatus`
-- `ShutdownCaptureWorker`
+- `hello`: opens the protocol session and carries protocol version agreement data.
+- `start_capture`: requests the worker to begin capture with the selected profile, sources, routes, and segment cadence.
+- `stop_capture`: requests user-initiated capture finalization.
 
 #### Capture-to-Host Responses and Events
 
-- `CaptureWorkerReady`
-- `CaptureStarted`
-- `CaptureStartRejected`
-- `SegmentFlushed`
-- `CaptureWarning`
-- `CaptureError`
-- `CaptureStopped`
-- `CaptureFinalized`
-- `CaptureStatus`
+- `hello_ack`: acknowledges `hello` and confirms the accepted protocol version.
+- `capture_started`: confirms that capture has started and echoes the effective session directory, profile, sources, and segment cadence.
+- `capture_status`: reports non-terminal capture progress, including recording and finalizing states.
+- `capture_route_event`: reports capture route degradation or recovery facts for selected sources.
+- `segment_flushed`: reports one sealed, partial, or failed audio segment artifact reference.
+- `segments_flushed`: reports a non-empty batch of flushed segment facts.
+- `capture_finalized`: reports terminal capture status and summary metadata after finalization.
+- `error`: reports a protocol or capture failure using the generic error payload.
 
 #### Message Design Rules
 
@@ -857,6 +860,12 @@ The exact error-code taxonomy and any future move to RFC 7464 JSON Text Sequence
 #### Deferred
 
 - exact error-code taxonomy
+- `GetCaptureStatus` as a dedicated status query command
+- `ShutdownCaptureWorker` as an explicit shutdown command
+- `CaptureWorkerReady` as a distinct worker-ready event
+- `CaptureStartRejected` as a distinct rejection event
+- `CaptureWarning` as a distinct warning event
+- `CaptureStopped` as a distinct stop acknowledgement event
 - `CaptureHeartbeat` or equivalent liveness events
 - future framing/transport upgrades (JSON Text Sequences, LSP-style `Content-Length`, Unix-domain `socketpair`)
 - further subdivision into additional supervised workers
