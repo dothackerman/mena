@@ -6,7 +6,6 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from shlex import quote
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -16,8 +15,6 @@ from pytest import CaptureFixture
 import mena.cli as cli_module
 from mena.artifacts import (
     ArtifactRecord,
-    ArtifactStore,
-    ArtifactStoreError,
     FileSystemArtifactStore,
     session_artifact_manifest_path,
 )
@@ -153,6 +150,9 @@ from mena.transcription import (
     TranscriptProviderMetadata,
     TranscriptSegment,
     persist_transcript_artifact,
+)
+from test_correction_workflow import (
+    _build_session_bundle as _build_correction_session_bundle,
 )
 
 SESSION_ID = "00000000-0000-0000-0000-000000000001"
@@ -1079,7 +1079,9 @@ model = "semantic-model:latest"
         captured["semantic_factory"] = kwargs["semantic_coherence_provider_factory"]
         return 0
 
-    monkeypatch.setattr("mena.processing_orchestration.run_processing_command", _fake_run_processing_command)
+    monkeypatch.setattr(
+        "mena.processing_orchestration.run_processing_command", _fake_run_processing_command
+    )
 
     exit_code = main(["process", str(session_dir)], config_path=config_path)
 
@@ -1106,7 +1108,9 @@ def test_main_process_without_session_path_uses_latest_recorded_session(
         calls.append(cast(Path, kwargs["session_path"]))
         return 0
 
-    monkeypatch.setattr("mena.processing_orchestration.run_processing_command", _fake_run_processing_command)
+    monkeypatch.setattr(
+        "mena.processing_orchestration.run_processing_command", _fake_run_processing_command
+    )
 
     exit_code = main(["process"], settings=settings)
 
@@ -1137,7 +1141,9 @@ def test_main_process_without_session_path_prefers_unprocessed_recording(
         calls.append(cast(Path, kwargs["session_path"]))
         return 0
 
-    monkeypatch.setattr("mena.processing_orchestration.run_processing_command", _fake_run_processing_command)
+    monkeypatch.setattr(
+        "mena.processing_orchestration.run_processing_command", _fake_run_processing_command
+    )
 
     exit_code = main(["process"], settings=settings)
 
@@ -1169,7 +1175,9 @@ def test_main_process_without_session_path_skips_record_with_malformed_id(
         calls.append(cast(Path, kwargs["session_path"]))
         return 0
 
-    monkeypatch.setattr("mena.processing_orchestration.run_processing_command", _fake_run_processing_command)
+    monkeypatch.setattr(
+        "mena.processing_orchestration.run_processing_command", _fake_run_processing_command
+    )
 
     exit_code = main(["process"], settings=settings)
 
@@ -1199,7 +1207,9 @@ def test_main_process_without_session_path_skips_provider_unavailable_semantic_s
         calls.append(cast(Path, kwargs["session_path"]))
         return 0
 
-    monkeypatch.setattr("mena.processing_orchestration.run_processing_command", _fake_run_processing_command)
+    monkeypatch.setattr(
+        "mena.processing_orchestration.run_processing_command", _fake_run_processing_command
+    )
 
     exit_code = main(["process"], settings=settings)
 
@@ -1226,7 +1236,9 @@ def test_main_process_without_session_path_keeps_completed_session_with_corrupt_
         calls.append(cast(Path, kwargs["session_path"]))
         return 0
 
-    monkeypatch.setattr("mena.processing_orchestration.run_processing_command", _fake_run_processing_command)
+    monkeypatch.setattr(
+        "mena.processing_orchestration.run_processing_command", _fake_run_processing_command
+    )
 
     exit_code = main(["process"], settings=settings)
 
@@ -1261,7 +1273,9 @@ def test_main_process_without_session_path_reports_corrupt_completed_manifest(
         calls.append(cast(Path, kwargs["session_path"]))
         return 0
 
-    monkeypatch.setattr("mena.processing_orchestration.run_processing_command", _fake_run_processing_command)
+    monkeypatch.setattr(
+        "mena.processing_orchestration.run_processing_command", _fake_run_processing_command
+    )
 
     exit_code = main(["process"], settings=settings)
     captured = capsys.readouterr()
@@ -1298,7 +1312,9 @@ def test_main_process_without_session_path_reports_unreadable_completed_manifest
         calls.append(cast(Path, kwargs["session_path"]))
         return 0
 
-    monkeypatch.setattr("mena.processing_orchestration.run_processing_command", _fake_run_processing_command)
+    monkeypatch.setattr(
+        "mena.processing_orchestration.run_processing_command", _fake_run_processing_command
+    )
 
     exit_code = main(["process"], settings=settings)
     captured = capsys.readouterr()
@@ -1327,7 +1343,9 @@ def test_main_process_without_session_path_keeps_failed_processing_candidate(
         calls.append(cast(Path, kwargs["session_path"]))
         return 0
 
-    monkeypatch.setattr("mena.processing_orchestration.run_processing_command", _fake_run_processing_command)
+    monkeypatch.setattr(
+        "mena.processing_orchestration.run_processing_command", _fake_run_processing_command
+    )
 
     exit_code = main(["process"], settings=settings)
 
@@ -1357,7 +1375,9 @@ def test_main_process_without_session_path_prompts_for_multiple_candidates(
         calls.append(cast(Path, kwargs["session_path"]))
         return 0
 
-    monkeypatch.setattr("mena.processing_orchestration.run_processing_command", _fake_run_processing_command)
+    monkeypatch.setattr(
+        "mena.processing_orchestration.run_processing_command", _fake_run_processing_command
+    )
 
     exit_code = main(["process"], settings=settings, input_fn=lambda _prompt: "")
     captured = capsys.readouterr()
@@ -1390,7 +1410,9 @@ def test_main_process_without_session_path_can_select_older_candidate(
         calls.append(cast(Path, kwargs["session_path"]))
         return 0
 
-    monkeypatch.setattr("mena.processing_orchestration.run_processing_command", _fake_run_processing_command)
+    monkeypatch.setattr(
+        "mena.processing_orchestration.run_processing_command", _fake_run_processing_command
+    )
 
     exit_code = main(["process"], settings=settings, input_fn=lambda _prompt: "2")
 
@@ -1448,7 +1470,9 @@ def test_main_process_without_session_path_uses_latest_completed_recording(
         calls.append(cast(Path, kwargs["session_path"]))
         return 0
 
-    monkeypatch.setattr("mena.processing_orchestration.run_processing_command", _fake_run_processing_command)
+    monkeypatch.setattr(
+        "mena.processing_orchestration.run_processing_command", _fake_run_processing_command
+    )
 
     exit_code = main(["process"], settings=settings)
 
@@ -1563,7 +1587,9 @@ def test_main_process_explicit_session_path_overrides_latest_recorded_session(
         calls.append(cast(Path, kwargs["session_path"]))
         return 0
 
-    monkeypatch.setattr("mena.processing_orchestration.run_processing_command", _fake_run_processing_command)
+    monkeypatch.setattr(
+        "mena.processing_orchestration.run_processing_command", _fake_run_processing_command
+    )
 
     exit_code = main(["process", str(explicit.record_path)], settings=settings)
 
@@ -1588,7 +1614,9 @@ def test_main_process_prints_start_and_success_handoff(
         print("third-party dependency warning")
         return 0
 
-    monkeypatch.setattr("mena.processing_orchestration.run_processing_command", _fake_run_processing_command)
+    monkeypatch.setattr(
+        "mena.processing_orchestration.run_processing_command", _fake_run_processing_command
+    )
 
     exit_code = main(["process"], settings=settings)
     captured = capsys.readouterr()
@@ -1619,7 +1647,9 @@ def test_main_process_omits_correction_handoff_after_semantic_provider_skip(
         _mark_semantic_provider_unavailable_skip(session)
         return 0
 
-    monkeypatch.setattr("mena.processing_orchestration.run_processing_command", _fake_run_processing_command)
+    monkeypatch.setattr(
+        "mena.processing_orchestration.run_processing_command", _fake_run_processing_command
+    )
 
     exit_code = main(["process"], settings=settings)
     captured = capsys.readouterr()
@@ -1644,7 +1674,9 @@ def test_main_process_does_not_print_success_handoff_on_failure(
     def _fake_run_processing_command(**_kwargs: object) -> int:
         raise ValueError("processing failed")
 
-    monkeypatch.setattr("mena.processing_orchestration.run_processing_command", _fake_run_processing_command)
+    monkeypatch.setattr(
+        "mena.processing_orchestration.run_processing_command", _fake_run_processing_command
+    )
 
     exit_code = main(["process"], settings=settings)
     captured = capsys.readouterr()
@@ -2359,15 +2391,19 @@ def test_resolve_latest_merged_transcript_record_ignores_corrupt_payload(
 
 def test_main_correct_handles_artifact_store_errors(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     capsys: CaptureFixture[str],
 ) -> None:
-    def _raise_artifact_error(**_kwargs: object) -> None:
-        raise ArtifactStoreError("Unsupported artifact manifest version.")
+    session_dir = _create_session_record(tmp_path)
+    manifest_path = session_artifact_manifest_path(session_dir)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps({"version": 999, "session_id": SESSION_ID, "artifacts": []}),
+        encoding="utf-8",
+    )
 
-    monkeypatch.setattr("mena.cli.run_correction_workflow", _raise_artifact_error)
-
-    exit_code = main(["correct", str(tmp_path)])
+    # The correction workflow surfaces a real ArtifactStoreError, which the
+    # adapter maps to exit code 1 with a "Cannot run correction workflow:" prefix.
+    exit_code = main(["correct", str(session_dir)])
     captured = capsys.readouterr()
 
     assert exit_code == 1
@@ -2458,24 +2494,13 @@ def test_console_correction_interaction_prints_playback_and_completion_notices(
 
 def test_main_correct_does_not_select_runtime_profile(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[Path] = []
+    # A correctable session with an empty review queue: no runtime profile state
+    # is persisted, so the correction command completing proves it never acquires
+    # summarization runtime resources (which would require accepted profile state).
+    session_dir, _, _ = _build_correction_session_bundle(tmp_path, flags=())
 
-    def _fake_run_correction_workflow(**kwargs: object) -> None:
-        calls.append(cast(Path, kwargs["session_path"]))
-
-    def _fail_runtime_profile_selection(**_kwargs: object) -> None:
-        raise AssertionError("correction must not acquire runtime resources")
-
-    monkeypatch.setattr("mena.cli.run_correction_workflow", _fake_run_correction_workflow)
-    monkeypatch.setattr(
-        "mena.cli.select_summarization_runtime_profile",
-        _fail_runtime_profile_selection,
-    )
-
-    assert main(["correct", str(tmp_path)]) == 0
-    assert calls == [tmp_path]
+    assert main(["correct", str(session_dir)]) == 0
 
 
 def test_main_process_requires_accepted_runtime_profile_state(
@@ -2761,7 +2786,9 @@ def test_main_process_stores_runtime_profile_provenance_before_processing_stages
     def _fail_processing_stages(**_kwargs: object) -> None:
         raise RuntimeError("stage should see existing runtime provenance")
 
-    monkeypatch.setattr("mena.processing_orchestration.run_processing_stages", _fail_processing_stages)
+    monkeypatch.setattr(
+        "mena.processing_orchestration.run_processing_stages", _fail_processing_stages
+    )
 
     with pytest.raises(RuntimeError, match="stage should see existing runtime provenance"):
         main(["process", str(session.record_path)], settings=settings, run_id="run-before-stage")
@@ -2783,11 +2810,11 @@ def test_resolve_runtime_fallback_input_guards_non_tty(
     # An explicit input function is always honored verbatim.
     assert _resolve_runtime_fallback_input(explicit) is explicit
     # On a real TTY, the builtin input prompt is used.
-    monkeypatch.setattr("mena.cli.sys.stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr("sys.stdin", SimpleNamespace(isatty=lambda: True))
     assert _resolve_runtime_fallback_input(None) is input
     # On a non-TTY stdin, no prompt is wired so the fallback raises an actionable
     # error instead of input() raising EOFError.
-    monkeypatch.setattr("mena.cli.sys.stdin", SimpleNamespace(isatty=lambda: False))
+    monkeypatch.setattr("sys.stdin", SimpleNamespace(isatty=lambda: False))
     assert _resolve_runtime_fallback_input(None) is None
 
 
@@ -2840,7 +2867,9 @@ def test_main_process_records_terminal_runtime_stewardship_release(
         )
 
     monkeypatch.setattr("mena.semantic_coherence.unload_ollama_model", _fake_unload_ollama_model)
-    monkeypatch.setattr("mena.processing_orchestration.run_processing_stages", _fake_run_processing_stages)
+    monkeypatch.setattr(
+        "mena.processing_orchestration.run_processing_stages", _fake_run_processing_stages
+    )
 
     exit_code = main(
         ["process", str(session.record_path)],
@@ -4593,7 +4622,9 @@ def _patch_processing_stages(
             semantic_coherence_result=SimpleNamespace(skipped=False, skip_reason=None)
         )
 
-    monkeypatch.setattr("mena.processing_orchestration.run_processing_stages", _fake_run_processing_stages)
+    monkeypatch.setattr(
+        "mena.processing_orchestration.run_processing_stages", _fake_run_processing_stages
+    )
     return invocation
 
 
@@ -5124,6 +5155,31 @@ def test_main_summarize_exits_3_when_summarization_fallback_is_unavailable(
     assert exit_code == 3
     assert "Cannot summarize session:" in captured.out
     assert "fallback-provider list is empty" in captured.out
+
+
+def test_console_summarize_interaction_renders_completion_handoff(
+    capsys: CaptureFixture[str],
+) -> None:
+    interaction = cli_module.ConsoleSummarizeInteraction(None)
+
+    interaction.notify(
+        WorkflowNotice(
+            topic="summarize.completed",
+            context={
+                "summary_path": "artifacts/summary/summary/final.json",
+                "session_dir": Path("/data/session"),
+                "summary_artifact_id": "sid:artifacts/summary/final.json",
+            },
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert "Notes created: artifacts/summary/summary/final.json" in captured.out
+    assert "Session path: /data/session" in captured.out
+    assert (
+        "Next command: mena export --summary-artifact-id "
+        "sid:artifacts/summary/final.json /data/session"
+    ) in captured.out
 
 
 def test_console_summarize_interaction_confirms_remote_fallback(

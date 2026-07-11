@@ -731,7 +731,9 @@ def test_summarize_workflow_reenters_the_fallback_ladder_when_the_fallback_fails
     assert stored_attempts == [(1, "initial"), (2, "stage-fallback")]
 
 
-def _language_capturing_stage(captured: dict[str, object]):
+def _language_capturing_stage(
+    captured: dict[str, object],
+) -> Callable[..., SimpleNamespace]:
     def _stage(**kwargs: object) -> SimpleNamespace:
         policy = cast(SummarizationPolicy | None, kwargs.get("policy"))
         captured["language"] = policy.language if policy is not None else None
