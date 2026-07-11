@@ -91,8 +91,7 @@ from mena.runtime_profile import (
 from mena.runtime_stewardship import (
     RUNTIME_STEWARDSHIP_RELEASE_NOTICE_TOPIC,
     RuntimeReleaseResult,
-    release_terminal_local_llm,
-    store_runtime_stewardship_provenance,
+    record_terminal_runtime_release,
 )
 from mena.semantic_coherence import (
     SEMANTIC_COHERENCE_STAGE,
@@ -1435,33 +1434,21 @@ def _record_terminal_local_llm_release(
     stage: str,
     boundary: str,
 ) -> RuntimeReleaseResult | None:
-    result = release_terminal_local_llm(
+    result = record_terminal_runtime_release(
+        store=store,
+        run_id=run_id,
+        attempt=attempt,
         provider=provider,
         stage=stage,
         boundary=boundary,
     )
-    if _release_skipped_without_observed_resource_use(result):
+    if result is None:
         return None
-    store_runtime_stewardship_provenance(
-        store=store,
-        run_id=run_id,
-        attempt=attempt,
-        boundary=boundary,
-        release_results=(result,),
-    )
     if result.status in {"failed", "not_supported"}:
         print(f"Runtime stewardship warning: {result.detail}")
     else:
         print(f"Runtime stewardship: {result.detail}")
     return result
-
-
-def _release_skipped_without_observed_resource_use(result: RuntimeReleaseResult) -> bool:
-    return (
-        result.status == "not_supported"
-        and result.detail
-        == "Provider did not observe Mena-owned runtime resource use for this lease."
-    )
 
 
 def _run_inspect_command(

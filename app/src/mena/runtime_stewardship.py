@@ -12,6 +12,9 @@ from mena.artifacts import ArtifactRecord, ArtifactStore
 RUNTIME_STEWARDSHIP_PROVENANCE_CONTRACT = "runtime-stewardship-provenance.v1"
 RUNTIME_STEWARDSHIP_RELEASE_NOTICE_TOPIC = "runtime_stewardship.release"
 RUNTIME_RELEASE_STATUSES = frozenset({"released", "not_supported", "failed"})
+RUNTIME_RELEASE_UNOBSERVED_RESOURCE_DETAIL = (
+    "Provider did not observe Mena-owned runtime resource use for this lease."
+)
 
 
 @dataclass(frozen=True)
@@ -96,7 +99,7 @@ def release_terminal_local_llm(
         return RuntimeReleaseResult(
             lease=lease,
             status="not_supported",
-            detail="Provider did not observe Mena-owned runtime resource use for this lease.",
+            detail=RUNTIME_RELEASE_UNOBSERVED_RESOURCE_DETAIL,
         )
     release = getattr(provider, "release_runtime_resource", None)
     if not callable(release):
@@ -119,6 +122,30 @@ def release_terminal_local_llm(
             status="failed",
             detail="Provider runtime release returned an invalid result.",
         )
+    return result
+
+
+def record_terminal_runtime_release(
+    *,
+    store: ArtifactStore,
+    run_id: str,
+    attempt: int,
+    provider: object,
+    stage: str,
+    boundary: str,
+) -> RuntimeReleaseResult | None:
+    """Release and persist terminal runtime stewardship, skipping unused leases."""
+
+    result = release_terminal_local_llm(provider=provider, stage=stage, boundary=boundary)
+    if _release_skipped_without_observed_resource_use(result):
+        return None
+    store_runtime_stewardship_provenance(
+        store=store,
+        run_id=run_id,
+        attempt=attempt,
+        boundary=boundary,
+        release_results=(result,),
+    )
     return result
 
 
@@ -161,3 +188,10 @@ def _aggregate_status(release_results: Sequence[RuntimeReleaseResult]) -> str:
     if any(result.status == "released" for result in release_results):
         return "released"
     return "not_supported"
+
+
+def _release_skipped_without_observed_resource_use(result: RuntimeReleaseResult) -> bool:
+    return (
+        result.status == "not_supported"
+        and result.detail == RUNTIME_RELEASE_UNOBSERVED_RESOURCE_DETAIL
+    )

@@ -26,8 +26,7 @@ from mena.ollama_summarization import OllamaSummarizationProvider
 from mena.provider_validation import require_provider, require_provider_instance
 from mena.runtime_stewardship import (
     RuntimeReleaseResult,
-    release_terminal_local_llm,
-    store_runtime_stewardship_provenance,
+    record_terminal_runtime_release,
 )
 from mena.semantic_coherence import OllamaSemanticCoherenceProvider, SemanticCoherenceProvider
 from mena.settings import AppSettings
@@ -625,6 +624,11 @@ def _resolve_local_summarization_fallback(
     evaluation = _scope_evaluation(evaluate_setup(detection_profile, state), scope)
     if not evaluation.ready:
         return f"Ollama fallback is not viable: {'; '.join(evaluation.blocking_reasons)}"
+    if not _automatic_local_fallback_authorized(accepted, scope):
+        return (
+            "Ollama fallback transition is not pre-authorized; re-run setup to accept "
+            "local summarization fallback"
+        )
     return ResolvedSummarizationFallback(
         plan=SummarizationRuntimePlan(
             accepted_stage=accepted_stage,
@@ -908,7 +912,7 @@ def run_summarization_with_runtime_fallback(
         select_summarization_runtime_after_stage_failure
     ),
     runtime_profile_store_fn: RuntimeProfileStore | None = None,
-    terminal_release_fn: TerminalRuntimeRelease = release_terminal_local_llm,
+    terminal_release_fn: TerminalRuntimeRelease = record_terminal_runtime_release,
 ) -> SummarizationRuntimeRunResult:
     """Run summarization with resolver-owned provider selection and fallback."""
 
@@ -938,6 +942,7 @@ def run_summarization_with_runtime_fallback(
         env=env,
     )
     current_attempt = attempt
+    released_attempts: set[int] = set()
     value: Any | None = None
     try:
         while True:
@@ -972,73 +977,43 @@ def run_summarization_with_runtime_fallback(
                     selection=fallback_selection,
                     name_suffix="stage-fallback",
                 )
-                released = _record_terminal_runtime_release(
+                released = terminal_release_fn(
                     store=store,
                     run_id=run_id,
                     attempt=current_attempt,
                     provider=provider,
                     stage="summarization",
                     boundary="summarize",
-                    terminal_release_fn=terminal_release_fn,
                 )
+                released_attempts.add(current_attempt)
                 if released is not None:
                     release_results.append(released)
-                provider = bind_summarization_runtime(
+                fallback_provider = bind_summarization_runtime(
                     selection=fallback_selection,
                     settings=settings,
                     summarization_provider_factory=summarization_provider_factory,
                     env=env,
                 )
+                provider = fallback_provider
                 selection = fallback_selection
                 current_attempt = fallback_attempt
     finally:
-        released = _record_terminal_runtime_release(
-            store=store,
-            run_id=run_id,
-            attempt=current_attempt,
-            provider=provider,
-            stage="summarization",
-            boundary="summarize",
-            terminal_release_fn=terminal_release_fn,
-        )
-        if released is not None:
-            release_results.append(released)
+        if current_attempt not in released_attempts:
+            released = terminal_release_fn(
+                store=store,
+                run_id=run_id,
+                attempt=current_attempt,
+                provider=provider,
+                stage="summarization",
+                boundary="summarize",
+            )
+            if released is not None:
+                release_results.append(released)
     return SummarizationRuntimeRunResult(
         value=value,
         selection=selection,
         provider=provider,
         release_results=tuple(release_results),
-    )
-
-
-def _record_terminal_runtime_release(
-    *,
-    store: FileSystemArtifactStore,
-    run_id: str,
-    attempt: int,
-    provider: object,
-    stage: str,
-    boundary: str,
-    terminal_release_fn: TerminalRuntimeRelease,
-) -> RuntimeReleaseResult | None:
-    result = terminal_release_fn(provider=provider, stage=stage, boundary=boundary)
-    if result is None or _release_skipped_without_observed_resource_use(result):
-        return None
-    store_runtime_stewardship_provenance(
-        store=store,
-        run_id=run_id,
-        attempt=attempt,
-        boundary=boundary,
-        release_results=(result,),
-    )
-    return result
-
-
-def _release_skipped_without_observed_resource_use(result: RuntimeReleaseResult) -> bool:
-    return (
-        result.status == "not_supported"
-        and result.detail
-        == "Provider did not observe Mena-owned runtime resource use for this lease."
     )
 
 

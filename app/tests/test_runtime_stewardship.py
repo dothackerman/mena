@@ -7,6 +7,7 @@ from mena.runtime_stewardship import (
     RuntimeLease,
     RuntimeReleaseResult,
     local_llm_lease,
+    record_terminal_runtime_release,
     release_terminal_local_llm,
     store_runtime_stewardship_provenance,
 )
@@ -119,3 +120,53 @@ def test_runtime_stewardship_provenance_persists_release_results() -> None:
     assert payload["releases"][0]["status"] == "released"
     assert payload["releases"][0]["lease"]["resource_kind"] == "local_llm"
     assert record.metadata["status"] == "released"
+
+
+def test_record_terminal_runtime_release_skips_unobserved_resource_use() -> None:
+    class Provider:
+        metadata = type("Metadata", (), {"name": "fake-llm", "model": "model-a"})()
+        runtime_resource_used = False
+
+    store = InMemoryArtifactStore(session_id="session-1")
+
+    result = record_terminal_runtime_release(
+        store=store,
+        run_id="summarize-1",
+        attempt=1,
+        provider=Provider(),
+        stage="summarization",
+        boundary="summarize",
+    )
+
+    assert result is None
+    assert store.list(artifact_type="runtime_stewardship_provenance") == ()
+
+
+def test_record_terminal_runtime_release_persists_observed_release_result() -> None:
+    class Provider:
+        metadata = type("Metadata", (), {"name": "fake-llm", "model": "model-a"})()
+        runtime_resource_used = True
+
+        def release_runtime_resource(self, lease: RuntimeLease) -> RuntimeReleaseResult:
+            return RuntimeReleaseResult(
+                lease=lease,
+                status="released",
+                detail="released by fake provider",
+            )
+
+    store = InMemoryArtifactStore(session_id="session-1")
+
+    result = record_terminal_runtime_release(
+        store=store,
+        run_id="summarize-1",
+        attempt=1,
+        provider=Provider(),
+        stage="summarization",
+        boundary="summarize",
+    )
+
+    records = store.list(artifact_type="runtime_stewardship_provenance")
+    assert result is not None
+    assert result.status == "released"
+    assert len(records) == 1
+    assert records[0].metadata["status"] == "released"
