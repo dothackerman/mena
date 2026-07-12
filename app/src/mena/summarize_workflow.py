@@ -46,7 +46,6 @@ from mena.runtime_stewardship import (
 )
 from mena.sessions import (
     SESSION_RECORD_FILENAME,
-    ResolvedSession,
     resolve_session,
     session_id,
     session_language_or_default,
@@ -62,7 +61,6 @@ from mena.summarization import (
 from mena.timestamps import parse_utc_timestamp
 
 SummarizationRuntimeRunnerFn = Callable[..., SummarizationRuntimeRunResult]
-ResolveSessionFn = Callable[[Path], ResolvedSession]
 
 
 @dataclass(frozen=True)
@@ -145,13 +143,9 @@ def run_summarization_command(
     summarization_runtime_runner_fn: SummarizationRuntimeRunnerFn = (
         run_summarization_with_runtime_fallback
     ),
-    resolve_session_fn: ResolveSessionFn | None = None,
     interaction: InteractionPort | None = None,
 ) -> int:
-    if resolve_session_fn is None:
-        resolve_session_fn = resolve_session
-
-    resolved_session = resolve_session_fn(session_path)
+    resolved_session = resolve_session(session_path)
     session_dir = resolved_session.session_dir
     session_record = resolved_session.record
     session_id_value = session_id(session_record)
