@@ -36,6 +36,54 @@ def test_session_lock_rejects_second_mutating_command_with_holder_details(
     assert str(session_dir) in message
 
 
+def test_session_lock_retries_when_lock_disappears_during_acquire(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    lock_path = session_dir / ORCHESTRATOR_LOCK_FILENAME
+    lock_path.write_text(
+        json.dumps(
+            {
+                "pid": os.getpid(),
+                "hostname": socket.gethostname(),
+                "acquired_at": "2026-07-12T18:00:00Z",
+                "command": "process",
+                "owner_token": "released",
+                "process_start_ticks": 100,
+            }
+        ),
+        encoding="utf-8",
+    )
+    original_create = session_lock_module._create_exclusive_json
+    release_before_read_pending = True
+
+    def _release_before_holder_read(
+        path: Path,
+        payload: dict[str, object],
+    ) -> None:
+        nonlocal release_before_read_pending
+        if release_before_read_pending:
+            release_before_read_pending = False
+            assert path == lock_path
+            lock_path.unlink()
+            raise FileExistsError
+        original_create(path, payload)
+
+    monkeypatch.setattr(
+        session_lock_module,
+        "_create_exclusive_json",
+        _release_before_holder_read,
+    )
+
+    with acquire_session_lock(session_dir=session_dir, command="summarize"):
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+
+    assert payload["command"] == "summarize"
+    assert not lock_path.exists()
+
+
 def test_session_lock_reclaims_same_host_dead_pid(tmp_path: Path) -> None:
     session_dir = tmp_path / "session"
     session_dir.mkdir()

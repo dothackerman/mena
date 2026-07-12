@@ -86,17 +86,21 @@ class SessionLock:
 
     def acquire(self) -> None:
         payload = _lock_payload(command=self.command, owner_token=self._owner_token)
-        try:
-            _create_exclusive_json(self.lock_path, payload)
-        except FileExistsError:
-            holder = _read_lock_info(self.lock_path)
-            if _is_reclaimable_stale_lock(holder):
-                _reclaim_stale_lock(
-                    self.lock_path,
-                    payload=payload,
-                    expected_holder=holder,
-                )
-            else:
+        while True:
+            try:
+                _create_exclusive_json(self.lock_path, payload)
+                break
+            except FileExistsError:
+                holder = _read_existing_lock_info(self.lock_path)
+                if holder is None:
+                    continue
+                if _is_reclaimable_stale_lock(holder):
+                    _reclaim_stale_lock(
+                        self.lock_path,
+                        payload=payload,
+                        expected_holder=holder,
+                    )
+                    break
                 raise SessionLockContention(
                     _contention_message(
                         holder=holder,
@@ -146,7 +150,18 @@ def _read_json_object(path: Path) -> dict[str, object] | None:
 
 
 def _read_lock_info(path: Path) -> SessionLockInfo:
-    data = _read_json_object(path)
+    return _read_existing_lock_info(path) or SessionLockInfo.from_mapping(None)
+
+
+def _read_existing_lock_info(path: Path) -> SessionLockInfo | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError):
+        return SessionLockInfo.from_mapping(None)
+    if not isinstance(data, dict):
+        return SessionLockInfo.from_mapping(None)
     return SessionLockInfo.from_mapping(data)
 
 
