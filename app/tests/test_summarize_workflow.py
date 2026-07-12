@@ -24,6 +24,7 @@ from mena.runtime_stewardship import (
     RuntimeLease,
     RuntimeReleaseResult,
 )
+from mena.session_lock import SessionLockContention, acquire_session_lock
 from mena.sessions import (
     SESSION_RECORD_FILENAME,
     resolve_session,
@@ -283,6 +284,25 @@ def test_summarize_workflow_notifies_progress_and_export_guidance(
         "00000000-0000-0000-0000-000000000001:artifacts/summary/summary/final.json"
     )
     assert interaction.notices[-1].context["session_dir"] == session_dir
+
+
+def test_summarize_workflow_rejects_locked_session_bundle(
+    tmp_path: Path,
+) -> None:
+    session_dir, _, _, _ = _build_summarize_session_bundle(tmp_path)
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+
+    with (
+        acquire_session_lock(session_dir=session_dir, command="process"),
+        pytest.raises(SessionLockContention, match="command=process"),
+    ):
+        run_summarization_command(
+            session_path=session_dir,
+            manual_notes=None,
+            language=None,
+            settings=settings,
+            summarization_provider_factory=_fake_provider_factory(),
+        )
 
 
 def test_summarize_workflow_prints_quoted_export_command_for_returned_summary(

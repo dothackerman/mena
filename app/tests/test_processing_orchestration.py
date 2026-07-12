@@ -31,6 +31,7 @@ from mena.processing_orchestration import (
     prepare_source_audio_inputs,
     run_processing_command,
     run_processing_stages,
+    run_resume_processing_command,
     runtime_fallback_stage_for_provider_failure,
     validate_capture_segment_alignment,
 )
@@ -42,6 +43,7 @@ from mena.runtime_stewardship import (
     RuntimeReleaseResult,
 )
 from mena.semantic_coherence import FakeSemanticCoherenceProvider, SemanticCoherenceResult
+from mena.session_lock import SessionLockContention, acquire_session_lock
 from mena.settings import AppSettings
 from mena.setup import (
     CommandIdentity,
@@ -308,6 +310,40 @@ def test_run_processing_command_runs_pipeline_with_provider_fakes(
     ]
     assert len(store.list(artifact_type="review_queue")) == 2
     assert "Processing completed for run 'run-1' (attempt 2)." in capsys.readouterr().out
+
+
+def test_run_processing_command_rejects_locked_session_bundle(tmp_path: Path) -> None:
+    session_path = _write_processing_session(tmp_path)
+
+    with (
+        acquire_session_lock(session_dir=session_path, command="summarize"),
+        pytest.raises(SessionLockContention, match="command=summarize"),
+    ):
+        run_processing_command(
+            session_path=session_path,
+            run_id="run-locked",
+            attempt=1,
+            now=NOW,
+            transcription_provider_factory=FakeTranscriptionProvider,
+            diarization_provider_factory=FakeDiarizationProvider,
+            semantic_coherence_provider_factory=lambda: FakeSemanticCoherenceProvider(results={}),
+        )
+
+
+def test_run_resume_processing_command_rejects_locked_session_bundle(tmp_path: Path) -> None:
+    session_path = _write_processing_session(tmp_path)
+
+    with (
+        acquire_session_lock(session_dir=session_path, command="process"),
+        pytest.raises(SessionLockContention, match="command=process"),
+    ):
+        run_resume_processing_command(
+            session_path=session_path,
+            now=NOW,
+            transcription_provider_factory=FakeTranscriptionProvider,
+            diarization_provider_factory=FakeDiarizationProvider,
+            semantic_coherence_provider_factory=lambda: FakeSemanticCoherenceProvider(results={}),
+        )
 
 
 def test_run_processing_command_preserves_noninteractive_fallback_guidance(

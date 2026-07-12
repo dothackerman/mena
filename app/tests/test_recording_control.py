@@ -25,6 +25,7 @@ from mena.recording_control import (
     _wait_for_record_stop,
     run_recording_control_workflow,
 )
+from mena.session_lock import ORCHESTRATOR_LOCK_FILENAME
 from mena.sessions import create_session
 from test_cli import (
     SESSION_ID,
@@ -96,6 +97,26 @@ def test_recording_control_creates_recorded_session_with_scripted_stop(tmp_path:
         "record.capture_finalized",
         "record.process_handoff",
     ]
+
+
+def test_recording_control_releases_orchestrator_lock_on_dry_run(tmp_path: Path) -> None:
+    interaction = ScriptedInteraction()
+
+    result = run_recording_control_workflow(
+        RecordCommandInput(
+            profile=parse_capture_profile("online"),
+            language="en",
+            dry_run=True,
+        ),
+        data_root=tmp_path,
+        discoverer=_available_discoverer,
+        worker_factory=FakeWorkerProcess,
+        interaction=interaction,
+        now=None,
+    )
+
+    assert result.record_path is not None
+    assert not (result.record_path.parent / ORCHESTRATOR_LOCK_FILENAME).exists()
 
 
 def test_recording_control_uses_interaction_for_ambiguous_routes(tmp_path: Path) -> None:

@@ -29,6 +29,9 @@ from mena.merge_timing import (
 )
 from mena.processing import (
     ProcessingStageLedger,
+    ProcessingStageState,
+    latest_non_retryable_processing_failure,
+    latest_resumable_processing_state,
 )
 from mena.profiles import CaptureProfile, CaptureSemanticRole, DiarisationPolicy
 from mena.provider_validation import ProviderValidationError as ProviderValidationError
@@ -49,6 +52,7 @@ from mena.semantic_coherence import (
     SemanticCoherenceStageResult,
     run_semantic_coherence_stage,
 )
+from mena.session_lock import acquire_session_lock
 from mena.sessions import (
     resolve_session,
     session_id,
@@ -92,7 +96,101 @@ class ProcessingPipelineResult:
     semantic_coherence_result: SemanticCoherenceStageResult
 
 
+class ProcessingResumeUnavailable(RuntimeError):
+    """Raised when no retryable processing checkpoint can be resumed."""
+
+
 def run_processing_command(
+    *,
+    session_path: Path,
+    run_id: str,
+    attempt: int,
+    now: datetime | None,
+    transcription_provider_factory: ProviderFactoryInput = None,
+    diarization_provider_factory: ProviderFactoryInput = None,
+    semantic_coherence_provider_factory: ProviderFactoryInput = None,
+    settings: AppSettings | None = None,
+    setup_runner: Any | None = None,
+    setup_command_identity: Any | None = None,
+    setup_hardware: Any | None = None,
+    allow_runtime_fallback: bool = False,
+    interaction: InteractionPort | None = None,
+    orchestrator_command: str = "process",
+) -> int:
+    resolved_session = resolve_session(session_path)
+    with acquire_session_lock(
+        session_dir=resolved_session.session_dir,
+        command=orchestrator_command,
+    ):
+        return _run_processing_command_unlocked(
+            session_path=session_path,
+            run_id=run_id,
+            attempt=attempt,
+            now=now,
+            transcription_provider_factory=transcription_provider_factory,
+            diarization_provider_factory=diarization_provider_factory,
+            semantic_coherence_provider_factory=semantic_coherence_provider_factory,
+            settings=settings,
+            setup_runner=setup_runner,
+            setup_command_identity=setup_command_identity,
+            setup_hardware=setup_hardware,
+            allow_runtime_fallback=allow_runtime_fallback,
+            interaction=interaction,
+        )
+
+
+def run_resume_processing_command(
+    *,
+    session_path: Path,
+    now: datetime | None,
+    transcription_provider_factory: ProviderFactoryInput = None,
+    diarization_provider_factory: ProviderFactoryInput = None,
+    semantic_coherence_provider_factory: ProviderFactoryInput = None,
+    settings: AppSettings | None = None,
+    setup_runner: Any | None = None,
+    setup_command_identity: Any | None = None,
+    setup_hardware: Any | None = None,
+    allow_runtime_fallback: bool = False,
+    interaction: InteractionPort | None = None,
+) -> int:
+    resolved_session = resolve_session(session_path)
+    with acquire_session_lock(
+        session_dir=resolved_session.session_dir,
+        command="resume",
+    ):
+        session_id_value = session_id(resolved_session.record)
+        store = FileSystemArtifactStore(
+            session_id=session_id_value,
+            session_dir=resolved_session.session_dir,
+        )
+        resumable = latest_resumable_processing_state(
+            store,
+            session_id=session_id_value,
+        )
+        if resumable is None:
+            blocked = latest_non_retryable_processing_failure(
+                store,
+                session_id=session_id_value,
+            )
+            raise ProcessingResumeUnavailable(_resume_unavailable_message(blocked))
+        return _run_processing_command_unlocked(
+            session_path=session_path,
+            run_id=resumable.run_id,
+            attempt=resumable.attempt + 1,
+            now=now,
+            transcription_provider_factory=transcription_provider_factory,
+            diarization_provider_factory=diarization_provider_factory,
+            semantic_coherence_provider_factory=semantic_coherence_provider_factory,
+            settings=settings,
+            setup_runner=setup_runner,
+            setup_command_identity=setup_command_identity,
+            setup_hardware=setup_hardware,
+            allow_runtime_fallback=allow_runtime_fallback,
+            interaction=interaction,
+        )
+
+
+def _run_processing_command_unlocked(
     *,
     session_path: Path,
     run_id: str,
@@ -877,6 +975,21 @@ def _requires_runtime_profile(
         transcription_provider_factory=transcription_provider_factory,
         diarization_provider_factory=diarization_provider_factory,
         semantic_coherence_provider_factory=semantic_coherence_provider_factory,
+    )
+
+
+def _resume_unavailable_message(blocked: ProcessingStageState | None) -> str:
+    if blocked is None:
+        return "No retryable processing failure found to resume."
+    reason = blocked.error.message if blocked.error is not None else "Unknown processing failure."
+    code = (
+        blocked.error.code if blocked.error is not None and blocked.error.code is not None else None
+    )
+    context = f" (code={code})" if code else ""
+    return (
+        "Latest processing failure is non-retryable at run "
+        f"'{blocked.run_id}', stage '{blocked.stage}', "
+        f"attempt {blocked.attempt}: {reason}{context}"
     )
 
 
