@@ -210,7 +210,7 @@ def _acquire_reclaim_guard(
                 raise SessionLockContention(
                     _contention_message(holder=holder, session_dir=session_dir)
                 ) from None
-            path.unlink(missing_ok=True)
+            _unlink_if_holder_matches(path, holder)
 
 
 def _replace_stale_lock(path: Path, payload: dict[str, object]) -> None:
@@ -227,6 +227,12 @@ def _unlink_if_payload_matches(
         return
     current_payload = _read_json_object(path)
     if current_payload == expected_payload:
+        path.unlink(missing_ok=True)
+
+
+def _unlink_if_holder_matches(path: Path, expected_holder: SessionLockInfo) -> None:
+    current_holder = _read_lock_info(path)
+    if current_holder == expected_holder:
         path.unlink(missing_ok=True)
 
 

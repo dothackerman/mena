@@ -8,8 +8,10 @@ from pathlib import Path
 
 import pytest
 
+import mena.session_lock as session_lock_module
 from mena.session_lock import (
     ORCHESTRATOR_LOCK_FILENAME,
+    RECLAIM_GUARD_FILENAME,
     SessionLockContention,
     acquire_session_lock,
 )
@@ -106,6 +108,55 @@ def test_session_lock_allows_only_one_concurrent_stale_reclaim(tmp_path: Path) -
     assert results.count("contended") == 1
     assert len(acquired) == 1
     assert not lock_path.exists()
+
+
+def test_session_lock_stale_reclaim_guard_cleanup_preserves_replaced_guard(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    lock_path = session_dir / ORCHESTRATOR_LOCK_FILENAME
+    guard_path = session_dir / RECLAIM_GUARD_FILENAME
+    stale_guard_payload = {
+        "pid": 999_999_999,
+        "hostname": socket.gethostname(),
+        "acquired_at": "2026-07-12T18:00:00Z",
+        "command": "process",
+    }
+    fresh_guard_payload = {
+        "pid": os.getpid(),
+        "hostname": socket.gethostname(),
+        "acquired_at": "2026-07-12T18:05:00Z",
+        "command": "summarize",
+        "owner_token": "fresh",
+    }
+    lock_path.write_text(json.dumps(stale_guard_payload), encoding="utf-8")
+    guard_path.write_text(json.dumps(stale_guard_payload), encoding="utf-8")
+    original_read_lock_info = session_lock_module._read_lock_info
+    guard_reads = 0
+
+    def _read_lock_info_with_replaced_guard(path: Path) -> object:
+        nonlocal guard_reads
+        holder = original_read_lock_info(path)
+        if path == guard_path and guard_reads == 0:
+            guard_reads += 1
+            guard_path.write_text(json.dumps(fresh_guard_payload), encoding="utf-8")
+        return holder
+
+    monkeypatch.setattr(
+        session_lock_module,
+        "_read_lock_info",
+        _read_lock_info_with_replaced_guard,
+    )
+
+    with (
+        pytest.raises(SessionLockContention, match="command=summarize"),
+        acquire_session_lock(session_dir=session_dir, command="export"),
+    ):
+        raise AssertionError("fresh reclaim guard should block this contender")
+
+    assert json.loads(guard_path.read_text(encoding="utf-8")) == fresh_guard_payload
 
 
 def test_session_lock_releases_on_normal_completion_and_keyboard_interrupt(

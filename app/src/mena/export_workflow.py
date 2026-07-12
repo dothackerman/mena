@@ -12,7 +12,7 @@ from mena.exportable_summary import resolve_exportable_summary_session
 from mena.interaction import ConfirmationRequest, InteractionPort, WorkflowNotice
 from mena.session_integrity import load_verified_session_bundle
 from mena.session_lock import acquire_session_lock
-from mena.sessions import session_id
+from mena.sessions import resolve_session_paths, session_id
 from mena.settings import AppSettings
 
 ExportFormat = Literal["markdown"]
@@ -137,8 +137,9 @@ def resolve_export_session(
     settings: AppSettings,
 ) -> _ResolvedExportSession:
     if session_path is not None:
+        session_dir, _ = resolve_session_paths(session_path)
         return _ResolvedExportSession(
-            session_path=session_path,
+            session_path=session_dir,
             summary_artifact_id=summary_artifact_id,
         )
 

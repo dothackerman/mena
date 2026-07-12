@@ -140,6 +140,28 @@ def test_export_workflow_format_flag_skips_confirmation(
     assert [notice.topic for notice in interaction.notices] == ["export.completed"]
 
 
+def test_export_workflow_accepts_session_json_path_when_locking(tmp_path: Path) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    session_dir, store, merged_record = _build_export_session(
+        settings.paths.sessions_dir / "session"
+    )
+    _persist_summary(store=store, merged_transcript_record=merged_record)
+    interaction = ScriptedInteraction(())
+
+    result = run_export_workflow(
+        ExportCommandInput(
+            session_path=session_dir / SESSION_RECORD_FILENAME,
+            export_format="markdown",
+        ),
+        settings=settings,
+        interaction=interaction,
+    )
+
+    assert result.status == "success"
+    assert result.export_path is not None
+    assert str(result.export_path).startswith(str(session_dir))
+
+
 def test_export_workflow_rejects_unsupported_format_without_cli_parser(
     tmp_path: Path,
 ) -> None:
