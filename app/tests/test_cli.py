@@ -95,6 +95,11 @@ from mena.runtime_profile import (
     select_runtime_profile,
     store_runtime_profile_provenance,
 )
+from mena.runtime_stewardship import (
+    RUNTIME_STEWARDSHIP_RELEASE_NOTICE_TOPIC,
+    RuntimeLease,
+    RuntimeReleaseResult,
+)
 from mena.semantic_coherence import (
     FakeSemanticCoherenceProvider,
 )
@@ -5092,6 +5097,60 @@ def test_console_summarize_interaction_renders_completion_handoff(
         "Next command: mena export --summary-artifact-id "
         "sid:artifacts/summary/final.json /data/session"
     ) in captured.out
+
+
+def test_console_summarize_interaction_renders_runtime_stewardship_release_notice(
+    capsys: CaptureFixture[str],
+) -> None:
+    interaction = cli_module.ConsoleSummarizeInteraction(None)
+    release = RuntimeReleaseResult(
+        lease=RuntimeLease(
+            resource_kind="local_llm",
+            stage="summarization",
+            boundary="summarize",
+            provider="Ollama",
+            model="llama3.1:8b",
+        ),
+        status="released",
+        detail="Ollama model release completed: unloaded.",
+    )
+
+    interaction.notify(
+        WorkflowNotice(
+            topic=RUNTIME_STEWARDSHIP_RELEASE_NOTICE_TOPIC,
+            context={"result": release},
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert "Runtime stewardship: Ollama model release completed: unloaded." in captured.out
+
+
+def test_console_summarize_interaction_renders_runtime_stewardship_release_warning(
+    capsys: CaptureFixture[str],
+) -> None:
+    interaction = cli_module.ConsoleSummarizeInteraction(None)
+    release = RuntimeReleaseResult(
+        lease=RuntimeLease(
+            resource_kind="local_llm",
+            stage="summarization",
+            boundary="summarize",
+            provider="Ollama",
+            model="llama3.1:8b",
+        ),
+        status="failed",
+        detail="release failed",
+    )
+
+    interaction.notify(
+        WorkflowNotice(
+            topic=RUNTIME_STEWARDSHIP_RELEASE_NOTICE_TOPIC,
+            context={"result": release},
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert "Runtime stewardship warning: release failed" in captured.out
 
 
 def test_console_summarize_interaction_confirms_remote_fallback(

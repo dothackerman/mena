@@ -87,14 +87,11 @@ from mena.review_flagging import (
 )
 from mena.runtime_profile import (
     RuntimeFallbackUnavailable,
-    bind_summarization_runtime,
-    select_summarization_runtime_profile,
-    store_runtime_profile_provenance,
 )
 from mena.runtime_stewardship import (
+    RUNTIME_STEWARDSHIP_RELEASE_NOTICE_TOPIC,
     RuntimeReleaseResult,
-    release_terminal_local_llm,
-    store_runtime_stewardship_provenance,
+    record_terminal_runtime_release,
 )
 from mena.semantic_coherence import (
     SEMANTIC_COHERENCE_STAGE,
@@ -128,7 +125,6 @@ from mena.setup_workflow import (
 )
 from mena.summarization import (
     SummarizationError,
-    run_summarization_stage,
 )
 from mena.timestamps import parse_utc_timestamp
 from mena.transcription import (
@@ -556,6 +552,12 @@ class ConsoleSummarizeInteraction:
                 f"mena export --summary-artifact-id {quote(str(context['summary_artifact_id']))} "
                 f"{quote(str(context['session_dir']))}"
             )
+        elif topic == RUNTIME_STEWARDSHIP_RELEASE_NOTICE_TOPIC:
+            result = cast(RuntimeReleaseResult, context["result"])
+            if result.status in {"failed", "not_supported"}:
+                print(f"Runtime stewardship warning: {result.detail}")
+            else:
+                print(f"Runtime stewardship: {result.detail}")
         else:
             raise ValueError(f"Unsupported summarize notice topic '{topic}'.")
 
@@ -1383,11 +1385,6 @@ def _run_summarize_command(
         setup_command_identity=setup_command_identity,
         setup_hardware=setup_hardware,
         allow_runtime_fallback=allow_runtime_fallback,
-        runtime_profile_selector_fn=select_summarization_runtime_profile,
-        runtime_profile_store_fn=store_runtime_profile_provenance,
-        runtime_summarization_binder_fn=bind_summarization_runtime,
-        run_summarization_stage_fn=run_summarization_stage,
-        terminal_llm_release_fn=_record_terminal_local_llm_release,
         interaction=interaction,
     )
 
@@ -1437,33 +1434,21 @@ def _record_terminal_local_llm_release(
     stage: str,
     boundary: str,
 ) -> RuntimeReleaseResult | None:
-    result = release_terminal_local_llm(
+    result = record_terminal_runtime_release(
+        store=store,
+        run_id=run_id,
+        attempt=attempt,
         provider=provider,
         stage=stage,
         boundary=boundary,
     )
-    if _release_skipped_without_observed_resource_use(result):
+    if result is None:
         return None
-    store_runtime_stewardship_provenance(
-        store=store,
-        run_id=run_id,
-        attempt=attempt,
-        boundary=boundary,
-        release_results=(result,),
-    )
     if result.status in {"failed", "not_supported"}:
         print(f"Runtime stewardship warning: {result.detail}")
     else:
         print(f"Runtime stewardship: {result.detail}")
     return result
-
-
-def _release_skipped_without_observed_resource_use(result: RuntimeReleaseResult) -> bool:
-    return (
-        result.status == "not_supported"
-        and result.detail
-        == "Provider did not observe Mena-owned runtime resource use for this lease."
-    )
 
 
 def _run_inspect_command(
