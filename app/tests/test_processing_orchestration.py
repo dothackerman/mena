@@ -2,14 +2,12 @@ import json
 import wave
 from datetime import UTC, datetime
 from pathlib import Path
-from types import SimpleNamespace
 from typing import cast
 
 import pytest
 
 from mena.artifacts import FileSystemArtifactStore
-from mena.diarization import DiarizationProviderUnavailable
-from mena.interaction import ConfirmationRequest, ScriptedInteraction, ScriptedResponse
+from mena.diarization import DiarizationProviderUnavailable, FakeDiarizationProvider
 from mena.processing import ArtifactRef, ProcessingErrorInfo, ProcessingStageLedger
 from mena.processing_orchestration import (
     CaptureSegmentInput,
@@ -26,8 +24,8 @@ from mena.processing_orchestration import (
     validate_capture_segment_alignment,
 )
 from mena.profiles import get_capture_profile
-from mena.runtime_profile import RuntimeFallbackUnavailable, RuntimeProfileSelection
-from mena.transcription import TranscriptionProviderUnavailable
+from mena.semantic_coherence import FakeSemanticCoherenceProvider
+from mena.transcription import FakeTranscriptionProvider, TranscriptionProviderUnavailable
 
 SESSION_ID = "00000000-0000-0000-0000-000000000001"
 NOW = datetime(2026, 7, 2, 12, 0, 0, tzinfo=UTC)
@@ -79,46 +77,11 @@ def _write_processing_session(tmp_path: Path) -> Path:
     return tmp_path
 
 
-class _FakeTranscription:
-    name = "fake-transcription"
-
-    def transcribe(self) -> None:
-        raise AssertionError("not called")
-
-
-class _FakeDiarization:
-    name = "fake-diarization"
-    config_id = "fake-diarization"
-
-    def diarize(self) -> None:
-        raise AssertionError("not called")
-
-
-class _FakeSemantic:
-    metadata = SimpleNamespace(config_id="fake-semantic", to_dict=lambda: {})
-
-    def check(self) -> None:
-        raise AssertionError("not called")
-
-
-def _successful_processing_stages(**_kwargs: object) -> object:
-    return SimpleNamespace(semantic_coherence_result=SimpleNamespace(skip_reason=None))
-
-
-def test_run_processing_command_delegates_to_injected_stage_runner(
+def test_run_processing_command_runs_pipeline_with_provider_fakes(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    import mena.processing_orchestration as orchestration
-
     session_path = _write_processing_session(tmp_path)
-    monkeypatch.setattr(orchestration, "_requires_runtime_profile", lambda *_args: False)
-    calls: list[dict[str, object]] = []
-
-    def _stage_runner(**kwargs: object) -> object:
-        calls.append(kwargs)
-        return _successful_processing_stages(**kwargs)
 
     assert (
         run_processing_command(
@@ -126,113 +89,18 @@ def test_run_processing_command_delegates_to_injected_stage_runner(
             run_id="run-1",
             attempt=2,
             now=NOW,
-            transcription_provider_factory=_FakeTranscription,
-            diarization_provider_factory=_FakeDiarization,
-            semantic_coherence_provider_factory=_FakeSemantic,
-            processing_stages_runner=_stage_runner,
+            transcription_provider_factory=FakeTranscriptionProvider,
+            diarization_provider_factory=FakeDiarizationProvider,
+            semantic_coherence_provider_factory=lambda: FakeSemanticCoherenceProvider(results={}),
         )
         == 0
     )
 
-    assert calls[0]["session_language"] == "fr-CH"
-    source_inputs = cast(dict[str, object], calls[0]["source_inputs"])
-    assert sorted(source_inputs) == ["local_mic", "system_audio"]
+    store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=session_path)
+    assert len(store.list(artifact_type="transcript")) == 2
+    assert len(store.list(artifact_type="merged_transcript")) == 1
+    assert len(store.list(artifact_type="review_queue")) == 2
     assert "Processing completed for run 'run-1' (attempt 2)." in capsys.readouterr().out
-
-
-def test_run_processing_command_authorizes_runtime_fallback_through_interaction(
-    tmp_path: Path,
-) -> None:
-    session_path = _write_processing_session(tmp_path)
-    fallback_evaluation = SimpleNamespace(profile=SimpleNamespace(id="fallback"))
-    observed_authorization: list[bool] = []
-
-    def _runtime_selection(**kwargs: object) -> RuntimeProfileSelection:
-        authorizer = kwargs["authorize_runtime_fallback"]
-        assert callable(authorizer)
-        observed_authorization.append(authorizer("gpu missing", fallback_evaluation))
-        return cast(
-            RuntimeProfileSelection,
-            SimpleNamespace(
-                accepted=SimpleNamespace(),
-                actual=SimpleNamespace(
-                    selected_asr_profile=SimpleNamespace(
-                        id="fake-asr",
-                        checkpoint="tiny",
-                        device="cpu",
-                        compute_type="int8",
-                        reason="test",
-                    )
-                ),
-                fallback_used=True,
-            ),
-        )
-
-    interaction = ScriptedInteraction(
-        [ScriptedResponse(kind="confirm", topic="runtime_fallback.one_run", value=True)]
-    )
-
-    assert (
-        run_processing_command(
-            session_path=session_path,
-            run_id="run-1",
-            attempt=1,
-            now=NOW,
-            diarization_provider_factory=_FakeDiarization,
-            semantic_coherence_provider_factory=_FakeSemantic,
-            interaction=interaction,
-            runtime_selection_fn=_runtime_selection,
-            runtime_profile_provenance_store_fn=lambda **_kwargs: None,
-            processing_stages_runner=_successful_processing_stages,
-        )
-        == 0
-    )
-
-    assert observed_authorization == [True]
-    assert interaction.pending == 0
-    request = interaction.requests[0]
-    assert isinstance(request, ConfirmationRequest)
-    assert request.topic == "runtime_fallback.one_run"
-    assert request.default is False
-    assert request.context["accepted_failure"] == "gpu missing"
-    assert request.context["fallback_evaluation"] is fallback_evaluation
-
-
-def test_run_processing_command_declines_runtime_fallback_through_interaction(
-    tmp_path: Path,
-) -> None:
-    session_path = _write_processing_session(tmp_path)
-    fallback_evaluation = SimpleNamespace(profile=SimpleNamespace(id="fallback"))
-
-    def _runtime_selection(**kwargs: object) -> RuntimeProfileSelection:
-        authorizer = kwargs["authorize_runtime_fallback"]
-        assert callable(authorizer)
-        if not authorizer("gpu missing", fallback_evaluation):
-            raise RuntimeFallbackUnavailable(
-                "Accepted runtime profile is unavailable and fallback was declined."
-            )
-        raise AssertionError("fallback should have been declined")
-
-    interaction = ScriptedInteraction(
-        [ScriptedResponse(kind="confirm", topic="runtime_fallback.one_run", value=False)]
-    )
-
-    with pytest.raises(RuntimeFallbackUnavailable, match="fallback was declined"):
-        run_processing_command(
-            session_path=session_path,
-            run_id="run-1",
-            attempt=1,
-            now=NOW,
-            diarization_provider_factory=_FakeDiarization,
-            semantic_coherence_provider_factory=_FakeSemantic,
-            interaction=interaction,
-            runtime_selection_fn=_runtime_selection,
-            runtime_profile_provenance_store_fn=lambda **_kwargs: None,
-            processing_stages_runner=_successful_processing_stages,
-        )
-
-    assert interaction.pending == 0
-    assert interaction.requests[0].topic == "runtime_fallback.one_run"
 
 
 def test_run_processing_stages_sequences_room_mic_profile(tmp_path: Path) -> None:
@@ -252,55 +120,6 @@ def test_run_processing_stages_sequences_room_mic_profile(tmp_path: Path) -> Non
             artifact=source_artifact,
         )
     }
-    calls: list[tuple[str, dict[str, object]]] = []
-
-    def _transcription_stage(**kwargs: object) -> object:
-        calls.append(("transcription", kwargs))
-        transcript = store.store(
-            artifact_type="transcript",
-            name="transcripts/room_mic.json",
-            data=b"{}",
-        )
-        return SimpleNamespace(transcript_record=transcript)
-
-    def _diarization_stage(**kwargs: object) -> object:
-        calls.append(("diarization", kwargs))
-        regular = store.store(
-            artifact_type="diarization",
-            name="diarization/regular.json",
-            data=b"{}",
-        )
-        exclusive = store.store(
-            artifact_type="diarization",
-            name="diarization/exclusive.json",
-            data=b"{}",
-        )
-        return SimpleNamespace(
-            skipped=False,
-            artifacts=(
-                SimpleNamespace(kind="regular_timeline"),
-                SimpleNamespace(kind="exclusive_projection"),
-            ),
-            artifact_records=(regular, exclusive),
-        )
-
-    def _room_merge_stage(**kwargs: object) -> object:
-        calls.append(("room_merge", kwargs))
-        merged = store.store(
-            artifact_type="merged_transcript",
-            name="merged/room.json",
-            data=b"{}",
-        )
-        return SimpleNamespace(merged_transcript_record=merged)
-
-    def _confidence_stage(**kwargs: object) -> object:
-        calls.append(("confidence", kwargs))
-        return None
-
-    def _semantic_stage(**kwargs: object) -> object:
-        calls.append(("semantic", kwargs))
-        return SimpleNamespace(skip_reason="provider_unavailable")
-
     result = run_processing_stages(
         session_id=SESSION_ID,
         profile=profile,
@@ -309,28 +128,19 @@ def test_run_processing_stages_sequences_room_mic_profile(tmp_path: Path) -> Non
         ledger=ledger,
         attempt=1,
         now=NOW,
-        transcription_provider=SimpleNamespace(name="transcription"),
-        diarization_provider=SimpleNamespace(name="diarization", config_id="diarization"),
-        semantic_coherence_provider=SimpleNamespace(metadata=SimpleNamespace(config_id="semantic")),
+        transcription_provider=FakeTranscriptionProvider(),
+        diarization_provider=FakeDiarizationProvider(),
+        semantic_coherence_provider=FakeSemanticCoherenceProvider(results={}),
         session_language="it-CH",
-        transcription_stage_runner=_transcription_stage,
-        diarization_stage_runner=_diarization_stage,
-        room_mic_merge_timing_stage_runner=_room_merge_stage,
-        confidence_flagging_stage_runner=_confidence_stage,
-        semantic_coherence_stage_runner=_semantic_stage,
     )
 
-    assert [name for name, _kwargs in calls] == [
-        "transcription",
-        "diarization",
-        "room_merge",
-        "confidence",
-        "semantic",
-    ]
-    assert calls[0][1]["language"] == "it"
-    assert calls[2][1]["room_regular_diarization_record"] is not None
-    assert calls[2][1]["room_exclusive_diarization_record"] is not None
-    assert result.semantic_coherence_result.skip_reason == "provider_unavailable"
+    transcript_record = store.list(artifact_type="transcript")[0]
+    transcript = json.loads(store.retrieve(transcript_record.id))
+    assert transcript["language"]["requested"] == "it"
+    assert len(store.list(artifact_type="diarization")) == 3
+    assert len(store.list(artifact_type="merged_transcript")) == 1
+    assert len(store.list(artifact_type="review_queue")) == 2
+    assert result.semantic_coherence_result.skip_reason is None
 
 
 def test_prepare_source_audio_inputs_stitches_multiple_segments(tmp_path: Path) -> None:

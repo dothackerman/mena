@@ -24,7 +24,6 @@ from mena.cli import (
     WORKER_EXIT_TIMEOUT_SECONDS,
     ConsoleCorrectionInteraction,
     ConsoleProcessingInteraction,
-    _record_terminal_local_llm_release,
     _resolve_latest_merged_transcript_record,
     _resolve_record_language,
     _resolve_record_profile,
@@ -68,6 +67,7 @@ from mena.ollama_summarization import (
     OLLAMA_SUMMARIZATION_SEED,
 )
 from mena.processing import (
+    PROCESSING_STATE_ARTIFACT_TYPE,
     ArtifactRef,
     ProcessingErrorInfo,
     ProcessingStageLedger,
@@ -2548,15 +2548,24 @@ def test_main_process_revalidates_only_derived_runtime_dependencies(
     monkeypatch.setattr(
         "mena.runtime_profile.detect_local_installation_state", _detect_processing_state
     )
-    processing_calls = _patch_processing_stages(monkeypatch)
+    monkeypatch.setattr("mena.runtime_profile.production_runtime_required", lambda **_: True)
 
-    assert main(["process", str(session.record_path)], settings=settings) == 0
+    assert (
+        main(
+            ["process", str(session.record_path)],
+            settings=settings,
+            transcription_provider_factory=FakeTranscriptionProvider,
+            diarization_provider_factory=FakeDiarizationProvider,
+            semantic_coherence_provider_factory=lambda: FakeSemanticCoherenceProvider(results={}),
+        )
+        == 0
+    )
 
     assert set(cast(tuple[str, ...], observed["stages"])) == PROCESSING_REQUIRED_RUNTIME_STAGES
     assert observed["commands"] == ("mena",)
     assert observed["playback"] == ()
     assert observed["surfaces"] == ("faster_whisper", "pyannote.audio")
-    assert processing_calls["session_id"] == session.record.id
+    assert _completed_processing_payloads(session)
 
 
 def test_main_process_does_not_preflight_optional_semantic_runtime(
@@ -2584,11 +2593,20 @@ def test_main_process_does_not_preflight_optional_semantic_runtime(
     monkeypatch.setattr(
         "mena.runtime_profile.detect_local_installation_state", _detect_processing_state
     )
-    processing_calls = _patch_processing_stages(monkeypatch)
+    monkeypatch.setattr("mena.runtime_profile.production_runtime_required", lambda **_: True)
 
-    assert main(["process", str(session.record_path)], settings=settings) == 0
+    assert (
+        main(
+            ["process", str(session.record_path)],
+            settings=settings,
+            transcription_provider_factory=FakeTranscriptionProvider,
+            diarization_provider_factory=FakeDiarizationProvider,
+            semantic_coherence_provider_factory=lambda: FakeSemanticCoherenceProvider(results={}),
+        )
+        == 0
+    )
 
-    assert processing_calls["session_id"] == session.record.id
+    assert _completed_processing_payloads(session)
 
 
 def test_main_process_prompts_for_ready_one_run_runtime_fallback(
@@ -2622,7 +2640,7 @@ def test_main_process_prompts_for_ready_one_run_runtime_fallback(
         "mena.runtime_profile.detect_local_installation_state",
         lambda *_args, **_kwargs: fallback_ready_state,
     )
-    processing_calls = _patch_processing_stages(monkeypatch)
+    monkeypatch.setattr("mena.runtime_profile.production_runtime_required", lambda **_: True)
     prompts: list[str] = []
 
     def _input(prompt: str) -> str:
@@ -2633,6 +2651,9 @@ def test_main_process_prompts_for_ready_one_run_runtime_fallback(
         ["process", str(session.record_path)],
         settings=settings,
         input_fn=_input,
+        transcription_provider_factory=FakeTranscriptionProvider,
+        diarization_provider_factory=FakeDiarizationProvider,
+        semantic_coherence_provider_factory=lambda: FakeSemanticCoherenceProvider(results={}),
     )
     captured = capsys.readouterr()
 
@@ -2641,7 +2662,7 @@ def test_main_process_prompts_for_ready_one_run_runtime_fallback(
     assert "One-run local runtime fallback is ready:" in captured.out
     assert "Processing completed" in captured.out
     assert "with explicit runtime fallback" in captured.out
-    assert processing_calls["session_id"] == session.record.id
+    assert _completed_processing_payloads(session)
 
 
 @pytest.mark.parametrize(
@@ -2708,13 +2729,11 @@ def test_console_processing_interaction_rejects_unsupported_confirmation_topic()
         interaction.confirm(ConfirmationRequest(topic="record.capture_route.microphone"))
 
 
-def test_main_process_executes_full_pipeline_with_stubbed_stages(
+def test_main_process_executes_full_pipeline_with_provider_fakes(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     capsys: CaptureFixture[str],
 ) -> None:
     session = _build_processing_session(tmp_path)
-    processing_calls = _patch_processing_stages(monkeypatch)
 
     exit_code = main(
         ["process", str(session.record_path)],
@@ -2726,15 +2745,14 @@ def test_main_process_executes_full_pipeline_with_stubbed_stages(
 
     captured = capsys.readouterr()
     assert exit_code == 0
-    assert processing_calls["session_id"] == session.record.id
-    assert processing_calls["run_id"] == "manual-run-001"
-    assert processing_calls["attempt"] == 1
+    completed = _completed_processing_payloads(session)
+    assert {payload["run_id"] for payload in completed} == {"manual-run-001"}
+    assert {payload["attempt"] for payload in completed} == {1}
     assert "Processing completed for run 'manual-run-001' (attempt 1)." in captured.out
 
 
-def test_main_process_without_path_executes_full_pipeline_with_stubbed_stages(
+def test_main_process_without_path_executes_full_pipeline_with_provider_fakes(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     capsys: CaptureFixture[str],
 ) -> None:
     settings = AppSettings.from_env(env={}, home=tmp_path)
@@ -2753,8 +2771,6 @@ def test_main_process_without_path_executes_full_pipeline_with_stubbed_stages(
             },
         },
     )
-    processing_calls = _patch_processing_stages(monkeypatch)
-
     exit_code = main(
         ["process"],
         settings=settings,
@@ -2766,30 +2782,33 @@ def test_main_process_without_path_executes_full_pipeline_with_stubbed_stages(
 
     captured = capsys.readouterr()
     assert exit_code == 0
-    assert processing_calls["session_id"] == session.record.id
-    assert processing_calls["run_id"] == "manual-run-pathless"
+    completed = _completed_processing_payloads(session)
+    assert {payload["run_id"] for payload in completed} == {"manual-run-pathless"}
     assert f"Processing recording: {session.record_path}" in captured.out
     assert "Processing completed successfully." in captured.out
     assert f"Next command: mena correct {session.record_path}" in captured.out
 
 
-def test_main_process_stores_runtime_profile_provenance_before_processing_stages(
+def test_main_process_stores_runtime_profile_provenance(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session = _build_processing_session(tmp_path)
     settings = AppSettings.from_env(env={}, home=tmp_path)
     _persist_ready_runtime_profile_state(settings, monkeypatch)
+    monkeypatch.setattr("mena.runtime_profile.production_runtime_required", lambda **_: True)
 
-    def _fail_processing_stages(**_kwargs: object) -> None:
-        raise RuntimeError("stage should see existing runtime provenance")
-
-    monkeypatch.setattr(
-        "mena.processing_orchestration.run_processing_stages", _fail_processing_stages
+    assert (
+        main(
+            ["process", str(session.record_path)],
+            settings=settings,
+            run_id="run-before-stage",
+            transcription_provider_factory=FakeTranscriptionProvider,
+            diarization_provider_factory=FakeDiarizationProvider,
+            semantic_coherence_provider_factory=lambda: FakeSemanticCoherenceProvider(results={}),
+        )
+        == 0
     )
-
-    with pytest.raises(RuntimeError, match="stage should see existing runtime provenance"):
-        main(["process", str(session.record_path)], settings=settings, run_id="run-before-stage")
 
     store = FileSystemArtifactStore(session_id=session.record.id, session_dir=session.bundle_path)
     provenance_records = store.list(artifact_type="runtime_profile_provenance")
@@ -2850,29 +2869,25 @@ def test_main_process_records_terminal_runtime_stewardship_release(
     session = _build_processing_session(tmp_path)
     settings = AppSettings.from_env(env={}, home=tmp_path)
     _persist_ready_runtime_profile_state(settings, monkeypatch)
+    monkeypatch.setattr("mena.runtime_profile.production_runtime_required", lambda **_: True)
 
-    def _fake_unload_ollama_model(**_kwargs: object) -> str:
-        return "unloaded"
+    class ReleasingSemanticProvider(FakeSemanticCoherenceProvider):
+        runtime_resource_used = True
 
-    def _fake_run_processing_stages(
-        *,
-        semantic_coherence_provider: object,
-        **_kwargs: object,
-    ) -> object:
-        cast(Any, semantic_coherence_provider)._runtime_resource_used = True
-        return SimpleNamespace(
-            semantic_coherence_result=SimpleNamespace(skipped=False, skip_reason=None)
-        )
-
-    monkeypatch.setattr("mena.semantic_coherence.unload_ollama_model", _fake_unload_ollama_model)
-    monkeypatch.setattr(
-        "mena.processing_orchestration.run_processing_stages", _fake_run_processing_stages
-    )
+        def release_runtime_resource(self, lease: RuntimeLease) -> RuntimeReleaseResult:
+            return RuntimeReleaseResult(
+                lease=lease,
+                status="released",
+                detail="Ollama model release completed: unloaded.",
+            )
 
     exit_code = main(
         ["process", str(session.record_path)],
         settings=settings,
         run_id="process-release",
+        transcription_provider_factory=FakeTranscriptionProvider,
+        diarization_provider_factory=FakeDiarizationProvider,
+        semantic_coherence_provider_factory=lambda: ReleasingSemanticProvider(results={}),
     )
     captured = capsys.readouterr()
 
@@ -2886,58 +2901,61 @@ def test_main_process_records_terminal_runtime_stewardship_release(
     assert payload["boundary"] == "process"
     assert payload["releases"][0]["status"] == "released"
     assert payload["releases"][0]["lease"]["stage"] == "semantic-review"
-    assert payload["releases"][0]["lease"]["provider"] == "ollama"
+    assert payload["releases"][0]["lease"]["provider"] == "fake"
 
 
-def test_terminal_runtime_stewardship_records_unsupported_release_after_resource_use(
-    tmp_path: Path,
+def test_console_processing_interaction_renders_runtime_stewardship_release_notice(
     capsys: CaptureFixture[str],
 ) -> None:
-    store = FileSystemArtifactStore(session_id="session-1", session_dir=tmp_path)
-    provider = SimpleNamespace(
-        metadata=SimpleNamespace(name="fake-llm", model="model-a"),
-        runtime_resource_used=True,
+    interaction = ConsoleProcessingInteraction(None)
+    release = RuntimeReleaseResult(
+        lease=RuntimeLease(
+            resource_kind="local_llm",
+            stage="semantic-review",
+            boundary="process",
+            provider="ollama",
+            model="llama3.1:8b",
+        ),
+        status="released",
+        detail="Ollama model release completed: unloaded.",
     )
 
-    result = _record_terminal_local_llm_release(
-        store=store,
-        run_id="unsupported-release",
-        attempt=1,
-        provider=provider,
-        stage="semantic-review",
-        boundary="process",
+    interaction.notify(
+        WorkflowNotice(
+            topic=RUNTIME_STEWARDSHIP_RELEASE_NOTICE_TOPIC,
+            context={"result": release},
+        )
     )
     captured = capsys.readouterr()
 
-    stewardship_records = store.list(artifact_type="runtime_stewardship_provenance")
-    assert result is not None
-    assert result.status == "not_supported"
-    assert "Runtime stewardship warning: Provider does not expose" in captured.out
-    assert len(stewardship_records) == 1
-    payload = json.loads(store.retrieve(stewardship_records[0].id))
-    assert payload["releases"][0]["status"] == "not_supported"
+    assert "Runtime stewardship: Ollama model release completed: unloaded." in captured.out
 
 
-def test_terminal_runtime_stewardship_skips_provider_without_resource_use_signal(
-    tmp_path: Path,
+def test_console_processing_interaction_renders_runtime_stewardship_release_warning(
     capsys: CaptureFixture[str],
 ) -> None:
-    store = FileSystemArtifactStore(session_id="session-1", session_dir=tmp_path)
-    provider = SimpleNamespace(metadata=SimpleNamespace(name="fake", model="none"))
+    interaction = ConsoleProcessingInteraction(None)
+    release = RuntimeReleaseResult(
+        lease=RuntimeLease(
+            resource_kind="local_llm",
+            stage="semantic-review",
+            boundary="process",
+            provider="ollama",
+            model="llama3.1:8b",
+        ),
+        status="failed",
+        detail="release failed",
+    )
 
-    result = _record_terminal_local_llm_release(
-        store=store,
-        run_id="custom-semantic-provider",
-        attempt=1,
-        provider=provider,
-        stage="semantic-review",
-        boundary="process",
+    interaction.notify(
+        WorkflowNotice(
+            topic=RUNTIME_STEWARDSHIP_RELEASE_NOTICE_TOPIC,
+            context={"result": release},
+        )
     )
     captured = capsys.readouterr()
 
-    assert result is None
-    assert captured.out == ""
-    assert store.list(artifact_type="runtime_stewardship_provenance") == ()
+    assert "Runtime stewardship warning: release failed" in captured.out
 
 
 def test_main_resume_stores_runtime_profile_provenance_per_attempt(
@@ -2975,11 +2993,21 @@ def test_main_resume_stores_runtime_profile_provenance_per_attempt(
         attempt=failed_state.attempt,
         selection=cast(Any, selection),
     )
-    processing_calls = _patch_processing_stages(monkeypatch)
+    monkeypatch.setattr("mena.runtime_profile.production_runtime_required", lambda **_: True)
 
-    assert main(["resume", str(session.record_path)], settings=settings) == 0
+    assert (
+        main(
+            ["resume", str(session.record_path)],
+            settings=settings,
+            transcription_provider_factory=FakeTranscriptionProvider,
+            diarization_provider_factory=FakeDiarizationProvider,
+            semantic_coherence_provider_factory=lambda: FakeSemanticCoherenceProvider(results={}),
+        )
+        == 0
+    )
 
-    assert processing_calls["attempt"] == failed_state.attempt + 1
+    completed = _completed_processing_payloads(session)
+    assert any(payload["attempt"] == failed_state.attempt + 1 for payload in completed)
     provenance_records = store.list(artifact_type="runtime_profile_provenance")
     attempts = {json.loads(store.retrieve(record.id))["attempt"] for record in provenance_records}
     assert attempts == {failed_state.attempt, failed_state.attempt + 1}
@@ -3035,7 +3063,6 @@ def test_main_process_reports_provider_factory_type_errors(
 
 def test_main_resume_retries_latest_retryable_failure(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     capsys: CaptureFixture[str],
 ) -> None:
     session = _build_processing_session(tmp_path)
@@ -3052,8 +3079,6 @@ def test_main_resume_retries_latest_retryable_failure(
         attempt=4,
     )
 
-    processing_calls = _patch_processing_stages(monkeypatch)
-
     exit_code = main(
         ["resume", str(session.record_path)],
         transcription_provider_factory=FakeTranscriptionProvider,
@@ -3063,9 +3088,9 @@ def test_main_resume_retries_latest_retryable_failure(
 
     captured = capsys.readouterr()
     assert exit_code == 0
-    assert processing_calls["session_id"] == session.record.id
-    assert processing_calls["run_id"] == failed_state.run_id
-    assert processing_calls["attempt"] == failed_state.attempt + 1
+    completed = _completed_processing_payloads(session)
+    assert {payload["run_id"] for payload in completed} == {failed_state.run_id}
+    assert {payload["attempt"] for payload in completed} == {failed_state.attempt + 1}
     assert (
         f"Processing completed for run '{failed_state.run_id}' "
         f"(attempt {failed_state.attempt + 1})." in captured.out
@@ -3074,7 +3099,6 @@ def test_main_resume_retries_latest_retryable_failure(
 
 def test_main_resume_retries_interrupted_running_state(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     capsys: CaptureFixture[str],
 ) -> None:
     session = _build_processing_session(tmp_path)
@@ -3086,8 +3110,6 @@ def test_main_resume_retries_interrupted_running_state(
         attempt=7,
     )
 
-    processing_calls = _patch_processing_stages(monkeypatch)
-
     exit_code = main(
         ["resume", str(session.record_path)],
         transcription_provider_factory=FakeTranscriptionProvider,
@@ -3097,9 +3119,9 @@ def test_main_resume_retries_interrupted_running_state(
 
     captured = capsys.readouterr()
     assert exit_code == 0
-    assert processing_calls["session_id"] == session.record.id
-    assert processing_calls["run_id"] == running_state.run_id
-    assert processing_calls["attempt"] == running_state.attempt + 1
+    completed = _completed_processing_payloads(session)
+    assert {payload["run_id"] for payload in completed} == {running_state.run_id}
+    assert {payload["attempt"] for payload in completed} == {running_state.attempt + 1}
     assert (
         f"Processing completed for run '{running_state.run_id}' "
         f"(attempt {running_state.attempt + 1})." in captured.out
@@ -3172,7 +3194,6 @@ def test_main_resume_blocks_non_retryable_failure_after_running_checkpoint(
 
 def test_main_resume_after_mid_run_completed_checkpoint_continues(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session = _build_processing_session(tmp_path)
     store = FileSystemArtifactStore(session_id=session.record.id, session_dir=session.bundle_path)
@@ -3200,8 +3221,6 @@ def test_main_resume_after_mid_run_completed_checkpoint_continues(
         started_at=running_state.started_at,
         now=now,
     )
-    processing_calls = _patch_processing_stages(monkeypatch)
-
     exit_code = main(
         ["resume", str(session.record_path)],
         transcription_provider_factory=FakeTranscriptionProvider,
@@ -3210,13 +3229,17 @@ def test_main_resume_after_mid_run_completed_checkpoint_continues(
     )
 
     assert exit_code == 0
-    assert processing_calls["run_id"] == completed_state.run_id
-    assert processing_calls["attempt"] == completed_state.attempt + 1
+    completed = [
+        payload
+        for payload in _completed_processing_payloads(session)
+        if payload["run_id"] == completed_state.run_id
+        and payload["attempt"] == completed_state.attempt + 1
+    ]
+    assert completed
 
 
 def test_main_resume_after_mid_run_skipped_checkpoint_continues(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session = _build_processing_session(tmp_path)
     store = FileSystemArtifactStore(session_id=session.record.id, session_dir=session.bundle_path)
@@ -3242,8 +3265,6 @@ def test_main_resume_after_mid_run_skipped_checkpoint_continues(
             completed_at="2026-05-08T08:30:00Z",
         )
     )
-    processing_calls = _patch_processing_stages(monkeypatch)
-
     exit_code = main(
         ["resume", str(session.record_path)],
         transcription_provider_factory=FakeTranscriptionProvider,
@@ -3252,8 +3273,13 @@ def test_main_resume_after_mid_run_skipped_checkpoint_continues(
     )
 
     assert exit_code == 0
-    assert processing_calls["run_id"] == skipped_state.run_id
-    assert processing_calls["attempt"] == skipped_state.attempt + 1
+    completed = [
+        payload
+        for payload in _completed_processing_payloads(session)
+        if payload["run_id"] == skipped_state.run_id
+        and payload["attempt"] == skipped_state.attempt + 1
+    ]
+    assert completed
 
 
 def test_main_resume_after_final_completed_checkpoint_reports_no_retry(
@@ -3293,7 +3319,6 @@ def test_main_resume_after_final_completed_checkpoint_reports_no_retry(
 
 def test_main_resume_ignores_later_summarization_checkpoint(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     capsys: CaptureFixture[str],
 ) -> None:
     session = create_session(profile=parse_capture_profile("online"), data_root=tmp_path)
@@ -3343,19 +3368,15 @@ def test_main_resume_ignores_later_summarization_checkpoint(
         started_at=summary_state.started_at,
         now=datetime(2026, 5, 8, 8, 45, tzinfo=UTC),
     )
-    processing_calls = _patch_processing_stages(monkeypatch)
-
     exit_code = main(["resume", str(session.record_path)])
     captured = capsys.readouterr()
 
     assert exit_code == 1
-    assert processing_calls == {}
     assert "No retryable processing failure found to resume." in captured.out
 
 
 def test_main_resume_uses_durable_checkpoint_order_when_timestamps_tie(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session = _build_processing_session(tmp_path)
     store = FileSystemArtifactStore(session_id=session.record.id, session_dir=session.bundle_path)
@@ -3376,8 +3397,6 @@ def test_main_resume_uses_durable_checkpoint_order_when_timestamps_tie(
         attempt=3,
         now=now,
     )
-    processing_calls = _patch_processing_stages(monkeypatch)
-
     exit_code = main(
         ["resume", str(session.record_path)],
         transcription_provider_factory=FakeTranscriptionProvider,
@@ -3386,8 +3405,12 @@ def test_main_resume_uses_durable_checkpoint_order_when_timestamps_tie(
     )
 
     assert exit_code == 0
-    assert processing_calls["run_id"] == newer_state.run_id
-    assert processing_calls["attempt"] == newer_state.attempt + 1
+    completed = [
+        payload
+        for payload in _completed_processing_payloads(session)
+        if payload["run_id"] == newer_state.run_id and payload["attempt"] == newer_state.attempt + 1
+    ]
+    assert completed
 
 
 def test_main_resume_without_checkpoint_reports_no_retry(
@@ -4584,46 +4607,20 @@ def _build_single_source_processing_session(tmp_path: Path) -> CreatedSession:
     return created_session
 
 
-def _patch_processing_stages(
-    monkeypatch: pytest.MonkeyPatch,
-) -> dict[str, object]:
-    invocation: dict[str, object] = {}
+def _processing_state_payloads(session: CreatedSession) -> list[dict[str, object]]:
+    store = FileSystemArtifactStore(session_id=session.record.id, session_dir=session.bundle_path)
+    return [
+        json.loads(store.retrieve(record.id))
+        for record in store.list(artifact_type=PROCESSING_STATE_ARTIFACT_TYPE)
+    ]
 
-    def _fake_run_processing_stages(
-        *,
-        session_id: str,
-        profile: object,
-        source_inputs: dict[str, object],
-        store: object,
-        ledger: object,
-        attempt: int,
-        now: datetime,
-        transcription_provider: object,
-        diarization_provider: object,
-        semantic_coherence_provider: object,
-        session_language: str | None = None,
-        **_kwargs: object,
-    ) -> object:
-        invocation["session_id"] = session_id
-        invocation["run_id"] = getattr(ledger, "run_id", None)
-        invocation["attempt"] = attempt
-        invocation["session_language"] = session_language
-        invocation["source_input_count"] = len(source_inputs)
-        invocation["source_inputs"] = source_inputs
-        invocation["providers"] = (
-            transcription_provider,
-            diarization_provider,
-            semantic_coherence_provider,
-        )
-        invocation["profile"] = profile.name.value if hasattr(profile, "name") else profile
-        return SimpleNamespace(
-            semantic_coherence_result=SimpleNamespace(skipped=False, skip_reason=None)
-        )
 
-    monkeypatch.setattr(
-        "mena.processing_orchestration.run_processing_stages", _fake_run_processing_stages
-    )
-    return invocation
+def _completed_processing_payloads(session: CreatedSession) -> list[dict[str, object]]:
+    return [
+        payload
+        for payload in _processing_state_payloads(session)
+        if payload["status"] == "completed"
+    ]
 
 
 def _unavailable_discoverer(profile: CaptureProfileId) -> AudioDiscovery:

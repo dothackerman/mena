@@ -21,7 +21,7 @@ from mena.diarization import (
     run_diarization_stage,
 )
 from mena.fields import optional_str, required_int, required_str
-from mena.interaction import ConfirmationRequest, InteractionPort
+from mena.interaction import ConfirmationRequest, InteractionPort, WorkflowNotice
 from mena.merge_timing import (
     run_merge_timing_stage,
     run_room_mic_merge_timing_stage,
@@ -33,14 +33,15 @@ from mena.profiles import CaptureProfile, DiarisationPolicy
 from mena.provider_validation import ProviderValidationError as ProviderValidationError
 from mena.provider_validation import require_provider
 from mena.runtime_profile import (
-    RuntimeProfileSelection,
     default_diarization_provider_factory,
     default_semantic_coherence_provider_factory,
     default_transcription_provider_factory,
     resolve_processing_runtime,
     run_processing_with_runtime_fallback,
-    select_runtime_profile,
-    select_runtime_profile_after_stage_failure,
+)
+from mena.runtime_stewardship import (
+    RUNTIME_STEWARDSHIP_RELEASE_NOTICE_TOPIC,
+    record_terminal_runtime_release,
 )
 from mena.semantic_coherence import (
     SemanticCoherenceProvider,
@@ -62,12 +63,6 @@ from mena.transcription import (
 
 ProviderFactory = Callable[[], Any]
 ProviderFactoryInput = ProviderFactory | None
-ProviderRunner = Callable[..., Any]
-ProcessingStagesRunner = Callable[..., Any]
-RuntimeFallbackAuthorizer = Callable[[str, Any], bool]
-RuntimeProfileSelector = Callable[..., RuntimeProfileSelection]
-RuntimeProfileSelectorAfterFailure = Callable[..., RuntimeProfileSelection]
-RuntimeProfileStore = Callable[..., Any]
 
 
 @dataclass(frozen=True)
@@ -110,21 +105,10 @@ def run_processing_command(
     setup_hardware: Any | None = None,
     allow_runtime_fallback: bool = False,
     interaction: InteractionPort | None = None,
-    terminal_llm_release: Callable[..., object] | None = None,
-    processing_stages_runner: ProcessingStagesRunner | None = None,
-    transcription_stage_runner: ProviderRunner = run_transcription_stage,
-    diarization_stage_runner: ProviderRunner = run_diarization_stage,
-    merge_timing_stage_runner: ProviderRunner = run_merge_timing_stage,
-    room_mic_merge_timing_stage_runner: ProviderRunner = run_room_mic_merge_timing_stage,
-    confidence_flagging_stage_runner: ProviderRunner | None = None,
-    semantic_coherence_stage_runner: ProviderRunner = run_semantic_coherence_stage,
-    runtime_selection_fn: RuntimeProfileSelector | None = None,
-    runtime_profile_selector_after_failure_fn: RuntimeProfileSelectorAfterFailure | None = None,
-    runtime_profile_provenance_store_fn: RuntimeProfileStore | None = None,
 ) -> int:
-    runtime_selection: RuntimeProfileSelection | None = None
+    runtime_selection = None
     effective_settings: AppSettings | None = None
-    runtime_fallback_authorizer: RuntimeFallbackAuthorizer | None = None
+    runtime_fallback_authorizer = None
     base_transcription_provider_factory = default_transcription_provider_factory(
         transcription_provider_factory
     )
@@ -148,15 +132,6 @@ def run_processing_command(
         session_record=session_record,
         store=store,
     )
-    if runtime_selection_fn is None:
-        runtime_selection_fn = select_runtime_profile
-    if runtime_profile_selector_after_failure_fn is None:
-        runtime_profile_selector_after_failure_fn = select_runtime_profile_after_stage_failure
-    if runtime_profile_provenance_store_fn is None:
-        runtime_profile_provenance_store_fn = _store_runtime_profile_provenance
-    if processing_stages_runner is None:
-        processing_stages_runner = run_processing_stages
-
     if _requires_runtime_profile(
         base_transcription_provider_factory,
         base_diarization_provider_factory,
@@ -190,8 +165,6 @@ def run_processing_command(
             hardware=setup_hardware,
             allow_runtime_fallback=allow_runtime_fallback,
             authorize_runtime_fallback=runtime_fallback_authorizer,
-            runtime_selection_fn=runtime_selection_fn,
-            runtime_profile_store_fn=runtime_profile_provenance_store_fn,
         )
         runtime_selection = runtime_bound.selection
         transcription_provider = runtime_bound.transcription_provider
@@ -233,7 +206,7 @@ def run_processing_command(
         diarization_provider: DiarizationProvider,
         semantic_coherence_provider: SemanticCoherenceProvider,
     ) -> ProcessingPipelineResult:
-        return processing_stages_runner(
+        return run_processing_stages(
             session_id=session_id_value,
             profile=profile,
             source_inputs=source_inputs,
@@ -245,12 +218,6 @@ def run_processing_command(
             diarization_provider=diarization_provider,
             semantic_coherence_provider=semantic_coherence_provider,
             session_language=session_language or None,
-            transcription_stage_runner=transcription_stage_runner,
-            diarization_stage_runner=diarization_stage_runner,
-            merge_timing_stage_runner=merge_timing_stage_runner,
-            room_mic_merge_timing_stage_runner=room_mic_merge_timing_stage_runner,
-            confidence_flagging_stage_runner=confidence_flagging_stage_runner,
-            semantic_coherence_stage_runner=semantic_coherence_stage_runner,
         )
 
     try:
@@ -284,10 +251,6 @@ def run_processing_command(
                     ledger=ledger,
                     stage=stage,
                 ),
-                runtime_profile_selector_after_failure_fn=(
-                    runtime_profile_selector_after_failure_fn
-                ),
-                runtime_profile_store_fn=runtime_profile_provenance_store_fn,
             )
             pipeline_result = runtime_result.value
             runtime_bound = runtime_result.runtime
@@ -298,8 +261,8 @@ def run_processing_command(
         else:
             raise RuntimeError("Runtime settings were not initialized for runtime processing.")
     finally:
-        if runtime_selection is not None and terminal_llm_release is not None:
-            terminal_llm_release(
+        if runtime_selection is not None:
+            release_result = record_terminal_runtime_release(
                 store=store,
                 run_id=run_id,
                 attempt=attempt,
@@ -307,6 +270,13 @@ def run_processing_command(
                 stage="semantic-review",
                 boundary="process",
             )
+            if release_result is not None and interaction is not None:
+                interaction.notify(
+                    WorkflowNotice(
+                        topic=RUNTIME_STEWARDSHIP_RELEASE_NOTICE_TOPIC,
+                        context={"result": release_result},
+                    )
+                )
 
     fallback = (
         " with explicit runtime fallback"
@@ -338,12 +308,6 @@ def run_processing_stages(
     diarization_provider: DiarizationProvider,
     semantic_coherence_provider: SemanticCoherenceProvider,
     session_language: str | None = None,
-    transcription_stage_runner: ProviderRunner = run_transcription_stage,
-    diarization_stage_runner: ProviderRunner = run_diarization_stage,
-    merge_timing_stage_runner: ProviderRunner = run_merge_timing_stage,
-    room_mic_merge_timing_stage_runner: ProviderRunner = run_room_mic_merge_timing_stage,
-    confidence_flagging_stage_runner: ProviderRunner | None = None,
-    semantic_coherence_stage_runner: ProviderRunner = run_semantic_coherence_stage,
 ) -> ProcessingPipelineResult:
     transcript_records: dict[str, ArtifactRecord] = {}
     for source in profile.sources:
@@ -351,7 +315,7 @@ def run_processing_stages(
         source_input = source_inputs[source_id]
         transcription_result = cast(
             Any,
-            transcription_stage_runner(
+            run_transcription_stage(
                 store=store,
                 ledger=ledger,
                 provider=transcription_provider,
@@ -376,7 +340,7 @@ def run_processing_stages(
         )
         result = cast(
             Any,
-            diarization_stage_runner(
+            run_diarization_stage(
                 store=store,
                 ledger=ledger,
                 provider=diarization_provider,
@@ -410,7 +374,7 @@ def run_processing_stages(
             room_regular, room_exclusive = room_records
         merge_result = cast(
             Any,
-            room_mic_merge_timing_stage_runner(
+            run_room_mic_merge_timing_stage(
                 store=store,
                 ledger=ledger,
                 room_transcript_record=transcript_records["room_mic"],
@@ -431,7 +395,7 @@ def run_processing_stages(
 
         merge_result = cast(
             Any,
-            merge_timing_stage_runner(
+            run_merge_timing_stage(
                 store=store,
                 ledger=ledger,
                 local_transcript_record=transcript_records[local_source_id],
@@ -443,11 +407,9 @@ def run_processing_stages(
             ),
         )
 
-    if confidence_flagging_stage_runner is None:
-        from mena.review_flagging import run_confidence_flagging_stage
+    from mena.review_flagging import run_confidence_flagging_stage
 
-        confidence_flagging_stage_runner = run_confidence_flagging_stage
-    confidence_flagging_stage_runner(
+    run_confidence_flagging_stage(
         store=store,
         ledger=ledger,
         merged_transcript_record=merge_result.merged_transcript_record,
@@ -457,7 +419,7 @@ def run_processing_stages(
 
     semantic_result = cast(
         Any,
-        semantic_coherence_stage_runner(
+        run_semantic_coherence_stage(
             store=store,
             ledger=ledger,
             merged_transcript_record=merge_result.merged_transcript_record,
@@ -928,25 +890,6 @@ def _asr_language_from_session_language(language: str | None) -> str | None:
     return normalized or None
 
 
-def _store_runtime_profile_provenance(
-    *,
-    store: FileSystemArtifactStore,
-    run_id: str,
-    attempt: int,
-    selection: RuntimeProfileSelection,
-    name_suffix: str | None = None,
-) -> None:
-    from mena.runtime_profile import store_runtime_profile_provenance
-
-    store_runtime_profile_provenance(
-        store=store,
-        run_id=run_id,
-        attempt=attempt,
-        selection=selection,
-        name_suffix=name_suffix or "",
-    )
-
-
 def _require_provider(
     provider_factory: ProviderFactory,
     provider_type: type[Any],
@@ -987,6 +930,4 @@ def _optional_metadata_str(payload: dict[str, object], key: str) -> str | None:
 
 
 # Backward-compatibility shims for existing CLI import paths.
-_run_processing_command = run_processing_command
-_run_processing_stages = run_processing_stages
 _collect_capture_segments = collect_capture_segments
