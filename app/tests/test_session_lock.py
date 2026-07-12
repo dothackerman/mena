@@ -313,8 +313,16 @@ def test_session_lock_reclaims_reused_same_host_pid(
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr(session_lock_module, "_pid_is_alive", lambda _pid: True)
-    monkeypatch.setattr(session_lock_module, "_process_start_ticks", lambda _pid: 200)
+    monkeypatch.setattr(
+        session_lock_module,
+        "_same_host_process_state",
+        lambda _pid: session_lock_module._SameHostProcessState(
+            alive=True,
+            zombie=False,
+            start_ticks=200,
+        ),
+    )
+    monkeypatch.setattr(session_lock_module, "_current_process_start_ticks", lambda: 200)
 
     with acquire_session_lock(session_dir=session_dir, command="summarize"):
         payload = json.loads(lock_path.read_text(encoding="utf-8"))
@@ -322,6 +330,66 @@ def test_session_lock_reclaims_reused_same_host_pid(
     assert payload["command"] == "summarize"
     assert payload["process_start_ticks"] == 200
     assert not lock_path.exists()
+
+
+def test_session_lock_reclaims_same_host_zombie_holder(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    lock_path = session_dir / ORCHESTRATOR_LOCK_FILENAME
+    lock_path.write_text(
+        json.dumps(
+            {
+                "pid": 1234,
+                "hostname": socket.gethostname(),
+                "acquired_at": "2026-07-12T18:00:00Z",
+                "command": "process",
+                "owner_token": "stale",
+                "process_start_ticks": 100,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        session_lock_module,
+        "_same_host_process_state",
+        lambda _pid: session_lock_module._SameHostProcessState(
+            alive=True,
+            zombie=True,
+            start_ticks=100,
+        ),
+    )
+    monkeypatch.setattr(session_lock_module, "_current_process_start_ticks", lambda: 100)
+
+    with acquire_session_lock(session_dir=session_dir, command="summarize"):
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+
+    assert payload["command"] == "summarize"
+    assert payload["process_start_ticks"] == 100
+    assert not lock_path.exists()
+
+
+def test_same_host_process_state_treats_zombie_as_reclaimable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        session_lock_module,
+        "_read_process_stat",
+        lambda _pid: session_lock_module._ProcessStat(
+            state="Z",
+            start_ticks=100,
+        ),
+    )
+    monkeypatch.setattr(os, "kill", lambda _pid, _signal: None)
+
+    process_state = session_lock_module._same_host_process_state(1234)
+
+    assert process_state.alive is True
+    assert process_state.zombie is True
+    assert process_state.start_ticks == 100
+    assert process_state.is_reclaimable_dead_holder
 
 
 def test_session_lock_releases_on_normal_completion_and_keyboard_interrupt(

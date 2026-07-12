@@ -61,6 +61,23 @@ class SessionLockInfo:
         )
 
 
+@dataclass(frozen=True)
+class _ProcessStat:
+    state: str | None
+    start_ticks: int | None
+
+
+@dataclass(frozen=True)
+class _SameHostProcessState:
+    alive: bool
+    zombie: bool
+    start_ticks: int | None
+
+    @property
+    def is_reclaimable_dead_holder(self) -> bool:
+        return not self.alive or self.zombie
+
+
 class SessionLock:
     """Context manager owning one session-bundle lock file."""
 
@@ -168,46 +185,62 @@ def _read_existing_lock_info(path: Path) -> SessionLockInfo | None:
 def _is_reclaimable_stale_lock(holder: SessionLockInfo) -> bool:
     if holder.hostname != socket.gethostname() or holder.pid is None:
         return False
-    if not _pid_is_alive(holder.pid):
+    process_state = _same_host_process_state(holder.pid)
+    if process_state.is_reclaimable_dead_holder:
         return True
-    if holder.process_start_ticks is None:
+    if holder.process_start_ticks is None or process_state.start_ticks is None:
         return False
-    process_start_ticks = _process_start_ticks(holder.pid)
-    return process_start_ticks is not None and process_start_ticks != holder.process_start_ticks
+    return process_state.start_ticks != holder.process_start_ticks
 
 
-def _pid_is_alive(pid: int) -> bool:
+def _same_host_process_state(pid: int) -> _SameHostProcessState:
     if pid <= 0:
-        return False
+        return _SameHostProcessState(alive=False, zombie=False, start_ticks=None)
+    process_stat = _read_process_stat(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
-        return False
+        return _SameHostProcessState(
+            alive=False,
+            zombie=False,
+            start_ticks=_start_ticks_from(process_stat),
+        )
     except PermissionError:
-        return True
+        alive = True
     except OSError as exc:
-        return exc.errno != errno.ESRCH
-    return True
+        alive = exc.errno != errno.ESRCH
+    else:
+        alive = True
+    return _SameHostProcessState(
+        alive=alive,
+        zombie=process_stat is not None and process_stat.state == "Z",
+        start_ticks=_start_ticks_from(process_stat),
+    )
 
 
 def _current_process_start_ticks() -> int | None:
-    return _process_start_ticks(os.getpid())
+    return _start_ticks_from(_read_process_stat(os.getpid()))
 
 
-def _process_start_ticks(pid: int) -> int | None:
+def _read_process_stat(pid: int) -> _ProcessStat | None:
     try:
         stat_text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
     except OSError:
         return None
     try:
         fields_after_command = stat_text.rsplit(") ", maxsplit=1)[1].split()
-        start_ticks = fields_after_command[19]
     except IndexError:
         return None
+    state = fields_after_command[0] if fields_after_command else None
     try:
-        return int(start_ticks)
-    except ValueError:
-        return None
+        start_ticks = int(fields_after_command[19])
+    except (IndexError, ValueError):
+        start_ticks = None
+    return _ProcessStat(state=state, start_ticks=start_ticks)
+
+
+def _start_ticks_from(process_stat: _ProcessStat | None) -> int | None:
+    return process_stat.start_ticks if process_stat is not None else None
 
 
 def _create_exclusive_json(path: Path, payload: dict[str, object]) -> None:
