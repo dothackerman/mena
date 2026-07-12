@@ -498,11 +498,17 @@ def test_main_reports_adapter_cancellations_and_errors(
     assert cli.main(["inspect", str(tmp_path)], settings=settings) == 1
     assert "Cannot inspect session: manifest missing" in capsys.readouterr().out
 
-    monkeypatch.setattr(
-        "mena.processing_orchestration.run_processing_command",
-        lambda **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt),
+    def _raise_processing_interrupted(**_kwargs: object) -> int:
+        raise KeyboardInterrupt
+
+    assert (
+        cli.main(
+            ["process", str(tmp_path)],
+            settings=settings,
+            processing_command_runner=_raise_processing_interrupted,
+        )
+        == 1
     )
-    assert cli.main(["process", str(tmp_path)], settings=settings) == 1
     assert "Processing workflow interrupted." in capsys.readouterr().out
 
 
