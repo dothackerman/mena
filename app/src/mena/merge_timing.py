@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -435,7 +435,7 @@ class MergedTranscriptArtifact:
 
 @dataclass(frozen=True)
 class MergeTimingStageResult:
-    """Result of running, reusing, or re-merging the dual-stream transcript slice."""
+    """Result of running, reusing, or re-merging the capture-profile transcript slice."""
 
     state: ProcessingStageState
     merged_transcript: MergedTranscriptArtifact
@@ -520,14 +520,22 @@ def run_merge_timing_stage(
 
     source_ids = _ordered_source_ids_for_policy(policy)
     effective_diarization_inputs = diarization_inputs or {}
-    try:
-        ordered_transcript_records = tuple(
-            transcript_records[source_id] for source_id in source_ids
-        )
-    except KeyError as exc:
-        raise MergeTimingInputError(
-            f"Merge/timing missing transcript record for source '{exc.args[0]}'."
-        ) from exc
+    _validate_merge_input_keys(
+        label="transcript record",
+        actual=transcript_records.keys(),
+        expected=source_ids,
+    )
+    _validate_merge_input_keys(
+        label="diarization input",
+        actual=effective_diarization_inputs.keys(),
+        expected=source_ids,
+        allow_missing=True,
+    )
+    _validate_supplied_diarization_inputs(
+        policy=policy,
+        diarization_inputs=effective_diarization_inputs,
+    )
+    ordered_transcript_records = tuple(transcript_records[source_id] for source_id in source_ids)
     source_diarization = {
         source_id: _effective_source_diarization(
             source_id=source_id,
@@ -675,6 +683,55 @@ class _EffectiveSourceDiarization:
 class _LoadedSourceDiarization:
     regular: DiarizationArtifact | None
     exclusive: DiarizationArtifact | None
+
+
+def _validate_merge_input_keys(
+    *,
+    label: str,
+    actual: Iterable[str],
+    expected: Iterable[str],
+    allow_missing: bool = False,
+) -> None:
+    actual_keys = set(actual)
+    expected_keys = set(expected)
+    unexpected = sorted(actual_keys - expected_keys)
+    if unexpected:
+        joined = ", ".join(unexpected)
+        raise MergeTimingInputError(f"Merge/timing received unexpected {label} key(s): {joined}.")
+    if not allow_missing:
+        missing = sorted(expected_keys - actual_keys)
+        if missing:
+            joined = ", ".join(missing)
+            raise MergeTimingInputError(f"Merge/timing missing {label} key(s): {joined}.")
+
+
+def _validate_supplied_diarization_inputs(
+    *,
+    policy: MergePolicy,
+    diarization_inputs: Mapping[str, SourceDiarizationInput],
+) -> None:
+    diarizable_source_ids = _diarizable_source_ids_for_policy(policy)
+    for source_id, diarization_input in diarization_inputs.items():
+        if (
+            diarization_input.regular_record is None
+            and diarization_input.exclusive_record is None
+            and diarization_input.status is None
+            and diarization_input.reason is None
+        ):
+            continue
+        if (
+            diarization_input.regular_record is None or diarization_input.exclusive_record is None
+        ) and (
+            diarization_input.regular_record is not None
+            or diarization_input.exclusive_record is not None
+        ):
+            raise MergeTimingInputError(
+                "Merge/timing requires both regular and exclusive diarization artifacts together."
+            )
+        if source_id not in diarizable_source_ids:
+            raise MergeTimingInputError(
+                f"Merge/timing source '{source_id}' does not accept diarization input."
+            )
 
 
 def _ordered_source_ids_for_policy(policy: MergePolicy) -> tuple[str, ...]:
