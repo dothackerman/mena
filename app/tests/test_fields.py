@@ -68,7 +68,13 @@ def test_contract_reader_covers_scalar_value_kinds() -> None:
     assert reader.required_int({"count": 1}, "count") == 1
     assert reader.optional_int({}, "count") is None
     assert reader.optional_int({"count": 1}, "count") == 1
+    assert reader.required_nullable_int({"count": None}, "count") is None
+    assert reader.required_nullable_int({"count": 1}, "count") == 1
     assert reader.required_bool({"enabled": False}, "enabled") is False
+    assert reader.optional_bool({}, "enabled") is None
+    assert reader.optional_bool({"enabled": False}, "enabled") is False
+    assert reader.required_nullable_bool({"enabled": None}, "enabled") is None
+    assert reader.required_nullable_bool({"enabled": False}, "enabled") is False
     assert reader.required_number({"score": 1}, "score") == 1.0
     assert reader.optional_number({}, "score") is None
     assert reader.optional_number({"score": 1.5}, "score") == 1.5
@@ -83,8 +89,28 @@ def test_contract_reader_covers_scalar_value_kinds() -> None:
             "Protocol field 'count' must be an integer or null.",
         ),
         (
+            lambda: reader.required_nullable_int({}, "count"),
+            "Protocol field 'count' is required.",
+        ),
+        (
+            lambda: reader.required_nullable_int({"count": True}, "count"),
+            "Protocol field 'count' must be an integer or null.",
+        ),
+        (
             lambda: reader.required_bool({"enabled": 0}, "enabled"),
             "Protocol field 'enabled' must be a boolean.",
+        ),
+        (
+            lambda: reader.optional_bool({"enabled": 0}, "enabled"),
+            "Protocol field 'enabled' must be a boolean or null.",
+        ),
+        (
+            lambda: reader.required_nullable_bool({}, "enabled"),
+            "Protocol field 'enabled' is required.",
+        ),
+        (
+            lambda: reader.required_nullable_bool({"enabled": 0}, "enabled"),
+            "Protocol field 'enabled' must be a boolean or null.",
         ),
         (
             lambda: reader.required_number({"score": True}, "score"),

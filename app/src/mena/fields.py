@@ -57,6 +57,16 @@ class ContractReader(Generic[_TError]):
             message=self._message(key, "must be an integer or null"),
         )
 
+    def required_nullable_int(self, data: Mapping[str, object], key: str) -> int | None:
+        if key not in data:
+            raise self.error(self._message(key, "is required"))
+        value = data[key]
+        if value is None:
+            return None
+        if type(value) is not int:
+            raise self.error(self._message(key, "must be an integer or null"))
+        return value
+
     def required_bool(self, data: Mapping[str, object], key: str) -> bool:
         return required_bool(
             data,
@@ -64,6 +74,24 @@ class ContractReader(Generic[_TError]):
             error=self.error,
             message=self._message(key, "must be a boolean"),
         )
+
+    def optional_bool(self, data: Mapping[str, object], key: str) -> bool | None:
+        value = data.get(key)
+        if value is None:
+            return None
+        if type(value) is not bool:
+            raise self.error(self._message(key, "must be a boolean or null"))
+        return value
+
+    def required_nullable_bool(self, data: Mapping[str, object], key: str) -> bool | None:
+        if key not in data:
+            raise self.error(self._message(key, "is required"))
+        value = data[key]
+        if value is None:
+            return None
+        if type(value) is not bool:
+            raise self.error(self._message(key, "must be a boolean or null"))
+        return value
 
     def required_number(self, data: Mapping[str, object], key: str) -> float:
         return required_number(
