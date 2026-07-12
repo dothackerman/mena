@@ -142,12 +142,12 @@ def ollama_token_counts(response: Mapping[str, object]) -> tuple[int | None, int
     """Return (prompt_eval_count, eval_count) from an Ollama response envelope."""
 
     return (
-        _optional_token_count(response.get("prompt_eval_count")),
-        _optional_token_count(response.get("eval_count")),
+        _read_optional_token_count(response.get("prompt_eval_count")),
+        _read_optional_token_count(response.get("eval_count")),
     )
 
 
-def _optional_token_count(value: object) -> int | None:
+def _read_optional_token_count(value: object) -> int | None:
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, int):

@@ -194,7 +194,7 @@ def _apply_config(
 ) -> tuple[SummarySettings, LocalLLMSettings]:
     _reject_unknown_keys(config, _ALLOWED_TOP_LEVEL_CONFIG_KEYS, "Config file")
 
-    summary_section = _optional_section(config, "summary")
+    summary_section = _read_optional_section(config, "summary")
     if summary_section is not None:
         _reject_unknown_keys(summary_section, _ALLOWED_SUMMARY_CONFIG_KEYS, "[summary]")
         if "language" in summary_section:
@@ -204,7 +204,7 @@ def _apply_config(
                 )
             )
 
-    ollama_section = _optional_section(config, "ollama")
+    ollama_section = _read_optional_section(config, "ollama")
     if ollama_section is not None:
         _reject_unknown_keys(ollama_section, _ALLOWED_OLLAMA_CONFIG_KEYS, "[ollama]")
         endpoint = local_llm.ollama_endpoint
@@ -242,7 +242,7 @@ def _apply_env(
     return summary, local_llm
 
 
-def _optional_section(config: Mapping[str, Any], key: str) -> Mapping[str, Any] | None:
+def _read_optional_section(config: Mapping[str, Any], key: str) -> Mapping[str, Any] | None:
     if key not in config:
         return None
     value = config[key]
