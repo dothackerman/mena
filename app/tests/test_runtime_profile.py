@@ -1334,6 +1334,55 @@ def test_summarization_runtime_fallback_bind_failure_does_not_release_primary_tw
     assert release_attempts == [1]
 
 
+def test_run_summarization_with_runtime_fallback_observes_terminal_release_on_failure(
+    tmp_path: Path,
+) -> None:
+    plan = _summarization_plan()
+    selection = cast(
+        RuntimeProfileSelection,
+        SimpleNamespace(accepted="accepted-state", actual="primary-state", summarization=plan),
+    )
+    observed: list[RuntimeReleaseResult] = []
+
+    def _release(**kwargs: object) -> RuntimeReleaseResult:
+        lease = RuntimeLease(
+            resource_kind="local_llm",
+            stage=cast(str, kwargs["stage"]),
+            boundary=cast(str, kwargs["boundary"]),
+            provider="Ollama",
+            model="llama3.1:8b",
+        )
+        return RuntimeReleaseResult(
+            lease=lease,
+            status="failed",
+            detail="Ollama model release failed.",
+        )
+
+    with pytest.raises(SummarizationError, match="summary exploded"):
+        run_summarization_with_runtime_fallback(
+            settings=cast(AppSettings, SimpleNamespace()),
+            store=FileSystemArtifactStore(session_id="session", session_dir=tmp_path),
+            run_id="summarize-run",
+            attempt=1,
+            runner=None,
+            command_identity=None,
+            hardware=None,
+            allow_runtime_fallback=False,
+            authorize_remote_summarization_fallback=None,
+            run=lambda _provider, _attempt: (_ for _ in ()).throw(
+                SummarizationError("summary exploded")
+            ),
+            failed_input_artifacts=("merged", "overlay"),
+            summarization_provider_factory=lambda: _ReleasableSummarization("primary"),
+            runtime_profile_selector_fn=lambda **_kwargs: selection,
+            runtime_profile_store_fn=lambda **_kwargs: None,
+            terminal_release_fn=_release,
+            runtime_release_observer=observed.append,
+        )
+
+    assert [result.detail for result in observed] == ["Ollama model release failed."]
+
+
 def _mistral_summary_state(
     *,
     key_present: bool = True,
@@ -1512,6 +1561,56 @@ def test_summarization_runtime_selection_uses_accepted_local_fallback_after_mist
     assert selection.summarization.accepted_stage.provider == "Mistral"
     assert selection.summarization.actual_stage.provider == "Ollama"
     assert selection.actual.stage_policies == (_ollama_summary_stage(settings),)
+
+
+def test_summarization_runtime_selection_revalidates_ollama_fallback_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    setup_state = _setup_state(settings=settings, pyannote_token_present=True)
+    mistral_primary = _accepted_mistral_primary_state(
+        settings=settings,
+        setup_state=setup_state,
+    )
+    accepted = replace(
+        mistral_primary,
+        fallback_authorization=replace(
+            mistral_primary.fallback_authorization,
+            local_status="authorized",
+            automatic_local_fallback_authorized=True,
+            stage_scope=("summarization",),
+        ),
+        summarization_fallback_providers=(_ollama_summary_stage(settings),),
+    )
+    persist_runtime_profile_state(accepted, paths=settings.paths)
+    mistral_down_ollama_missing = replace(
+        _setup_state(
+            settings=settings,
+            ollama_model_present=False,
+            pyannote_token_present=True,
+        ),
+        mistral_summary=_mistral_summary_state(
+            key_present=False,
+            reachable=False,
+            resolved_model=None,
+            model_allowed=False,
+            detail="MENA_MISTRAL_API_KEY is not set.",
+        ),
+    )
+    monkeypatch.setattr(
+        "mena.runtime_profile.detect_local_installation_state",
+        lambda *_args, **_kwargs: mistral_down_ollama_missing,
+    )
+
+    with pytest.raises(RuntimeFallbackUnavailable, match="Ollama fallback is not viable"):
+        select_summarization_runtime_profile(
+            settings=settings,
+            runner=None,
+            command_identity=None,
+            hardware=None,
+            allow_runtime_fallback=False,
+        )
 
 
 def test_summarization_runtime_selection_rejects_unauthorized_local_fallback(

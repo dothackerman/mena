@@ -67,6 +67,7 @@ ProcessingRuntimeRunner = Callable[["BoundProcessingRuntime"], Any]
 SummarizationRuntimeRunner = Callable[[SummarizationProvider, int], Any]
 FailedInputArtifactsResolver = Callable[[str], tuple[str, ...]]
 TerminalRuntimeRelease = Callable[..., RuntimeReleaseResult | None]
+RuntimeReleaseObserver = Callable[[RuntimeReleaseResult], None]
 RUNTIME_PROFILE_PROVENANCE_CONTRACT = "runtime-profile-provenance.v1"
 PROCESSING_REQUIRED_RUNTIME_STAGES = frozenset({"transcription", "diarization"})
 PROCESSING_OPTIONAL_RUNTIME_STAGES = frozenset({"semantic-review"})
@@ -611,7 +612,7 @@ def _resolve_local_summarization_fallback(
     )
     if local_profile is None:
         return "Ollama fallback is not supported by this runtime"
-    scope = _runtime_revalidation_scope(SUMMARIZATION_RUNTIME_STAGES, accepted.stage_policies)
+    scope = _runtime_revalidation_scope(SUMMARIZATION_RUNTIME_STAGES, (entry,))
     command_runner = runner or SubprocessCommandRunner()
     detection_profile = _profile_for_scope(local_profile, scope)
     state = detect_local_installation_state(
@@ -913,6 +914,7 @@ def run_summarization_with_runtime_fallback(
     ),
     runtime_profile_store_fn: RuntimeProfileStore | None = None,
     terminal_release_fn: TerminalRuntimeRelease = record_terminal_runtime_release,
+    runtime_release_observer: RuntimeReleaseObserver | None = None,
 ) -> SummarizationRuntimeRunResult:
     """Run summarization with resolver-owned provider selection and fallback."""
 
@@ -988,6 +990,8 @@ def run_summarization_with_runtime_fallback(
                 released_attempts.add(current_attempt)
                 if released is not None:
                     release_results.append(released)
+                    if runtime_release_observer is not None:
+                        runtime_release_observer(released)
                 fallback_provider = bind_summarization_runtime(
                     selection=fallback_selection,
                     settings=settings,
@@ -1009,6 +1013,8 @@ def run_summarization_with_runtime_fallback(
             )
             if released is not None:
                 release_results.append(released)
+                if runtime_release_observer is not None:
+                    runtime_release_observer(released)
     return SummarizationRuntimeRunResult(
         value=value,
         selection=selection,

@@ -505,6 +505,39 @@ def test_summarize_workflow_reports_runtime_stewardship_release_notice(
     assert interaction.notices[1].context["result"] == _runtime_release_result()
 
 
+def test_summarize_workflow_reports_runtime_release_warning_when_runner_fails(
+    tmp_path: Path,
+) -> None:
+    session_dir, _, _, _ = _build_summarize_session_bundle(tmp_path)
+    interaction = ScriptedInteraction()
+    release_result = _runtime_release_result(
+        status="failed",
+        detail="Ollama model release failed.",
+    )
+
+    def _runtime_runner(**kwargs: object) -> SummarizationRuntimeRunResult:
+        observer = cast(Callable[[RuntimeReleaseResult], None], kwargs["runtime_release_observer"])
+        observer(release_result)
+        raise SummarizationError("provider unavailable")
+
+    with pytest.raises(SummarizationError, match="provider unavailable"):
+        run_summarization_command(
+            session_path=session_dir,
+            manual_notes=None,
+            language=None,
+            settings=AppSettings.from_env(env={}, home=tmp_path),
+            summarization_runtime_runner_fn=_runtime_runner,
+            interaction=interaction,
+        )
+
+    assert [notice.topic for notice in interaction.notices] == [
+        "summarize.started",
+        "runtime_stewardship.release",
+    ]
+    assert interaction.notices[1].severity == "warning"
+    assert interaction.notices[1].context["result"] == release_result
+
+
 def test_summarize_workflow_propagates_runtime_runner_failures(
     tmp_path: Path,
 ) -> None:

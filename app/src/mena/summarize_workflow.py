@@ -193,6 +193,15 @@ def run_summarization_command(
 
     run_id = f"summarize-{uuid4()}"
     ledger = ProcessingStageLedger(store=store, session_id=session_id_value, run_id=run_id)
+    observed_release_results: list[RuntimeReleaseResult] = []
+
+    def _observe_runtime_release(result: RuntimeReleaseResult) -> None:
+        observed_release_results.append(result)
+        _notify_runtime_stewardship_release(
+            interaction=interaction,
+            result=result,
+        )
+
     runtime_result = summarization_runtime_runner_fn(
         settings=settings,
         store=store,
@@ -208,6 +217,7 @@ def run_summarization_command(
             resolved_overlay[0],
             manual_notes_record,
         ),
+        runtime_release_observer=_observe_runtime_release,
         run=lambda provider, attempt: run_summarization_stage(
             store=store,
             ledger=ledger,
@@ -219,7 +229,11 @@ def run_summarization_command(
             attempt=attempt,
         ),
     )
+    already_observed = list(observed_release_results)
     for release_result in runtime_result.release_results:
+        if release_result in already_observed:
+            already_observed.remove(release_result)
+            continue
         _notify_runtime_stewardship_release(
             interaction=interaction,
             result=release_result,
