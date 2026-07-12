@@ -13,15 +13,7 @@ from typing import Self
 
 from mena.artifacts import ArtifactRecord, ArtifactStore
 from mena.diarization import DiarizationArtifact, DiarizationContractError, DiarizationSegment
-from mena.fields import (
-    optional_number,
-    optional_str,
-    required_bool,
-    required_int,
-    required_mapping,
-    required_number,
-    required_str,
-)
+from mena.fields import ContractReader
 from mena.processing import (
     ArtifactRef,
     ProcessingErrorInfo,
@@ -84,27 +76,24 @@ class MergePolicy:
     @classmethod
     def from_dict(cls, data: object) -> Self:
         item = _mapping(data, "Merge policy")
+        reader = ContractReader("Merge policy", MergeTimingContractError)
         policy = cls(
-            policy_version=_required_int(item, "policy_version", "Merge policy"),
-            capture_profile=_required_str(item, "capture_profile", "Merge policy"),
-            local_source_id=_required_str(item, "local_source_id", "Merge policy"),
-            remote_source_id=_required_str(item, "remote_source_id", "Merge policy"),
-            local_speaker_id=_required_str(item, "local_speaker_id", "Merge policy"),
-            local_speaker_label=_required_str(item, "local_speaker_label", "Merge policy"),
-            remote_fallback_speaker_id=_required_str(
-                item, "remote_fallback_speaker_id", "Merge policy"
+            policy_version=reader.required_int(item, "policy_version"),
+            capture_profile=reader.required_str(item, "capture_profile"),
+            local_source_id=reader.required_str(item, "local_source_id"),
+            remote_source_id=reader.required_str(item, "remote_source_id"),
+            local_speaker_id=reader.required_str(item, "local_speaker_id"),
+            local_speaker_label=reader.required_str(item, "local_speaker_label"),
+            remote_fallback_speaker_id=reader.required_str(item, "remote_fallback_speaker_id"),
+            remote_fallback_speaker_label=reader.required_str(
+                item, "remote_fallback_speaker_label"
             ),
-            remote_fallback_speaker_label=_required_str(
-                item, "remote_fallback_speaker_label", "Merge policy"
-            ),
-            room_source_id=_optional_str(item, "room_source_id", "Merge policy") or "room_mic",
-            room_fallback_speaker_id=_optional_str(item, "room_fallback_speaker_id", "Merge policy")
+            room_source_id=reader.optional_str(item, "room_source_id") or "room_mic",
+            room_fallback_speaker_id=reader.optional_str(item, "room_fallback_speaker_id")
             or "room",
-            room_fallback_speaker_label=_optional_str(
-                item, "room_fallback_speaker_label", "Merge policy"
-            )
+            room_fallback_speaker_label=reader.optional_str(item, "room_fallback_speaker_label")
             or "Room",
-            sort_order=_required_str(item, "sort_order", "Merge policy"),
+            sort_order=reader.required_str(item, "sort_order"),
         )
         if policy.policy_version != MERGE_POLICY_VERSION:
             raise MergeTimingContractError("Unsupported merge policy version.")
@@ -153,11 +142,12 @@ class SegmentConfidence:
     @classmethod
     def from_dict(cls, data: object, *, label: str) -> Self:
         item = _mapping(data, label)
+        reader = ContractReader(label, MergeTimingContractError)
         confidence = cls(
-            status=_required_str(item, "status", label),
-            metric=_optional_str(item, "metric", label),
-            value=_optional_number(item, "value", label),
-            reason=_optional_str(item, "reason", label),
+            status=reader.required_str(item, "status"),
+            metric=reader.optional_str(item, "metric"),
+            value=reader.optional_number(item, "value"),
+            reason=reader.optional_str(item, "reason"),
         )
         if confidence.status not in CONFIDENCE_STATUSES:
             raise MergeTimingContractError(f"{label} status is invalid.")
@@ -193,10 +183,11 @@ class SpeakerIdentity:
     @classmethod
     def from_dict(cls, data: object) -> Self:
         item = _mapping(data, "Speaker identity")
+        reader = ContractReader("Speaker identity", MergeTimingContractError)
         speaker = cls(
-            speaker_id=_required_str(item, "speaker_id", "Speaker identity"),
-            label=_required_str(item, "label", "Speaker identity"),
-            kind=_required_str(item, "kind", "Speaker identity"),
+            speaker_id=reader.required_str(item, "speaker_id"),
+            label=reader.required_str(item, "label"),
+            kind=reader.required_str(item, "kind"),
             confidence=SegmentConfidence.from_dict(
                 item.get("confidence"), label="Speaker confidence"
             ),
@@ -230,16 +221,13 @@ class MergedTranscriptSource:
     @classmethod
     def from_dict(cls, data: object) -> Self:
         item = _mapping(data, "Merged transcript source")
+        reader = ContractReader("Merged transcript source", MergeTimingContractError)
         source = cls(
-            source_id=_required_str(item, "source_id", "Merged transcript source"),
-            channel=_required_str(item, "channel", "Merged transcript source"),
+            source_id=reader.required_str(item, "source_id"),
+            channel=reader.required_str(item, "channel"),
             transcript_artifact=ArtifactRef.from_dict(item.get("transcript_artifact")),
-            diarization_status=_required_str(
-                item, "diarization_status", "Merged transcript source"
-            ),
-            diarization_reason=_optional_str(
-                item, "diarization_reason", "Merged transcript source"
-            ),
+            diarization_status=reader.required_str(item, "diarization_status"),
+            diarization_reason=reader.optional_str(item, "diarization_reason"),
             regular_diarization_artifact=(
                 None
                 if item.get("regular_diarization_artifact") is None
@@ -313,29 +301,26 @@ class MergedTranscriptSegment:
     @classmethod
     def from_dict(cls, data: object) -> Self:
         item = _mapping(data, "Merged transcript segment")
+        reader = ContractReader("Merged transcript segment", MergeTimingContractError)
         segment = cls(
-            id=_required_str(item, "id", "Merged transcript segment"),
-            text=_required_str(item, "text", "Merged transcript segment"),
-            start_seconds=_required_number(item, "start_seconds", "Merged transcript segment"),
-            end_seconds=_required_number(item, "end_seconds", "Merged transcript segment"),
-            source_id=_required_str(item, "source_id", "Merged transcript segment"),
-            channel=_required_str(item, "channel", "Merged transcript segment"),
+            id=reader.required_str(item, "id"),
+            text=reader.required_str(item, "text"),
+            start_seconds=reader.required_number(item, "start_seconds"),
+            end_seconds=reader.required_number(item, "end_seconds"),
+            source_id=reader.required_str(item, "source_id"),
+            channel=reader.required_str(item, "channel"),
             speaker=SpeakerIdentity.from_dict(item.get("speaker")),
             transcription_confidence=SegmentConfidence.from_dict(
                 item.get("transcription_confidence"),
                 label="Transcription confidence",
             ),
-            overlap_detected=_required_bool(item, "overlap_detected", "Merged transcript segment"),
-            transcript_segment_id=_required_str(
-                item,
-                "transcript_segment_id",
-                "Merged transcript segment",
-            ),
+            overlap_detected=reader.required_bool(item, "overlap_detected"),
+            transcript_segment_id=reader.required_str(item, "transcript_segment_id"),
             diarization_segment_ids=tuple(
-                _required_str(value, "", "Diarization segment id")
+                _read_required_string_value(value, "Diarization segment id")
                 for value in _list(item, "diarization_segment_ids")
             ),
-            metadata=_required_json_object(item, "metadata", "Merged transcript segment metadata"),
+            metadata=reader.required_mapping(item, "metadata"),
         )
         for value, label in (
             (segment.id, "Merged transcript segment id"),
@@ -386,18 +371,19 @@ class MergedTranscriptArtifact:
     @classmethod
     def from_dict(cls, data: object) -> Self:
         item = _mapping(data, "Merged transcript artifact")
+        reader = ContractReader("Merged transcript artifact", MergeTimingContractError)
         artifact = cls(
-            version=_required_int(item, "version", "Merged transcript artifact"),
-            session_id=_required_str(item, "session_id", "Merged transcript artifact"),
+            version=reader.required_int(item, "version"),
+            session_id=reader.required_str(item, "session_id"),
             policy=MergePolicy.from_dict(item.get("policy")),
             sources=tuple(
                 MergedTranscriptSource.from_dict(source) for source in _list(item, "sources")
             ),
-            text=_required_str(item, "text", "Merged transcript artifact"),
+            text=reader.required_str(item, "text"),
             segments=tuple(
                 MergedTranscriptSegment.from_dict(segment) for segment in _list(item, "segments")
             ),
-            created_at=_required_str(item, "created_at", "Merged transcript artifact"),
+            created_at=reader.required_str(item, "created_at"),
         )
         if artifact.version != MERGED_TRANSCRIPT_SCHEMA_VERSION:
             raise MergeTimingContractError("Unsupported merged transcript artifact version.")
@@ -1512,75 +1498,10 @@ def _list(data: Mapping[str, object], field_name: str) -> list[object]:
     return value
 
 
-def _required_str(data: Mapping[str, object] | object, field_name: str, label: str) -> str:
-    if not isinstance(data, Mapping):
-        if not isinstance(data, str) or not data:
-            raise MergeTimingContractError(f"{label} must be a non-empty string.")
-        return data
-    return required_str(
-        data,
-        field_name,
-        error=MergeTimingContractError,
-        message=f"Field '{field_name}' in {label} must be a non-empty string.",
-    )
-
-
-def _optional_str(data: Mapping[str, object], field_name: str, label: str) -> str | None:
-    return optional_str(
-        data,
-        field_name,
-        error=MergeTimingContractError,
-        message=f"Field '{field_name}' in {label} must be null or a non-empty string.",
-    )
-
-
-def _required_int(data: Mapping[str, object], field_name: str, label: str) -> int:
-    return required_int(
-        data,
-        field_name,
-        error=MergeTimingContractError,
-        message=f"Field '{field_name}' in {label} must be an integer.",
-    )
-
-
-def _required_number(data: Mapping[str, object], field_name: str, label: str) -> float:
-    return required_number(
-        data,
-        field_name,
-        error=MergeTimingContractError,
-        message=f"Field '{field_name}' in {label} must be a number.",
-    )
-
-
-def _optional_number(data: Mapping[str, object], field_name: str, label: str) -> float | None:
-    return optional_number(
-        data,
-        field_name,
-        error=MergeTimingContractError,
-        message=f"Field '{field_name}' in {label} must be null or a number.",
-    )
-
-
-def _required_bool(data: Mapping[str, object], field_name: str, label: str) -> bool:
-    return required_bool(
-        data,
-        field_name,
-        error=MergeTimingContractError,
-        message=f"Field '{field_name}' in {label} must be a boolean.",
-    )
-
-
-def _required_json_object(
-    data: Mapping[str, object],
-    field_name: str,
-    label: str,
-) -> Mapping[str, object]:
-    return required_mapping(
-        data,
-        field_name,
-        error=MergeTimingContractError,
-        message=f"{label} must be a JSON object.",
-    )
+def _read_required_string_value(data: object, label: str) -> str:
+    if not isinstance(data, str) or not data:
+        raise MergeTimingContractError(f"{label} must be a non-empty string.")
+    return data
 
 
 def _validate_stable_id(value: str, label: str) -> None:
