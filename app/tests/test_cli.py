@@ -1586,7 +1586,11 @@ def test_main_summarize_accepts_session_json_file(
 
     def _fake_run_summarization_command(**kwargs: object) -> int:
         observed["session_path"] = kwargs["session_path"]
+        observed["summarization_provider_factory"] = kwargs["summarization_provider_factory"]
         return 0
+
+    def _summarization_provider_factory() -> FakeSummarizationProvider:
+        return FakeSummarizationProvider(result=_summary_result_for_export())
 
     monkeypatch.setattr(
         "mena.summarize_workflow.run_summarization_command",
@@ -1594,12 +1598,17 @@ def test_main_summarize_accepts_session_json_file(
     )
     settings = AppSettings.from_env(env={}, home=tmp_path)
 
-    exit_code = main(["summarize", str(session_json_path)], settings=settings)
+    exit_code = main(
+        ["summarize", str(session_json_path)],
+        settings=settings,
+        summarization_provider_factory=_summarization_provider_factory,
+    )
 
     # A session.json file path is accepted and forwarded to the summarize
     # workflow, which resolves both directory and record-file paths.
     assert exit_code == 0
     assert observed["session_path"] == session_json_path
+    assert observed["summarization_provider_factory"] is _summarization_provider_factory
 
 
 def test_main_summarize_auto_selects_ready_session_when_session_path_is_omitted(

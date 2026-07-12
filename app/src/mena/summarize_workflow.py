@@ -37,7 +37,7 @@ from mena.merge_timing import (
 from mena.mistral_llm import MISTRAL_SUMMARY_DISCLOSURE, MistralSummaryState
 from mena.processing import ProcessingStageLedger
 from mena.runtime_profile import (
-    SummarizationRuntimeRunResult,
+    ProviderFactoryInput,
     run_summarization_with_runtime_fallback,
 )
 from mena.runtime_stewardship import (
@@ -59,8 +59,6 @@ from mena.summarization import (
     run_summarization_stage,
 )
 from mena.timestamps import parse_utc_timestamp
-
-SummarizationRuntimeRunnerFn = Callable[..., SummarizationRuntimeRunResult]
 
 
 @dataclass(frozen=True)
@@ -140,9 +138,7 @@ def run_summarization_command(
     setup_command_identity: CommandIdentity | None = None,
     setup_hardware: HardwareFacts | None = None,
     allow_runtime_fallback: bool = False,
-    summarization_runtime_runner_fn: SummarizationRuntimeRunnerFn = (
-        run_summarization_with_runtime_fallback
-    ),
+    summarization_provider_factory: ProviderFactoryInput = None,
     interaction: InteractionPort | None = None,
 ) -> int:
     resolved_session = resolve_session(session_path)
@@ -196,7 +192,7 @@ def run_summarization_command(
             result=result,
         )
 
-    runtime_result = summarization_runtime_runner_fn(
+    runtime_result = run_summarization_with_runtime_fallback(
         settings=settings,
         store=store,
         run_id=run_id,
@@ -211,6 +207,7 @@ def run_summarization_command(
             resolved_overlay[0],
             manual_notes_record,
         ),
+        summarization_provider_factory=summarization_provider_factory,
         runtime_release_observer=_observe_runtime_release,
         run=lambda provider, attempt: run_summarization_stage(
             store=store,

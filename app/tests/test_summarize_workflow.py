@@ -15,9 +15,9 @@ from mena.interaction import (
 )
 from mena.merge_timing import MERGED_TRANSCRIPT_ARTIFACT_TYPE
 from mena.mistral_llm import MistralSummaryState
-from mena.runtime_profile import (
-    RuntimeProfileSelection,
-    SummarizationRuntimeRunResult,
+from mena.ollama_summarization import (
+    OLLAMA_SUMMARIZATION_NUM_CTX,
+    OLLAMA_SUMMARIZATION_SEED,
 )
 from mena.runtime_stewardship import (
     RUNTIME_STEWARDSHIP_RELEASE_NOTICE_TOPIC,
@@ -38,8 +38,14 @@ from mena.setup import (
     persist_runtime_profile_state,
 )
 from mena.summarization import (
+    REQUIRED_NOTE_PRODUCTS,
+    FakeSummarizationProvider,
+    ProductRequestRecord,
     SummarizationError,
     SummarizationPolicy,
+    SummarizationRequest,
+    SummaryResult,
+    SummaryTimelineEntry,
 )
 from mena.summarize_workflow import (
     _merged_transcript_timestamp_key,
@@ -57,21 +63,66 @@ from test_cli import (
 SESSION_ID = "00000000-0000-0000-0000-000000000001"
 
 
-def _runtime_selection(**_kwargs: object) -> RuntimeProfileSelection:
-    return cast(RuntimeProfileSelection, SimpleNamespace())
+def _summary_result() -> SummaryResult:
+    return SummaryResult(
+        timeline=(
+            SummaryTimelineEntry(
+                text="The team aligned on the plan.",
+                source_segment_ids=("segment_2",),
+                start_seconds=1.0,
+            ),
+        ),
+        action_items=(),
+        general_summary="The team aligned on the plan.",
+        request_records=_request_records_for_products(REQUIRED_NOTE_PRODUCTS),
+    )
 
 
-def _single_attempt_runtime_runner(**kwargs: object) -> SummarizationRuntimeRunResult:
-    provider = SimpleNamespace(metadata=SimpleNamespace(config_id="provider"))
-    result = cast(Callable[[object, int], object], kwargs["run"])(
-        provider,
-        cast(int, kwargs["attempt"]),
+def _request_records_for_products(products: tuple[str, ...]) -> tuple[ProductRequestRecord, ...]:
+    return tuple(
+        ProductRequestRecord(
+            product=product,
+            model="fake-summarizer",
+            num_ctx=OLLAMA_SUMMARIZATION_NUM_CTX,
+            temperature=0,
+            seed=OLLAMA_SUMMARIZATION_SEED,
+            prompt_eval_count=None,
+            eval_count=None,
+        )
+        for product in products
     )
-    return SummarizationRuntimeRunResult(
-        value=result,
-        selection=_runtime_selection(),
-        provider=provider,
+
+
+def _persist_ready_summarization_runtime(
+    *,
+    settings: AppSettings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    setup_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = build_runtime_profile_state(evaluate_setup(get_alpha_local_profile(), setup_state))
+    persist_runtime_profile_state(accepted, paths=settings.paths)
+    monkeypatch.setattr(
+        "mena.runtime_profile.detect_local_installation_state",
+        lambda *_args, **_kwargs: setup_state,
     )
+
+
+def _fake_provider_factory(
+    provider: FakeSummarizationProvider | None = None,
+) -> Callable[[], FakeSummarizationProvider]:
+    resolved_provider = provider or FakeSummarizationProvider(result=_summary_result())
+    return lambda: resolved_provider
+
+
+class _ReleasableFakeSummarizationProvider(FakeSummarizationProvider):
+    runtime_resource_used = True
+
+    def __init__(self, *, release_result: RuntimeReleaseResult) -> None:
+        super().__init__(result=_summary_result())
+        self._release_result = release_result
+
+    def release_runtime_resource(self, _lease: RuntimeLease) -> RuntimeReleaseResult:
+        return self._release_result
 
 
 def _runtime_release_result(
@@ -208,14 +259,16 @@ def test_summarize_workflow_notifies_progress_and_export_guidance(
         )
 
     _patch_summarization_stage(monkeypatch, _stage)
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    _persist_ready_summarization_runtime(settings=settings, monkeypatch=monkeypatch)
 
     assert (
         run_summarization_command(
             session_path=session_dir,
             manual_notes=None,
             language=None,
-            settings=AppSettings.from_env(env={}, home=tmp_path),
-            summarization_runtime_runner_fn=_single_attempt_runtime_runner,
+            settings=settings,
+            summarization_provider_factory=_fake_provider_factory(),
             interaction=interaction,
         )
         == 0
@@ -255,14 +308,16 @@ def test_summarize_workflow_prints_quoted_export_command_for_returned_summary(
         return SimpleNamespace(summary_record=summary_record)
 
     _patch_summarization_stage(monkeypatch, _stage)
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    _persist_ready_summarization_runtime(settings=settings, monkeypatch=monkeypatch)
 
     assert (
         run_summarization_command(
             session_path=session_dir,
             manual_notes=None,
             language=None,
-            settings=AppSettings.from_env(env={}, home=tmp_path),
-            summarization_runtime_runner_fn=_single_attempt_runtime_runner,
+            settings=settings,
+            summarization_provider_factory=_fake_provider_factory(),
         )
         == 0
     )
@@ -335,14 +390,16 @@ def test_summarize_workflow_applies_active_overlay_and_manual_notes(
         )
 
     _patch_summarization_stage(monkeypatch, _fake_run_summarization_stage)
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    _persist_ready_summarization_runtime(settings=settings, monkeypatch=monkeypatch)
 
     assert (
         run_summarization_command(
             session_path=session_dir,
             manual_notes=str(notes_path),
             language="de-CH",
-            settings=AppSettings.from_env(env={}, home=tmp_path),
-            summarization_runtime_runner_fn=_single_attempt_runtime_runner,
+            settings=settings,
+            summarization_provider_factory=_fake_provider_factory(),
         )
         == 0
     )
@@ -353,40 +410,14 @@ def test_summarize_workflow_applies_active_overlay_and_manual_notes(
     assert cast(SummarizationPolicy, captured["policy"]).language == "de-CH"
 
 
-def test_summarize_workflow_calls_the_runtime_resolver_once_with_stage_inputs(
+def test_summarize_workflow_uses_real_runtime_resolver_with_provider_factory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    session_dir, _, merged_record, overlay_record = _build_summarize_session_bundle(tmp_path)
-    provider = SimpleNamespace(metadata=SimpleNamespace(config_id="provider"))
-    captured: dict[str, object] = {}
-
-    def _runtime_runner(**kwargs: object) -> SummarizationRuntimeRunResult:
-        captured.update(kwargs)
-        result = cast(Callable[[object, int], object], kwargs["run"])(
-            provider,
-            cast(int, kwargs["attempt"]),
-        )
-        return SummarizationRuntimeRunResult(
-            value=result,
-            selection=_runtime_selection(),
-            provider=provider,
-        )
-
-    def _stage(**kwargs: object) -> SimpleNamespace:
-        captured["provider"] = kwargs["provider"]
-        store = cast(ArtifactStore, kwargs["store"])
-        return SimpleNamespace(
-            summary_record=store.store(
-                artifact_type="summary",
-                name="summary/final.json",
-                data=b"{}",
-                version=1,
-            ),
-        )
-
-    _patch_summarization_stage(monkeypatch, _stage)
+    session_dir, store, _, _ = _build_summarize_session_bundle(tmp_path)
     settings = AppSettings.from_env(env={}, home=tmp_path)
+    provider = FakeSummarizationProvider(result=_summary_result())
+    _persist_ready_summarization_runtime(settings=settings, monkeypatch=monkeypatch)
 
     assert (
         run_summarization_command(
@@ -394,35 +425,26 @@ def test_summarize_workflow_calls_the_runtime_resolver_once_with_stage_inputs(
             manual_notes=None,
             language=None,
             settings=settings,
-            summarization_runtime_runner_fn=_runtime_runner,
+            summarization_provider_factory=_fake_provider_factory(provider),
         )
         == 0
     )
 
-    assert captured["settings"] is settings
-    assert captured["failed_input_artifacts"] == (merged_record.id, overlay_record.id)
-    assert captured["provider"] is provider
+    assert len(provider.requests) == 1
+    request = provider.requests[0]
+    assert isinstance(request, SummarizationRequest)
+    assert request.merged_transcript.segments[1].text == "Corrected segment."
+    provenance_records = store.list(artifact_type="runtime_profile_provenance")
+    assert len(provenance_records) == 1
 
 
 def test_summarize_workflow_uses_unique_runtime_profile_provenance_per_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    session_dir, _, _, _ = _build_summarize_session_bundle(tmp_path)
-    run_ids: list[str] = []
-
-    def _runtime_runner(**kwargs: object) -> SummarizationRuntimeRunResult:
-        run_ids.append(cast(str, kwargs["run_id"]))
-        provider = SimpleNamespace(metadata=SimpleNamespace(config_id="provider"))
-        result = cast(Callable[[object, int], object], kwargs["run"])(
-            provider,
-            cast(int, kwargs["attempt"]),
-        )
-        return SummarizationRuntimeRunResult(
-            value=result,
-            selection=_runtime_selection(),
-            provider=provider,
-        )
+    session_dir, store, _, _ = _build_summarize_session_bundle(tmp_path)
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    _persist_ready_summarization_runtime(settings=settings, monkeypatch=monkeypatch)
 
     def _stage(**kwargs: object) -> SimpleNamespace:
         store = cast(ArtifactStore, kwargs["store"])
@@ -444,12 +466,16 @@ def test_summarize_workflow_uses_unique_runtime_profile_provenance_per_run(
                 session_path=session_dir,
                 manual_notes=None,
                 language=None,
-                settings=AppSettings.from_env(env={}, home=tmp_path),
-                summarization_runtime_runner_fn=_runtime_runner,
+                settings=settings,
+                summarization_provider_factory=_fake_provider_factory(),
             )
             == 0
         )
 
+    run_ids = [
+        cast(str, json.loads(store.retrieve(record.id))["run_id"])
+        for record in store.list(artifact_type="runtime_profile_provenance")
+    ]
     assert len(run_ids) == 2
     assert len(set(run_ids)) == 2
     assert all(run_id.startswith("summarize-") for run_id in run_ids)
@@ -461,19 +487,10 @@ def test_summarize_workflow_reports_runtime_stewardship_release_notice(
 ) -> None:
     session_dir, _, _, _ = _build_summarize_session_bundle(tmp_path)
     interaction = ScriptedInteraction()
-
-    def _runtime_runner(**kwargs: object) -> SummarizationRuntimeRunResult:
-        provider = SimpleNamespace(metadata=SimpleNamespace(config_id="provider"))
-        result = cast(Callable[[object, int], object], kwargs["run"])(
-            provider,
-            cast(int, kwargs["attempt"]),
-        )
-        return SummarizationRuntimeRunResult(
-            value=result,
-            selection=_runtime_selection(),
-            provider=provider,
-            release_results=(_runtime_release_result(),),
-        )
+    release_result = _runtime_release_result()
+    provider = _ReleasableFakeSummarizationProvider(release_result=release_result)
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    _persist_ready_summarization_runtime(settings=settings, monkeypatch=monkeypatch)
 
     def _stage(**kwargs: object) -> SimpleNamespace:
         store = cast(ArtifactStore, kwargs["store"])
@@ -493,8 +510,8 @@ def test_summarize_workflow_reports_runtime_stewardship_release_notice(
             session_path=session_dir,
             manual_notes=None,
             language=None,
-            settings=AppSettings.from_env(env={}, home=tmp_path),
-            summarization_runtime_runner_fn=_runtime_runner,
+            settings=settings,
+            summarization_provider_factory=_fake_provider_factory(provider),
             interaction=interaction,
         )
         == 0
@@ -506,11 +523,12 @@ def test_summarize_workflow_reports_runtime_stewardship_release_notice(
         RUNTIME_STEWARDSHIP_RELEASE_NOTICE_TOPIC,
         "summarize.completed",
     ]
-    assert interaction.notices[1].context["result"] == _runtime_release_result()
+    assert interaction.notices[1].context["result"] == release_result
 
 
-def test_summarize_workflow_reports_runtime_release_warning_when_runner_fails(
+def test_summarize_workflow_reports_runtime_release_warning_when_stage_fails(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session_dir, _, _, _ = _build_summarize_session_bundle(tmp_path)
     interaction = ScriptedInteraction()
@@ -518,19 +536,22 @@ def test_summarize_workflow_reports_runtime_release_warning_when_runner_fails(
         status="failed",
         detail="Ollama model release failed.",
     )
+    provider = _ReleasableFakeSummarizationProvider(release_result=release_result)
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    _persist_ready_summarization_runtime(settings=settings, monkeypatch=monkeypatch)
 
-    def _runtime_runner(**kwargs: object) -> SummarizationRuntimeRunResult:
-        observer = cast(Callable[[RuntimeReleaseResult], None], kwargs["runtime_release_observer"])
-        observer(release_result)
+    def _stage(**_kwargs: object) -> SimpleNamespace:
         raise SummarizationError("provider unavailable")
+
+    _patch_summarization_stage(monkeypatch, _stage)
 
     with pytest.raises(SummarizationError, match="provider unavailable"):
         run_summarization_command(
             session_path=session_dir,
             manual_notes=None,
             language=None,
-            settings=AppSettings.from_env(env={}, home=tmp_path),
-            summarization_runtime_runner_fn=_runtime_runner,
+            settings=settings,
+            summarization_provider_factory=_fake_provider_factory(provider),
             interaction=interaction,
         )
 
@@ -542,29 +563,32 @@ def test_summarize_workflow_reports_runtime_release_warning_when_runner_fails(
     assert interaction.notices[1].context["result"] == release_result
 
 
-def test_summarize_workflow_propagates_runtime_runner_failures(
+def test_summarize_workflow_propagates_summarization_stage_failures(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session_dir, _, _, _ = _build_summarize_session_bundle(tmp_path)
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    _persist_ready_summarization_runtime(settings=settings, monkeypatch=monkeypatch)
 
-    def _runtime_runner(**_kwargs: object) -> SummarizationRuntimeRunResult:
+    def _stage(**_kwargs: object) -> SimpleNamespace:
         raise SummarizationError("provider unavailable")
+
+    _patch_summarization_stage(monkeypatch, _stage)
 
     with pytest.raises(SummarizationError, match="provider unavailable"):
         run_summarization_command(
             session_path=session_dir,
             manual_notes=None,
             language=None,
-            settings=AppSettings.from_env(env={}, home=tmp_path),
-            summarization_runtime_runner_fn=_runtime_runner,
+            settings=settings,
+            summarization_provider_factory=_fake_provider_factory(),
         )
 
 
-def test_summarize_workflow_remote_fallback_authorizer_uses_the_interaction_port(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    session_dir, _, _, _ = _build_summarize_session_bundle(tmp_path)
+def test_summarize_workflow_remote_fallback_authorizer_uses_the_interaction_port() -> None:
+    from mena.summarize_workflow import _remote_fallback_authorizer
+
     interaction = ScriptedInteraction(
         [
             ScriptedResponse(
@@ -583,51 +607,9 @@ def test_summarize_workflow_remote_fallback_authorizer_uses_the_interaction_port
         policy="mena-mistral-summary-allowlist-2026-06-29-v1",
         detail="resolved inside the accepted snapshot",
     )
-    authorized: dict[str, object] = {}
 
-    def _runtime_runner(**kwargs: object) -> SummarizationRuntimeRunResult:
-        authorize = cast(
-            Callable[[str, MistralSummaryState], bool],
-            kwargs["authorize_remote_summarization_fallback"],
-        )
-        authorized["result"] = authorize("ollama is down", probe_state)
-        provider = SimpleNamespace(metadata=SimpleNamespace(config_id="provider"))
-        result = cast(Callable[[object, int], object], kwargs["run"])(
-            provider,
-            cast(int, kwargs["attempt"]),
-        )
-        return SummarizationRuntimeRunResult(
-            value=result,
-            selection=_runtime_selection(),
-            provider=provider,
-        )
-
-    def _stage(**kwargs: object) -> SimpleNamespace:
-        store = cast(ArtifactStore, kwargs["store"])
-        return SimpleNamespace(
-            summary_record=store.store(
-                artifact_type="summary",
-                name="summary/final.json",
-                data=b"{}",
-                version=1,
-            ),
-        )
-
-    _patch_summarization_stage(monkeypatch, _stage)
-
-    assert (
-        run_summarization_command(
-            session_path=session_dir,
-            manual_notes=None,
-            language=None,
-            settings=AppSettings.from_env(env={}, home=tmp_path),
-            summarization_runtime_runner_fn=_runtime_runner,
-            interaction=interaction,
-        )
-        == 0
-    )
-
-    assert authorized["result"] is True
+    authorize = _remote_fallback_authorizer(interaction)
+    assert authorize("ollama is down", probe_state) is True
     request = cast(ConfirmationRequest, interaction.requests[0])
     assert request.topic == "runtime_fallback.summarization_remote"
     assert request.context["reason"] == "ollama is down"
@@ -690,6 +672,7 @@ def test_summarize_workflow_resolves_session_language_before_config_default(
     settings = AppSettings.from_env(env={}, home=tmp_path, config_path=config_path)
     captured: dict[str, object] = {}
     _patch_summarization_stage(monkeypatch, _language_capturing_stage(captured))
+    _persist_ready_summarization_runtime(settings=settings, monkeypatch=monkeypatch)
 
     assert (
         run_summarization_command(
@@ -697,7 +680,7 @@ def test_summarize_workflow_resolves_session_language_before_config_default(
             manual_notes=None,
             language=None,
             settings=settings,
-            summarization_runtime_runner_fn=_single_attempt_runtime_runner,
+            summarization_provider_factory=_fake_provider_factory(),
         )
         == 0
     )
@@ -712,16 +695,18 @@ def test_summarize_workflow_canonicalizes_underscore_session_language(
 ) -> None:
     session_dir, _, _, _ = _build_summarize_session_bundle(tmp_path)
     _set_session_language(session_dir, "de_CH")
+    settings = AppSettings.from_env(env={}, home=tmp_path)
     captured: dict[str, object] = {}
     _patch_summarization_stage(monkeypatch, _language_capturing_stage(captured))
+    _persist_ready_summarization_runtime(settings=settings, monkeypatch=monkeypatch)
 
     assert (
         run_summarization_command(
             session_path=session_dir,
             manual_notes=None,
             language=None,
-            settings=AppSettings.from_env(env={}, home=tmp_path),
-            summarization_runtime_runner_fn=_single_attempt_runtime_runner,
+            settings=settings,
+            summarization_provider_factory=_fake_provider_factory(),
         )
         == 0
     )
@@ -739,6 +724,7 @@ def test_summarize_workflow_explicit_language_overrides_config_default(
     settings = AppSettings.from_env(env={}, home=tmp_path, config_path=config_path)
     captured: dict[str, object] = {}
     _patch_summarization_stage(monkeypatch, _language_capturing_stage(captured))
+    _persist_ready_summarization_runtime(settings=settings, monkeypatch=monkeypatch)
 
     assert (
         run_summarization_command(
@@ -746,7 +732,7 @@ def test_summarize_workflow_explicit_language_overrides_config_default(
             manual_notes=None,
             language="it-CH",
             settings=settings,
-            summarization_runtime_runner_fn=_single_attempt_runtime_runner,
+            summarization_provider_factory=_fake_provider_factory(),
         )
         == 0
     )
@@ -772,7 +758,6 @@ def test_summarize_workflow_rejects_invalid_session_language(
             manual_notes=None,
             language=None,
             settings=AppSettings.from_env(env={}, home=tmp_path),
-            summarization_runtime_runner_fn=_single_attempt_runtime_runner,
         )
 
 

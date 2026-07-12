@@ -797,6 +797,7 @@ def main(
     transcription_provider_factory: ProviderFactory | None = None,
     diarization_provider_factory: ProviderFactory | None = None,
     semantic_coherence_provider_factory: ProviderFactory | None = None,
+    summarization_provider_factory: ProviderFactory | None = None,
     settings: AppSettings | None = None,
     config_path: Path | None = None,
     input_fn: Callable[[str], str] | None = None,
@@ -921,6 +922,7 @@ def main(
                 setup_command_identity=setup_command_identity,
                 setup_hardware=setup_hardware,
                 allow_runtime_fallback=args.allow_runtime_fallback,
+                summarization_provider_factory=summarization_provider_factory,
                 interaction=interaction,
             )
         except RuntimeFallbackUnavailable as exc:
@@ -1374,6 +1376,7 @@ def _run_summarize_command(
     setup_command_identity: CommandIdentity | None = None,
     setup_hardware: HardwareFacts | None = None,
     allow_runtime_fallback: bool = False,
+    summarization_provider_factory: ProviderFactory | None = None,
     interaction: InteractionPort | None = None,
 ) -> int:
     return summarize_workflow.run_summarization_command(
@@ -1385,6 +1388,7 @@ def _run_summarize_command(
         setup_command_identity=setup_command_identity,
         setup_hardware=setup_hardware,
         allow_runtime_fallback=allow_runtime_fallback,
+        summarization_provider_factory=summarization_provider_factory,
         interaction=interaction,
     )
 
