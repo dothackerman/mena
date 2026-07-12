@@ -1613,6 +1613,72 @@ def test_summarization_runtime_selection_revalidates_ollama_fallback_scope(
         )
 
 
+def test_summarization_runtime_selection_revalidates_ollama_fallback_entry_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    setup_state = _setup_state(settings=settings, pyannote_token_present=True)
+    mistral_primary = _accepted_mistral_primary_state(
+        settings=settings,
+        setup_state=setup_state,
+    )
+    fallback_entry = replace(
+        _ollama_summary_stage(settings),
+        model="fallback-only-model",
+    )
+    accepted = replace(
+        mistral_primary,
+        fallback_authorization=replace(
+            mistral_primary.fallback_authorization,
+            local_status="authorized",
+            automatic_local_fallback_authorized=True,
+            stage_scope=("summarization",),
+        ),
+        summarization_fallback_providers=(fallback_entry,),
+    )
+    persist_runtime_profile_state(accepted, paths=settings.paths)
+    observed_models: list[str] = []
+
+    def _detect_state(_settings: AppSettings, **kwargs: object) -> LocalInstallationState:
+        profile = cast(Any, kwargs["profile"])
+        model = next(stage.model for stage in profile.stages if stage.stage == "summarization")
+        observed_models.append(model)
+        return replace(
+            setup_state,
+            mistral_summary=_mistral_summary_state(
+                key_present=False,
+                reachable=False,
+                resolved_model=None,
+                model_allowed=False,
+                detail="MENA_MISTRAL_API_KEY is not set.",
+            ),
+            ollama=replace(
+                setup_state.ollama,
+                model=model,
+                model_present=model == settings.local_llm.ollama_model,
+                detail=(
+                    "model present"
+                    if model == settings.local_llm.ollama_model
+                    else f"model {model} is not listed by Ollama"
+                ),
+            ),
+        )
+
+    monkeypatch.setattr("mena.runtime_profile.detect_local_installation_state", _detect_state)
+
+    with pytest.raises(RuntimeFallbackUnavailable, match="fallback-only-model"):
+        select_summarization_runtime_profile(
+            settings=settings,
+            runner=None,
+            command_identity=None,
+            hardware=None,
+            allow_runtime_fallback=False,
+        )
+
+    assert observed_models[-1] == "fallback-only-model"
+
+
 def test_summarization_runtime_selection_rejects_unauthorized_local_fallback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

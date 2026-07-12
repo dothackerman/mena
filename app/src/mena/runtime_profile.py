@@ -600,7 +600,7 @@ def _resolve_local_summarization_fallback(
     entry: StageProfile,
     ordered: tuple[StageProfile, ...],
 ) -> ResolvedSummarizationFallback | str:
-    catalog = default_profile_catalog(_accepted_local_llm_model(accepted))
+    catalog = default_profile_catalog(entry.model)
     local_profile = next(
         (
             profile
