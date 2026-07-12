@@ -10,6 +10,9 @@ from typing import Any, Protocol
 from mena.artifacts import ArtifactRecord, ArtifactStore
 
 RUNTIME_STEWARDSHIP_PROVENANCE_CONTRACT = "runtime-stewardship-provenance.v1"
+# Shared application-workflow notice topic for terminal runtime release outcomes.
+# Command workflows emit this notice with context {"result": RuntimeReleaseResult}
+# so CLI adapters can render provider-independent stewardship warnings.
 RUNTIME_STEWARDSHIP_RELEASE_NOTICE_TOPIC = "runtime_stewardship.release"
 RUNTIME_RELEASE_STATUSES = frozenset({"released", "not_supported", "failed"})
 RUNTIME_RELEASE_UNOBSERVED_RESOURCE_DETAIL = (

@@ -19,7 +19,11 @@ from mena.runtime_profile import (
     RuntimeProfileSelection,
     SummarizationRuntimeRunResult,
 )
-from mena.runtime_stewardship import RuntimeLease, RuntimeReleaseResult
+from mena.runtime_stewardship import (
+    RUNTIME_STEWARDSHIP_RELEASE_NOTICE_TOPIC,
+    RuntimeLease,
+    RuntimeReleaseResult,
+)
 from mena.sessions import (
     SESSION_RECORD_FILENAME,
     resolve_session,
@@ -499,7 +503,7 @@ def test_summarize_workflow_reports_runtime_stewardship_release_notice(
     topics = [notice.topic for notice in interaction.notices]
     assert topics == [
         "summarize.started",
-        "runtime_stewardship.release",
+        RUNTIME_STEWARDSHIP_RELEASE_NOTICE_TOPIC,
         "summarize.completed",
     ]
     assert interaction.notices[1].context["result"] == _runtime_release_result()
@@ -532,7 +536,7 @@ def test_summarize_workflow_reports_runtime_release_warning_when_runner_fails(
 
     assert [notice.topic for notice in interaction.notices] == [
         "summarize.started",
-        "runtime_stewardship.release",
+        RUNTIME_STEWARDSHIP_RELEASE_NOTICE_TOPIC,
     ]
     assert interaction.notices[1].severity == "warning"
     assert interaction.notices[1].context["result"] == release_result
