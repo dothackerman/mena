@@ -3,13 +3,7 @@ from types import MappingProxyType
 
 import pytest
 
-from mena.fields import (
-    ContractReader,
-    optional_enum_str,
-    require_exact_keys,
-    required_enum_str,
-    required_sha256,
-)
+from mena.fields import ContractReader, require_exact_keys, required_sha256
 
 
 class FieldError(ValueError):
@@ -134,51 +128,6 @@ def test_contract_reader_covers_collection_value_kinds() -> None:
         reader.optional_mapping({"item": []}, "item")
     with pytest.raises(FieldError, match="Payload field 'items' must be an array."):
         reader.required_list({"items": {}}, "items")
-
-
-def test_enum_readers_check_string_and_allowed_values() -> None:
-    allowed = frozenset({"ready", "failed"})
-    assert (
-        required_enum_str(
-            {"status": "ready"},
-            "status",
-            allowed,
-            error=FieldError,
-            string_message="string",
-            enum_message="enum",
-        )
-        == "ready"
-    )
-    assert (
-        optional_enum_str(
-            {},
-            "status",
-            allowed,
-            error=FieldError,
-            string_message="string",
-            enum_message="enum",
-        )
-        is None
-    )
-
-    with pytest.raises(FieldError, match="string"):
-        required_enum_str(
-            {"status": ""},
-            "status",
-            allowed,
-            error=FieldError,
-            string_message="string",
-            enum_message="enum",
-        )
-    with pytest.raises(FieldError, match="enum"):
-        optional_enum_str(
-            {"status": "unknown"},
-            "status",
-            allowed,
-            error=FieldError,
-            string_message="string",
-            enum_message="enum",
-        )
 
 
 def test_required_sha256_checks_lowercase_hex_digest() -> None:

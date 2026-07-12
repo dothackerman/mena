@@ -351,7 +351,7 @@ class RuntimeProfileState:
             selected_asr_profile=_asr_profile_from_dict(data.get("selected_asr_profile")),
             readiness_summary=_readiness_items_from_dicts(data.get("readiness_summary")),
             evidence_digest=RUNTIME_PROFILE_READER.required_str(data, "evidence_digest"),
-            evidence=RUNTIME_PROFILE_READER.required_mapping(data, "evidence"),
+            evidence=RUNTIME_PROFILE_READER.required_dict(data, "evidence"),
             fallback_authorization=RuntimeFallbackAuthorization.from_dict(
                 data.get("fallback_authorization")
             ),

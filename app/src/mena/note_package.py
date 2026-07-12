@@ -611,9 +611,9 @@ def validate_product_map_payload(product: str, payload: Mapping[str, object]) ->
 def _provider_timeline_entries(
     payload: Mapping[str, object],
     label: str,
-) -> list[Mapping[str, object]]:
+) -> list[tuple[Mapping[str, object], str]]:
     values = _list(payload, "timeline")
-    entries: list[Mapping[str, object]] = []
+    entries: list[tuple[Mapping[str, object], str]] = []
     for index, value in enumerate(values):
         item = _mapping(value, f"{label}[{index}]")
         _require_exact_keys(
@@ -621,7 +621,9 @@ def _provider_timeline_entries(
             ("text", "source_segment_ids"),
             f"{label}[{index}]",
         )
-        ContractReader(f"{label}[{index}]", SummarizationContractError).required_str(item, "text")
+        text = ContractReader(f"{label}[{index}]", SummarizationContractError).required_str(
+            item, "text"
+        )
         source_segment_ids = _str_list(
             item,
             "source_segment_ids",
@@ -631,7 +633,7 @@ def _provider_timeline_entries(
             raise SummarizationContractError(
                 f"{label}[{index}] source_segment_ids must not be empty."
             )
-        entries.append(item)
+        entries.append((item, text))
     return entries
 
 
@@ -641,7 +643,7 @@ def _derive_timeline_entries(
 ) -> tuple[SummaryTimelineEntry, ...]:
     segments_by_id = {segment.id: segment for segment in merged_transcript.segments}
     entries = []
-    for index, item in enumerate(_provider_timeline_entries(payload, "Summary timeline")):
+    for index, (item, text) in enumerate(_provider_timeline_entries(payload, "Summary timeline")):
         source_segment_ids = tuple(
             _str_list(
                 item,
@@ -657,9 +659,7 @@ def _derive_timeline_entries(
             )
         entries.append(
             SummaryTimelineEntry(
-                text=ContractReader(
-                    f"Summary timeline[{index}]", SummarizationContractError
-                ).required_str(item, "text"),
+                text=text,
                 source_segment_ids=source_segment_ids,
                 start_seconds=min(
                     segments_by_id[source_id].start_seconds for source_id in source_segment_ids

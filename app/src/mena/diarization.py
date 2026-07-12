@@ -114,7 +114,7 @@ class DiarizedSpeaker:
             embedding=SpeakerEmbeddingRef.from_dict(
                 _read_required_field(item, "embedding", "Diarized speaker")
             ),
-            metadata=reader.required_mapping(item, "metadata"),
+            metadata=_read_required_json_object(item, "metadata", "Diarized speaker metadata"),
         )
         _validate_stable_id(speaker.id, "Diarized speaker id")
         return speaker
@@ -149,7 +149,7 @@ class DiarizationSegment:
             start_seconds=reader.required_number(item, "start_seconds"),
             end_seconds=reader.required_number(item, "end_seconds"),
             overlapped=reader.required_bool(item, "overlapped"),
-            metadata=reader.required_mapping(item, "metadata"),
+            metadata=_read_required_json_object(item, "metadata", "Diarization segment metadata"),
         )
         _validate_stable_id(segment.id, "Diarization segment id")
         _validate_stable_id(segment.speaker_id, "Diarization segment speaker_id")
@@ -185,8 +185,10 @@ class DiarizationProviderMetadata:
             name=reader.required_str(item, "name"),
             checkpoint=reader.required_str(item, "checkpoint"),
             device=reader.required_str(item, "device"),
-            parameters=reader.required_mapping(item, "parameters"),
-            metadata=reader.required_mapping(item, "metadata"),
+            parameters=_read_required_json_object(
+                item, "parameters", "Diarization provider parameters"
+            ),
+            metadata=_read_required_json_object(item, "metadata", "Diarization provider metadata"),
         )
         _validate_stable_id(provider.name, "Diarization provider name")
         return provider
@@ -1265,6 +1267,19 @@ def _json_object(data: object, label: str, *, optional: bool = True) -> Mapping[
     except TypeError as exc:
         raise DiarizationContractError(f"{label} must be JSON serializable.") from exc
     return data
+
+
+def _read_required_json_object(
+    data: Mapping[str, object], key: str, label: str
+) -> Mapping[str, object]:
+    value = ContractReader(label, DiarizationContractError).required_dict(data, key)
+    if any(not isinstance(item_key, str) for item_key in value):
+        raise DiarizationContractError(f"{label} field '{key}' must be a JSON object.")
+    try:
+        json.dumps(value)
+    except TypeError as exc:
+        raise DiarizationContractError(f"{label} field '{key}' must be JSON serializable.") from exc
+    return value
 
 
 def _validate_stable_id(value: str, label: str) -> None:

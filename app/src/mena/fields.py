@@ -58,14 +58,13 @@ class ContractReader(Generic[_TError]):
         )
 
     def required_nullable_int(self, data: Mapping[str, object], key: str) -> int | None:
-        if key not in data:
-            raise self.error(self._message(key, "is required"))
-        value = data[key]
-        if value is None:
-            return None
-        if type(value) is not int:
-            raise self.error(self._message(key, "must be an integer or null"))
-        return value
+        return _read_required_nullable_int(
+            data,
+            key,
+            error=self.error,
+            missing_message=self._message(key, "is required"),
+            invalid_message=self._message(key, "must be an integer or null"),
+        )
 
     def required_bool(self, data: Mapping[str, object], key: str) -> bool:
         return _read_required_bool(
@@ -76,22 +75,21 @@ class ContractReader(Generic[_TError]):
         )
 
     def optional_bool(self, data: Mapping[str, object], key: str) -> bool | None:
-        value = data.get(key)
-        if value is None:
-            return None
-        if type(value) is not bool:
-            raise self.error(self._message(key, "must be a boolean or null"))
-        return value
+        return _read_optional_bool(
+            data,
+            key,
+            error=self.error,
+            message=self._message(key, "must be a boolean or null"),
+        )
 
     def required_nullable_bool(self, data: Mapping[str, object], key: str) -> bool | None:
-        if key not in data:
-            raise self.error(self._message(key, "is required"))
-        value = data[key]
-        if value is None:
-            return None
-        if type(value) is not bool:
-            raise self.error(self._message(key, "must be a boolean or null"))
-        return value
+        return _read_required_nullable_bool(
+            data,
+            key,
+            error=self.error,
+            missing_message=self._message(key, "is required"),
+            invalid_message=self._message(key, "must be a boolean or null"),
+        )
 
     def required_number(self, data: Mapping[str, object], key: str) -> float:
         return _read_required_number(
@@ -219,6 +217,24 @@ def _read_optional_int(
     return value
 
 
+def _read_required_nullable_int(
+    data: Mapping[str, object],
+    key: str,
+    *,
+    error: type[_TError],
+    missing_message: str,
+    invalid_message: str,
+) -> int | None:
+    if key not in data:
+        raise error(missing_message)
+    value = data[key]
+    if value is None:
+        return None
+    if type(value) is not int:
+        raise error(invalid_message)
+    return value
+
+
 def _read_required_bool(
     data: Mapping[str, object],
     key: str,
@@ -229,6 +245,39 @@ def _read_required_bool(
     value = data.get(key)
     if type(value) is not bool:
         raise error(message)
+    return value
+
+
+def _read_optional_bool(
+    data: Mapping[str, object],
+    key: str,
+    *,
+    error: type[_TError],
+    message: str,
+) -> bool | None:
+    value = data.get(key)
+    if value is None:
+        return None
+    if type(value) is not bool:
+        raise error(message)
+    return value
+
+
+def _read_required_nullable_bool(
+    data: Mapping[str, object],
+    key: str,
+    *,
+    error: type[_TError],
+    missing_message: str,
+    invalid_message: str,
+) -> bool | None:
+    if key not in data:
+        raise error(missing_message)
+    value = data[key]
+    if value is None:
+        return None
+    if type(value) is not bool:
+        raise error(invalid_message)
     return value
 
 
@@ -311,38 +360,6 @@ def _read_required_list(
     value = data.get(key)
     if not isinstance(value, list):
         raise error(message)
-    return value
-
-
-def required_enum_str(
-    data: Mapping[str, object],
-    key: str,
-    allowed_values: frozenset[str],
-    *,
-    error: type[_TError],
-    string_message: str,
-    enum_message: str,
-) -> str:
-    value = _read_required_str(data, key, error=error, message=string_message)
-    if value not in allowed_values:
-        raise error(enum_message)
-    return value
-
-
-def optional_enum_str(
-    data: Mapping[str, object],
-    key: str,
-    allowed_values: frozenset[str],
-    *,
-    error: type[_TError],
-    string_message: str,
-    enum_message: str,
-) -> str | None:
-    value = _read_optional_str(data, key, error=error, message=string_message)
-    if value is None:
-        return None
-    if value not in allowed_values:
-        raise error(enum_message)
     return value
 
 

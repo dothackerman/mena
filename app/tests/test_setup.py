@@ -6,7 +6,7 @@ import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from typing import cast
 
 import pytest
@@ -1227,6 +1227,20 @@ def test_runtime_profile_state_defaults_to_an_empty_fallback_list(tmp_path: Path
 
     assert loaded.summarization_fallback_providers == ()
     assert loaded.fallback_authorization.remote_status == "not_configured"
+
+
+def test_runtime_profile_state_rejects_non_dict_evidence(tmp_path: Path) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    state = _state(runtime_paths=settings.paths, pyannote_token_present=True)
+    accepted = build_runtime_profile_state(evaluate_setup(get_alpha_local_profile(), state))
+    payload = accepted.to_dict()
+    payload["evidence"] = MappingProxyType({})
+
+    with pytest.raises(
+        ValueError,
+        match="Runtime profile state field 'evidence' must be a JSON object\\.",
+    ):
+        RuntimeProfileState.from_dict(payload)
 
 
 def test_runtime_profile_state_rejects_non_summarization_fallback_entries(

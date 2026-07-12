@@ -99,7 +99,7 @@ class CorrectionEntry:
             original_flag_id=reader.required_nullable_str(item, "original_flag_id"),
             speaker_id=reader.required_nullable_str(item, "speaker_id"),
             speaker_label=reader.required_nullable_str(item, "speaker_label"),
-            text=_read_required_nullable_str(item, "text", "Correction entry", allow_empty=True),
+            text=_read_required_nullable_text(item, "text", "Correction entry"),
             overlap_detected=reader.required_nullable_bool(item, "overlap_detected"),
             metadata=_read_json_object(item, "metadata", "Correction entry"),
         )
@@ -466,21 +466,13 @@ def _reject_unknown_keys(data: Mapping[str, object], allowed: frozenset[str], la
         raise CorrectionOverlayContractError(f"{label} contains unknown fields: {unknown}.")
 
 
-def _read_required_nullable_str(
-    data: Mapping[str, object],
-    key: str,
-    label: str,
-    *,
-    allow_empty: bool = False,
-) -> str | None:
-    if allow_empty:
-        value = _require_key(data, key, label)
-        if value is None:
-            return None
-        if not isinstance(value, str):
-            raise CorrectionOverlayContractError(f"{label} field '{key}' must be a string or null.")
-        return value
-    return ContractReader(label, CorrectionOverlayContractError).required_nullable_str(data, key)
+def _read_required_nullable_text(data: Mapping[str, object], key: str, label: str) -> str | None:
+    value = _require_key(data, key, label)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise CorrectionOverlayContractError(f"{label} field '{key}' must be a string or null.")
+    return value
 
 
 def _read_nullable_artifact_ref(
