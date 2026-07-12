@@ -142,6 +142,13 @@ ProviderFactory = Callable[[], Any]
 ChoiceT = TypeVar("ChoiceT")
 
 
+def _print_runtime_stewardship_release_notice(result: RuntimeReleaseResult) -> None:
+    if result.status in {"failed", "not_supported"}:
+        print(f"Runtime stewardship warning: {result.detail}")
+    else:
+        print(f"Runtime stewardship: {result.detail}")
+
+
 class ConsoleRecordInteraction:
     """Console adapter for record workflow interaction topics."""
 
@@ -477,11 +484,9 @@ class ConsoleProcessingInteraction:
     def notify(self, notice: WorkflowNotice) -> None:
         if notice.topic != RUNTIME_STEWARDSHIP_RELEASE_NOTICE_TOPIC:
             raise ValueError(f"Unsupported processing notice topic '{notice.topic}'.")
-        result = cast(RuntimeReleaseResult, notice.context["result"])
-        if result.status in {"failed", "not_supported"}:
-            print(f"Runtime stewardship warning: {result.detail}")
-        else:
-            print(f"Runtime stewardship: {result.detail}")
+        _print_runtime_stewardship_release_notice(
+            cast(RuntimeReleaseResult, notice.context["result"])
+        )
 
 
 class ConsoleSummarizeInteraction:
@@ -558,11 +563,7 @@ class ConsoleSummarizeInteraction:
                 f"{quote(str(context['session_dir']))}"
             )
         elif topic == RUNTIME_STEWARDSHIP_RELEASE_NOTICE_TOPIC:
-            result = cast(RuntimeReleaseResult, context["result"])
-            if result.status in {"failed", "not_supported"}:
-                print(f"Runtime stewardship warning: {result.detail}")
-            else:
-                print(f"Runtime stewardship: {result.detail}")
+            _print_runtime_stewardship_release_notice(cast(RuntimeReleaseResult, context["result"]))
         else:
             raise ValueError(f"Unsupported summarize notice topic '{topic}'.")
 
