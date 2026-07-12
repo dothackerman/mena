@@ -92,7 +92,9 @@ from mena.semantic_coherence import (
     SemanticCoherenceError,
 )
 from mena.session_integrity import (
+    SessionIndexEntry,
     SessionIntegrityError,
+    rebuild_session_index,
     verify_session_bundle,
 )
 from mena.sessions import (
@@ -966,6 +968,9 @@ def main(
             print("Export cancelled.")
             return 1
 
+    if args.command == "list":
+        return _run_list_command(sessions_root=sessions_root)
+
     if args.command == "inspect":
         try:
             return _run_inspect_command(session_path=Path(args.session_path))
@@ -1427,6 +1432,60 @@ def _resolve_export_interaction(
     input_fn: Callable[[str], str] | None,
 ) -> InteractionPort:
     return ConsoleExportInteraction(_record_input(input_fn))
+
+
+UNTITLED_SESSION_NAME = "Untitled recording"
+
+
+def _run_list_command(*, sessions_root: Path) -> int:
+    """Render the rebuildable global-index projection as one line per session.
+
+    The workflow interface is the existing index projection
+    (``rebuild_session_index``); this command is a rendering adapter over it and
+    never persists the index to disk (ADR-018). Sorting is a rendering concern:
+    the projection returns entries in bundle-path order, so newest-first ordering
+    is applied here.
+    """
+
+    entries = rebuild_session_index(sessions_root)
+    if not entries:
+        print("No sessions found.")
+        return 0
+    for entry in _sort_session_index_newest_first(entries):
+        print(_format_session_index_line(entry))
+    return 0
+
+
+def _sort_session_index_newest_first(
+    entries: Sequence[SessionIndexEntry],
+) -> list[SessionIndexEntry]:
+    parseable: list[tuple[datetime, SessionIndexEntry]] = []
+    unparseable: list[SessionIndexEntry] = []
+    for entry in entries:
+        parsed = _parse_iso_timestamp(entry.created_at)
+        if parsed is None:
+            unparseable.append(entry)
+        else:
+            parseable.append((parsed, entry))
+    # Stable sort keyed only on the timestamp keeps entries with equal (or
+    # unparseable) timestamps in the projection's original order.
+    parseable.sort(key=lambda item: item[0], reverse=True)
+    return [entry for _, entry in parseable] + unparseable
+
+
+def _format_session_index_line(entry: SessionIndexEntry) -> str:
+    fields = (
+        entry.created_at,
+        entry.session_id[:8],
+        entry.name or UNTITLED_SESSION_NAME,
+        entry.profile,
+        entry.status,
+        str(entry.bundle_path),
+    )
+    line = " | ".join(fields)
+    if not entry.integrity_ok:
+        line = f"{line} | DEGRADED ({entry.finding_count} integrity finding(s))"
+    return line
 
 
 def _run_inspect_command(
