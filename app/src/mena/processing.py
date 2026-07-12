@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Self
 
 from mena.artifacts import ArtifactRecord, ArtifactStore
-from mena.fields import optional_str, required_bool, required_int, required_str
+from mena.fields import ContractReader
 from mena.timestamps import utc_timestamp
 
 PROCESSING_STATE_ARTIFACT_TYPE = "processing_state"
@@ -62,6 +62,9 @@ class ProcessingStateError(RuntimeError):
     """Raised when processing checkpoint state violates the v1 contract."""
 
 
+PROCESSING_READER = ContractReader("Processing", ProcessingStateError)
+
+
 @dataclass(frozen=True)
 class ArtifactRef:
     """Stable reference to an artifact consumed or produced by a processing stage."""
@@ -84,10 +87,10 @@ class ArtifactRef:
     def from_dict(cls, data: object) -> Self:
         if not isinstance(data, dict):
             raise ProcessingStateError("Artifact ref must be a JSON object.")
-        artifact_id = _required_str(data, "id")
-        artifact_type = _required_str(data, "artifact_type")
-        version = _required_int(data, "version")
-        sha256 = _required_str(data, "sha256")
+        artifact_id = PROCESSING_READER.required_str(data, "id")
+        artifact_type = PROCESSING_READER.required_str(data, "artifact_type")
+        version = PROCESSING_READER.required_int(data, "version")
+        sha256 = PROCESSING_READER.required_str(data, "sha256")
         if not _ARTIFACT_TYPE_PATTERN.fullmatch(artifact_type):
             raise ProcessingStateError("Artifact ref artifact_type must be a stable identifier.")
         if version < 1:
@@ -119,8 +122,8 @@ class ProcessingErrorInfo:
             raise ProcessingStateError("Processing error must be present for failed stages.")
         if not isinstance(data, dict):
             raise ProcessingStateError("Processing error must be a JSON object.")
-        message = _required_str(data, "message")
-        retryable = _required_bool(data, "retryable")
+        message = PROCESSING_READER.required_str(data, "message")
+        retryable = PROCESSING_READER.required_bool(data, "retryable")
         code = data.get("code")
         if code is not None and (not isinstance(code, str) or not code):
             raise ProcessingStateError("Processing error code must be null or a non-empty string.")
@@ -157,18 +160,18 @@ class ProcessingStageState:
             raise ProcessingStateError("Processing stage state must be a JSON object.")
         error_data = data.get("error")
         state = cls(
-            version=_required_int(data, "version"),
-            session_id=_required_str(data, "session_id"),
-            run_id=_required_str(data, "run_id"),
-            stage=_required_str(data, "stage"),
-            status=_required_str(data, "status"),
+            version=PROCESSING_READER.required_int(data, "version"),
+            session_id=PROCESSING_READER.required_str(data, "session_id"),
+            run_id=PROCESSING_READER.required_str(data, "run_id"),
+            stage=PROCESSING_READER.required_str(data, "stage"),
+            status=PROCESSING_READER.required_str(data, "status"),
             input_artifacts=_artifact_refs(data.get("input_artifacts")),
             output_artifacts=_artifact_refs(data.get("output_artifacts")),
-            started_at=_optional_str(data, "started_at"),
-            completed_at=_optional_str(data, "completed_at"),
+            started_at=PROCESSING_READER.optional_str(data, "started_at"),
+            completed_at=PROCESSING_READER.optional_str(data, "completed_at"),
             error=None if error_data is None else ProcessingErrorInfo.from_dict(error_data),
-            attempt=_required_int(data, "attempt"),
-            skip_reason=_optional_str(data, "skip_reason"),
+            attempt=PROCESSING_READER.required_int(data, "attempt"),
+            skip_reason=PROCESSING_READER.optional_str(data, "skip_reason"),
         )
         _validate_stage_state(state)
         return state
@@ -517,39 +520,3 @@ def latest_non_retryable_processing_failure(
     if latest.error is not None and not latest.error.retryable:
         return latest
     return None
-
-
-def _required_str(data: dict[str, object], key: str) -> str:
-    return required_str(
-        data,
-        key,
-        error=ProcessingStateError,
-        message=f"Processing field '{key}' must be a non-empty string.",
-    )
-
-
-def _optional_str(data: dict[str, object], key: str) -> str | None:
-    return optional_str(
-        data,
-        key,
-        error=ProcessingStateError,
-        message=f"Processing field '{key}' must be null or a non-empty string.",
-    )
-
-
-def _required_int(data: dict[str, object], key: str) -> int:
-    return required_int(
-        data,
-        key,
-        error=ProcessingStateError,
-        message=f"Processing field '{key}' must be an integer.",
-    )
-
-
-def _required_bool(data: dict[str, object], key: str) -> bool:
-    return required_bool(
-        data,
-        key,
-        error=ProcessingStateError,
-        message=f"Processing field '{key}' must be a boolean.",
-    )

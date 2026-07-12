@@ -12,13 +12,7 @@ from pathlib import Path
 from typing import Protocol, Self, runtime_checkable
 
 from mena.artifacts import ArtifactRecord, ArtifactStore
-from mena.fields import (
-    optional_mapping,
-    required_bool,
-    required_int,
-    required_number,
-    required_str,
-)
+from mena.fields import ContractReader
 from mena.local_llm import (
     OLLAMA_DEFAULT_ENDPOINT,
     OLLAMA_DEFAULT_MODEL,
@@ -94,19 +88,12 @@ class SemanticCoherencePolicy:
     @classmethod
     def from_dict(cls, data: object) -> Self:
         item = _mapping(data, "Semantic coherence policy")
+        reader = ContractReader("Semantic coherence policy", SemanticCoherenceContractError)
         policy = cls(
-            policy_version=_required_int(item, "policy_version", "Semantic coherence policy"),
-            context_window_segments=_required_int(
-                item,
-                "context_window_segments",
-                "Semantic coherence policy",
-            ),
-            min_flag_confidence=_required_number(
-                item,
-                "min_flag_confidence",
-                "Semantic coherence policy",
-            ),
-            prompt_policy=_required_str(item, "prompt_policy", "Semantic coherence policy"),
+            policy_version=reader.required_int(item, "policy_version"),
+            context_window_segments=reader.required_int(item, "context_window_segments"),
+            min_flag_confidence=reader.required_number(item, "min_flag_confidence"),
+            prompt_policy=reader.required_str(item, "prompt_policy"),
         )
         if policy.policy_version != SEMANTIC_COHERENCE_POLICY_VERSION:
             raise SemanticCoherenceContractError("Unsupported semantic coherence policy version.")
@@ -166,11 +153,12 @@ class SemanticCoherenceResult:
     @classmethod
     def from_dict(cls, data: object) -> Self:
         item = _mapping(data, "Semantic coherence result")
+        reader = ContractReader("Semantic coherence result", SemanticCoherenceContractError)
         result = cls(
-            coherent=_required_bool(item, "coherent", "Semantic coherence result"),
-            confidence=_required_number(item, "confidence", "Semantic coherence result"),
-            reason=_required_str(item, "reason", "Semantic coherence result"),
-            evidence=_optional_json_object(item, "evidence", "Semantic coherence result"),
+            coherent=reader.required_bool(item, "coherent"),
+            confidence=reader.required_number(item, "confidence"),
+            reason=reader.required_str(item, "reason"),
+            evidence=reader.optional_mapping(item, "evidence"),
         )
         _validate_probability(result.confidence, "Semantic coherence confidence")
         return result
@@ -717,55 +705,6 @@ def _mapping(data: object, label: str) -> Mapping[str, object]:
     if not isinstance(data, Mapping):
         raise SemanticCoherenceContractError(f"{label} must be a JSON object.")
     return data
-
-
-def _required_str(data: Mapping[str, object], field_name: str, label: str) -> str:
-    return required_str(
-        data,
-        field_name,
-        error=SemanticCoherenceContractError,
-        message=f"Field '{field_name}' in {label} must be a non-empty string.",
-    )
-
-
-def _required_int(data: Mapping[str, object], field_name: str, label: str) -> int:
-    return required_int(
-        data,
-        field_name,
-        error=SemanticCoherenceContractError,
-        message=f"Field '{field_name}' in {label} must be an integer.",
-    )
-
-
-def _required_number(data: Mapping[str, object], field_name: str, label: str) -> float:
-    return required_number(
-        data,
-        field_name,
-        error=SemanticCoherenceContractError,
-        message=f"Field '{field_name}' in {label} must be a number.",
-    )
-
-
-def _required_bool(data: Mapping[str, object], field_name: str, label: str) -> bool:
-    return required_bool(
-        data,
-        field_name,
-        error=SemanticCoherenceContractError,
-        message=f"Field '{field_name}' in {label} must be a boolean.",
-    )
-
-
-def _optional_json_object(
-    data: Mapping[str, object],
-    field_name: str,
-    label: str,
-) -> Mapping[str, object]:
-    return optional_mapping(
-        data,
-        field_name,
-        error=SemanticCoherenceContractError,
-        message=f"Field '{field_name}' in {label} must be an object.",
-    )
 
 
 def _validate_probability(value: float, label: str) -> None:

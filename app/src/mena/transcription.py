@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Protocol, Self, cast, runtime_checkable
 
 from mena.artifacts import ArtifactRecord, ArtifactStore
-from mena.fields import optional_number, optional_str, required_int, required_number, required_str
+from mena.fields import ContractReader
 from mena.processing import (
     ArtifactRef,
     ProcessingErrorInfo,
@@ -57,11 +57,12 @@ class TranscriptWord:
     @classmethod
     def from_dict(cls, data: object) -> Self:
         item = _mapping(data, "Transcript word")
+        reader = ContractReader("Transcript word", TranscriptionContractError)
         word = cls(
-            text=_required_str(item, "text", "Transcript word"),
-            start_seconds=_required_number(item, "start_seconds", "Transcript word"),
-            end_seconds=_required_number(item, "end_seconds", "Transcript word"),
-            probability=_optional_number(item, "probability", "Transcript word"),
+            text=reader.required_str(item, "text"),
+            start_seconds=reader.required_number(item, "start_seconds"),
+            end_seconds=reader.required_number(item, "end_seconds"),
+            probability=reader.optional_number(item, "probability"),
         )
         _validate_span(word.start_seconds, word.end_seconds, "Transcript word")
         _validate_probability(word.probability, "Transcript word probability")
@@ -92,18 +93,15 @@ class TranscriptSegment:
     @classmethod
     def from_dict(cls, data: object) -> Self:
         item = _mapping(data, "Transcript segment")
+        reader = ContractReader("Transcript segment", TranscriptionContractError)
         segment = cls(
-            id=_required_str(item, "id", "Transcript segment"),
-            text=_required_str(item, "text", "Transcript segment"),
-            start_seconds=_required_number(item, "start_seconds", "Transcript segment"),
-            end_seconds=_required_number(item, "end_seconds", "Transcript segment"),
-            avg_logprob=_optional_number(item, "avg_logprob", "Transcript segment"),
-            no_speech_probability=_optional_number(
-                item,
-                "no_speech_probability",
-                "Transcript segment",
-            ),
-            compression_ratio=_optional_number(item, "compression_ratio", "Transcript segment"),
+            id=reader.required_str(item, "id"),
+            text=reader.required_str(item, "text"),
+            start_seconds=reader.required_number(item, "start_seconds"),
+            end_seconds=reader.required_number(item, "end_seconds"),
+            avg_logprob=reader.optional_number(item, "avg_logprob"),
+            no_speech_probability=reader.optional_number(item, "no_speech_probability"),
+            compression_ratio=reader.optional_number(item, "compression_ratio"),
             words=tuple(TranscriptWord.from_dict(word) for word in _list(item, "words")),
         )
         _validate_stable_id(segment.id, "Transcript segment id")
@@ -138,14 +136,11 @@ class TranscriptLanguage:
     @classmethod
     def from_dict(cls, data: object) -> Self:
         item = _mapping(data, "Transcript language")
+        reader = ContractReader("Transcript language", TranscriptionContractError)
         language = cls(
-            requested=_optional_str(item, "requested", "Transcript language"),
-            detected=_optional_str(item, "detected", "Transcript language"),
-            detection_probability=_optional_number(
-                item,
-                "detection_probability",
-                "Transcript language",
-            ),
+            requested=reader.optional_str(item, "requested"),
+            detected=reader.optional_str(item, "detected"),
+            detection_probability=reader.optional_number(item, "detection_probability"),
         )
         _validate_probability(language.detection_probability, "Language detection probability")
         return language
@@ -173,12 +168,13 @@ class TranscriptProviderMetadata:
     @classmethod
     def from_dict(cls, data: object) -> Self:
         item = _mapping(data, "Transcript provider")
+        reader = ContractReader("Transcript provider", TranscriptionContractError)
         provider = cls(
-            name=_required_str(item, "name", "Transcript provider"),
-            checkpoint=_required_str(item, "checkpoint", "Transcript provider"),
-            quantization=_required_str(item, "quantization", "Transcript provider"),
-            device=_required_str(item, "device", "Transcript provider"),
-            timestamp_mode=_required_str(item, "timestamp_mode", "Transcript provider"),
+            name=reader.required_str(item, "name"),
+            checkpoint=reader.required_str(item, "checkpoint"),
+            quantization=reader.required_str(item, "quantization"),
+            device=reader.required_str(item, "device"),
+            timestamp_mode=reader.required_str(item, "timestamp_mode"),
             decode_parameters=_json_object(
                 item.get("decode_parameters"),
                 "Transcript provider decode_parameters",
@@ -217,18 +213,19 @@ class TranscriptArtifact:
     @classmethod
     def from_dict(cls, data: object) -> Self:
         item = _mapping(data, "Transcript artifact")
+        reader = ContractReader("Transcript artifact", TranscriptionContractError)
         transcript = cls(
-            version=_required_int(item, "version", "Transcript artifact"),
-            session_id=_required_str(item, "session_id", "Transcript artifact"),
+            version=reader.required_int(item, "version"),
+            session_id=reader.required_str(item, "session_id"),
             source_artifact=ArtifactRef.from_dict(item.get("source_artifact")),
-            source_id=_optional_str(item, "source_id", "Transcript artifact"),
+            source_id=reader.optional_str(item, "source_id"),
             provider=TranscriptProviderMetadata.from_dict(item.get("provider")),
             language=TranscriptLanguage.from_dict(item.get("language")),
-            text=_required_str(item, "text", "Transcript artifact"),
+            text=reader.required_str(item, "text"),
             segments=tuple(
                 TranscriptSegment.from_dict(segment) for segment in _list(item, "segments")
             ),
-            created_at=_required_str(item, "created_at", "Transcript artifact"),
+            created_at=reader.required_str(item, "created_at"),
         )
         if transcript.version != TRANSCRIPT_SCHEMA_VERSION:
             raise TranscriptionContractError("Unsupported transcript artifact version.")
@@ -430,8 +427,8 @@ class FasterWhisperTranscriptionProvider:
         )
         language = TranscriptLanguage(
             requested=request.language,
-            detected=_optional_attr_str(info, "language"),
-            detection_probability=_optional_attr_number(info, "language_probability"),
+            detected=_read_optional_attr_str(info, "language"),
+            detection_probability=_read_optional_attr_number(info, "language_probability"),
         )
         return TranscriptArtifact(
             version=TRANSCRIPT_SCHEMA_VERSION,
@@ -808,11 +805,11 @@ def _segment_from_faster_whisper(segment: object, *, index: int) -> TranscriptSe
     return TranscriptSegment(
         id=f"segment_{index:06d}",
         text=str(getattr(segment, "text", "")).strip(),
-        start_seconds=_required_attr_number(segment, "start"),
-        end_seconds=_required_attr_number(segment, "end"),
-        avg_logprob=_optional_attr_number(segment, "avg_logprob"),
-        no_speech_probability=_optional_attr_number(segment, "no_speech_prob"),
-        compression_ratio=_optional_attr_number(segment, "compression_ratio"),
+        start_seconds=_read_required_attr_number(segment, "start"),
+        end_seconds=_read_required_attr_number(segment, "end"),
+        avg_logprob=_read_optional_attr_number(segment, "avg_logprob"),
+        no_speech_probability=_read_optional_attr_number(segment, "no_speech_prob"),
+        compression_ratio=_read_optional_attr_number(segment, "compression_ratio"),
         words=words,
     )
 
@@ -820,9 +817,9 @@ def _segment_from_faster_whisper(segment: object, *, index: int) -> TranscriptSe
 def _word_from_faster_whisper(word: object) -> TranscriptWord:
     return TranscriptWord(
         text=str(getattr(word, "word", "")).strip(),
-        start_seconds=_required_attr_number(word, "start"),
-        end_seconds=_required_attr_number(word, "end"),
-        probability=_optional_attr_number(word, "probability"),
+        start_seconds=_read_required_attr_number(word, "start"),
+        end_seconds=_read_required_attr_number(word, "end"),
+        probability=_read_optional_attr_number(word, "probability"),
     )
 
 
@@ -841,51 +838,6 @@ def _list(data: Mapping[str, object], key: str) -> list[object]:
     if not isinstance(value, list):
         raise TranscriptionContractError(f"Transcript field '{key}' must be an array.")
     return value
-
-
-def _required_str(data: Mapping[str, object], key: str, label: str) -> str:
-    return required_str(
-        data,
-        key,
-        error=TranscriptionContractError,
-        message=f"{label} field '{key}' must be a non-empty string.",
-    )
-
-
-def _optional_str(data: Mapping[str, object], key: str, label: str) -> str | None:
-    return optional_str(
-        data,
-        key,
-        error=TranscriptionContractError,
-        message=f"{label} field '{key}' must be null or a string.",
-    )
-
-
-def _required_int(data: Mapping[str, object], key: str, label: str) -> int:
-    return required_int(
-        data,
-        key,
-        error=TranscriptionContractError,
-        message=f"{label} field '{key}' must be an integer.",
-    )
-
-
-def _required_number(data: Mapping[str, object], key: str, label: str) -> float:
-    return required_number(
-        data,
-        key,
-        error=TranscriptionContractError,
-        message=f"{label} field '{key}' must be a number.",
-    )
-
-
-def _optional_number(data: Mapping[str, object], key: str, label: str) -> float | None:
-    return optional_number(
-        data,
-        key,
-        error=TranscriptionContractError,
-        message=f"{label} field '{key}' must be null or a number.",
-    )
 
 
 def _json_object(data: object, label: str) -> Mapping[str, object]:
@@ -915,7 +867,7 @@ def _validate_probability(value: float | None, label: str) -> None:
         raise TranscriptionContractError(f"{label} must be between 0 and 1.")
 
 
-def _required_attr_number(data: object, attr: str) -> float:
+def _read_required_attr_number(data: object, attr: str) -> float:
     value = getattr(data, attr, None)
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise TranscriptionContractError(
@@ -924,7 +876,7 @@ def _required_attr_number(data: object, attr: str) -> float:
     return float(value)
 
 
-def _optional_attr_number(data: object, attr: str) -> float | None:
+def _read_optional_attr_number(data: object, attr: str) -> float | None:
     value = getattr(data, attr, None)
     if value is None:
         return None
@@ -933,7 +885,7 @@ def _optional_attr_number(data: object, attr: str) -> float | None:
     return float(value)
 
 
-def _optional_attr_str(data: object, attr: str) -> str | None:
+def _read_optional_attr_str(data: object, attr: str) -> str | None:
     value = getattr(data, attr, None)
     if value is None:
         return None

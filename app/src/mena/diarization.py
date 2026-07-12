@@ -15,14 +15,7 @@ from pathlib import Path
 from typing import Any, Protocol, Self, cast, runtime_checkable
 
 from mena.artifacts import ArtifactRecord, ArtifactStore
-from mena.fields import (
-    optional_int,
-    optional_str,
-    required_bool,
-    required_int,
-    required_number,
-    required_str,
-)
+from mena.fields import ContractReader
 from mena.processing import (
     PROCESSING_STATE_VERSION,
     ArtifactRef,
@@ -76,12 +69,13 @@ class SpeakerEmbeddingRef:
     @classmethod
     def from_dict(cls, data: object) -> Self:
         item = _mapping(data, "Speaker embedding")
+        reader = ContractReader("Speaker embedding", DiarizationContractError)
         if "artifact" not in item:
             raise DiarizationContractError("Speaker embedding field 'artifact' is required.")
         embedding = cls(
-            status=_required_str(item, "status", "Speaker embedding"),
+            status=reader.required_str(item, "status"),
             artifact=None if item["artifact"] is None else ArtifactRef.from_dict(item["artifact"]),
-            reason=_required_optional_str(item, "reason", "Speaker embedding"),
+            reason=reader.required_nullable_str(item, "reason"),
         )
         if embedding.status not in EMBEDDING_STATUSES:
             raise DiarizationContractError("Speaker embedding status is invalid.")
@@ -113,13 +107,14 @@ class DiarizedSpeaker:
     @classmethod
     def from_dict(cls, data: object) -> Self:
         item = _mapping(data, "Diarized speaker")
+        reader = ContractReader("Diarized speaker", DiarizationContractError)
         speaker = cls(
-            id=_required_str(item, "id", "Diarized speaker"),
-            label=_required_str(item, "label", "Diarized speaker"),
+            id=reader.required_str(item, "id"),
+            label=reader.required_str(item, "label"),
             embedding=SpeakerEmbeddingRef.from_dict(
-                _required_field(item, "embedding", "Diarized speaker")
+                _read_required_field(item, "embedding", "Diarized speaker")
             ),
-            metadata=_required_json_object(item, "metadata", "Diarized speaker metadata"),
+            metadata=reader.required_mapping(item, "metadata"),
         )
         _validate_stable_id(speaker.id, "Diarized speaker id")
         return speaker
@@ -147,13 +142,14 @@ class DiarizationSegment:
     @classmethod
     def from_dict(cls, data: object) -> Self:
         item = _mapping(data, "Diarization segment")
+        reader = ContractReader("Diarization segment", DiarizationContractError)
         segment = cls(
-            id=_required_str(item, "id", "Diarization segment"),
-            speaker_id=_required_str(item, "speaker_id", "Diarization segment"),
-            start_seconds=_required_number(item, "start_seconds", "Diarization segment"),
-            end_seconds=_required_number(item, "end_seconds", "Diarization segment"),
-            overlapped=_required_bool(item, "overlapped", "Diarization segment"),
-            metadata=_required_json_object(item, "metadata", "Diarization segment metadata"),
+            id=reader.required_str(item, "id"),
+            speaker_id=reader.required_str(item, "speaker_id"),
+            start_seconds=reader.required_number(item, "start_seconds"),
+            end_seconds=reader.required_number(item, "end_seconds"),
+            overlapped=reader.required_bool(item, "overlapped"),
+            metadata=reader.required_mapping(item, "metadata"),
         )
         _validate_stable_id(segment.id, "Diarization segment id")
         _validate_stable_id(segment.speaker_id, "Diarization segment speaker_id")
@@ -184,12 +180,13 @@ class DiarizationProviderMetadata:
     @classmethod
     def from_dict(cls, data: object) -> Self:
         item = _mapping(data, "Diarization provider")
+        reader = ContractReader("Diarization provider", DiarizationContractError)
         provider = cls(
-            name=_required_str(item, "name", "Diarization provider"),
-            checkpoint=_required_str(item, "checkpoint", "Diarization provider"),
-            device=_required_str(item, "device", "Diarization provider"),
-            parameters=_required_json_object(item, "parameters", "Diarization provider parameters"),
-            metadata=_required_json_object(item, "metadata", "Diarization provider metadata"),
+            name=reader.required_str(item, "name"),
+            checkpoint=reader.required_str(item, "checkpoint"),
+            device=reader.required_str(item, "device"),
+            parameters=reader.required_mapping(item, "parameters"),
+            metadata=reader.required_mapping(item, "metadata"),
         )
         _validate_stable_id(provider.name, "Diarization provider name")
         return provider
@@ -314,27 +311,25 @@ class DiarizationArtifact:
     def from_dict(cls, data: object) -> Self:
         item = _mapping(data, "Diarization artifact")
         context_data = _mapping(item.get("context"), "Diarization context")
-        policy_version = _required_int(context_data, "policy_version", "Diarization context")
+        reader = ContractReader("Diarization artifact", DiarizationContractError)
+        context_reader = ContractReader("Diarization context", DiarizationContractError)
+        policy_version = context_reader.required_int(context_data, "policy_version")
         if policy_version != DIARIZATION_POLICY_VERSION:
             raise DiarizationContractError(
                 f"Diarization context policy_version must match {DIARIZATION_POLICY_VERSION}."
             )
         artifact = cls(
-            version=_required_int(item, "version", "Diarization artifact"),
-            kind=_required_str(item, "kind", "Diarization artifact"),
-            session_id=_required_str(item, "session_id", "Diarization artifact"),
+            version=reader.required_int(item, "version"),
+            kind=reader.required_str(item, "kind"),
+            session_id=reader.required_str(item, "session_id"),
             source_artifact=ArtifactRef.from_dict(item.get("source_artifact")),
-            source_id=_required_str(item, "source_id", "Diarization artifact"),
+            source_id=reader.required_str(item, "source_id"),
             context=DiarizationContext(
-                capture_profile=_required_str(
-                    context_data, "capture_profile", "Diarization context"
-                ),
-                source_id=_required_str(context_data, "source_id", "Diarization context"),
-                enabled=_required_bool(context_data, "enabled", "Diarization context"),
-                remote_speaker_count=_required_optional_int(
-                    context_data,
-                    "remote_speaker_count",
-                    "Diarization context",
+                capture_profile=context_reader.required_str(context_data, "capture_profile"),
+                source_id=context_reader.required_str(context_data, "source_id"),
+                enabled=context_reader.required_bool(context_data, "enabled"),
+                remote_speaker_count=context_reader.required_nullable_int(
+                    context_data, "remote_speaker_count"
                 ),
             ),
             provider=DiarizationProviderMetadata.from_dict(item.get("provider")),
@@ -352,7 +347,7 @@ class DiarizationArtifact:
                 _json_object(entry, "Diarization correction overlay entry", optional=False)
                 for entry in _list(item, "overlay_entries")
             ),
-            created_at=_required_str(item, "created_at", "Diarization artifact"),
+            created_at=reader.required_str(item, "created_at"),
         )
         _validate_artifact(artifact)
         return artifact
@@ -1123,8 +1118,8 @@ def _segments_from_pyannote(output: object, *, id_prefix: str) -> Iterable[Diari
             DiarizationSegment(
                 id=f"{id_prefix}_{index:06d}",
                 speaker_id=speaker_id,
-                start_seconds=_required_attr_number(turn, "start"),
-                end_seconds=_required_attr_number(turn, "end"),
+                start_seconds=_read_required_attr_number(turn, "start"),
+                end_seconds=_read_required_attr_number(turn, "end"),
                 overlapped=False,
             )
         )
@@ -1252,76 +1247,10 @@ def _list(data: Mapping[str, object], key: str) -> list[object]:
     return value
 
 
-def _required_str(data: Mapping[str, object], key: str, label: str) -> str:
-    return required_str(
-        data,
-        key,
-        error=DiarizationContractError,
-        message=f"{label} field '{key}' must be a non-empty string.",
-    )
-
-
-def _required_field(data: Mapping[str, object], key: str, label: str) -> object:
+def _read_required_field(data: Mapping[str, object], key: str, label: str) -> object:
     if key not in data:
         raise DiarizationContractError(f"{label} field '{key}' is required.")
     return data[key]
-
-
-def _optional_str(data: Mapping[str, object], key: str, label: str) -> str | None:
-    return optional_str(
-        data,
-        key,
-        error=DiarizationContractError,
-        message=f"{label} field '{key}' must be null or a string.",
-    )
-
-
-def _required_optional_str(data: Mapping[str, object], key: str, label: str) -> str | None:
-    if key not in data:
-        raise DiarizationContractError(f"{label} field '{key}' is required.")
-    return _optional_str(data, key, label)
-
-
-def _required_int(data: Mapping[str, object], key: str, label: str) -> int:
-    return required_int(
-        data,
-        key,
-        error=DiarizationContractError,
-        message=f"{label} field '{key}' must be an integer.",
-    )
-
-
-def _optional_int(data: Mapping[str, object], key: str, label: str) -> int | None:
-    return optional_int(
-        data,
-        key,
-        error=DiarizationContractError,
-        message=f"{label} field '{key}' must be null or an integer.",
-    )
-
-
-def _required_optional_int(data: Mapping[str, object], key: str, label: str) -> int | None:
-    if key not in data:
-        raise DiarizationContractError(f"{label} field '{key}' is required.")
-    return _optional_int(data, key, label)
-
-
-def _required_bool(data: Mapping[str, object], key: str, label: str) -> bool:
-    return required_bool(
-        data,
-        key,
-        error=DiarizationContractError,
-        message=f"{label} field '{key}' must be a boolean.",
-    )
-
-
-def _required_number(data: Mapping[str, object], key: str, label: str) -> float:
-    return required_number(
-        data,
-        key,
-        error=DiarizationContractError,
-        message=f"{label} field '{key}' must be a number.",
-    )
 
 
 def _json_object(data: object, label: str, *, optional: bool = True) -> Mapping[str, object]:
@@ -1338,14 +1267,6 @@ def _json_object(data: object, label: str, *, optional: bool = True) -> Mapping[
     return data
 
 
-def _required_json_object(data: Mapping[str, object], key: str, label: str) -> Mapping[str, object]:
-    if key not in data:
-        raise DiarizationContractError(f"{label} field '{key}' is required.")
-    if data[key] is None:
-        raise DiarizationContractError(f"{label} field '{key}' must be a JSON object.")
-    return _json_object(data[key], label)
-
-
 def _validate_stable_id(value: str, label: str) -> None:
     if not _STABLE_ID_PATTERN.fullmatch(value):
         raise DiarizationContractError(f"{label} must be a stable identifier.")
@@ -1356,7 +1277,7 @@ def _validate_span(start_seconds: float, end_seconds: float, label: str) -> None
         raise DiarizationContractError(f"{label} timestamps must be non-negative and ordered.")
 
 
-def _required_attr_number(data: object, attr: str) -> float:
+def _read_required_attr_number(data: object, attr: str) -> float:
     value = getattr(data, attr, None)
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise DiarizationContractError(f"pyannote turn attribute '{attr}' must be numeric.")

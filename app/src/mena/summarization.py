@@ -17,7 +17,7 @@ from mena.correction_overlay import (
     CorrectionOverlayContractError,
     apply_correction_overlay,
 )
-from mena.fields import optional_str, required_int, required_str
+from mena.fields import ContractReader
 from mena.local_llm import LocalLLMProviderMetadata
 from mena.merge_timing import MergedTranscriptArtifact, MergeTimingContractError
 from mena.note_package import (
@@ -203,9 +203,10 @@ class SummaryArtifact:
     @classmethod
     def from_dict(cls, data: object) -> Self:
         item = _mapping(data, "Summary artifact")
+        reader = ContractReader("Summary artifact", SummarizationContractError)
         artifact = cls(
-            version=_required_int(item, "version", "Summary artifact"),
-            session_id=_required_str(item, "session_id", "Summary artifact"),
+            version=reader.required_int(item, "version"),
+            session_id=reader.required_str(item, "session_id"),
             merged_transcript_artifact=ArtifactRef.from_dict(
                 item.get("merged_transcript_artifact")
             ),
@@ -222,8 +223,8 @@ class SummaryArtifact:
             action_items=tuple(
                 SummaryActionItem.from_dict(action) for action in _list(item, "action_items")
             ),
-            general_summary=_required_str(item, "general_summary", "Summary artifact"),
-            created_at=_required_str(item, "created_at", "Summary artifact"),
+            general_summary=reader.required_str(item, "general_summary"),
+            created_at=reader.required_str(item, "created_at"),
             request_records=request_records_from_payload(item, required=True),
         )
         if artifact.version != SUMMARY_SCHEMA_VERSION:
@@ -618,13 +619,14 @@ def _processing_error_message(exc: BaseException) -> str:
 
 def _provider_from_dict(data: object) -> SummarizationProviderMetadata:
     item = _mapping(data, "Summary provider")
+    reader = ContractReader("Summary provider", SummarizationContractError)
     provider = SummarizationProviderMetadata(
-        name=_required_str(item, "name", "Summary provider"),
-        model=_required_str(item, "model", "Summary provider"),
-        endpoint=_optional_str(item, "endpoint", "Summary provider"),
-        prompt_policy=_required_str(item, "prompt_policy", "Summary provider"),
-        resolved_model=_optional_str(item, "resolved_model", "Summary provider"),
-        account_scope=_optional_str(item, "account_scope", "Summary provider"),
+        name=reader.required_str(item, "name"),
+        model=reader.required_str(item, "model"),
+        endpoint=reader.optional_str(item, "endpoint"),
+        prompt_policy=reader.required_str(item, "prompt_policy"),
+        resolved_model=reader.optional_str(item, "resolved_model"),
+        account_scope=reader.optional_str(item, "account_scope"),
     )
     if provider.prompt_policy not in SUPPORTED_PROMPT_POLICIES:
         raise SummarizationContractError("Unsupported summary provider prompt policy.")
@@ -687,33 +689,6 @@ def _str_list(data: Mapping[str, object], field_name: str, label: str) -> list[s
     if any(not isinstance(value, str) or not value for value in values):
         raise SummarizationContractError(f"{label} must contain non-empty strings.")
     return [str(value) for value in values]
-
-
-def _required_str(data: Mapping[str, object], field_name: str, label: str) -> str:
-    return required_str(
-        data,
-        field_name,
-        error=SummarizationContractError,
-        message=f"Field '{field_name}' in {label} must be a non-empty string.",
-    )
-
-
-def _optional_str(data: Mapping[str, object], field_name: str, label: str) -> str | None:
-    return optional_str(
-        data,
-        field_name,
-        error=SummarizationContractError,
-        message=f"Field '{field_name}' in {label} must be null or a non-empty string.",
-    )
-
-
-def _required_int(data: Mapping[str, object], field_name: str, label: str) -> int:
-    return required_int(
-        data,
-        field_name,
-        error=SummarizationContractError,
-        message=f"Field '{field_name}' in {label} must be an integer.",
-    )
 
 
 def _timestamp(now: datetime | None) -> str:

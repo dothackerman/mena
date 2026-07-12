@@ -510,7 +510,7 @@ def test_ollama_semantic_provider_preserves_raw_output_on_contract_failure(
         provider.check(_semantic_request())
 
     message = str(exc_info.value)
-    assert "Field 'confidence' in Semantic coherence result must be a number." in message
+    assert "Semantic coherence result field 'confidence' must be a number." in message
     assert "Raw Ollama message content:" in message
     assert raw_content in message
 
@@ -537,7 +537,7 @@ def test_ollama_semantic_provider_preserves_raw_output_on_null_confidence(
         provider.check(_semantic_request())
 
     message = str(exc_info.value)
-    assert "Field 'confidence' in Semantic coherence result must be a number." in message
+    assert "Semantic coherence result field 'confidence' must be a number." in message
     assert "Raw Ollama message content:" in message
     assert raw_content in message
 
@@ -800,7 +800,7 @@ def test_semantic_coherence_result_from_dict_validates_contract() -> None:
                 "reason": "context mismatch",
             }
         )
-    with pytest.raises(SemanticCoherenceContractError, match="must be an object"):
+    with pytest.raises(SemanticCoherenceContractError, match="must be a JSON object or null"):
         SemanticCoherenceResult.from_dict(
             {
                 "coherent": False,
