@@ -1420,6 +1420,29 @@ def _accepted_mistral_primary_state(
     return build_runtime_profile_state(evaluate_setup(profile, mistral_state))
 
 
+def _accepted_mistral_primary_with_local_fallback(
+    *,
+    settings: AppSettings,
+    setup_state: LocalInstallationState,
+    fallback_entry: StageProfile | None = None,
+) -> RuntimeProfileState:
+    mistral_primary = _accepted_mistral_primary_state(
+        settings=settings,
+        setup_state=setup_state,
+    )
+    local_fallback_entry = fallback_entry or _ollama_summary_stage(settings)
+    return replace(
+        mistral_primary,
+        fallback_authorization=replace(
+            mistral_primary.fallback_authorization,
+            local_status="authorized",
+            automatic_local_fallback_authorized=True,
+            stage_scope=("summarization",),
+        ),
+        summarization_fallback_providers=(local_fallback_entry,),
+    )
+
+
 def _accepted_local_state_with_mistral_fallback(
     *,
     settings: AppSettings,
@@ -1516,19 +1539,8 @@ def test_summarization_runtime_selection_uses_accepted_local_fallback_after_mist
 ) -> None:
     settings = AppSettings.from_env(env={}, home=tmp_path)
     setup_state = _setup_state(settings=settings, pyannote_token_present=True)
-    mistral_primary = _accepted_mistral_primary_state(
-        settings=settings,
-        setup_state=setup_state,
-    )
-    accepted = replace(
-        mistral_primary,
-        fallback_authorization=replace(
-            mistral_primary.fallback_authorization,
-            local_status="authorized",
-            automatic_local_fallback_authorized=True,
-            stage_scope=("summarization",),
-        ),
-        summarization_fallback_providers=(_ollama_summary_stage(settings),),
+    accepted = _accepted_mistral_primary_with_local_fallback(
+        settings=settings, setup_state=setup_state
     )
     persist_runtime_profile_state(accepted, paths=settings.paths)
     mistral_down = replace(
@@ -1569,19 +1581,8 @@ def test_summarization_runtime_selection_revalidates_ollama_fallback_scope(
 ) -> None:
     settings = AppSettings.from_env(env={}, home=tmp_path)
     setup_state = _setup_state(settings=settings, pyannote_token_present=True)
-    mistral_primary = _accepted_mistral_primary_state(
-        settings=settings,
-        setup_state=setup_state,
-    )
-    accepted = replace(
-        mistral_primary,
-        fallback_authorization=replace(
-            mistral_primary.fallback_authorization,
-            local_status="authorized",
-            automatic_local_fallback_authorized=True,
-            stage_scope=("summarization",),
-        ),
-        summarization_fallback_providers=(_ollama_summary_stage(settings),),
+    accepted = _accepted_mistral_primary_with_local_fallback(
+        settings=settings, setup_state=setup_state
     )
     persist_runtime_profile_state(accepted, paths=settings.paths)
     mistral_down_ollama_missing = replace(
@@ -1619,23 +1620,14 @@ def test_summarization_runtime_selection_revalidates_ollama_fallback_entry_model
 ) -> None:
     settings = AppSettings.from_env(env={}, home=tmp_path)
     setup_state = _setup_state(settings=settings, pyannote_token_present=True)
-    mistral_primary = _accepted_mistral_primary_state(
-        settings=settings,
-        setup_state=setup_state,
-    )
     fallback_entry = replace(
         _ollama_summary_stage(settings),
         model="fallback-only-model",
     )
-    accepted = replace(
-        mistral_primary,
-        fallback_authorization=replace(
-            mistral_primary.fallback_authorization,
-            local_status="authorized",
-            automatic_local_fallback_authorized=True,
-            stage_scope=("summarization",),
-        ),
-        summarization_fallback_providers=(fallback_entry,),
+    accepted = _accepted_mistral_primary_with_local_fallback(
+        settings=settings,
+        setup_state=setup_state,
+        fallback_entry=fallback_entry,
     )
     persist_runtime_profile_state(accepted, paths=settings.paths)
     observed_models: list[str] = []
@@ -2001,19 +1993,8 @@ def test_summarization_stage_failure_selection_can_fallback_from_mistral_to_loca
 ) -> None:
     settings = AppSettings.from_env(env={}, home=tmp_path)
     ready_state = _setup_state(settings=settings, pyannote_token_present=True)
-    mistral_primary = _accepted_mistral_primary_state(
-        settings=settings,
-        setup_state=ready_state,
-    )
-    accepted = replace(
-        mistral_primary,
-        fallback_authorization=replace(
-            mistral_primary.fallback_authorization,
-            local_status="authorized",
-            automatic_local_fallback_authorized=True,
-            stage_scope=("summarization",),
-        ),
-        summarization_fallback_providers=(_ollama_summary_stage(settings),),
+    accepted = _accepted_mistral_primary_with_local_fallback(
+        settings=settings, setup_state=ready_state
     )
     monkeypatch.setattr(
         "mena.runtime_profile.detect_local_installation_state",
