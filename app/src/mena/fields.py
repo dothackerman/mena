@@ -17,7 +17,7 @@ class ContractReader(Generic[_TError]):
     error: type[_TError]
 
     def required_str(self, data: Mapping[str, object], key: str) -> str:
-        return required_str(
+        return _read_required_str(
             data,
             key,
             error=self.error,
@@ -25,7 +25,7 @@ class ContractReader(Generic[_TError]):
         )
 
     def optional_str(self, data: Mapping[str, object], key: str) -> str | None:
-        return optional_str(
+        return _read_optional_str(
             data,
             key,
             error=self.error,
@@ -33,7 +33,7 @@ class ContractReader(Generic[_TError]):
         )
 
     def required_nullable_str(self, data: Mapping[str, object], key: str) -> str | None:
-        return required_nullable_str(
+        return _read_required_nullable_str(
             data,
             key,
             error=self.error,
@@ -42,7 +42,7 @@ class ContractReader(Generic[_TError]):
         )
 
     def required_int(self, data: Mapping[str, object], key: str) -> int:
-        return required_int(
+        return _read_required_int(
             data,
             key,
             error=self.error,
@@ -50,7 +50,7 @@ class ContractReader(Generic[_TError]):
         )
 
     def optional_int(self, data: Mapping[str, object], key: str) -> int | None:
-        return optional_int(
+        return _read_optional_int(
             data,
             key,
             error=self.error,
@@ -68,7 +68,7 @@ class ContractReader(Generic[_TError]):
         return value
 
     def required_bool(self, data: Mapping[str, object], key: str) -> bool:
-        return required_bool(
+        return _read_required_bool(
             data,
             key,
             error=self.error,
@@ -94,7 +94,7 @@ class ContractReader(Generic[_TError]):
         return value
 
     def required_number(self, data: Mapping[str, object], key: str) -> float:
-        return required_number(
+        return _read_required_number(
             data,
             key,
             error=self.error,
@@ -102,7 +102,7 @@ class ContractReader(Generic[_TError]):
         )
 
     def optional_number(self, data: Mapping[str, object], key: str) -> float | None:
-        return optional_number(
+        return _read_optional_number(
             data,
             key,
             error=self.error,
@@ -114,7 +114,7 @@ class ContractReader(Generic[_TError]):
         data: Mapping[str, object],
         key: str,
     ) -> Mapping[str, object]:
-        return required_mapping(
+        return _read_required_mapping(
             data,
             key,
             error=self.error,
@@ -122,7 +122,7 @@ class ContractReader(Generic[_TError]):
         )
 
     def required_dict(self, data: Mapping[str, object], key: str) -> dict[str, object]:
-        return required_dict(
+        return _read_required_dict(
             data,
             key,
             error=self.error,
@@ -134,7 +134,7 @@ class ContractReader(Generic[_TError]):
         data: Mapping[str, object],
         key: str,
     ) -> Mapping[str, object]:
-        return optional_mapping(
+        return _read_optional_mapping(
             data,
             key,
             error=self.error,
@@ -142,7 +142,7 @@ class ContractReader(Generic[_TError]):
         )
 
     def required_list(self, data: Mapping[str, object], key: str) -> list[object]:
-        return required_list(
+        return _read_required_list(
             data,
             key,
             error=self.error,
@@ -153,7 +153,7 @@ class ContractReader(Generic[_TError]):
         return f"{self.context_label} field '{key}' {requirement}."
 
 
-def required_str(
+def _read_required_str(
     data: Mapping[str, object], key: str, *, error: type[_TError], message: str
 ) -> str:
     value = data.get(key)
@@ -162,7 +162,7 @@ def required_str(
     return value
 
 
-def optional_str(
+def _read_optional_str(
     data: Mapping[str, object],
     key: str,
     *,
@@ -177,7 +177,7 @@ def optional_str(
     return value
 
 
-def required_nullable_str(
+def _read_required_nullable_str(
     data: Mapping[str, object],
     key: str,
     *,
@@ -195,7 +195,7 @@ def required_nullable_str(
     return value
 
 
-def required_int(
+def _read_required_int(
     data: Mapping[str, object], key: str, *, error: type[_TError], message: str
 ) -> int:
     value = data.get(key)
@@ -204,7 +204,7 @@ def required_int(
     return value
 
 
-def optional_int(
+def _read_optional_int(
     data: Mapping[str, object],
     key: str,
     *,
@@ -219,7 +219,7 @@ def optional_int(
     return value
 
 
-def required_bool(
+def _read_required_bool(
     data: Mapping[str, object],
     key: str,
     *,
@@ -232,7 +232,7 @@ def required_bool(
     return value
 
 
-def required_number(
+def _read_required_number(
     data: Mapping[str, object],
     key: str,
     *,
@@ -245,7 +245,7 @@ def required_number(
     return float(value)
 
 
-def optional_number(
+def _read_optional_number(
     data: Mapping[str, object],
     key: str,
     *,
@@ -260,7 +260,7 @@ def optional_number(
     return float(value)
 
 
-def required_mapping(
+def _read_required_mapping(
     data: Mapping[str, object],
     key: str,
     *,
@@ -273,7 +273,7 @@ def required_mapping(
     return value
 
 
-def required_dict(
+def _read_required_dict(
     data: Mapping[str, object],
     key: str,
     *,
@@ -286,7 +286,7 @@ def required_dict(
     return value
 
 
-def optional_mapping(
+def _read_optional_mapping(
     data: Mapping[str, object],
     key: str,
     *,
@@ -301,7 +301,7 @@ def optional_mapping(
     return value
 
 
-def required_list(
+def _read_required_list(
     data: Mapping[str, object],
     key: str,
     *,
@@ -323,7 +323,7 @@ def required_enum_str(
     string_message: str,
     enum_message: str,
 ) -> str:
-    value = required_str(data, key, error=error, message=string_message)
+    value = _read_required_str(data, key, error=error, message=string_message)
     if value not in allowed_values:
         raise error(enum_message)
     return value
@@ -338,7 +338,7 @@ def optional_enum_str(
     string_message: str,
     enum_message: str,
 ) -> str | None:
-    value = optional_str(data, key, error=error, message=string_message)
+    value = _read_optional_str(data, key, error=error, message=string_message)
     if value is None:
         return None
     if value not in allowed_values:
@@ -354,7 +354,7 @@ def required_sha256(
     string_message: str,
     sha_message: str,
 ) -> str:
-    value = required_str(data, key, error=error, message=string_message)
+    value = _read_required_str(data, key, error=error, message=string_message)
     if not _SHA256_PATTERN.fullmatch(value):
         raise error(sha_message)
     return value
