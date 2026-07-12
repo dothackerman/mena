@@ -175,6 +175,7 @@ class CaptureRouteBindingPayload:
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> Self:
         payload = _ensure_mapping(data, "capture route binding")
+        reader = ContractReader("capture route binding", ProtocolError)
         _require_exact_keys(
             payload,
             {"role", "source_id", "route_id", "label", "backend", "backend_name", "required"},
@@ -198,11 +199,11 @@ class CaptureRouteBindingPayload:
             route_id=PROTOCOL_READER.required_str(payload, "route_id"),
             label=PROTOCOL_READER.required_str(payload, "label"),
             backend=PROTOCOL_READER.required_str(payload, "backend"),
-            backend_name=_read_optional_str(payload, "backend_name", "capture route binding"),
-            backend_target=_read_optional_str(payload, "backend_target", "capture route binding"),
-            node_name=_read_optional_str(payload, "node_name", "capture route binding"),
-            object_serial=_read_optional_str(payload, "object_serial", "capture route binding"),
-            sink_input_id=_read_optional_str(payload, "sink_input_id", "capture route binding"),
+            backend_name=reader.optional_str(payload, "backend_name"),
+            backend_target=reader.optional_str(payload, "backend_target"),
+            node_name=reader.optional_str(payload, "node_name"),
+            object_serial=reader.optional_str(payload, "object_serial"),
+            sink_input_id=reader.optional_str(payload, "sink_input_id"),
             required=PROTOCOL_READER.required_bool(payload, "required"),
         )
 
@@ -229,6 +230,7 @@ class StartCapturePayload:
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> Self:
         payload = _ensure_mapping(data, "start_capture payload")
+        reader = ContractReader("start_capture payload", ProtocolError)
         _require_exact_keys(
             payload,
             {"profile", "language", "segment_seconds", "selected_sources", "routes"},
@@ -249,7 +251,7 @@ class StartCapturePayload:
             )
         if len(set(selected_sources)) != len(selected_sources):
             raise ProtocolError("start_capture payload selected_sources must be unique.")
-        raw_routes = _read_list(payload, "routes", "start_capture payload")
+        raw_routes = reader.required_list(payload, "routes")
         parsed_routes: list[CaptureRouteBindingPayload] = []
         for route in raw_routes:
             if not isinstance(route, dict):
@@ -390,6 +392,7 @@ class CaptureRouteEventPayload:
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> Self:
         payload = _ensure_mapping(data, "capture_route_event payload")
+        reader = ContractReader("capture_route_event payload", ProtocolError)
         _require_exact_keys(
             payload,
             {
@@ -421,7 +424,7 @@ class CaptureRouteEventPayload:
                 CAPTURE_SOURCE_IDS,
                 "capture_route_event payload",
             ),
-            occurred_at=_read_optional_str(payload, "occurred_at", "capture_route_event payload"),
+            occurred_at=reader.optional_str(payload, "occurred_at"),
             elapsed_seconds=_read_optional_non_negative_number(
                 payload,
                 "elapsed_seconds",
@@ -432,8 +435,8 @@ class CaptureRouteEventPayload:
                 "segment_index",
                 "capture_route_event payload",
             ),
-            route_id=_read_optional_str(payload, "route_id", "capture_route_event payload"),
-            route_label=_read_optional_str(payload, "route_label", "capture_route_event payload"),
+            route_id=reader.optional_str(payload, "route_id"),
+            route_label=reader.optional_str(payload, "route_label"),
             capture_mode=_read_optional_enum_str(
                 payload,
                 "capture_mode",
@@ -468,6 +471,7 @@ class SegmentFlushedPayload:
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> Self:
         payload = _ensure_mapping(data, "segment_flushed payload")
+        reader = ContractReader("segment_flushed payload", ProtocolError)
         _require_exact_keys(
             payload,
             {
@@ -509,11 +513,11 @@ class SegmentFlushedPayload:
             sample_format=PROTOCOL_READER.required_str(payload, "sample_format"),
             byte_count=_read_non_negative_int(payload, "byte_count"),
             duration_seconds=_read_non_negative_number(payload, "duration_seconds"),
-            started_at=_read_optional_str(payload, "started_at", "segment_flushed payload"),
-            ended_at=_read_optional_str(payload, "ended_at", "segment_flushed payload"),
+            started_at=reader.optional_str(payload, "started_at"),
+            ended_at=reader.optional_str(payload, "ended_at"),
             sha256=_read_sha256(payload, "sha256"),
-            route_id=_read_optional_str(payload, "route_id", "segment_flushed payload"),
-            route_label=_read_optional_str(payload, "route_label", "segment_flushed payload"),
+            route_id=reader.optional_str(payload, "route_id"),
+            route_label=reader.optional_str(payload, "route_label"),
             capture_mode=_read_optional_enum_str(
                 payload,
                 "capture_mode",
@@ -565,8 +569,9 @@ class SegmentsFlushedPayload:
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> Self:
         payload = _ensure_mapping(data, "segments_flushed payload")
+        reader = ContractReader("segments_flushed payload", ProtocolError)
         _require_exact_keys(payload, {"segments"}, "segments_flushed payload")
-        raw_segments = _read_list(payload, "segments", "segments_flushed payload")
+        raw_segments = reader.required_list(payload, "segments")
         if not raw_segments:
             raise ProtocolError("segments_flushed payload segments must not be empty.")
         segments: list[SegmentFlushedPayload] = []
@@ -599,16 +604,13 @@ class CaptureFinalizedPayload:
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> Self:
         payload = _ensure_mapping(data, "capture_finalized payload")
+        reader = ContractReader("capture_finalized payload", ProtocolError)
         _require_exact_keys(
             payload,
             {"status", "stop_reason", "completed_at", "error", "capture_metadata"},
             "capture_finalized payload",
         )
-        capture_metadata = _read_mapping(
-            payload,
-            "capture_metadata",
-            "capture_finalized payload",
-        )
+        capture_metadata = reader.required_dict(payload, "capture_metadata")
         _validate_capture_metadata_or_summary(capture_metadata)
         return cls(
             status=_read_enum_str(
@@ -623,8 +625,8 @@ class CaptureFinalizedPayload:
                 CAPTURE_STOP_REASONS,
                 "capture_finalized payload",
             ),
-            completed_at=_read_optional_str(payload, "completed_at", "capture_finalized payload"),
-            error=_read_optional_str(payload, "error", "capture_finalized payload"),
+            completed_at=reader.optional_str(payload, "completed_at"),
+            error=reader.optional_str(payload, "error"),
             capture_metadata=dict(capture_metadata),
         )
 
@@ -649,8 +651,9 @@ class ErrorPayload:
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> Self:
         payload = _ensure_mapping(data, "error payload")
+        reader = ContractReader("error payload", ProtocolError)
         _require_exact_keys(payload, {"code", "message", "recoverable", "details"}, "error payload")
-        details = _read_mapping(payload, "details", "error payload")
+        details = reader.required_dict(payload, "details")
         return cls(
             code=PROTOCOL_READER.required_str(payload, "code"),
             message=PROTOCOL_READER.required_str(payload, "message"),
@@ -942,10 +945,6 @@ def _read_optional_enum_str(
     return value
 
 
-def _read_optional_str(data: dict[str, object], key: str, context: str) -> str | None:
-    return ContractReader(context, ProtocolError).optional_str(data, key)
-
-
 def _read_sha256(data: dict[str, object], key: str) -> str:
     return required_sha256(
         data,
@@ -962,28 +961,12 @@ def _ensure_mapping(data: Mapping[str, object], context: str) -> dict[str, objec
     return data
 
 
-def _read_mapping(
-    data: dict[str, object],
-    key: str,
-    context: str,
-) -> dict[str, object]:
-    return ContractReader(context, ProtocolError).required_dict(data, key)
-
-
-def _read_list(
-    data: dict[str, object],
-    key: str,
-    context: str,
-) -> list[object]:
-    return ContractReader(context, ProtocolError).required_list(data, key)
-
-
 def _read_str_sequence(
     data: dict[str, object],
     key: str,
     context: str,
 ) -> tuple[str, ...]:
-    values = _read_list(data, key, context)
+    values = ContractReader(context, ProtocolError).required_list(data, key)
     strings: list[str] = []
     for index, value in enumerate(values):
         if not isinstance(value, str) or not value:
@@ -1017,6 +1000,7 @@ def _validate_capture_metadata_or_summary(data: dict[str, object]) -> None:
 
 
 def _validate_capture_metadata(data: dict[str, object]) -> None:
+    reader = ContractReader("capture_metadata", ProtocolError)
     _validate_capture_metadata_common(
         data,
         expected_keys={
@@ -1031,7 +1015,7 @@ def _validate_capture_metadata(data: dict[str, object]) -> None:
         },
     )
     segment_count = _read_non_negative_int(data, "segment_count")
-    segments = _read_list(data, "segments", "capture_metadata")
+    segments = reader.required_list(data, "segments")
     if segment_count != len(segments):
         raise ProtocolError("capture_metadata segment_count must match segments length.")
     for segment in segments:
@@ -1061,6 +1045,7 @@ def _validate_capture_metadata_common(
     *,
     expected_keys: set[str],
 ) -> None:
+    reader = ContractReader("capture_metadata", ProtocolError)
     _require_exact_keys(data, expected_keys, "capture_metadata")
     if PROTOCOL_READER.required_int(data, "version") != 1:
         raise ProtocolError("capture_metadata field 'version' must be 1.")
@@ -1068,7 +1053,7 @@ def _validate_capture_metadata_common(
     _read_positive_int(data, "sample_rate")
     _read_positive_int(data, "channels")
     _read_positive_int(data, "segment_seconds")
-    sources = _read_list(data, "sources", "capture_metadata")
+    sources = reader.required_list(data, "sources")
     for source in sources:
         if not isinstance(source, dict):
             raise ProtocolError("capture_metadata sources must contain JSON objects.")
@@ -1076,6 +1061,7 @@ def _validate_capture_metadata_common(
 
 
 def _validate_capture_source_summary(data: dict[str, object]) -> None:
+    reader = ContractReader("capture source summary", ProtocolError)
     _require_exact_keys(
         data,
         {
@@ -1089,8 +1075,8 @@ def _validate_capture_source_summary(data: dict[str, object]) -> None:
         "capture source summary",
     )
     _read_enum_str(data, "source_id", CAPTURE_SOURCE_IDS, "capture source summary")
-    _read_optional_str(data, "route_id", "capture source summary")
-    _read_optional_str(data, "route_label", "capture source summary")
+    reader.optional_str(data, "route_id")
+    reader.optional_str(data, "route_label")
     _read_optional_enum_str(
         data,
         "capture_mode",

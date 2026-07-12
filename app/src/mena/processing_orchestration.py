@@ -486,7 +486,7 @@ def collect_capture_segments(
                 f"Session contains an unexpected capture source '{source_id}' for processing."
             )
         index = _read_positive_session_int(raw_segment, "index")
-        _ = SESSION_READER.required_str(raw_segment, "path")
+        path = SESSION_READER.required_str(raw_segment, "path")
         status = SESSION_READER.required_str(raw_segment, "status")
         if status != "sealed":
             raise ValueError(
@@ -495,18 +495,12 @@ def collect_capture_segments(
         expected_sha = raw_segment.get("sha256")
         if expected_sha is not None and not isinstance(expected_sha, str):
             raise ValueError("Capture segment sha256 must be a string when provided.")
-        route_id = raw_segment.get("route_id")
-        if route_id is not None and not isinstance(route_id, str):
-            raise ValueError("Capture segment route_id must be a string when provided.")
-        route_label = raw_segment.get("route_label")
-        if route_label is not None and not isinstance(route_label, str):
-            raise ValueError("Capture segment route_label must be a string when provided.")
-        capture_mode = raw_segment.get("capture_mode")
-        if capture_mode is not None and not isinstance(capture_mode, str):
-            raise ValueError("Capture segment capture_mode must be a string when provided.")
+        route_id = SESSION_READER.optional_str(raw_segment, "route_id")
+        route_label = SESSION_READER.optional_str(raw_segment, "route_label")
+        capture_mode = SESSION_READER.optional_str(raw_segment, "capture_mode")
         grouped[source_id].append(
             {
-                "path": SESSION_READER.required_str(raw_segment, "path"),
+                "path": path,
                 "index": index,
                 "status": status,
                 "sha256": expected_sha,

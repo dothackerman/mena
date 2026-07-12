@@ -1,4 +1,4 @@
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from types import MappingProxyType
 
 import pytest
@@ -73,14 +73,30 @@ def test_contract_reader_covers_scalar_value_kinds() -> None:
     assert reader.optional_number({}, "score") is None
     assert reader.optional_number({"score": 1.5}, "score") == 1.5
 
-    for call in (
-        lambda: reader.required_int({"count": True}, "count"),
-        lambda: reader.optional_int({"count": True}, "count"),
-        lambda: reader.required_bool({"enabled": 0}, "enabled"),
-        lambda: reader.required_number({"score": True}, "score"),
-        lambda: reader.optional_number({"score": True}, "score"),
-    ):
-        with pytest.raises(FieldError):
+    scalar_error_cases: tuple[tuple[Callable[[], object], str], ...] = (
+        (
+            lambda: reader.required_int({"count": True}, "count"),
+            "Protocol field 'count' must be an integer.",
+        ),
+        (
+            lambda: reader.optional_int({"count": True}, "count"),
+            "Protocol field 'count' must be an integer or null.",
+        ),
+        (
+            lambda: reader.required_bool({"enabled": 0}, "enabled"),
+            "Protocol field 'enabled' must be a boolean.",
+        ),
+        (
+            lambda: reader.required_number({"score": True}, "score"),
+            "Protocol field 'score' must be a number.",
+        ),
+        (
+            lambda: reader.optional_number({"score": True}, "score"),
+            "Protocol field 'score' must be a number or null.",
+        ),
+    )
+    for call, match in scalar_error_cases:
+        with pytest.raises(FieldError, match=match):
             call()
 
 
