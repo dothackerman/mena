@@ -59,8 +59,6 @@ from mena.processing import (
     PROCESSING_STATE_ARTIFACT_TYPE,
     ProcessingStageState,
     ProcessingStateError,
-    latest_non_retryable_processing_failure,
-    latest_resumable_processing_state,
 )
 from mena.profiles import (
     CaptureProfileSelection,
@@ -95,6 +93,7 @@ from mena.session_integrity import (
     SessionIntegrityError,
     verify_session_bundle,
 )
+from mena.session_lock import SessionLockContention
 from mena.sessions import (
     ProcessableSessionCandidate,
     processable_session_candidates,
@@ -864,25 +863,29 @@ def main(
             print("Recording setup cancelled.")
             return 1
 
-        result = run_recording_control_workflow(
-            RecordCommandInput(
-                profile=profile,
-                language=language,
-                name=args.name,
-                microphone_route_id=args.mic,
-                playback_stream_route_id=args.playback_stream,
-                output_sink_route_id=args.output_sink,
-                dry_run=args.dry_run,
-                verbose=args.verbose,
-                worker_exit_timeout=args.worker_exit_timeout,
-                stop_input_available=_record_input(input_fn) is not None,
-            ),
-            data_root=_effective_record_data_root(data_root, app_settings),
-            discoverer=discoverer,
-            worker_factory=worker_factory,
-            interaction=ConsoleRecordInteraction(input_fn),
-            now=now,
-        )
+        try:
+            result = run_recording_control_workflow(
+                RecordCommandInput(
+                    profile=profile,
+                    language=language,
+                    name=args.name,
+                    microphone_route_id=args.mic,
+                    playback_stream_route_id=args.playback_stream,
+                    output_sink_route_id=args.output_sink,
+                    dry_run=args.dry_run,
+                    verbose=args.verbose,
+                    worker_exit_timeout=args.worker_exit_timeout,
+                    stop_input_available=_record_input(input_fn) is not None,
+                ),
+                data_root=_effective_record_data_root(data_root, app_settings),
+                discoverer=discoverer,
+                worker_factory=worker_factory,
+                interaction=ConsoleRecordInteraction(input_fn),
+                now=now,
+            )
+        except SessionLockContention as exc:
+            print(f"Cannot start recording: {exc}")
+            return 4
         return result.exit_code
 
     if args.command == "correct":
@@ -893,6 +896,9 @@ def main(
                 interaction=ConsoleCorrectionInteraction(input_fn),
                 playback_player=playback_player,
             )
+        except SessionLockContention as exc:
+            print(f"Cannot run correction workflow: {exc}")
+            return 4
         except (ArtifactStoreError, CorrectionWorkflowError) as exc:
             print(f"Cannot run correction workflow: {exc}")
             return 1
@@ -925,6 +931,9 @@ def main(
                 summarization_provider_factory=summarization_provider_factory,
                 interaction=interaction,
             )
+        except SessionLockContention as exc:
+            print(f"Cannot summarize session: {exc}")
+            return 4
         except RuntimeFallbackUnavailable as exc:
             # Recoverable: the accepted summarization provider failed and an
             # accepted fallback exists but is not authorized (or none is
@@ -953,6 +962,9 @@ def main(
                 settings=_settings_with_sessions_root(app_settings, sessions_root),
                 input_fn=input_fn,
             )
+        except SessionLockContention as exc:
+            print(f"Cannot export session summary markdown: {exc}")
+            return 4
         except (
             ArtifactStoreError,
             SummaryMarkdownExportError,
@@ -987,75 +999,60 @@ def main(
                     app_settings,
                     input_fn=input_fn,
                 )
+                if args.command == "process":
+                    print(f"Processing recording: {session_path}")
+                exit_code = processing_command_runner(
+                    session_path=session_path,
+                    run_id=invocation_run_id,
+                    attempt=invocation_attempt,
+                    now=now,
+                    transcription_provider_factory=transcription_provider_factory,
+                    diarization_provider_factory=diarization_provider_factory,
+                    semantic_coherence_provider_factory=(
+                        effective_semantic_coherence_provider_factory
+                    ),
+                    settings=app_settings,
+                    setup_runner=setup_runner,
+                    setup_command_identity=setup_command_identity,
+                    setup_hardware=setup_hardware,
+                    allow_runtime_fallback=args.allow_runtime_fallback,
+                    interaction=_resolve_runtime_fallback_interaction(input_fn),
+                    orchestrator_command=args.command,
+                )
             else:
                 session_path = Path(args.session_path)
-                resolved_session = resolve_session(session_path)
-                session_id_value = session_id(resolved_session.record)
-                store = FileSystemArtifactStore(
-                    session_id=session_id_value,
-                    session_dir=resolved_session.session_dir,
+                exit_code = processing_orchestration.run_resume_processing_command(
+                    session_path=session_path,
+                    now=now,
+                    transcription_provider_factory=transcription_provider_factory,
+                    diarization_provider_factory=diarization_provider_factory,
+                    semantic_coherence_provider_factory=(
+                        effective_semantic_coherence_provider_factory
+                    ),
+                    settings=app_settings,
+                    setup_runner=setup_runner,
+                    setup_command_identity=setup_command_identity,
+                    setup_hardware=setup_hardware,
+                    allow_runtime_fallback=args.allow_runtime_fallback,
+                    interaction=_resolve_runtime_fallback_interaction(input_fn),
                 )
-                resumable = latest_resumable_processing_state(
-                    store,
-                    session_id=session_id_value,
-                )
-                if resumable is None:
-                    blocked = latest_non_retryable_processing_failure(
-                        store,
-                        session_id=session_id_value,
-                    )
-                    if blocked is not None:
-                        reason = (
-                            blocked.error.message
-                            if blocked.error is not None
-                            else "Unknown processing failure."
-                        )
-                        code = (
-                            blocked.error.code
-                            if blocked.error is not None and blocked.error.code is not None
-                            else None
-                        )
-                        context = f" (code={code})" if code else ""
-                        print(
-                            "Latest processing failure is non-retryable at run "
-                            f"'{blocked.run_id}', stage '{blocked.stage}', "
-                            f"attempt {blocked.attempt}: "
-                            f"{reason}{context}"
-                        )
-                    else:
-                        print("No retryable processing failure found to resume.")
-                    return 1
-                invocation_run_id = resumable.run_id
-                invocation_attempt = resumable.attempt + 1
-
-            if args.command == "process":
-                print(f"Processing recording: {session_path}")
-            exit_code = processing_command_runner(
-                session_path=session_path,
-                run_id=invocation_run_id,
-                attempt=invocation_attempt,
-                now=now,
-                transcription_provider_factory=transcription_provider_factory,
-                diarization_provider_factory=diarization_provider_factory,
-                semantic_coherence_provider_factory=effective_semantic_coherence_provider_factory,
-                settings=app_settings,
-                setup_runner=setup_runner,
-                setup_command_identity=setup_command_identity,
-                setup_hardware=setup_hardware,
-                allow_runtime_fallback=args.allow_runtime_fallback,
-                interaction=_resolve_runtime_fallback_interaction(input_fn),
-            )
             if args.command == "process" and exit_code == 0:
                 print("Processing completed successfully.")
                 if _correction_handoff_available(session_path):
                     print(f"Next command: mena correct {quote(str(session_path))}")
             return exit_code
+        except processing_orchestration.ProcessingResumeUnavailable as exc:
+            print(str(exc))
+            return 1
         except RuntimeFallbackUnavailable as exc:
             # Recoverable: a GPU stage failed and a CPU fallback exists but is not
             # authorized. Distinct exit code 3 lets an automated caller re-invoke
             # with --allow-runtime-fallback instead of treating it as a hard error.
             print(f"Cannot run processing workflow: {exc}")
             return 3
+        except SessionLockContention as exc:
+            print(f"Cannot run processing workflow: {exc}")
+            return 4
         except (
             ArtifactStoreError,
             ProcessingStateError,
