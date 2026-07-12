@@ -201,7 +201,10 @@ def test_correction_entry_rejects_missing_nullable_contract_fields() -> None:
     )
     del payload["speaker_id"]
 
-    with pytest.raises(CorrectionOverlayContractError, match="speaker_id is required"):
+    with pytest.raises(
+        CorrectionOverlayContractError,
+        match="Correction entry field 'speaker_id' is required.",
+    ):
         CorrectionEntry.from_dict(payload)
 
 
@@ -399,7 +402,10 @@ def test_correction_overlay_rejects_missing_review_queue_artifact_field() -> Non
     payload = _overlay_fixture(source_record=source_record).to_dict()
     del payload["review_queue_artifact"]
 
-    with pytest.raises(CorrectionOverlayContractError, match="review_queue_artifact is required"):
+    with pytest.raises(
+        CorrectionOverlayContractError,
+        match="Correction overlay artifact field 'review_queue_artifact' is required.",
+    ):
         CorrectionOverlayArtifact.from_dict(payload)
 
 

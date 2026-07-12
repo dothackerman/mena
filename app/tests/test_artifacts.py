@@ -359,7 +359,7 @@ def test_file_system_artifact_store_rejects_boolean_integer_fields(tmp_path: Pat
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     reader = _file_system_store(tmp_path)
 
-    with pytest.raises(ArtifactStoreError, match="integer"):
+    with pytest.raises(ArtifactStoreError, match="Artifact field 'version' must be an integer\\."):
         reader.list()
 
 

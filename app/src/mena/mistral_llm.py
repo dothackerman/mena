@@ -432,8 +432,8 @@ def mistral_token_counts(response: Mapping[str, object]) -> tuple[int, int]:
     if not isinstance(usage, Mapping):
         raise MistralContractError("Mistral response is missing a usage object.")
     return (
-        _required_token_count(usage, "prompt_tokens"),
-        _required_token_count(usage, "completion_tokens"),
+        _read_required_token_count(usage, "prompt_tokens"),
+        _read_required_token_count(usage, "completion_tokens"),
     )
 
 
@@ -456,7 +456,7 @@ def _first_choice(response: Mapping[str, object]) -> Mapping[str, object]:
     return first
 
 
-def _required_token_count(usage: Mapping[str, object], field_name: str) -> int:
+def _read_required_token_count(usage: Mapping[str, object], field_name: str) -> int:
     value = usage.get(field_name)
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise MistralContractError(

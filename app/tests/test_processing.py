@@ -372,13 +372,17 @@ def test_processing_state_validation_rejects_boolean_integer_fields() -> None:
     payload = _state_dict()
     payload["attempt"] = True
 
-    with pytest.raises(ProcessingStateError, match="integer"):
+    with pytest.raises(
+        ProcessingStateError, match="Processing field 'attempt' must be an integer\\."
+    ):
         ProcessingStageState.from_dict(payload)
 
     ref_payload = _artifact_ref_dict()
     ref_payload["version"] = True
 
-    with pytest.raises(ProcessingStateError, match="integer"):
+    with pytest.raises(
+        ProcessingStateError, match="Processing field 'version' must be an integer\\."
+    ):
         ArtifactRef.from_dict(ref_payload)
 
 

@@ -2,6 +2,7 @@ import json
 from datetime import UTC, datetime
 from importlib.resources import files
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, cast
 
 import pytest
@@ -663,7 +664,40 @@ def test_diarization_contract_requires_schema_required_nullable_and_object_field
     segment = cast(list[dict[str, object]], payload["segments"])[0]
     del segment["metadata"]
 
-    with pytest.raises(DiarizationContractError, match="metadata"):
+    with pytest.raises(
+        DiarizationContractError,
+        match="Diarization segment metadata field 'metadata' must be a JSON object\\.",
+    ):
+        DiarizationArtifact.from_dict(payload)
+
+    payload = _diarization_artifact(source_ref=source_ref).to_dict()
+    speaker = cast(list[dict[str, object]], payload["speakers"])[0]
+    speaker["metadata"] = {1: "bad"}
+
+    with pytest.raises(
+        DiarizationContractError,
+        match="Diarized speaker metadata field 'metadata' must be a JSON object\\.",
+    ):
+        DiarizationArtifact.from_dict(payload)
+
+    payload = _diarization_artifact(source_ref=source_ref).to_dict()
+    provider = cast(dict[str, object], payload["provider"])
+    provider["parameters"] = {"bad": object()}
+
+    with pytest.raises(
+        DiarizationContractError,
+        match="Diarization provider parameters field 'parameters' must be JSON serializable\\.",
+    ):
+        DiarizationArtifact.from_dict(payload)
+
+    payload = _diarization_artifact(source_ref=source_ref).to_dict()
+    provider = cast(dict[str, object], payload["provider"])
+    provider["metadata"] = MappingProxyType({})
+
+    with pytest.raises(
+        DiarizationContractError,
+        match="Diarization provider metadata field 'metadata' must be a JSON object\\.",
+    ):
         DiarizationArtifact.from_dict(payload)
 
     payload = _diarization_artifact(source_ref=source_ref).to_dict()

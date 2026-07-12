@@ -12,14 +12,7 @@ from pathlib import Path
 from typing import Self
 
 from mena.artifacts import ArtifactRecord, ArtifactStore
-from mena.fields import (
-    optional_str,
-    required_bool,
-    required_int,
-    required_mapping,
-    required_number,
-    required_str,
-)
+from mena.fields import ContractReader
 from mena.merge_timing import (
     MergedTranscriptArtifact,
     MergedTranscriptSegment,
@@ -96,27 +89,14 @@ class ConfidenceFlaggingPolicy:
     @classmethod
     def from_dict(cls, data: object) -> Self:
         item = _mapping(data, "Confidence flagging policy")
+        reader = ContractReader("Confidence flagging policy", ReviewFlaggingContractError)
         policy = cls(
-            policy_version=_required_int(item, "policy_version", "Confidence flagging policy"),
-            min_word_probability=_required_number(
-                item,
-                "min_word_probability",
-                "Confidence flagging policy",
-            ),
-            min_avg_logprob=_required_number(
-                item,
-                "min_avg_logprob",
-                "Confidence flagging policy",
-            ),
-            min_speaker_overlap_ratio=_required_number(
-                item,
-                "min_speaker_overlap_ratio",
-                "Confidence flagging policy",
-            ),
-            flag_unavailable_speaker_confidence=_required_bool(
-                item,
-                "flag_unavailable_speaker_confidence",
-                "Confidence flagging policy",
+            policy_version=reader.required_int(item, "policy_version"),
+            min_word_probability=reader.required_number(item, "min_word_probability"),
+            min_avg_logprob=reader.required_number(item, "min_avg_logprob"),
+            min_speaker_overlap_ratio=reader.required_number(item, "min_speaker_overlap_ratio"),
+            flag_unavailable_speaker_confidence=reader.required_bool(
+                item, "flag_unavailable_speaker_confidence"
             ),
         )
         if policy.policy_version != FLAGGING_POLICY_VERSION:
@@ -155,15 +135,16 @@ class ReviewFlag:
     @classmethod
     def from_dict(cls, data: object) -> Self:
         item = _mapping(data, "Review flag")
+        reader = ContractReader("Review flag", ReviewFlaggingContractError)
         flag = cls(
-            id=_required_str(item, "id", "Review flag"),
-            segment_id=_required_str(item, "segment_id", "Review flag"),
-            reason_code=_required_str(item, "reason_code", "Review flag"),
-            start_seconds=_required_number(item, "start_seconds", "Review flag"),
-            end_seconds=_required_number(item, "end_seconds", "Review flag"),
-            source_id=_required_str(item, "source_id", "Review flag"),
-            speaker_id=_optional_str(item, "speaker_id", "Review flag"),
-            metadata=_required_json_object(item, "metadata", "Review flag metadata"),
+            id=reader.required_str(item, "id"),
+            segment_id=reader.required_str(item, "segment_id"),
+            reason_code=reader.required_str(item, "reason_code"),
+            start_seconds=reader.required_number(item, "start_seconds"),
+            end_seconds=reader.required_number(item, "end_seconds"),
+            source_id=reader.required_str(item, "source_id"),
+            speaker_id=reader.optional_str(item, "speaker_id"),
+            metadata=reader.required_mapping(item, "metadata"),
         )
         for value, label in (
             (flag.id, "Review flag id"),
@@ -205,15 +186,16 @@ class ReviewQueueArtifact:
     @classmethod
     def from_dict(cls, data: object) -> Self:
         item = _mapping(data, "Review queue artifact")
+        reader = ContractReader("Review queue artifact", ReviewFlaggingContractError)
         artifact = cls(
-            version=_required_int(item, "version", "Review queue artifact"),
-            session_id=_required_str(item, "session_id", "Review queue artifact"),
+            version=reader.required_int(item, "version"),
+            session_id=reader.required_str(item, "session_id"),
             merged_transcript_artifact=ArtifactRef.from_dict(
                 item.get("merged_transcript_artifact")
             ),
             policy=_review_policy_from_dict(item.get("policy")),
             flags=tuple(ReviewFlag.from_dict(flag) for flag in _list(item, "flags")),
-            created_at=_required_str(item, "created_at", "Review queue artifact"),
+            created_at=reader.required_str(item, "created_at"),
         )
         if artifact.version != REVIEW_QUEUE_SCHEMA_VERSION:
             raise ReviewFlaggingContractError("Unsupported review queue artifact version.")
@@ -614,19 +596,12 @@ def _review_policy_from_dict(data: object) -> Mapping[str, object] | ConfidenceF
 
 
 def _validate_semantic_policy(policy: Mapping[str, object]) -> None:
-    policy_version = _required_int(policy, "policy_version", "Semantic review policy")
-    context_window_segments = _required_int(
-        policy,
-        "context_window_segments",
-        "Semantic review policy",
-    )
-    min_flag_confidence = _required_number(
-        policy,
-        "min_flag_confidence",
-        "Semantic review policy",
-    )
-    prompt_policy = _required_str(policy, "prompt_policy", "Semantic review policy")
-    _required_str(policy, "provider_config_id", "Semantic review policy")
+    reader = ContractReader("Semantic review policy", ReviewFlaggingContractError)
+    policy_version = reader.required_int(policy, "policy_version")
+    context_window_segments = reader.required_int(policy, "context_window_segments")
+    min_flag_confidence = reader.required_number(policy, "min_flag_confidence")
+    prompt_policy = reader.required_str(policy, "prompt_policy")
+    reader.required_str(policy, "provider_config_id")
     if policy_version != SEMANTIC_REVIEW_POLICY_VERSION:
         raise ReviewFlaggingContractError("Unsupported semantic review policy version.")
     if prompt_policy not in SUPPORTED_SEMANTIC_REVIEW_PROMPT_POLICIES:
@@ -649,64 +624,6 @@ def _list(data: Mapping[str, object], field_name: str) -> list[object]:
     if not isinstance(value, list):
         raise ReviewFlaggingContractError(f"Field '{field_name}' must be an array.")
     return value
-
-
-def _required_str(data: Mapping[str, object], field_name: str, label: str) -> str:
-    return required_str(
-        data,
-        field_name,
-        error=ReviewFlaggingContractError,
-        message=f"Field '{field_name}' in {label} must be a non-empty string.",
-    )
-
-
-def _optional_str(data: Mapping[str, object], field_name: str, label: str) -> str | None:
-    return optional_str(
-        data,
-        field_name,
-        error=ReviewFlaggingContractError,
-        message=f"Field '{field_name}' in {label} must be null or a non-empty string.",
-    )
-
-
-def _required_int(data: Mapping[str, object], field_name: str, label: str) -> int:
-    return required_int(
-        data,
-        field_name,
-        error=ReviewFlaggingContractError,
-        message=f"Field '{field_name}' in {label} must be an integer.",
-    )
-
-
-def _required_number(data: Mapping[str, object], field_name: str, label: str) -> float:
-    return required_number(
-        data,
-        field_name,
-        error=ReviewFlaggingContractError,
-        message=f"Field '{field_name}' in {label} must be a number.",
-    )
-
-
-def _required_bool(data: Mapping[str, object], field_name: str, label: str) -> bool:
-    return required_bool(
-        data,
-        field_name,
-        error=ReviewFlaggingContractError,
-        message=f"Field '{field_name}' in {label} must be a boolean.",
-    )
-
-
-def _required_json_object(
-    data: Mapping[str, object],
-    field_name: str,
-    label: str,
-) -> Mapping[str, object]:
-    return required_mapping(
-        data,
-        field_name,
-        error=ReviewFlaggingContractError,
-        message=f"{label} must be a JSON object.",
-    )
 
 
 def _validate_stable_id(value: str, label: str) -> None:

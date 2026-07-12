@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Protocol
 
 from mena import __version__
-from mena.fields import optional_str, required_bool, required_dict, required_int, required_str
+from mena.fields import ContractReader
 from mena.local_llm import OLLAMA_DEFAULT_MODEL
 from mena.mistral_llm import (
     MENA_MISTRAL_API_KEY_ENV,
@@ -60,6 +60,7 @@ LOCAL_FALLBACK_STATUSES = frozenset(
     {"not_configured", "configured_unauthorized", "authorized", "unavailable"}
 )
 REMOTE_FALLBACK_STATUSES = frozenset({"not_configured", "configured_unauthorized", "authorized"})
+RUNTIME_PROFILE_READER = ContractReader("Runtime profile state", ValueError)
 
 
 @dataclass(frozen=True)
@@ -333,22 +334,24 @@ class RuntimeProfileState:
     def from_dict(cls, data: object) -> RuntimeProfileState:
         if not isinstance(data, dict):
             raise ValueError("Runtime profile state must be a JSON object.")
-        schema_version = _required_int(data, "schema_version")
+        schema_version = RUNTIME_PROFILE_READER.required_int(data, "schema_version")
         if schema_version != RUNTIME_PROFILE_STATE_SCHEMA_VERSION:
             raise ValueError("Unsupported runtime profile state schema version.")
         fallback_providers = data.get("summarization_fallback_providers")
         return cls(
             schema_version=schema_version,
-            catalog_version=_required_str(data, "catalog_version"),
-            accepted_profile_id=_required_str(data, "accepted_profile_id"),
-            accepted_profile_version=_required_str(data, "accepted_profile_version"),
-            accepted_at=_required_str(data, "accepted_at"),
-            product_version=_required_str(data, "product_version"),
+            catalog_version=RUNTIME_PROFILE_READER.required_str(data, "catalog_version"),
+            accepted_profile_id=RUNTIME_PROFILE_READER.required_str(data, "accepted_profile_id"),
+            accepted_profile_version=RUNTIME_PROFILE_READER.required_str(
+                data, "accepted_profile_version"
+            ),
+            accepted_at=RUNTIME_PROFILE_READER.required_str(data, "accepted_at"),
+            product_version=RUNTIME_PROFILE_READER.required_str(data, "product_version"),
             stage_policies=_stage_profiles_from_dicts(data.get("stage_policies")),
             selected_asr_profile=_asr_profile_from_dict(data.get("selected_asr_profile")),
             readiness_summary=_readiness_items_from_dicts(data.get("readiness_summary")),
-            evidence_digest=_required_str(data, "evidence_digest"),
-            evidence=_required_mapping(data, "evidence"),
+            evidence_digest=RUNTIME_PROFILE_READER.required_str(data, "evidence_digest"),
+            evidence=RUNTIME_PROFILE_READER.required_dict(data, "evidence"),
             fallback_authorization=RuntimeFallbackAuthorization.from_dict(
                 data.get("fallback_authorization")
             ),
@@ -399,16 +402,22 @@ class RuntimeFallbackAuthorization:
         if not isinstance(data, dict):
             raise ValueError("Runtime fallback authorization must be a JSON object.")
         authorization = cls(
-            local_status=_required_str(data, "local_status"),
-            local_profile_id=_optional_str(data, "local_profile_id"),
-            local_profile_version=_optional_str(data, "local_profile_version"),
-            automatic_local_fallback_authorized=_required_bool(
+            local_status=RUNTIME_PROFILE_READER.required_str(data, "local_status"),
+            local_profile_id=RUNTIME_PROFILE_READER.optional_str(data, "local_profile_id"),
+            local_profile_version=RUNTIME_PROFILE_READER.optional_str(
+                data, "local_profile_version"
+            ),
+            automatic_local_fallback_authorized=RUNTIME_PROFILE_READER.required_bool(
                 data, "automatic_local_fallback_authorized"
             ),
             stage_scope=_str_tuple(data.get("stage_scope"), "stage_scope"),
-            placement_change_allowed=_required_bool(data, "placement_change_allowed"),
-            profile_change_allowed=_required_bool(data, "profile_change_allowed"),
-            remote_status=_required_str(data, "remote_status"),
+            placement_change_allowed=RUNTIME_PROFILE_READER.required_bool(
+                data, "placement_change_allowed"
+            ),
+            profile_change_allowed=RUNTIME_PROFILE_READER.required_bool(
+                data, "profile_change_allowed"
+            ),
+            remote_status=RUNTIME_PROFILE_READER.required_str(data, "remote_status"),
             remote_stage_scope=_str_tuple(data.get("remote_stage_scope"), "remote_stage_scope"),
             blocking_reasons=_str_tuple(data.get("blocking_reasons"), "blocking_reasons"),
         )
@@ -2134,51 +2143,6 @@ def _format_bool(value: bool | None) -> str:
     return "yes" if value else "no"
 
 
-def _required_str(data: Mapping[str, object], key: str) -> str:
-    return required_str(
-        data,
-        key,
-        error=ValueError,
-        message=f"Runtime profile state field '{key}' must be a non-empty string.",
-    )
-
-
-def _optional_str(data: Mapping[str, object], key: str) -> str | None:
-    return optional_str(
-        data,
-        key,
-        error=ValueError,
-        message=f"Runtime profile state field '{key}' must be null or a non-empty string.",
-    )
-
-
-def _required_int(data: Mapping[str, object], key: str) -> int:
-    return required_int(
-        data,
-        key,
-        error=ValueError,
-        message=f"Runtime profile state field '{key}' must be an integer.",
-    )
-
-
-def _required_bool(data: Mapping[str, object], key: str) -> bool:
-    return required_bool(
-        data,
-        key,
-        error=ValueError,
-        message=f"Runtime profile state field '{key}' must be a boolean.",
-    )
-
-
-def _required_mapping(data: Mapping[str, object], key: str) -> Mapping[str, object]:
-    return required_dict(
-        data,
-        key,
-        error=ValueError,
-        message=f"Runtime profile state field '{key}' must be a JSON object.",
-    )
-
-
 def _str_tuple(data: object, key: str) -> tuple[str, ...]:
     if data is None:
         return ()
@@ -2230,11 +2194,11 @@ def _stage_profiles_from_dicts(data: object) -> tuple[StageProfile, ...]:
             raise ValueError("Runtime profile state stage_policies entries must be objects.")
         stages.append(
             StageProfile(
-                stage=_required_str(item, "stage"),
-                provider=_required_str(item, "provider"),
-                model=_required_str(item, "model"),
-                device=_required_str(item, "device"),
-                policy=_required_str(item, "policy"),
+                stage=RUNTIME_PROFILE_READER.required_str(item, "stage"),
+                provider=RUNTIME_PROFILE_READER.required_str(item, "provider"),
+                model=RUNTIME_PROFILE_READER.required_str(item, "model"),
+                device=RUNTIME_PROFILE_READER.required_str(item, "device"),
+                policy=RUNTIME_PROFILE_READER.required_str(item, "policy"),
             )
         )
     return tuple(stages)
@@ -2252,10 +2216,10 @@ def _readiness_items_from_dicts(data: object) -> tuple[ReadinessItem, ...]:
             raise ValueError("Runtime profile readiness ready field must be boolean.")
         items.append(
             ReadinessItem(
-                id=_required_str(item, "id"),
-                label=_required_str(item, "label"),
+                id=RUNTIME_PROFILE_READER.required_str(item, "id"),
+                label=RUNTIME_PROFILE_READER.required_str(item, "label"),
                 ready=ready,
-                detail=_required_str(item, "detail"),
+                detail=RUNTIME_PROFILE_READER.required_str(item, "detail"),
             )
         )
     return tuple(items)
@@ -2265,11 +2229,11 @@ def _asr_profile_from_dict(data: object) -> FasterWhisperModelProfile:
     if not isinstance(data, dict):
         raise ValueError("Runtime profile state selected_asr_profile must be an object.")
     return FasterWhisperModelProfile(
-        id=_required_str(data, "id"),
-        checkpoint=_required_str(data, "checkpoint"),
-        device=_required_str(data, "device"),
-        compute_type=_required_str(data, "compute_type"),
-        reason=_required_str(data, "reason"),
+        id=RUNTIME_PROFILE_READER.required_str(data, "id"),
+        checkpoint=RUNTIME_PROFILE_READER.required_str(data, "checkpoint"),
+        device=RUNTIME_PROFILE_READER.required_str(data, "device"),
+        compute_type=RUNTIME_PROFILE_READER.required_str(data, "compute_type"),
+        reason=RUNTIME_PROFILE_READER.required_str(data, "reason"),
     )
 
 

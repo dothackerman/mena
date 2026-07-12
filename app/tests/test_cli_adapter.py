@@ -595,15 +595,3 @@ def test_setup_cli_interaction_and_command_adapter(
         == 7
     )
     assert "setup message" in capsys.readouterr().out
-
-
-def test_cli_session_field_adapters() -> None:
-    # Adapter-local helpers with no delegation to the processing workflow
-    # modules; unreachable through build_parser/main, so covered directly.
-    assert cli._required_str({"id": "session"}, "id") == "session"
-    assert cli._required_int({"count": 2}, "count") == 2
-    assert cli._optional_metadata_str({"route": None}, "route") is None
-    with pytest.raises(ValueError, match="required"):
-        cli._required_str(object(), "id")
-    with pytest.raises(ValueError, match="positive integer"):
-        cli._required_int({"count": 0}, "count")

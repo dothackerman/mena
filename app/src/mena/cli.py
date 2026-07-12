@@ -40,7 +40,6 @@ from mena.discovery import (
 from mena.export import (
     SummaryMarkdownExportError,
 )
-from mena.fields import optional_str, required_int, required_str
 from mena.interaction import (
     ChoiceOption,
     ChoiceRequest,
@@ -1477,35 +1476,3 @@ def _parse_iso_timestamp(value: str) -> datetime | None:
         return parse_utc_timestamp(value)
     except ValueError:
         return None
-
-
-def _required_str(payload: dict[str, object] | object, key: str) -> str:
-    if not isinstance(payload, dict):
-        raise ValueError(f"Session field '{key}' is required and must be a non-empty string.")
-    return required_str(
-        payload,
-        key,
-        error=ValueError,
-        message=f"Session field '{key}' is required and must be a non-empty string.",
-    )
-
-
-def _required_int(payload: dict[str, object], key: str) -> int:
-    value = required_int(
-        payload,
-        key,
-        error=ValueError,
-        message=f"Session field '{key}' must be a positive integer.",
-    )
-    if value <= 0:
-        raise ValueError(f"Session field '{key}' must be a positive integer.")
-    return value
-
-
-def _optional_metadata_str(payload: dict[str, object], key: str) -> str | None:
-    return optional_str(
-        payload,
-        key,
-        error=ValueError,
-        message=f"Session field '{key}' must be a non-empty string or null.",
-    )

@@ -1116,7 +1116,10 @@ def test_ollama_summarization_provider_preserves_raw_output_on_contract_failure(
         provider.summarize(_summary_request())
 
     message = str(exc_info.value)
-    assert "Field 'general_summary' in Summary result must be a non-empty string." in message
+    assert (
+        "Summary result field 'general_summary' is required and must be a non-empty string."
+        in message
+    )
     assert "Raw Ollama message content:" in message
     assert raw_content in message
 

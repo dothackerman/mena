@@ -207,10 +207,10 @@ def rebuild_session_index(sessions_root: Path) -> tuple[SessionIndexEntry, ...]:
             record = read_session_record(record_path)
         except (OSError, ValueError, json.JSONDecodeError):
             continue
-        session_id = _optional_record_str(record, "id")
-        created_at = _optional_record_str(record, "created_at")
-        status = _optional_record_str(record, "status")
-        profile = _optional_record_str(record, "profile")
+        session_id = _read_optional_record_str(record, "id")
+        created_at = _read_optional_record_str(record, "created_at")
+        status = _read_optional_record_str(record, "status")
+        profile = _read_optional_record_str(record, "profile")
         name = record.get("name")
         if (
             session_id is None
@@ -305,8 +305,8 @@ def _verify_capture_metadata(
         _verify_file_bytes(
             file_path=resolved,
             display_path=_display_path(resolved, session_dir=session_dir),
-            expected_sha=_optional_str(raw_segment, "sha256"),
-            expected_byte_count=_optional_int(raw_segment, "byte_count"),
+            expected_sha=_read_optional_str(raw_segment, "sha256"),
+            expected_byte_count=_read_optional_int(raw_segment, "byte_count"),
             code_prefix="capture_segment",
             findings=findings,
         )
@@ -647,21 +647,21 @@ def _resolve_recorded_path(*, session_dir: Path, path_value: str) -> Path:
     return session_dir / path
 
 
-def _optional_record_str(record: Mapping[str, object], key: str) -> str | None:
+def _read_optional_record_str(record: Mapping[str, object], key: str) -> str | None:
     value = record.get(key)
     if isinstance(value, str) and value:
         return value
     return None
 
 
-def _optional_str(record: Mapping[str, object], key: str) -> str | None:
+def _read_optional_str(record: Mapping[str, object], key: str) -> str | None:
     value = record.get(key)
     if isinstance(value, str):
         return value
     return None
 
 
-def _optional_int(record: Mapping[str, object], key: str) -> int | None:
+def _read_optional_int(record: Mapping[str, object], key: str) -> int | None:
     value = record.get(key)
     if type(value) is int:
         return value

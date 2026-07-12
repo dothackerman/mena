@@ -8,14 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Self
 
-from mena.fields import (
-    optional_str,
-    require_exact_keys,
-    required_bool,
-    required_int,
-    required_number,
-    required_str,
-)
+from mena.fields import ContractReader, require_exact_keys
 from mena.merge_timing import MergedTranscriptArtifact
 from mena.note_product_strategy import (
     MAP_CALL,
@@ -225,15 +218,12 @@ class SummarizationPolicy:
     @classmethod
     def from_dict(cls, data: object) -> Self:
         item = _mapping(data, "Summarization policy")
+        reader = ContractReader("Summarization policy", SummarizationContractError)
         policy = cls(
-            policy_version=_required_int(item, "policy_version", "Summarization policy"),
-            prompt_policy=_required_str(item, "prompt_policy", "Summarization policy"),
-            language=_required_str(item, "language", "Summarization policy"),
-            include_manual_notes=_required_bool(
-                item,
-                "include_manual_notes",
-                "Summarization policy",
-            ),
+            policy_version=reader.required_int(item, "policy_version"),
+            prompt_policy=reader.required_str(item, "prompt_policy"),
+            language=reader.required_str(item, "language"),
+            include_manual_notes=reader.required_bool(item, "include_manual_notes"),
         )
         if policy.policy_version != SUMMARIZATION_POLICY_VERSION:
             raise SummarizationContractError("Unsupported summarization policy version.")
@@ -265,17 +255,18 @@ class SummaryTimelineEntry:
     @classmethod
     def from_dict(cls, data: object) -> Self:
         item = _mapping(data, "Summary timeline entry")
+        reader = ContractReader("Summary timeline entry", SummarizationContractError)
         _require_exact_keys(
             item,
             ("text", "source_segment_ids", "start_seconds"),
             "Summary timeline entry",
         )
         entry = cls(
-            text=_required_str(item, "text", "Summary timeline entry"),
+            text=reader.required_str(item, "text"),
             source_segment_ids=tuple(
                 _str_list(item, "source_segment_ids", "Summary timeline source_segment_ids")
             ),
-            start_seconds=_required_nonnegative_number(
+            start_seconds=_read_nonnegative_number(
                 item,
                 "start_seconds",
                 "Summary timeline entry",
@@ -312,10 +303,11 @@ class SummaryActionItem:
     @classmethod
     def from_dict(cls, data: object) -> Self:
         item = _mapping(data, "Summary action item")
+        reader = ContractReader("Summary action item", SummarizationContractError)
         return cls(
-            text=_required_str(item, "text", "Summary action item"),
-            owner=_optional_str(item, "owner", "Summary action item"),
-            due=_optional_str(item, "due", "Summary action item"),
+            text=reader.required_str(item, "text"),
+            owner=reader.optional_str(item, "owner"),
+            due=reader.optional_str(item, "due"),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -341,21 +333,24 @@ class ProductRequestRecord:
     @classmethod
     def from_dict(cls, data: object) -> Self:
         item = _mapping(data, "Product request record")
+        reader = ContractReader("Product request record", SummarizationContractError)
         _require_chunk_coordinate_keys(item)
         record = cls(
-            product=_required_str(item, "product", "Product request record"),
-            model=_required_str(item, "model", "Product request record"),
-            num_ctx=_required_positive_int(item, "num_ctx", "Product request record"),
-            temperature=_required_number(item, "temperature", "Product request record"),
-            seed=_required_int(item, "seed", "Product request record"),
-            prompt_eval_count=_optional_nonnegative_int(
+            product=reader.required_str(item, "product"),
+            model=reader.required_str(item, "model"),
+            num_ctx=_read_positive_int(item, "num_ctx", "Product request record"),
+            temperature=reader.required_number(item, "temperature"),
+            seed=reader.required_int(item, "seed"),
+            prompt_eval_count=_read_optional_nonnegative_int(
                 item, "prompt_eval_count", "Product request record"
             ),
-            eval_count=_optional_nonnegative_int(item, "eval_count", "Product request record"),
-            strategy=_required_str(item, "strategy", "Product request record"),
-            call=_required_str(item, "call", "Product request record"),
-            chunk_index=_optional_nonnegative_int(item, "chunk_index", "Product request record"),
-            chunk_count=_optional_positive_int(item, "chunk_count", "Product request record"),
+            eval_count=_read_optional_nonnegative_int(item, "eval_count", "Product request record"),
+            strategy=reader.required_str(item, "strategy"),
+            call=reader.required_str(item, "call"),
+            chunk_index=_read_optional_nonnegative_int(
+                item, "chunk_index", "Product request record"
+            ),
+            chunk_count=_read_optional_positive_int(item, "chunk_count", "Product request record"),
         )
         record._validate()
         return record
@@ -430,6 +425,7 @@ class SummaryResult:
     @classmethod
     def from_dict(cls, data: object) -> Self:
         item = _mapping(data, "Summary result")
+        reader = ContractReader("Summary result", SummarizationContractError)
         result = cls(
             timeline=tuple(
                 SummaryTimelineEntry.from_dict(entry) for entry in _list(item, "timeline")
@@ -437,7 +433,7 @@ class SummaryResult:
             action_items=tuple(
                 SummaryActionItem.from_dict(action) for action in _list(item, "action_items")
             ),
-            general_summary=_required_str(item, "general_summary", "Summary result"),
+            general_summary=reader.required_str(item, "general_summary"),
             request_records=request_records_from_payload(item),
         )
         if not result.timeline:
@@ -584,7 +580,9 @@ def validate_product_payload(product: str, payload: Mapping[str, object]) -> Non
             SummaryActionItem.from_dict(action)
     elif product == "general_summary":
         _require_exact_keys(payload, ("general_summary",), "Summary general-summary payload")
-        _required_str(payload, "general_summary", "Summary result")
+        ContractReader("Summary result", SummarizationContractError).required_str(
+            payload, "general_summary"
+        )
 
 
 def validate_product_map_payload(product: str, payload: Mapping[str, object]) -> None:
@@ -613,9 +611,9 @@ def validate_product_map_payload(product: str, payload: Mapping[str, object]) ->
 def _provider_timeline_entries(
     payload: Mapping[str, object],
     label: str,
-) -> list[Mapping[str, object]]:
+) -> list[tuple[Mapping[str, object], str]]:
     values = _list(payload, "timeline")
-    entries: list[Mapping[str, object]] = []
+    entries: list[tuple[Mapping[str, object], str]] = []
     for index, value in enumerate(values):
         item = _mapping(value, f"{label}[{index}]")
         _require_exact_keys(
@@ -623,7 +621,9 @@ def _provider_timeline_entries(
             ("text", "source_segment_ids"),
             f"{label}[{index}]",
         )
-        _required_str(item, "text", f"{label}[{index}]")
+        text = ContractReader(f"{label}[{index}]", SummarizationContractError).required_str(
+            item, "text"
+        )
         source_segment_ids = _str_list(
             item,
             "source_segment_ids",
@@ -633,7 +633,7 @@ def _provider_timeline_entries(
             raise SummarizationContractError(
                 f"{label}[{index}] source_segment_ids must not be empty."
             )
-        entries.append(item)
+        entries.append((item, text))
     return entries
 
 
@@ -643,7 +643,7 @@ def _derive_timeline_entries(
 ) -> tuple[SummaryTimelineEntry, ...]:
     segments_by_id = {segment.id: segment for segment in merged_transcript.segments}
     entries = []
-    for index, item in enumerate(_provider_timeline_entries(payload, "Summary timeline")):
+    for index, (item, text) in enumerate(_provider_timeline_entries(payload, "Summary timeline")):
         source_segment_ids = tuple(
             _str_list(
                 item,
@@ -659,7 +659,7 @@ def _derive_timeline_entries(
             )
         entries.append(
             SummaryTimelineEntry(
-                text=_required_str(item, "text", f"Summary timeline[{index}]"),
+                text=text,
                 source_segment_ids=source_segment_ids,
                 start_seconds=min(
                     segments_by_id[source_id].start_seconds for source_id in source_segment_ids
@@ -839,87 +839,33 @@ def _str_list(data: Mapping[str, object], field_name: str, label: str) -> list[s
     return [str(value) for value in values]
 
 
-def _required_str(data: Mapping[str, object], field_name: str, label: str) -> str:
-    return required_str(
-        data,
-        field_name,
-        error=SummarizationContractError,
-        message=f"Field '{field_name}' in {label} must be a non-empty string.",
-    )
-
-
-def _optional_str(data: Mapping[str, object], field_name: str, label: str) -> str | None:
-    return optional_str(
-        data,
-        field_name,
-        error=SummarizationContractError,
-        message=f"Field '{field_name}' in {label} must be null or a non-empty string.",
-    )
-
-
-def _required_int(data: Mapping[str, object], field_name: str, label: str) -> int:
-    return required_int(
-        data,
-        field_name,
-        error=SummarizationContractError,
-        message=f"Field '{field_name}' in {label} must be an integer.",
-    )
-
-
-def _required_bool(data: Mapping[str, object], field_name: str, label: str) -> bool:
-    return required_bool(
-        data,
-        field_name,
-        error=SummarizationContractError,
-        message=f"Field '{field_name}' in {label} must be a boolean.",
-    )
-
-
-def _required_number(data: Mapping[str, object], field_name: str, label: str) -> float:
-    return required_number(
-        data,
-        field_name,
-        error=SummarizationContractError,
-        message=f"Field '{field_name}' in {label} must be a number.",
-    )
-
-
-def _required_nonnegative_number(data: Mapping[str, object], field_name: str, label: str) -> float:
-    value = _required_number(data, field_name, label)
+def _read_nonnegative_number(data: Mapping[str, object], field_name: str, label: str) -> float:
+    value = ContractReader(label, SummarizationContractError).required_number(data, field_name)
     if value < 0:
         raise SummarizationContractError(f"Field '{field_name}' in {label} must be at least 0.")
     return value
 
 
-def _optional_int(data: Mapping[str, object], field_name: str, label: str) -> int | None:
-    value = data.get(field_name)
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise SummarizationContractError(
-            f"Field '{field_name}' in {label} must be null or an integer."
-        )
-    return value
-
-
-def _required_positive_int(data: Mapping[str, object], field_name: str, label: str) -> int:
-    value = _required_int(data, field_name, label)
+def _read_positive_int(data: Mapping[str, object], field_name: str, label: str) -> int:
+    value = ContractReader(label, SummarizationContractError).required_int(data, field_name)
     if value < 1:
         raise SummarizationContractError(f"Field '{field_name}' in {label} must be at least 1.")
     return value
 
 
-def _optional_positive_int(data: Mapping[str, object], field_name: str, label: str) -> int | None:
-    value = _optional_int(data, field_name, label)
+def _read_optional_positive_int(
+    data: Mapping[str, object], field_name: str, label: str
+) -> int | None:
+    value = ContractReader(label, SummarizationContractError).optional_int(data, field_name)
     if value is not None and value < 1:
         raise SummarizationContractError(f"Field '{field_name}' in {label} must be at least 1.")
     return value
 
 
-def _optional_nonnegative_int(
+def _read_optional_nonnegative_int(
     data: Mapping[str, object], field_name: str, label: str
 ) -> int | None:
-    value = _optional_int(data, field_name, label)
+    value = ContractReader(label, SummarizationContractError).optional_int(data, field_name)
     if value is not None and value < 0:
         raise SummarizationContractError(f"Field '{field_name}' in {label} must be at least 0.")
     return value

@@ -9,10 +9,11 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Self
 
-from mena.fields import optional_str, required_bool, required_int, required_list, required_str
+from mena.fields import ContractReader
 from mena.profiles import CaptureProfileId
 
 DISCOVERY_VERSION = 1
+DISCOVERY_READER = ContractReader("discovery", ValueError)
 
 
 class DiscoveryStatus(StrEnum):
@@ -52,16 +53,16 @@ class AudioRoute:
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> Self:
         return cls(
-            id=_required_int(data, "id"),
-            route_id=_required_str(data, "route_id"),
-            name=_required_str(data, "name"),
-            description=_optional_str(data, "description"),
-            media_class=_required_str(data, "media_class"),
-            active=_required_bool(data, "active"),
-            is_default=_optional_bool(data, "is_default") or False,
-            node_name=_optional_str(data, "node_name"),
-            object_serial=_optional_str(data, "object_serial"),
-            pw_record_target=_optional_str(data, "pw_record_target"),
+            id=DISCOVERY_READER.required_int(data, "id"),
+            route_id=DISCOVERY_READER.required_str(data, "route_id"),
+            name=DISCOVERY_READER.required_str(data, "name"),
+            description=DISCOVERY_READER.optional_str(data, "description"),
+            media_class=DISCOVERY_READER.required_str(data, "media_class"),
+            active=DISCOVERY_READER.required_bool(data, "active"),
+            is_default=DISCOVERY_READER.optional_bool(data, "is_default") or False,
+            node_name=DISCOVERY_READER.optional_str(data, "node_name"),
+            object_serial=DISCOVERY_READER.optional_str(data, "object_serial"),
+            pw_record_target=DISCOVERY_READER.optional_str(data, "pw_record_target"),
         )
 
 
@@ -93,14 +94,14 @@ class PlaybackStream:
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> Self:
         return cls(
-            id=_required_int(data, "id"),
-            route_id=_required_str(data, "route_id"),
-            name=_required_str(data, "name"),
-            app_binary_name=_optional_str(data, "app_binary_name"),
-            stream_name=_optional_str(data, "stream_name"),
-            media_name=_optional_str(data, "media_name"),
-            sink_input_id=_optional_str(data, "sink_input_id"),
-            active=_required_bool(data, "active"),
+            id=DISCOVERY_READER.required_int(data, "id"),
+            route_id=DISCOVERY_READER.required_str(data, "route_id"),
+            name=DISCOVERY_READER.required_str(data, "name"),
+            app_binary_name=DISCOVERY_READER.optional_str(data, "app_binary_name"),
+            stream_name=DISCOVERY_READER.optional_str(data, "stream_name"),
+            media_name=DISCOVERY_READER.optional_str(data, "media_name"),
+            sink_input_id=DISCOVERY_READER.optional_str(data, "sink_input_id"),
+            active=DISCOVERY_READER.required_bool(data, "active"),
         )
 
 
@@ -129,19 +130,19 @@ class AudioDiscovery:
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> Self:
-        sources = _required_list(data, "sources")
-        sinks = _required_list(data, "sinks")
-        streams = _required_list(data, "playback_streams")
+        sources = DISCOVERY_READER.required_list(data, "sources")
+        sinks = DISCOVERY_READER.required_list(data, "sinks")
+        streams = DISCOVERY_READER.required_list(data, "playback_streams")
         return cls(
-            version=_required_int(data, "version"),
-            profile=CaptureProfileId(_required_str(data, "profile")),
-            status=DiscoveryStatus(_required_str(data, "status")),
-            sources=tuple(AudioRoute.from_dict(_required_dict(source)) for source in sources),
-            sinks=tuple(AudioRoute.from_dict(_required_dict(sink)) for sink in sinks),
+            version=DISCOVERY_READER.required_int(data, "version"),
+            profile=CaptureProfileId(DISCOVERY_READER.required_str(data, "profile")),
+            status=DiscoveryStatus(DISCOVERY_READER.required_str(data, "status")),
+            sources=tuple(AudioRoute.from_dict(_read_dict(source)) for source in sources),
+            sinks=tuple(AudioRoute.from_dict(_read_dict(sink)) for sink in sinks),
             playback_streams=tuple(
-                PlaybackStream.from_dict(_required_dict(stream)) for stream in streams
+                PlaybackStream.from_dict(_read_dict(stream)) for stream in streams
             ),
-            error=_optional_str(data, "error"),
+            error=DISCOVERY_READER.optional_str(data, "error"),
         )
 
 
@@ -429,61 +430,7 @@ def _activity_label(active: bool) -> str:
     return "active" if active else "idle"
 
 
-def _required_int(data: dict[str, object], key: str) -> int:
-    return required_int(
-        data,
-        key,
-        error=ValueError,
-        message=f"discovery.{key} must be an integer.",
-    )
-
-
-def _required_bool(data: dict[str, object], key: str) -> bool:
-    return required_bool(
-        data,
-        key,
-        error=ValueError,
-        message=f"discovery.{key} must be a boolean.",
-    )
-
-
-def _optional_bool(data: dict[str, object], key: str) -> bool | None:
-    value = data.get(key)
-    if value is None:
-        return None
-    if not isinstance(value, bool):
-        raise ValueError(f"discovery.{key} must be a boolean or null.")
-    return value
-
-
-def _required_str(data: dict[str, object], key: str) -> str:
-    return required_str(
-        data,
-        key,
-        error=ValueError,
-        message=f"discovery.{key} must be a non-empty string.",
-    )
-
-
-def _optional_str(data: dict[str, object], key: str) -> str | None:
-    return optional_str(
-        data,
-        key,
-        error=ValueError,
-        message=f"discovery.{key} must be a non-empty string or null.",
-    )
-
-
-def _required_list(data: dict[str, object], key: str) -> list[object]:
-    return required_list(
-        data,
-        key,
-        error=ValueError,
-        message=f"discovery.{key} must be a list.",
-    )
-
-
-def _required_dict(value: object) -> dict[str, object]:
+def _read_dict(value: object) -> dict[str, object]:
     if not isinstance(value, dict):
         raise ValueError("discovery item must be an object.")
     return value

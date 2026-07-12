@@ -63,7 +63,7 @@ def build_start_capture_payload(
                 route_id=microphone.route_id,
                 label=_audio_route_label(microphone),
                 backend_name=microphone.name,
-                backend_target=_required_pw_record_target(microphone, "microphone"),
+                backend_target=_read_pw_record_target(microphone, "microphone"),
                 node_name=microphone.node_name,
                 object_serial=microphone.object_serial,
             )
@@ -97,7 +97,7 @@ def build_start_capture_payload(
                     route_id=microphone.route_id,
                     label=_audio_route_label(microphone),
                     backend_name=microphone.name,
-                    backend_target=_required_pw_record_target(microphone, "microphone"),
+                    backend_target=_read_pw_record_target(microphone, "microphone"),
                     node_name=microphone.node_name,
                     object_serial=microphone.object_serial,
                 ),
@@ -107,7 +107,7 @@ def build_start_capture_payload(
                     route_id=playback_stream.route_id,
                     label=_playback_stream_label(playback_stream),
                     backend_name=playback_stream.name,
-                    backend_target=_required_sink_input_id(playback_stream),
+                    backend_target=_read_sink_input_id(playback_stream),
                     sink_input_id=playback_stream.sink_input_id,
                 ),
                 _route_binding(
@@ -116,7 +116,7 @@ def build_start_capture_payload(
                     route_id=output_sink.route_id,
                     label=_audio_route_label(output_sink),
                     backend_name=output_sink.name,
-                    backend_target=_required_pw_record_target(output_sink, "output sink"),
+                    backend_target=_read_pw_record_target(output_sink, "output sink"),
                     node_name=output_sink.node_name,
                     object_serial=output_sink.object_serial,
                 ),
@@ -181,13 +181,13 @@ def _route_binding(
     )
 
 
-def _required_pw_record_target(route: AudioRoute, role: str) -> str:
+def _read_pw_record_target(route: AudioRoute, role: str) -> str:
     if route.pw_record_target:
         return route.pw_record_target
     raise CapturePlanningError(f"Selected {role} route is missing a PipeWire record target.")
 
 
-def _required_sink_input_id(stream: PlaybackStream) -> str:
+def _read_sink_input_id(stream: PlaybackStream) -> str:
     if stream.sink_input_id:
         return stream.sink_input_id
     raise CapturePlanningError("Selected playback stream route is missing a Pulse sink-input id.")

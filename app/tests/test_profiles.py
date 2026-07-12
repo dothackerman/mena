@@ -142,7 +142,10 @@ def test_capture_source_rejects_empty_device_route() -> None:
     source_data = get_capture_profile(CaptureProfileId.ONLINE_DUAL_STREAM).sources[0].to_dict()
     source_data["device_route"] = {}
 
-    with pytest.raises(ValueError, match="device_route.backend"):
+    with pytest.raises(
+        ValueError,
+        match="device_route field 'backend' is required and must be a non-empty string.",
+    ):
         CaptureProfile.from_dict(
             {
                 "name": "online_dual_stream",

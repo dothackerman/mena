@@ -528,21 +528,21 @@ class PipeWirePcmProvider:
     ) -> _PwRecordCommandSpec:
         if source_id is CaptureSourceId.LOCAL_MIC:
             return _PwRecordCommandSpec(
-                target=_required_backend_target(
+                target=_read_backend_target(
                     plan.microphone_pw_record_target,
                     "microphone",
                 )
             )
         if source_id is CaptureSourceId.ROOM_MIC:
             return _PwRecordCommandSpec(
-                target=_required_backend_target(
+                target=_read_backend_target(
                     plan.microphone_pw_record_target,
                     "microphone",
                 )
             )
         if source_id is CaptureSourceId.SYSTEM_AUDIO:
             if plan.system_audio_mode == CAPTURE_MODE_SYSTEM_MIX_REMOTE:
-                output_sink_target = _required_backend_target(
+                output_sink_target = _read_backend_target(
                     plan.output_sink_pw_record_target,
                     "output sink",
                 )
@@ -1148,7 +1148,7 @@ def make_wav_bytes(
     return header + pcm_bytes
 
 
-def _required_backend_target(backend_name: str | None, role: str) -> str:
+def _read_backend_target(backend_name: str | None, role: str) -> str:
     if backend_name is None:
         raise ValueError(f"PipeWire {role} target requires a backend name.")
     return backend_name
