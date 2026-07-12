@@ -1,8 +1,9 @@
+import hashlib
 import json
 from datetime import UTC, datetime
 from importlib.resources import files
 from pathlib import Path
-from typing import cast
+from typing import TypedDict, cast
 
 import pytest
 from jsonschema import Draft202012Validator, FormatChecker
@@ -31,10 +32,10 @@ from mena.merge_timing import (
     MergeTimingError,
     MergeTimingInputError,
     SegmentConfidence,
+    SourceDiarizationInput,
     SpeakerIdentity,
     persist_merged_transcript_artifact,
     run_merge_timing_stage,
-    run_room_mic_merge_timing_stage,
 )
 from mena.processing import ArtifactRef, ProcessingStageLedger
 from mena.transcription import (
@@ -50,6 +51,78 @@ from mena.transcription import (
 SESSION_ID = "00000000-0000-0000-0000-000000000001"
 RUN_ID = "run-20260517"
 NOW = datetime(2026, 5, 17, 14, 0, 0, tzinfo=UTC)
+ONLINE_DUAL_STREAM_MERGED_TRANSCRIPT_GOLDEN_SHA256 = (
+    "0fa7e3da930ff2114bf9db0e6618557579d02c651c2093e681c25c3301df4790"
+)
+IN_PERSON_SINGLE_MIC_MERGED_TRANSCRIPT_GOLDEN_SHA256 = (
+    "265d5eaf4a6fdb30c642aafe2a684377d4bcae1f6333f8e9270f1d8d010d11e8"
+)
+ONLINE_DUAL_STREAM_MERGED_TRANSCRIPT_PATH = (
+    "artifacts/merged_transcript/run-20260517/5b617fd6-1a65c54d/17cb058d1294/attempt-001.json"
+)
+IN_PERSON_SINGLE_MIC_MERGED_TRANSCRIPT_PATH = (
+    "artifacts/merged_transcript/run-20260517/32985f34/1048b003c403/attempt-001.json"
+)
+ONLINE_DUAL_STREAM_POLICY_CONFIG_ID = (
+    '{"capture_profile":"online_dual_stream","local_source_id":"local_mic",'
+    '"local_speaker_id":"you","local_speaker_label":"You","policy_version":1,'
+    '"remote_fallback_speaker_id":"remote","remote_fallback_speaker_label":"Remote",'
+    '"remote_source_id":"system_audio","room_fallback_speaker_id":"room",'
+    '"room_fallback_speaker_label":"Room","room_source_id":"room_mic",'
+    '"sort_order":"start_seconds,end_seconds,channel,source_id,transcript_segment_id"}'
+)
+IN_PERSON_SINGLE_MIC_POLICY_CONFIG_ID = (
+    '{"capture_profile":"in_person_single_mic","local_source_id":"local_mic",'
+    '"local_speaker_id":"you","local_speaker_label":"You","policy_version":1,'
+    '"remote_fallback_speaker_id":"remote","remote_fallback_speaker_label":"Remote",'
+    '"remote_source_id":"system_audio","room_fallback_speaker_id":"room",'
+    '"room_fallback_speaker_label":"Room","room_source_id":"room_mic",'
+    '"sort_order":"start_seconds,end_seconds,channel,source_id,transcript_segment_id"}'
+)
+
+
+class _MergeStageInputs(TypedDict):
+    policy: MergePolicy
+    transcript_records: dict[str, ArtifactRecord]
+    diarization_inputs: dict[str, SourceDiarizationInput]
+
+
+def _online_stage_inputs(
+    *,
+    policy: MergePolicy,
+    local_transcript_record: ArtifactRecord,
+    remote_transcript_record: ArtifactRecord,
+    remote_diarization_input: SourceDiarizationInput | None = None,
+) -> _MergeStageInputs:
+    diarization_inputs = (
+        {}
+        if remote_diarization_input is None
+        else {policy.remote_source_id: remote_diarization_input}
+    )
+    return {
+        "policy": policy,
+        "transcript_records": {
+            policy.local_source_id: local_transcript_record,
+            policy.remote_source_id: remote_transcript_record,
+        },
+        "diarization_inputs": diarization_inputs,
+    }
+
+
+def _single_source_stage_inputs(
+    *,
+    policy: MergePolicy,
+    room_transcript_record: ArtifactRecord,
+    room_diarization_input: SourceDiarizationInput | None = None,
+) -> _MergeStageInputs:
+    diarization_inputs = (
+        {} if room_diarization_input is None else {policy.room_source_id: room_diarization_input}
+    )
+    return {
+        "policy": policy,
+        "transcript_records": {policy.room_source_id: room_transcript_record},
+        "diarization_inputs": diarization_inputs,
+    }
 
 
 def test_merge_timing_stage_persists_merged_artifact_and_completed_checkpoint(
@@ -117,22 +190,34 @@ def test_merge_timing_stage_persists_merged_artifact_and_completed_checkpoint(
         source_record=remote_source,
     )
     ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+    policy = MergePolicy()
 
     result = run_merge_timing_stage(
         store=store,
         ledger=ledger,
-        local_transcript_record=local_transcript_record,
-        remote_transcript_record=remote_transcript_record,
-        remote_regular_diarization_record=regular_record,
-        remote_exclusive_diarization_record=exclusive_record,
+        **_online_stage_inputs(
+            policy=policy,
+            local_transcript_record=local_transcript_record,
+            remote_transcript_record=remote_transcript_record,
+            remote_diarization_input=SourceDiarizationInput(
+                regular_record=regular_record,
+                exclusive_record=exclusive_record,
+            ),
+        ),
         now=NOW,
     )
 
     assert result.skipped is False
     assert result.state.status == "completed"
     assert result.merged_transcript_record.artifact_type == MERGED_TRANSCRIPT_ARTIFACT_TYPE
+    assert result.merged_transcript_record.path == ONLINE_DUAL_STREAM_MERGED_TRANSCRIPT_PATH
     assert result.merged_transcript_record.metadata["contract"] == "merged-transcript.v1"
-    payload = json.loads(store.retrieve(result.merged_transcript_record.id))
+    payload_bytes = store.retrieve(result.merged_transcript_record.id)
+    assert (
+        hashlib.sha256(payload_bytes).hexdigest()
+        == ONLINE_DUAL_STREAM_MERGED_TRANSCRIPT_GOLDEN_SHA256
+    )
+    payload = json.loads(payload_bytes)
     Draft202012Validator(
         _load_merged_transcript_schema(),
         format_checker=FormatChecker(),
@@ -155,7 +240,7 @@ def test_merge_timing_stage_persists_merged_artifact_and_completed_checkpoint(
     ]
 
 
-def test_room_mic_merge_timing_stage_persists_single_source_room_artifact(
+def test_merge_timing_stage_persists_single_source_room_artifact(
     tmp_path: Path,
 ) -> None:
     store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=tmp_path)
@@ -174,21 +259,33 @@ def test_room_mic_merge_timing_stage_persists_single_source_room_artifact(
         name_prefix="room-",
     )
     ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+    policy = MergePolicy(capture_profile="in_person_single_mic")
 
-    result = run_room_mic_merge_timing_stage(
+    result = run_merge_timing_stage(
         store=store,
         ledger=ledger,
-        room_transcript_record=room_transcript_record,
-        room_regular_diarization_record=regular_record,
-        room_exclusive_diarization_record=exclusive_record,
+        **_single_source_stage_inputs(
+            policy=policy,
+            room_transcript_record=room_transcript_record,
+            room_diarization_input=SourceDiarizationInput(
+                regular_record=regular_record,
+                exclusive_record=exclusive_record,
+            ),
+        ),
         now=NOW,
     )
 
     assert result.skipped is False
     assert result.state.status == "completed"
+    assert result.merged_transcript_record.path == IN_PERSON_SINGLE_MIC_MERGED_TRANSCRIPT_PATH
     assert result.merged_transcript_record.metadata["room_source_id"] == "room_mic"
     assert result.merged_transcript_record.metadata["room_diarization_status"] == "used"
-    payload = json.loads(store.retrieve(result.merged_transcript_record.id))
+    payload_bytes = store.retrieve(result.merged_transcript_record.id)
+    assert (
+        hashlib.sha256(payload_bytes).hexdigest()
+        == IN_PERSON_SINGLE_MIC_MERGED_TRANSCRIPT_GOLDEN_SHA256
+    )
+    payload = json.loads(payload_bytes)
     Draft202012Validator(
         _load_merged_transcript_schema(),
         format_checker=FormatChecker(),
@@ -205,7 +302,7 @@ def test_room_mic_merge_timing_stage_persists_single_source_room_artifact(
     assert artifact.segments[0].speaker.label == "Room speaker 1"
 
 
-def test_room_mic_merge_timing_rejects_exclusive_capture_profile_mismatch(
+def test_merge_timing_stage_rejects_single_source_exclusive_capture_profile_mismatch(
     tmp_path: Path,
 ) -> None:
     store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=tmp_path)
@@ -232,22 +329,28 @@ def test_room_mic_merge_timing_rejects_exclusive_capture_profile_mismatch(
         metadata=exclusive_record.metadata,
     )
     ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+    policy = MergePolicy(capture_profile="in_person_single_mic")
 
     with pytest.raises(
         MergeTimingError,
         match="Room exclusive diarization capture_profile must match the merge policy",
     ):
-        run_room_mic_merge_timing_stage(
+        run_merge_timing_stage(
             store=store,
             ledger=ledger,
-            room_transcript_record=room_transcript_record,
-            room_regular_diarization_record=regular_record,
-            room_exclusive_diarization_record=mismatched_exclusive_record,
+            **_single_source_stage_inputs(
+                policy=policy,
+                room_transcript_record=room_transcript_record,
+                room_diarization_input=SourceDiarizationInput(
+                    regular_record=regular_record,
+                    exclusive_record=mismatched_exclusive_record,
+                ),
+            ),
             now=NOW,
         )
 
 
-def test_room_mic_merge_timing_stage_reuses_verified_completed_output() -> None:
+def test_merge_timing_stage_reuses_verified_completed_single_source_output() -> None:
     store = InMemoryArtifactStore(session_id=SESSION_ID)
     room_source = store.store(artifact_type="source_audio", name="room.wav", data=b"room")
     room_transcript_record = _persist_transcript(
@@ -256,27 +359,42 @@ def test_room_mic_merge_timing_stage_reuses_verified_completed_output() -> None:
         source_id="room_mic",
     )
     ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+    policy = MergePolicy(capture_profile="in_person_single_mic")
 
-    first = run_room_mic_merge_timing_stage(
+    first = run_merge_timing_stage(
         store=store,
         ledger=ledger,
-        room_transcript_record=room_transcript_record,
-        room_diarization_status="skipped",
-        room_diarization_reason="diarization_disabled",
+        **_single_source_stage_inputs(
+            policy=policy,
+            room_transcript_record=room_transcript_record,
+            room_diarization_input=SourceDiarizationInput(
+                status="skipped",
+                reason="diarization_disabled",
+            ),
+        ),
         now=NOW,
     )
-    second = run_room_mic_merge_timing_stage(
+    second = run_merge_timing_stage(
         store=store,
         ledger=ledger,
-        room_transcript_record=room_transcript_record,
-        room_diarization_status="skipped",
-        room_diarization_reason="diarization_disabled",
+        **_single_source_stage_inputs(
+            policy=policy,
+            room_transcript_record=room_transcript_record,
+            room_diarization_input=SourceDiarizationInput(
+                status="skipped",
+                reason="diarization_disabled",
+            ),
+        ),
         now=NOW,
     )
 
     assert second.skipped is True
     assert second.skip_reason == "completed_output_reused"
     assert second.merged_transcript_record == first.merged_transcript_record
+    assert (
+        first.merged_transcript_record.metadata["policy_config_id"]
+        == IN_PERSON_SINGLE_MIC_POLICY_CONFIG_ID
+    )
     room_source_info = second.merged_transcript.sources[0]
     room_segment = second.merged_transcript.segments[0]
     assert room_source_info.diarization_status == "skipped"
@@ -301,29 +419,44 @@ def test_merge_timing_stage_reuses_verified_completed_output() -> None:
         source_id="system_audio",
     )
     ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+    policy = MergePolicy()
 
     first = run_merge_timing_stage(
         store=store,
         ledger=ledger,
-        local_transcript_record=local_transcript_record,
-        remote_transcript_record=remote_transcript_record,
-        remote_diarization_status="skipped",
-        remote_diarization_reason="diarization_disabled",
+        **_online_stage_inputs(
+            policy=policy,
+            local_transcript_record=local_transcript_record,
+            remote_transcript_record=remote_transcript_record,
+            remote_diarization_input=SourceDiarizationInput(
+                status="skipped",
+                reason="diarization_disabled",
+            ),
+        ),
         now=NOW,
     )
     second = run_merge_timing_stage(
         store=store,
         ledger=ledger,
-        local_transcript_record=local_transcript_record,
-        remote_transcript_record=remote_transcript_record,
-        remote_diarization_status="skipped",
-        remote_diarization_reason="diarization_disabled",
+        **_online_stage_inputs(
+            policy=policy,
+            local_transcript_record=local_transcript_record,
+            remote_transcript_record=remote_transcript_record,
+            remote_diarization_input=SourceDiarizationInput(
+                status="skipped",
+                reason="diarization_disabled",
+            ),
+        ),
         now=NOW,
     )
 
     assert second.skipped is True
     assert second.skip_reason == "completed_output_reused"
     assert second.merged_transcript_record == first.merged_transcript_record
+    assert (
+        first.merged_transcript_record.metadata["policy_config_id"]
+        == ONLINE_DUAL_STREAM_POLICY_CONFIG_ID
+    )
 
 
 def test_merge_timing_stage_reuse_is_scoped_to_matching_policy_and_inputs() -> None:
@@ -341,25 +474,35 @@ def test_merge_timing_stage_reuse_is_scoped_to_matching_policy_and_inputs() -> N
         source_id="system_audio",
     )
     ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+    policy = MergePolicy()
 
     run_merge_timing_stage(
         store=store,
         ledger=ledger,
-        local_transcript_record=local_transcript_record,
-        remote_transcript_record=remote_transcript_record,
-        remote_diarization_status="skipped",
-        remote_diarization_reason="diarization_disabled",
+        **_online_stage_inputs(
+            policy=policy,
+            local_transcript_record=local_transcript_record,
+            remote_transcript_record=remote_transcript_record,
+            remote_diarization_input=SourceDiarizationInput(
+                status="skipped",
+                reason="diarization_disabled",
+            ),
+        ),
         now=NOW,
     )
     changed_policy = MergePolicy(remote_fallback_speaker_label="Remote participant")
     second = run_merge_timing_stage(
         store=store,
         ledger=ledger,
-        local_transcript_record=local_transcript_record,
-        remote_transcript_record=remote_transcript_record,
-        remote_diarization_status="skipped",
-        remote_diarization_reason="diarization_disabled",
-        policy=changed_policy,
+        **_online_stage_inputs(
+            policy=changed_policy,
+            local_transcript_record=local_transcript_record,
+            remote_transcript_record=remote_transcript_record,
+            remote_diarization_input=SourceDiarizationInput(
+                status="skipped",
+                reason="diarization_disabled",
+            ),
+        ),
         attempt=2,
         now=NOW,
     )
@@ -374,11 +517,15 @@ def test_merge_timing_stage_reuse_is_scoped_to_matching_policy_and_inputs() -> N
     third = run_merge_timing_stage(
         store=store,
         ledger=ledger,
-        local_transcript_record=local_transcript_record,
-        remote_transcript_record=other_remote_transcript,
-        remote_diarization_status="skipped",
-        remote_diarization_reason="diarization_disabled",
-        policy=changed_policy,
+        **_online_stage_inputs(
+            policy=changed_policy,
+            local_transcript_record=local_transcript_record,
+            remote_transcript_record=other_remote_transcript,
+            remote_diarization_input=SourceDiarizationInput(
+                status="skipped",
+                reason="diarization_disabled",
+            ),
+        ),
         attempt=3,
         now=NOW,
     )
@@ -387,7 +534,7 @@ def test_merge_timing_stage_reuse_is_scoped_to_matching_policy_and_inputs() -> N
     assert third.skipped is False
 
 
-def test_merge_timing_stage_reuses_inferred_policy_for_custom_source_ids() -> None:
+def test_merge_timing_stage_reuses_explicit_policy_for_custom_source_ids() -> None:
     store = InMemoryArtifactStore(session_id=SESSION_ID)
     local_source = store.store(artifact_type="source_audio", name="host.wav", data=b"host")
     remote_source = store.store(artifact_type="source_audio", name="call.wav", data=b"call")
@@ -402,23 +549,34 @@ def test_merge_timing_stage_reuses_inferred_policy_for_custom_source_ids() -> No
         source_id="call_audio",
     )
     ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+    policy = MergePolicy(local_source_id="host_mic", remote_source_id="call_audio")
 
     first = run_merge_timing_stage(
         store=store,
         ledger=ledger,
-        local_transcript_record=local_transcript_record,
-        remote_transcript_record=remote_transcript_record,
-        remote_diarization_status="skipped",
-        remote_diarization_reason="diarization_disabled",
+        **_online_stage_inputs(
+            policy=policy,
+            local_transcript_record=local_transcript_record,
+            remote_transcript_record=remote_transcript_record,
+            remote_diarization_input=SourceDiarizationInput(
+                status="skipped",
+                reason="diarization_disabled",
+            ),
+        ),
         now=NOW,
     )
     second = run_merge_timing_stage(
         store=store,
         ledger=ledger,
-        local_transcript_record=local_transcript_record,
-        remote_transcript_record=remote_transcript_record,
-        remote_diarization_status="skipped",
-        remote_diarization_reason="diarization_disabled",
+        **_online_stage_inputs(
+            policy=policy,
+            local_transcript_record=local_transcript_record,
+            remote_transcript_record=remote_transcript_record,
+            remote_diarization_input=SourceDiarizationInput(
+                status="skipped",
+                reason="diarization_disabled",
+            ),
+        ),
         now=NOW,
     )
 
@@ -443,14 +601,20 @@ def test_merge_timing_stage_records_explicit_skipped_diarization_status() -> Non
         source_id="system_audio",
     )
     ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+    policy = MergePolicy()
 
     result = run_merge_timing_stage(
         store=store,
         ledger=ledger,
-        local_transcript_record=local_transcript_record,
-        remote_transcript_record=remote_transcript_record,
-        remote_diarization_status="skipped",
-        remote_diarization_reason="diarization_disabled",
+        **_online_stage_inputs(
+            policy=policy,
+            local_transcript_record=local_transcript_record,
+            remote_transcript_record=remote_transcript_record,
+            remote_diarization_input=SourceDiarizationInput(
+                status="skipped",
+                reason="diarization_disabled",
+            ),
+        ),
         now=NOW,
     )
 
@@ -483,13 +647,19 @@ def test_merge_timing_stage_fails_closed_when_reused_output_payload_is_invalid(
         source_id="system_audio",
     )
     ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+    policy = MergePolicy()
     first = run_merge_timing_stage(
         store=store,
         ledger=ledger,
-        local_transcript_record=local_transcript_record,
-        remote_transcript_record=remote_transcript_record,
-        remote_diarization_status="skipped",
-        remote_diarization_reason="diarization_disabled",
+        **_online_stage_inputs(
+            policy=policy,
+            local_transcript_record=local_transcript_record,
+            remote_transcript_record=remote_transcript_record,
+            remote_diarization_input=SourceDiarizationInput(
+                status="skipped",
+                reason="diarization_disabled",
+            ),
+        ),
         now=NOW,
     )
     original_retrieve = store.retrieve
@@ -504,10 +674,15 @@ def test_merge_timing_stage_fails_closed_when_reused_output_payload_is_invalid(
     second = run_merge_timing_stage(
         store=store,
         ledger=ledger,
-        local_transcript_record=local_transcript_record,
-        remote_transcript_record=remote_transcript_record,
-        remote_diarization_status="skipped",
-        remote_diarization_reason="diarization_disabled",
+        **_online_stage_inputs(
+            policy=policy,
+            local_transcript_record=local_transcript_record,
+            remote_transcript_record=remote_transcript_record,
+            remote_diarization_input=SourceDiarizationInput(
+                status="skipped",
+                reason="diarization_disabled",
+            ),
+        ),
         attempt=2,
         now=NOW,
     )
@@ -681,15 +856,92 @@ def test_merge_timing_stage_requires_regular_and_exclusive_diarization_together(
         source_record=remote_source,
     )
     ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+    policy = MergePolicy()
 
     with pytest.raises(MergeTimingInputError, match="both regular and exclusive"):
         run_merge_timing_stage(
             store=store,
             ledger=ledger,
-            local_transcript_record=local_transcript_record,
-            remote_transcript_record=remote_transcript_record,
-            remote_regular_diarization_record=regular_record,
+            **_online_stage_inputs(
+                policy=policy,
+                local_transcript_record=local_transcript_record,
+                remote_transcript_record=remote_transcript_record,
+                remote_diarization_input=SourceDiarizationInput(
+                    regular_record=regular_record,
+                ),
+            ),
             now=NOW,
+        )
+
+
+def test_merge_timing_stage_rejects_unexpected_or_unused_source_inputs() -> None:
+    store = InMemoryArtifactStore(session_id=SESSION_ID)
+    local_source = store.store(artifact_type="source_audio", name="local.wav", data=b"local")
+    remote_source = store.store(artifact_type="source_audio", name="remote.wav", data=b"remote")
+    extra_source = store.store(artifact_type="source_audio", name="extra.wav", data=b"extra")
+    local_transcript_record = _persist_transcript(
+        store=store,
+        source_record=local_source,
+        source_id="local_mic",
+    )
+    remote_transcript_record = _persist_transcript(
+        store=store,
+        source_record=remote_source,
+        source_id="system_audio",
+    )
+    extra_transcript_record = _persist_transcript(
+        store=store,
+        source_record=extra_source,
+        source_id="extra_source",
+    )
+    regular_record, exclusive_record = _persist_remote_diarization_pair(
+        store=store,
+        source_record=remote_source,
+    )
+    ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+    policy = MergePolicy()
+
+    with pytest.raises(MergeTimingInputError, match="unexpected transcript record"):
+        run_merge_timing_stage(
+            store=store,
+            ledger=ledger,
+            policy=policy,
+            transcript_records={
+                policy.local_source_id: local_transcript_record,
+                policy.remote_source_id: remote_transcript_record,
+                "extra_source": extra_transcript_record,
+            },
+        )
+
+    with pytest.raises(MergeTimingInputError, match="unexpected diarization input"):
+        run_merge_timing_stage(
+            store=store,
+            ledger=ledger,
+            policy=policy,
+            transcript_records={
+                policy.local_source_id: local_transcript_record,
+                policy.remote_source_id: remote_transcript_record,
+            },
+            diarization_inputs={
+                "extra_source": SourceDiarizationInput(
+                    regular_record=regular_record,
+                    exclusive_record=exclusive_record,
+                )
+            },
+        )
+
+    with pytest.raises(MergeTimingInputError, match="both regular and exclusive"):
+        run_merge_timing_stage(
+            store=store,
+            ledger=ledger,
+            policy=policy,
+            transcript_records={
+                policy.local_source_id: local_transcript_record,
+                policy.remote_source_id: remote_transcript_record,
+            },
+            diarization_inputs={
+                policy.local_source_id: SourceDiarizationInput(regular_record=regular_record)
+            },
         )
 
 
@@ -708,14 +960,18 @@ def test_merge_timing_stage_rejects_invalid_remote_diarization_status() -> None:
         source_id="system_audio",
     )
     ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+    policy = MergePolicy()
 
     with pytest.raises(MergeTimingInputError, match="status is invalid"):
         run_merge_timing_stage(
             store=store,
             ledger=ledger,
-            local_transcript_record=local_transcript_record,
-            remote_transcript_record=remote_transcript_record,
-            remote_diarization_status="bad",
+            **_online_stage_inputs(
+                policy=policy,
+                local_transcript_record=local_transcript_record,
+                remote_transcript_record=remote_transcript_record,
+                remote_diarization_input=SourceDiarizationInput(status="bad"),
+            ),
             now=NOW,
         )
 
@@ -740,9 +996,11 @@ def test_merge_timing_stage_marks_failed_checkpoint_on_policy_mismatch() -> None
         run_merge_timing_stage(
             store=store,
             ledger=ledger,
-            local_transcript_record=local_transcript_record,
-            remote_transcript_record=remote_transcript_record,
-            policy=MergePolicy(local_source_id="wrong_local"),
+            **_online_stage_inputs(
+                policy=MergePolicy(local_source_id="wrong_local"),
+                local_transcript_record=local_transcript_record,
+                remote_transcript_record=remote_transcript_record,
+            ),
             now=NOW,
         )
 
@@ -770,15 +1028,21 @@ def test_merge_timing_stage_marks_failed_checkpoint_on_corrupt_input_artifact(
     )
     ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
     (tmp_path / remote_transcript_record.path).write_bytes(b"corrupt")
+    policy = MergePolicy()
 
     with pytest.raises(MergeTimingError, match="match metadata"):
         run_merge_timing_stage(
             store=store,
             ledger=ledger,
-            local_transcript_record=local_transcript_record,
-            remote_transcript_record=remote_transcript_record,
-            remote_diarization_status="skipped",
-            remote_diarization_reason="diarization_disabled",
+            **_online_stage_inputs(
+                policy=policy,
+                local_transcript_record=local_transcript_record,
+                remote_transcript_record=remote_transcript_record,
+                remote_diarization_input=SourceDiarizationInput(
+                    status="skipped",
+                    reason="diarization_disabled",
+                ),
+            ),
             now=NOW,
         )
 
@@ -933,14 +1197,20 @@ def test_merge_timing_stage_handles_avg_logprob_and_missing_exclusive_diarizatio
         name="exclusive-custom.json",
     )
     ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+    policy = MergePolicy()
 
     result = run_merge_timing_stage(
         store=store,
         ledger=ledger,
-        local_transcript_record=local_transcript_record,
-        remote_transcript_record=remote_transcript_record,
-        remote_regular_diarization_record=regular_record,
-        remote_exclusive_diarization_record=exclusive_record,
+        **_online_stage_inputs(
+            policy=policy,
+            local_transcript_record=local_transcript_record,
+            remote_transcript_record=remote_transcript_record,
+            remote_diarization_input=SourceDiarizationInput(
+                regular_record=regular_record,
+                exclusive_record=exclusive_record,
+            ),
+        ),
         now=NOW,
     )
 
@@ -1002,14 +1272,20 @@ def test_merge_timing_stage_marks_cross_stream_overlap_after_chronological_sort(
         ),
     )
     ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+    policy = MergePolicy()
 
     result = run_merge_timing_stage(
         store=store,
         ledger=ledger,
-        local_transcript_record=local_transcript_record,
-        remote_transcript_record=remote_transcript_record,
-        remote_diarization_status="skipped",
-        remote_diarization_reason="diarization_disabled",
+        **_online_stage_inputs(
+            policy=policy,
+            local_transcript_record=local_transcript_record,
+            remote_transcript_record=remote_transcript_record,
+            remote_diarization_input=SourceDiarizationInput(
+                status="skipped",
+                reason="diarization_disabled",
+            ),
+        ),
         now=NOW,
     )
 
@@ -1037,15 +1313,21 @@ def test_merge_timing_stage_rejects_transcripts_from_different_sessions() -> Non
         session_id="00000000-0000-0000-0000-000000000099",
     )
     ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+    policy = MergePolicy()
 
     with pytest.raises(MergeTimingError, match="Remote transcript session_id"):
         run_merge_timing_stage(
             store=store,
             ledger=ledger,
-            local_transcript_record=local_transcript_record,
-            remote_transcript_record=remote_transcript_record,
-            remote_diarization_status="skipped",
-            remote_diarization_reason="diarization_disabled",
+            **_online_stage_inputs(
+                policy=policy,
+                local_transcript_record=local_transcript_record,
+                remote_transcript_record=remote_transcript_record,
+                remote_diarization_input=SourceDiarizationInput(
+                    status="skipped",
+                    reason="diarization_disabled",
+                ),
+            ),
             now=NOW,
         )
 

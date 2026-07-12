@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -435,13 +435,23 @@ class MergedTranscriptArtifact:
 
 @dataclass(frozen=True)
 class MergeTimingStageResult:
-    """Result of running, reusing, or re-merging the dual-stream transcript slice."""
+    """Result of running, reusing, or re-merging the capture-profile transcript slice."""
 
     state: ProcessingStageState
     merged_transcript: MergedTranscriptArtifact
     merged_transcript_record: ArtifactRecord
     skipped: bool = False
     skip_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class SourceDiarizationInput:
+    """Optional diarization records and fallback status for one capture source."""
+
+    regular_record: ArtifactRecord | None = None
+    exclusive_record: ArtifactRecord | None = None
+    status: str | None = None
+    reason: str | None = None
 
 
 def persist_merged_transcript_artifact(
@@ -498,47 +508,51 @@ def run_merge_timing_stage(
     *,
     store: ArtifactStore,
     ledger: ProcessingStageLedger,
-    local_transcript_record: ArtifactRecord,
-    remote_transcript_record: ArtifactRecord,
-    policy: MergePolicy | None = None,
-    remote_regular_diarization_record: ArtifactRecord | None = None,
-    remote_exclusive_diarization_record: ArtifactRecord | None = None,
-    remote_diarization_status: str | None = None,
-    remote_diarization_reason: str | None = None,
+    policy: MergePolicy,
+    transcript_records: Mapping[str, ArtifactRecord],
+    diarization_inputs: Mapping[str, SourceDiarizationInput] | None = None,
     stage: str = MERGE_TIMING_STAGE,
     attempt: int = 1,
     skip_completed: bool = True,
     now: datetime | None = None,
 ) -> MergeTimingStageResult:
-    """Merge local and remote transcript artifacts into a deterministic merged view."""
+    """Merge capture-profile transcript artifacts into a deterministic merged view."""
 
-    local_ref = ArtifactRef.from_record(local_transcript_record)
-    remote_ref = ArtifactRef.from_record(remote_transcript_record)
-    input_refs = [local_ref, remote_ref]
-    if (
-        remote_regular_diarization_record is not None
-        or remote_exclusive_diarization_record is not None
-    ):
-        if remote_regular_diarization_record is None or remote_exclusive_diarization_record is None:
-            raise MergeTimingInputError(
-                "Merge/timing requires both regular and exclusive diarization artifacts together."
-            )
-        input_refs.extend(
-            (
-                ArtifactRef.from_record(remote_regular_diarization_record),
-                ArtifactRef.from_record(remote_exclusive_diarization_record),
-            )
+    source_ids = _ordered_source_ids_for_policy(policy)
+    effective_diarization_inputs = diarization_inputs or {}
+    _validate_merge_input_keys(
+        label="transcript record",
+        actual=transcript_records.keys(),
+        expected=source_ids,
+    )
+    _validate_merge_input_keys(
+        label="diarization input",
+        actual=effective_diarization_inputs.keys(),
+        expected=source_ids,
+        allow_missing=True,
+    )
+    _validate_supplied_diarization_inputs(
+        policy=policy,
+        diarization_inputs=effective_diarization_inputs,
+    )
+    ordered_transcript_records = tuple(transcript_records[source_id] for source_id in source_ids)
+    source_diarization = {
+        source_id: _effective_source_diarization(
+            source_id=source_id,
+            policy=policy,
+            diarization_input=effective_diarization_inputs.get(source_id),
         )
-        effective_remote_diarization_status = "used"
-        effective_remote_diarization_reason = None
-    else:
-        effective_remote_diarization_status = remote_diarization_status or "unavailable"
-        effective_remote_diarization_reason = (
-            remote_diarization_reason or "remote_diarization_unavailable"
-        )
-    if effective_remote_diarization_status not in DIARIZATION_STATUSES:
-        raise MergeTimingInputError("Merge/timing remote diarization status is invalid.")
-    input_artifacts = tuple(input_refs)
+        for source_id in source_ids
+    }
+    input_artifacts = _merge_input_artifacts(
+        transcript_records=ordered_transcript_records,
+        source_diarization=source_diarization,
+        source_ids=source_ids,
+    )
+    reuse_metadata = _reuse_metadata_for_policy(
+        policy=policy,
+        source_diarization=source_diarization,
+    )
 
     if skip_completed:
         completed = _completed_state_for_inputs(
@@ -546,15 +560,8 @@ def run_merge_timing_stage(
             ledger=ledger,
             stage=stage,
             input_artifacts=input_artifacts,
-            policy_config_id=_policy_for_reuse_lookup(
-                policy=policy,
-                local_transcript_record=local_transcript_record,
-                remote_transcript_record=remote_transcript_record,
-            ).config_id,
-            reuse_metadata={
-                "remote_diarization_status": effective_remote_diarization_status,
-                "remote_diarization_reason": effective_remote_diarization_reason,
-            },
+            policy_config_id=policy.config_id,
+            reuse_metadata=reuse_metadata,
         )
         if completed is not None:
             reused = _load_reusable_output(store=store, completed=completed)
@@ -591,263 +598,37 @@ def run_merge_timing_stage(
         now=now,
     )
     try:
-        local_transcript = _verify_and_load_transcript(store=store, record=local_transcript_record)
-        remote_transcript = _verify_and_load_transcript(
-            store=store, record=remote_transcript_record
-        )
-        effective_policy = policy or MergePolicy(
-            local_source_id=local_transcript.source_id or "local_mic",
-            remote_source_id=remote_transcript.source_id or "system_audio",
-        )
-        _validate_transcript_matches_policy(
-            local_transcript=local_transcript,
-            remote_transcript=remote_transcript,
-            policy=effective_policy,
+        transcripts = {
+            source_id: _verify_and_load_transcript(store=store, record=record)
+            for source_id, record in zip(source_ids, ordered_transcript_records, strict=True)
+        }
+        _validate_transcripts_match_policy(
+            transcripts=transcripts,
+            policy=policy,
             ledger_session_id=ledger.session_id,
         )
-        remote_regular = None
-        remote_exclusive = None
-        if (
-            remote_regular_diarization_record is not None
-            and remote_exclusive_diarization_record is not None
-        ):
-            remote_regular = _verify_and_load_diarization(
-                store=store, record=remote_regular_diarization_record
-            )
-            remote_exclusive = _verify_and_load_diarization(
-                store=store,
-                record=remote_exclusive_diarization_record,
-            )
-            if (
-                remote_regular.kind != "regular_timeline"
-                or remote_exclusive.kind != "exclusive_projection"
-            ):
-                raise MergeTimingInputError(
-                    "Merge/timing requires regular_timeline and "
-                    "exclusive_projection diarization artifacts."
-                )
-            if remote_regular.source_id != effective_policy.remote_source_id:
-                raise MergeTimingInputError(
-                    "Remote diarization source_id must match the merge policy remote source."
-                )
-            if remote_exclusive.source_id != effective_policy.remote_source_id:
-                raise MergeTimingInputError(
-                    "Exclusive diarization source_id must match the merge policy remote source."
-                )
-            if remote_regular.session_id != ledger.session_id:
-                raise MergeTimingInputError(
-                    "Remote regular diarization session_id must match the processing ledger."
-                )
-            if remote_exclusive.session_id != ledger.session_id:
-                raise MergeTimingInputError(
-                    "Remote exclusive diarization session_id must match the processing ledger."
-                )
+        loaded_diarization = _load_and_validate_diarization_inputs(
+            store=store,
+            ledger_session_id=ledger.session_id,
+            policy=policy,
+            source_diarization=source_diarization,
+        )
         artifact = _build_merged_transcript(
-            local_transcript=local_transcript,
-            remote_transcript=remote_transcript,
-            local_record=local_transcript_record,
-            remote_record=remote_transcript_record,
-            remote_regular_diarization=remote_regular,
-            remote_exclusive_diarization=remote_exclusive,
-            remote_regular_record=remote_regular_diarization_record,
-            remote_exclusive_record=remote_exclusive_diarization_record,
-            policy=effective_policy,
-            remote_diarization_status=effective_remote_diarization_status,
-            remote_diarization_reason=effective_remote_diarization_reason,
+            transcripts=transcripts,
+            transcript_records=dict(zip(source_ids, ordered_transcript_records, strict=True)),
+            source_diarization=source_diarization,
+            loaded_diarization=loaded_diarization,
+            policy=policy,
             created_at=_timestamp(now),
         )
         output_record = persist_merged_transcript_artifact(
             store=store,
             artifact=artifact,
-            name=_merged_transcript_artifact_name(
+            name=_merged_transcript_artifact_name_for_policy(
                 run_id=ledger.run_id,
-                local_sha256=local_transcript_record.sha256,
-                remote_sha256=remote_transcript_record.sha256,
-                policy=artifact.policy,
-                remote_diarization_status=effective_remote_diarization_status,
-                remote_diarization_reason=effective_remote_diarization_reason,
-                attempt=attempt,
-            ),
-        )
-    except (
-        MergeTimingError,
-        DiarizationContractError,
-        TranscriptionContractError,
-        json.JSONDecodeError,
-        UnicodeDecodeError,
-    ) as exc:
-        failed = _mark_merge_failed(
-            ledger=ledger,
-            stage=stage,
-            input_artifacts=input_artifacts,
-            attempt=attempt,
-            started_at=started.started_at,
-            now=now,
-            message=str(exc),
-            retryable=False,
-            code="merge_timing_failed",
-        )
-        raise MergeTimingError(failed.error.message if failed.error else str(exc)) from exc
-
-    completed = ledger.mark_completed(
-        stage=stage,
-        input_artifacts=input_artifacts,
-        output_artifacts=(ArtifactRef.from_record(output_record),),
-        attempt=attempt,
-        started_at=started.started_at,
-        now=now,
-    )
-    return MergeTimingStageResult(
-        state=completed,
-        merged_transcript=artifact,
-        merged_transcript_record=output_record,
-    )
-
-
-def run_room_mic_merge_timing_stage(
-    *,
-    store: ArtifactStore,
-    ledger: ProcessingStageLedger,
-    room_transcript_record: ArtifactRecord,
-    policy: MergePolicy | None = None,
-    room_regular_diarization_record: ArtifactRecord | None = None,
-    room_exclusive_diarization_record: ArtifactRecord | None = None,
-    room_diarization_status: str | None = None,
-    room_diarization_reason: str | None = None,
-    stage: str = MERGE_TIMING_STAGE,
-    attempt: int = 1,
-    skip_completed: bool = True,
-    now: datetime | None = None,
-) -> MergeTimingStageResult:
-    """Create a merged transcript for the in-person single-room-mic profile."""
-
-    room_ref = ArtifactRef.from_record(room_transcript_record)
-    input_refs = [room_ref]
-    if room_regular_diarization_record is not None or room_exclusive_diarization_record is not None:
-        if room_regular_diarization_record is None or room_exclusive_diarization_record is None:
-            raise MergeTimingInputError(
-                "Merge/timing requires both regular and exclusive diarization artifacts together."
-            )
-        input_refs.extend(
-            (
-                ArtifactRef.from_record(room_regular_diarization_record),
-                ArtifactRef.from_record(room_exclusive_diarization_record),
-            )
-        )
-        effective_room_diarization_status = "used"
-        effective_room_diarization_reason = None
-    else:
-        effective_room_diarization_status = room_diarization_status or "unavailable"
-        effective_room_diarization_reason = (
-            room_diarization_reason or "room_diarization_unavailable"
-        )
-    if effective_room_diarization_status not in DIARIZATION_STATUSES:
-        raise MergeTimingInputError("Merge/timing room diarization status is invalid.")
-    input_artifacts = tuple(input_refs)
-
-    if skip_completed:
-        completed = _completed_state_for_inputs(
-            store=store,
-            ledger=ledger,
-            stage=stage,
-            input_artifacts=input_artifacts,
-            policy_config_id=_room_policy_for_reuse_lookup(
+                source_records=ordered_transcript_records,
                 policy=policy,
-                room_transcript_record=room_transcript_record,
-            ).config_id,
-            reuse_metadata={
-                "room_diarization_status": effective_room_diarization_status,
-                "room_diarization_reason": effective_room_diarization_reason,
-            },
-        )
-        if completed is not None:
-            reused = _load_reusable_output(store=store, completed=completed)
-            if reused is not None:
-                record, artifact = reused
-                timestamp = _timestamp(now)
-                state = ledger.record(
-                    ProcessingStageState(
-                        version=1,
-                        session_id=ledger.session_id,
-                        run_id=ledger.run_id,
-                        stage=stage,
-                        status="skipped",
-                        input_artifacts=input_artifacts,
-                        output_artifacts=completed.output_artifacts,
-                        started_at=timestamp,
-                        completed_at=timestamp,
-                        error=None,
-                        attempt=attempt,
-                    )
-                )
-                return MergeTimingStageResult(
-                    state=state,
-                    merged_transcript=artifact,
-                    merged_transcript_record=record,
-                    skipped=True,
-                    skip_reason="completed_output_reused",
-                )
-
-    started = ledger.mark_running(
-        stage=stage,
-        input_artifacts=input_artifacts,
-        attempt=attempt,
-        now=now,
-    )
-    try:
-        room_transcript = _verify_and_load_transcript(store=store, record=room_transcript_record)
-        effective_policy = policy or MergePolicy(
-            capture_profile="in_person_single_mic",
-            room_source_id=room_transcript.source_id or "room_mic",
-        )
-        _validate_room_transcript_matches_policy(
-            room_transcript=room_transcript,
-            policy=effective_policy,
-            ledger_session_id=ledger.session_id,
-        )
-        room_regular = None
-        room_exclusive = None
-        if (
-            room_regular_diarization_record is not None
-            and room_exclusive_diarization_record is not None
-        ):
-            room_regular = _verify_and_load_diarization(
-                store=store,
-                record=room_regular_diarization_record,
-            )
-            room_exclusive = _verify_and_load_diarization(
-                store=store,
-                record=room_exclusive_diarization_record,
-            )
-            _validate_diarization_pair_matches_policy(
-                regular=room_regular,
-                exclusive=room_exclusive,
-                policy=effective_policy,
-                expected_source_id=effective_policy.room_source_id,
-                source_label="Room",
-                ledger_session_id=ledger.session_id,
-            )
-        artifact = _build_room_mic_merged_transcript(
-            room_transcript=room_transcript,
-            room_record=room_transcript_record,
-            room_regular_diarization=room_regular,
-            room_exclusive_diarization=room_exclusive,
-            room_regular_record=room_regular_diarization_record,
-            room_exclusive_record=room_exclusive_diarization_record,
-            policy=effective_policy,
-            room_diarization_status=effective_room_diarization_status,
-            room_diarization_reason=effective_room_diarization_reason,
-            created_at=_timestamp(now),
-        )
-        output_record = persist_merged_transcript_artifact(
-            store=store,
-            artifact=artifact,
-            name=_single_source_merged_transcript_artifact_name(
-                run_id=ledger.run_id,
-                source_sha256=room_transcript_record.sha256,
-                policy=artifact.policy,
-                diarization_status=effective_room_diarization_status,
-                diarization_reason=effective_room_diarization_reason,
+                source_diarization=source_diarization,
                 attempt=attempt,
             ),
         )
@@ -890,6 +671,170 @@ def _default_policy() -> MergePolicy:
     return MergePolicy()
 
 
+@dataclass(frozen=True)
+class _EffectiveSourceDiarization:
+    regular_record: ArtifactRecord | None
+    exclusive_record: ArtifactRecord | None
+    status: str
+    reason: str | None
+
+
+@dataclass(frozen=True)
+class _LoadedSourceDiarization:
+    regular: DiarizationArtifact | None
+    exclusive: DiarizationArtifact | None
+
+
+def _validate_merge_input_keys(
+    *,
+    label: str,
+    actual: Iterable[str],
+    expected: Iterable[str],
+    allow_missing: bool = False,
+) -> None:
+    actual_keys = set(actual)
+    expected_keys = set(expected)
+    unexpected = sorted(actual_keys - expected_keys)
+    if unexpected:
+        joined = ", ".join(unexpected)
+        raise MergeTimingInputError(f"Merge/timing received unexpected {label} key(s): {joined}.")
+    if not allow_missing:
+        missing = sorted(expected_keys - actual_keys)
+        if missing:
+            joined = ", ".join(missing)
+            raise MergeTimingInputError(f"Merge/timing missing {label} key(s): {joined}.")
+
+
+def _validate_supplied_diarization_inputs(
+    *,
+    policy: MergePolicy,
+    diarization_inputs: Mapping[str, SourceDiarizationInput],
+) -> None:
+    diarizable_source_ids = _diarizable_source_ids_for_policy(policy)
+    for source_id, diarization_input in diarization_inputs.items():
+        if (
+            diarization_input.regular_record is None
+            and diarization_input.exclusive_record is None
+            and diarization_input.status is None
+            and diarization_input.reason is None
+        ):
+            continue
+        if (
+            diarization_input.regular_record is None or diarization_input.exclusive_record is None
+        ) and (
+            diarization_input.regular_record is not None
+            or diarization_input.exclusive_record is not None
+        ):
+            raise MergeTimingInputError(
+                "Merge/timing requires both regular and exclusive diarization artifacts together."
+            )
+        if source_id not in diarizable_source_ids:
+            raise MergeTimingInputError(
+                f"Merge/timing source '{source_id}' does not accept diarization input."
+            )
+
+
+def _ordered_source_ids_for_policy(policy: MergePolicy) -> tuple[str, ...]:
+    if policy.capture_profile == "in_person_single_mic":
+        return (policy.room_source_id,)
+    return (policy.local_source_id, policy.remote_source_id)
+
+
+def _diarizable_source_ids_for_policy(policy: MergePolicy) -> set[str]:
+    if policy.capture_profile == "in_person_single_mic":
+        return {policy.room_source_id}
+    return {policy.remote_source_id}
+
+
+def _effective_source_diarization(
+    *,
+    source_id: str,
+    policy: MergePolicy,
+    diarization_input: SourceDiarizationInput | None,
+) -> _EffectiveSourceDiarization:
+    if source_id not in _diarizable_source_ids_for_policy(policy):
+        return _EffectiveSourceDiarization(
+            regular_record=None,
+            exclusive_record=None,
+            status="not_applicable",
+            reason="local_user_structural_attribution",
+        )
+    if diarization_input is None:
+        diarization_input = SourceDiarizationInput()
+    if (
+        diarization_input.regular_record is not None
+        or diarization_input.exclusive_record is not None
+    ):
+        if diarization_input.regular_record is None or diarization_input.exclusive_record is None:
+            raise MergeTimingInputError(
+                "Merge/timing requires both regular and exclusive diarization artifacts together."
+            )
+        return _EffectiveSourceDiarization(
+            regular_record=diarization_input.regular_record,
+            exclusive_record=diarization_input.exclusive_record,
+            status="used",
+            reason=None,
+        )
+    status = diarization_input.status or "unavailable"
+    if status not in DIARIZATION_STATUSES:
+        raise MergeTimingInputError("Merge/timing diarization status is invalid.")
+    return _EffectiveSourceDiarization(
+        regular_record=None,
+        exclusive_record=None,
+        status=status,
+        reason=diarization_input.reason
+        or _default_diarization_unavailable_reason(source_id, policy),
+    )
+
+
+def _default_diarization_unavailable_reason(source_id: str, policy: MergePolicy) -> str:
+    if policy.capture_profile == "in_person_single_mic" and source_id == policy.room_source_id:
+        return "room_diarization_unavailable"
+    return "remote_diarization_unavailable"
+
+
+def _merge_input_artifacts(
+    *,
+    transcript_records: tuple[ArtifactRecord, ...],
+    source_diarization: Mapping[str, _EffectiveSourceDiarization],
+    source_ids: tuple[str, ...],
+) -> tuple[ArtifactRef, ...]:
+    input_refs = [ArtifactRef.from_record(record) for record in transcript_records]
+    for source_id in source_ids:
+        source_input = source_diarization[source_id]
+        if source_input.regular_record is None and source_input.exclusive_record is None:
+            continue
+        if source_input.regular_record is None or source_input.exclusive_record is None:
+            raise MergeTimingInputError(
+                "Merge/timing requires both regular and exclusive diarization artifacts together."
+            )
+        input_refs.extend(
+            (
+                ArtifactRef.from_record(source_input.regular_record),
+                ArtifactRef.from_record(source_input.exclusive_record),
+            )
+        )
+    return tuple(input_refs)
+
+
+def _reuse_metadata_for_policy(
+    *,
+    policy: MergePolicy,
+    source_diarization: Mapping[str, _EffectiveSourceDiarization],
+) -> dict[str, object]:
+    if policy.capture_profile == "in_person_single_mic":
+        room = source_diarization[policy.room_source_id]
+        return {
+            "room_diarization_status": room.status,
+            "room_diarization_reason": room.reason,
+        }
+    remote = source_diarization[policy.remote_source_id]
+    return {
+        "remote_diarization_status": remote.status,
+        "remote_diarization_reason": remote.reason,
+    }
+
+
 def _expected_source_ids_for_policy(policy: MergePolicy) -> set[str]:
     if policy.capture_profile == "in_person_single_mic":
         return {policy.room_source_id}
@@ -915,40 +860,6 @@ def _validate_source_channels_match_policy(
         )
 
 
-def _policy_for_reuse_lookup(
-    *,
-    policy: MergePolicy | None,
-    local_transcript_record: ArtifactRecord,
-    remote_transcript_record: ArtifactRecord,
-) -> MergePolicy:
-    if policy is not None:
-        return policy
-    return MergePolicy(
-        local_source_id=_metadata_source_id(local_transcript_record) or "local_mic",
-        remote_source_id=_metadata_source_id(remote_transcript_record) or "system_audio",
-    )
-
-
-def _room_policy_for_reuse_lookup(
-    *,
-    policy: MergePolicy | None,
-    room_transcript_record: ArtifactRecord,
-) -> MergePolicy:
-    if policy is not None:
-        return policy
-    return MergePolicy(
-        capture_profile="in_person_single_mic",
-        room_source_id=_metadata_source_id(room_transcript_record) or "room_mic",
-    )
-
-
-def _metadata_source_id(record: ArtifactRecord) -> str | None:
-    value = record.metadata.get("source_id")
-    if isinstance(value, str) and value:
-        return value
-    return None
-
-
 def _verify_and_load_transcript(
     *, store: ArtifactStore, record: ArtifactRecord
 ) -> TranscriptArtifact:
@@ -969,41 +880,74 @@ def _verify_and_load_diarization(
     return DiarizationArtifact.from_dict(json.loads(store.retrieve(record.id)))
 
 
-def _validate_transcript_matches_policy(
+def _validate_transcripts_match_policy(
     *,
-    local_transcript: TranscriptArtifact,
-    remote_transcript: TranscriptArtifact,
+    transcripts: Mapping[str, TranscriptArtifact],
     policy: MergePolicy,
     ledger_session_id: str,
 ) -> None:
-    if local_transcript.session_id != ledger_session_id:
-        raise MergeTimingInputError("Local transcript session_id must match the processing ledger.")
-    if remote_transcript.session_id != ledger_session_id:
-        raise MergeTimingInputError(
-            "Remote transcript session_id must match the processing ledger."
-        )
-    if local_transcript.session_id != remote_transcript.session_id:
-        raise MergeTimingInputError("Local and remote transcript session_id values must match.")
-    if local_transcript.source_id != policy.local_source_id:
-        raise MergeTimingInputError("Local transcript source_id must match the merge policy.")
-    if remote_transcript.source_id != policy.remote_source_id:
-        raise MergeTimingInputError("Remote transcript source_id must match the merge policy.")
+    for source_id, transcript in transcripts.items():
+        label = _transcript_source_label(source_id=source_id, policy=policy)
+        if transcript.session_id != ledger_session_id:
+            raise MergeTimingInputError(
+                f"{label} transcript session_id must match the processing ledger."
+            )
+        if transcript.source_id != source_id:
+            raise MergeTimingInputError(
+                f"{label} transcript source_id must match the merge policy."
+            )
+    if policy.capture_profile == "in_person_single_mic":
+        return
+    if policy.local_source_id not in transcripts or policy.remote_source_id not in transcripts:
+        raise MergeTimingInputError("Merge policy source ids must have transcript records.")
 
 
-def _validate_room_transcript_matches_policy(
+def _transcript_source_label(*, source_id: str, policy: MergePolicy) -> str:
+    if source_id == policy.local_source_id:
+        return "Local"
+    if source_id == policy.remote_source_id:
+        return "Remote"
+    if source_id == policy.room_source_id:
+        return "Room"
+    return "Source"
+
+
+def _load_and_validate_diarization_inputs(
     *,
-    room_transcript: TranscriptArtifact,
-    policy: MergePolicy,
+    store: ArtifactStore,
     ledger_session_id: str,
-) -> None:
-    if policy.capture_profile != "in_person_single_mic":
-        raise MergeTimingInputError(
-            "Room-mic merge/timing requires the in_person_single_mic capture profile."
+    policy: MergePolicy,
+    source_diarization: Mapping[str, _EffectiveSourceDiarization],
+) -> dict[str, _LoadedSourceDiarization]:
+    loaded: dict[str, _LoadedSourceDiarization] = {}
+    for source_id, source_input in source_diarization.items():
+        if source_input.regular_record is None and source_input.exclusive_record is None:
+            loaded[source_id] = _LoadedSourceDiarization(regular=None, exclusive=None)
+            continue
+        if source_input.regular_record is None or source_input.exclusive_record is None:
+            raise MergeTimingInputError(
+                "Merge/timing requires both regular and exclusive diarization artifacts together."
+            )
+        regular = _verify_and_load_diarization(store=store, record=source_input.regular_record)
+        exclusive = _verify_and_load_diarization(store=store, record=source_input.exclusive_record)
+        _validate_diarization_pair_matches_policy(
+            regular=regular,
+            exclusive=exclusive,
+            policy=policy,
+            expected_source_id=source_id,
+            source_label=_source_label(source_id=source_id, policy=policy),
+            ledger_session_id=ledger_session_id,
         )
-    if room_transcript.session_id != ledger_session_id:
-        raise MergeTimingInputError("Room transcript session_id must match the processing ledger.")
-    if room_transcript.source_id != policy.room_source_id:
-        raise MergeTimingInputError("Room transcript source_id must match the merge policy.")
+        loaded[source_id] = _LoadedSourceDiarization(regular=regular, exclusive=exclusive)
+    return loaded
+
+
+def _source_label(*, source_id: str, policy: MergePolicy) -> str:
+    if source_id == policy.remote_source_id:
+        return "Remote"
+    if source_id == policy.room_source_id:
+        return "Room"
+    return "Source"
 
 
 def _validate_diarization_pair_matches_policy(
@@ -1047,147 +991,76 @@ def _validate_diarization_pair_matches_policy(
 
 def _build_merged_transcript(
     *,
-    local_transcript: TranscriptArtifact,
-    remote_transcript: TranscriptArtifact,
-    local_record: ArtifactRecord,
-    remote_record: ArtifactRecord,
-    remote_regular_diarization: DiarizationArtifact | None,
-    remote_exclusive_diarization: DiarizationArtifact | None,
-    remote_regular_record: ArtifactRecord | None,
-    remote_exclusive_record: ArtifactRecord | None,
+    transcripts: Mapping[str, TranscriptArtifact],
+    transcript_records: Mapping[str, ArtifactRecord],
+    source_diarization: Mapping[str, _EffectiveSourceDiarization],
+    loaded_diarization: Mapping[str, _LoadedSourceDiarization],
     policy: MergePolicy,
-    remote_diarization_status: str,
-    remote_diarization_reason: str | None,
     created_at: str,
 ) -> MergedTranscriptArtifact:
-    local_source = MergedTranscriptSource(
-        source_id=policy.local_source_id,
-        channel="local",
-        transcript_artifact=ArtifactRef.from_record(local_record),
-        diarization_status="not_applicable",
-        diarization_reason="local_user_structural_attribution",
+    sources = tuple(
+        _source_for_merge(
+            source_id=source_id,
+            policy=policy,
+            transcript_record=transcript_records[source_id],
+            source_diarization=source_diarization[source_id],
+        )
+        for source_id in _ordered_source_ids_for_policy(policy)
     )
-    remote_source = MergedTranscriptSource(
-        source_id=policy.remote_source_id,
-        channel="remote",
-        transcript_artifact=ArtifactRef.from_record(remote_record),
-        diarization_status=remote_diarization_status,
-        diarization_reason=remote_diarization_reason
-        if remote_diarization_status != "used"
+    merged_segments: list[MergedTranscriptSegment] = []
+    for source_id in _ordered_source_ids_for_policy(policy):
+        transcript = transcripts[source_id]
+        offset = len(merged_segments)
+        merged_segments.extend(
+            _source_segment_to_merged(
+                index=offset + index,
+                source_id=source_id,
+                segment=segment,
+                policy=policy,
+                source_diarization=source_diarization[source_id],
+                loaded_diarization=loaded_diarization[source_id],
+            )
+            for index, segment in enumerate(transcript.segments, start=1)
+        )
+    ordered_segments = _mark_cross_segment_overlap(
+        tuple(sorted(merged_segments, key=_segment_sort_key))
+    )
+    return MergedTranscriptArtifact(
+        version=MERGED_TRANSCRIPT_SCHEMA_VERSION,
+        session_id=next(iter(transcripts.values())).session_id,
+        policy=policy,
+        sources=sources,
+        text=" ".join(segment.text for segment in ordered_segments).strip(),
+        segments=ordered_segments,
+        created_at=created_at,
+    )
+
+
+def _source_for_merge(
+    *,
+    source_id: str,
+    policy: MergePolicy,
+    transcript_record: ArtifactRecord,
+    source_diarization: _EffectiveSourceDiarization,
+) -> MergedTranscriptSource:
+    return MergedTranscriptSource(
+        source_id=source_id,
+        channel=_channel_for_source(source_id=source_id, policy=policy),
+        transcript_artifact=ArtifactRef.from_record(transcript_record),
+        diarization_status=source_diarization.status,
+        diarization_reason=source_diarization.reason
+        if source_diarization.status != "used"
         else None,
         regular_diarization_artifact=(
             None
-            if remote_regular_record is None
-            else ArtifactRef.from_record(remote_regular_record)
+            if source_diarization.regular_record is None
+            else ArtifactRef.from_record(source_diarization.regular_record)
         ),
         exclusive_diarization_artifact=(
             None
-            if remote_exclusive_record is None
-            else ArtifactRef.from_record(remote_exclusive_record)
+            if source_diarization.exclusive_record is None
+            else ArtifactRef.from_record(source_diarization.exclusive_record)
         ),
-    )
-    remote_speakers = {}
-    remote_regular_segments: tuple[DiarizationSegment, ...] = ()
-    remote_exclusive_segments: tuple[DiarizationSegment, ...] = ()
-    if remote_regular_diarization is not None and remote_exclusive_diarization is not None:
-        remote_speakers = {
-            speaker.id: speaker.label for speaker in remote_regular_diarization.speakers
-        }
-        remote_regular_segments = remote_regular_diarization.segments
-        remote_exclusive_segments = remote_exclusive_diarization.segments
-
-    merged_segments = [
-        _local_segment_to_merged(index=index, segment=segment, policy=policy)
-        for index, segment in enumerate(local_transcript.segments, start=1)
-    ]
-    remote_offset = len(merged_segments)
-    merged_segments.extend(
-        _remote_segment_to_merged(
-            index=remote_offset + index,
-            segment=segment,
-            policy=policy,
-            diarization_status=remote_diarization_status,
-            diarization_reason=remote_diarization_reason,
-            remote_speakers=remote_speakers,
-            remote_regular_segments=remote_regular_segments,
-            remote_exclusive_segments=remote_exclusive_segments,
-        )
-        for index, segment in enumerate(remote_transcript.segments, start=1)
-    )
-    ordered_segments = _mark_cross_segment_overlap(
-        tuple(sorted(merged_segments, key=_segment_sort_key))
-    )
-    return MergedTranscriptArtifact(
-        version=MERGED_TRANSCRIPT_SCHEMA_VERSION,
-        session_id=local_transcript.session_id,
-        policy=policy,
-        sources=(local_source, remote_source),
-        text=" ".join(segment.text for segment in ordered_segments).strip(),
-        segments=ordered_segments,
-        created_at=created_at,
-    )
-
-
-def _build_room_mic_merged_transcript(
-    *,
-    room_transcript: TranscriptArtifact,
-    room_record: ArtifactRecord,
-    room_regular_diarization: DiarizationArtifact | None,
-    room_exclusive_diarization: DiarizationArtifact | None,
-    room_regular_record: ArtifactRecord | None,
-    room_exclusive_record: ArtifactRecord | None,
-    policy: MergePolicy,
-    room_diarization_status: str,
-    room_diarization_reason: str | None,
-    created_at: str,
-) -> MergedTranscriptArtifact:
-    room_source = MergedTranscriptSource(
-        source_id=policy.room_source_id,
-        channel="room",
-        transcript_artifact=ArtifactRef.from_record(room_record),
-        diarization_status=room_diarization_status,
-        diarization_reason=room_diarization_reason if room_diarization_status != "used" else None,
-        regular_diarization_artifact=(
-            None if room_regular_record is None else ArtifactRef.from_record(room_regular_record)
-        ),
-        exclusive_diarization_artifact=(
-            None
-            if room_exclusive_record is None
-            else ArtifactRef.from_record(room_exclusive_record)
-        ),
-    )
-    room_speakers = {}
-    room_regular_segments: tuple[DiarizationSegment, ...] = ()
-    room_exclusive_segments: tuple[DiarizationSegment, ...] = ()
-    if room_regular_diarization is not None and room_exclusive_diarization is not None:
-        room_speakers = {speaker.id: speaker.label for speaker in room_regular_diarization.speakers}
-        room_regular_segments = room_regular_diarization.segments
-        room_exclusive_segments = room_exclusive_diarization.segments
-
-    merged_segments = tuple(
-        _room_segment_to_merged(
-            index=index,
-            segment=segment,
-            policy=policy,
-            diarization_status=room_diarization_status,
-            diarization_reason=room_diarization_reason,
-            room_speakers=room_speakers,
-            room_regular_segments=room_regular_segments,
-            room_exclusive_segments=room_exclusive_segments,
-        )
-        for index, segment in enumerate(room_transcript.segments, start=1)
-    )
-    ordered_segments = _mark_cross_segment_overlap(
-        tuple(sorted(merged_segments, key=_segment_sort_key))
-    )
-    return MergedTranscriptArtifact(
-        version=MERGED_TRANSCRIPT_SCHEMA_VERSION,
-        session_id=room_transcript.session_id,
-        policy=policy,
-        sources=(room_source,),
-        text=" ".join(segment.text for segment in ordered_segments).strip(),
-        segments=ordered_segments,
-        created_at=created_at,
     )
 
 
@@ -1205,6 +1078,70 @@ def _segment_sort_key(
 
 def _channel_sort_order(channel: str) -> int:
     return {"local": 0, "remote": 1, "room": 2}.get(channel, 99)
+
+
+def _channel_for_source(*, source_id: str, policy: MergePolicy) -> str:
+    if policy.capture_profile == "in_person_single_mic" and source_id == policy.room_source_id:
+        return "room"
+    if source_id == policy.local_source_id:
+        return "local"
+    if source_id == policy.remote_source_id:
+        return "remote"
+    raise MergeTimingInputError("Merge policy source id is not supported.")
+
+
+def _source_segment_to_merged(
+    *,
+    index: int,
+    source_id: str,
+    segment: TranscriptSegment,
+    policy: MergePolicy,
+    source_diarization: _EffectiveSourceDiarization,
+    loaded_diarization: _LoadedSourceDiarization,
+) -> MergedTranscriptSegment:
+    channel = _channel_for_source(source_id=source_id, policy=policy)
+    if channel == "local":
+        return _local_segment_to_merged(index=index, segment=segment, policy=policy)
+    regular_segments: tuple[DiarizationSegment, ...] = ()
+    exclusive_segments: tuple[DiarizationSegment, ...] = ()
+    speakers: Mapping[str, str] = {}
+    if loaded_diarization.regular is not None and loaded_diarization.exclusive is not None:
+        speakers = {speaker.id: speaker.label for speaker in loaded_diarization.regular.speakers}
+        regular_segments = loaded_diarization.regular.segments
+        exclusive_segments = loaded_diarization.exclusive.segments
+    if channel == "remote":
+        return _diarizable_segment_to_merged(
+            index=index,
+            segment=segment,
+            source_id=source_id,
+            channel=channel,
+            diarization_status=source_diarization.status,
+            diarization_reason=source_diarization.reason,
+            speakers=speakers,
+            regular_segments=regular_segments,
+            exclusive_segments=exclusive_segments,
+            fallback_speaker_id=policy.remote_fallback_speaker_id,
+            fallback_speaker_label=policy.remote_fallback_speaker_label,
+            fallback_kind="fallback_remote",
+            diarized_kind="diarized_remote",
+            unavailable_reason="remote_diarization_not_available",
+        )
+    return _diarizable_segment_to_merged(
+        index=index,
+        segment=segment,
+        source_id=source_id,
+        channel=channel,
+        diarization_status=source_diarization.status,
+        diarization_reason=source_diarization.reason,
+        speakers=speakers,
+        regular_segments=regular_segments,
+        exclusive_segments=exclusive_segments,
+        fallback_speaker_id=policy.room_fallback_speaker_id,
+        fallback_speaker_label=policy.room_fallback_speaker_label,
+        fallback_kind="fallback_room",
+        diarized_kind="diarized_room",
+        unavailable_reason="room_diarization_not_available",
+    )
 
 
 def _local_segment_to_merged(
@@ -1234,64 +1171,6 @@ def _local_segment_to_merged(
         transcription_confidence=_transcription_confidence(segment),
         overlap_detected=False,
         transcript_segment_id=segment.id,
-    )
-
-
-def _remote_segment_to_merged(
-    *,
-    index: int,
-    segment: TranscriptSegment,
-    policy: MergePolicy,
-    diarization_status: str,
-    diarization_reason: str | None,
-    remote_speakers: Mapping[str, str],
-    remote_regular_segments: tuple[DiarizationSegment, ...],
-    remote_exclusive_segments: tuple[DiarizationSegment, ...],
-) -> MergedTranscriptSegment:
-    return _diarizable_segment_to_merged(
-        index=index,
-        segment=segment,
-        source_id=policy.remote_source_id,
-        channel="remote",
-        diarization_status=diarization_status,
-        diarization_reason=diarization_reason,
-        speakers=remote_speakers,
-        regular_segments=remote_regular_segments,
-        exclusive_segments=remote_exclusive_segments,
-        fallback_speaker_id=policy.remote_fallback_speaker_id,
-        fallback_speaker_label=policy.remote_fallback_speaker_label,
-        fallback_kind="fallback_remote",
-        diarized_kind="diarized_remote",
-        unavailable_reason="remote_diarization_not_available",
-    )
-
-
-def _room_segment_to_merged(
-    *,
-    index: int,
-    segment: TranscriptSegment,
-    policy: MergePolicy,
-    diarization_status: str,
-    diarization_reason: str | None,
-    room_speakers: Mapping[str, str],
-    room_regular_segments: tuple[DiarizationSegment, ...],
-    room_exclusive_segments: tuple[DiarizationSegment, ...],
-) -> MergedTranscriptSegment:
-    return _diarizable_segment_to_merged(
-        index=index,
-        segment=segment,
-        source_id=policy.room_source_id,
-        channel="room",
-        diarization_status=diarization_status,
-        diarization_reason=diarization_reason,
-        speakers=room_speakers,
-        regular_segments=room_regular_segments,
-        exclusive_segments=room_exclusive_segments,
-        fallback_speaker_id=policy.room_fallback_speaker_id,
-        fallback_speaker_label=policy.room_fallback_speaker_label,
-        fallback_kind="fallback_room",
-        diarized_kind="diarized_room",
-        unavailable_reason="room_diarization_not_available",
     )
 
 
@@ -1540,6 +1419,36 @@ def _mark_merge_failed(
         attempt=attempt,
         started_at=started_at,
         now=now,
+    )
+
+
+def _merged_transcript_artifact_name_for_policy(
+    *,
+    run_id: str,
+    source_records: tuple[ArtifactRecord, ...],
+    policy: MergePolicy,
+    source_diarization: Mapping[str, _EffectiveSourceDiarization],
+    attempt: int,
+) -> Path:
+    if policy.capture_profile == "in_person_single_mic":
+        source = source_diarization[policy.room_source_id]
+        return _single_source_merged_transcript_artifact_name(
+            run_id=run_id,
+            source_sha256=source_records[0].sha256,
+            policy=policy,
+            diarization_status=source.status,
+            diarization_reason=source.reason,
+            attempt=attempt,
+        )
+    source = source_diarization[policy.remote_source_id]
+    return _merged_transcript_artifact_name(
+        run_id=run_id,
+        local_sha256=source_records[0].sha256,
+        remote_sha256=source_records[1].sha256,
+        policy=policy,
+        remote_diarization_status=source.status,
+        remote_diarization_reason=source.reason,
+        attempt=attempt,
     )
 
 

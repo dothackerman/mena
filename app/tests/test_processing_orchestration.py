@@ -1,6 +1,7 @@
 import json
 import wave
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -16,12 +17,14 @@ from mena.interaction import (
     TextRequest,
     WorkflowNotice,
 )
+from mena.merge_timing import MergePolicy
 from mena.processing import ArtifactRef, ProcessingErrorInfo, ProcessingStageLedger
 from mena.processing_orchestration import (
     CaptureSegmentInput,
     SourceAudioInput,
     _asr_language_from_session_language,
     _ensure_provider_prep_audio_artifact,
+    _merge_policy_for_profile,
     _stitch_provider_prep_audio,
     collect_capture_segments,
     latest_failed_stage_input_artifacts,
@@ -290,7 +293,19 @@ def test_run_processing_command_runs_pipeline_with_provider_fakes(
 
     store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=session_path)
     assert len(store.list(artifact_type="transcript")) == 2
-    assert len(store.list(artifact_type="merged_transcript")) == 1
+    merged_records = store.list(artifact_type="merged_transcript")
+    assert len(merged_records) == 1
+    merged_record = merged_records[0]
+    assert merged_record.metadata["policy_config_id"] == MergePolicy().config_id
+    assert merged_record.metadata["local_source_id"] == "local_mic"
+    assert merged_record.metadata["remote_source_id"] == "system_audio"
+    assert merged_record.metadata["remote_diarization_status"] == "used"
+    merged_payload = json.loads(store.retrieve(merged_record.id))
+    assert merged_payload["policy"]["capture_profile"] == "online_dual_stream"
+    assert [source["source_id"] for source in merged_payload["sources"]] == [
+        "local_mic",
+        "system_audio",
+    ]
     assert len(store.list(artifact_type="review_queue")) == 2
     assert "Processing completed for run 'run-1' (attempt 2)." in capsys.readouterr().out
 
@@ -586,7 +601,19 @@ def test_run_processing_stages_sequences_room_mic_profile(tmp_path: Path) -> Non
     transcript = json.loads(store.retrieve(transcript_record.id))
     assert transcript["language"]["requested"] == "it"
     assert len(store.list(artifact_type="diarization")) == 3
-    assert len(store.list(artifact_type="merged_transcript")) == 1
+    merged_records = store.list(artifact_type="merged_transcript")
+    assert len(merged_records) == 1
+    merged_record = merged_records[0]
+    assert (
+        merged_record.metadata["policy_config_id"]
+        == MergePolicy(capture_profile="in_person_single_mic").config_id
+    )
+    assert merged_record.metadata["capture_profile"] == "in_person_single_mic"
+    assert merged_record.metadata["room_source_id"] == "room_mic"
+    assert merged_record.metadata["room_diarization_status"] == "used"
+    merged_payload = json.loads(store.retrieve(merged_record.id))
+    assert merged_payload["policy"]["capture_profile"] == "in_person_single_mic"
+    assert [source["source_id"] for source in merged_payload["sources"]] == ["room_mic"]
     assert len(store.list(artifact_type="review_queue")) == 2
     assert result.semantic_coherence_result.skip_reason is None
 
@@ -861,3 +888,8 @@ def test_processing_orchestration_small_helpers_cover_runtime_decisions(
         )
         == "diarization"
     )
+    profile = get_capture_profile("online_dual_stream")
+    reversed_profile = replace(profile, sources=tuple(reversed(profile.sources)))
+    merge_policy = _merge_policy_for_profile(profile=reversed_profile)
+    assert merge_policy.local_source_id == "local_mic"
+    assert merge_policy.remote_source_id == "system_audio"

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import shutil
 import wave
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -23,13 +23,14 @@ from mena.diarization import (
 from mena.fields import optional_str, required_int, required_str
 from mena.interaction import ConfirmationRequest, InteractionPort, WorkflowNotice
 from mena.merge_timing import (
+    MergePolicy,
+    SourceDiarizationInput,
     run_merge_timing_stage,
-    run_room_mic_merge_timing_stage,
 )
 from mena.processing import (
     ProcessingStageLedger,
 )
-from mena.profiles import CaptureProfile, DiarisationPolicy
+from mena.profiles import CaptureProfile, CaptureSemanticRole, DiarisationPolicy
 from mena.provider_validation import ProviderValidationError as ProviderValidationError
 from mena.provider_validation import require_provider
 from mena.runtime_profile import (
@@ -357,47 +358,19 @@ def run_processing_stages(
         if regular is not None or exclusive is not None:
             diarization_records[source_id] = (regular, exclusive)
 
-    source_ids = tuple(source.logical_id.value for source in profile.sources)
-    if source_ids == ("room_mic",):
-        room_regular: ArtifactRecord | None = None
-        room_exclusive: ArtifactRecord | None = None
-        room_records = diarization_records.get("room_mic")
-        if room_records is not None:
-            room_regular, room_exclusive = room_records
-        merge_result = cast(
-            Any,
-            run_room_mic_merge_timing_stage(
-                store=store,
-                ledger=ledger,
-                room_transcript_record=transcript_records["room_mic"],
-                room_regular_diarization_record=room_regular,
-                room_exclusive_diarization_record=room_exclusive,
-                attempt=attempt,
-                now=now,
-            ),
-        )
-    else:
-        local_source_id = source_ids[0]
-        remote_source_id = source_ids[1]
-        remote_regular: ArtifactRecord | None = None
-        remote_exclusive: ArtifactRecord | None = None
-        remote_records = diarization_records.get(remote_source_id)
-        if remote_records is not None:
-            remote_regular, remote_exclusive = remote_records
-
-        merge_result = cast(
-            Any,
-            run_merge_timing_stage(
-                store=store,
-                ledger=ledger,
-                local_transcript_record=transcript_records[local_source_id],
-                remote_transcript_record=transcript_records[remote_source_id],
-                remote_regular_diarization_record=remote_regular,
-                remote_exclusive_diarization_record=remote_exclusive,
-                attempt=attempt,
-                now=now,
-            ),
-        )
+    merge_policy = _merge_policy_for_profile(profile=profile)
+    merge_result = cast(
+        Any,
+        run_merge_timing_stage(
+            store=store,
+            ledger=ledger,
+            policy=merge_policy,
+            transcript_records=transcript_records,
+            diarization_inputs=_merge_diarization_inputs(diarization_records),
+            attempt=attempt,
+            now=now,
+        ),
+    )
 
     from mena.review_flagging import run_confidence_flagging_stage
 
@@ -430,6 +403,51 @@ def runtime_fallback_stage_for_provider_failure(
     from mena.runtime_profile import runtime_fallback_stage_for_provider_failure as _resolver_stage
 
     return _resolver_stage(exc)
+
+
+def _merge_policy_for_profile(*, profile: CaptureProfile) -> MergePolicy:
+    if profile.name.value == "in_person_single_mic":
+        return MergePolicy(
+            capture_profile=profile.name.value,
+            room_source_id=_source_id_for_semantic_role(profile, CaptureSemanticRole.ROOM_MIC),
+        )
+    if profile.name.value == "online_dual_stream":
+        return MergePolicy(
+            capture_profile=profile.name.value,
+            local_source_id=_source_id_for_semantic_role(profile, CaptureSemanticRole.LOCAL_MIC),
+            remote_source_id=_source_id_for_semantic_role(
+                profile, CaptureSemanticRole.SYSTEM_AUDIO
+            ),
+        )
+    raise ValueError(
+        "Processing currently supports online_dual_stream and in_person_single_mic profiles."
+    )
+
+
+def _source_id_for_semantic_role(
+    profile: CaptureProfile,
+    role: CaptureSemanticRole,
+) -> str:
+    matching_source_ids = [
+        source.logical_id.value for source in profile.sources if source.semantic_role == role
+    ]
+    if len(matching_source_ids) != 1:
+        raise ValueError(
+            f"Capture profile '{profile.name.value}' must define exactly one {role.value} source."
+        )
+    return matching_source_ids[0]
+
+
+def _merge_diarization_inputs(
+    diarization_records: Mapping[str, tuple[ArtifactRecord | None, ArtifactRecord | None]],
+) -> dict[str, SourceDiarizationInput]:
+    return {
+        source_id: SourceDiarizationInput(
+            regular_record=records[0],
+            exclusive_record=records[1],
+        )
+        for source_id, records in diarization_records.items()
+    }
 
 
 def latest_failed_stage_input_artifacts(
@@ -891,11 +909,12 @@ def _runtime_fallback_authorizer(
 
 
 def _validate_processing_profile_support(profile: CaptureProfile) -> None:
-    source_ids = tuple(source.logical_id.value for source in profile.sources)
-    if source_ids not in {("local_mic", "system_audio"), ("room_mic",)}:
+    try:
+        _merge_policy_for_profile(profile=profile)
+    except ValueError as exc:
         raise ValueError(
             "Processing currently supports online_dual_stream and in_person_single_mic profiles."
-        )
+        ) from exc
 
 
 def _asr_language_from_session_language(language: str | None) -> str | None:
