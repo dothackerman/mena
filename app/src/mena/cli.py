@@ -453,6 +453,8 @@ class ConsoleProcessingInteraction:
     def confirm(self, request: ConfirmationRequest) -> bool:
         if request.topic != "runtime_fallback.one_run":
             raise ValueError(f"Unsupported processing confirmation topic '{request.topic}'.")
+        if self._input_fn is None:
+            return False
         accepted_failure = str(request.context["accepted_failure"])
         fallback_evaluation = cast(SetupEvaluation, request.context["fallback_evaluation"])
         print(f"Accepted runtime profile is unavailable: {accepted_failure}")
@@ -462,8 +464,6 @@ class ConsoleProcessingInteraction:
             f"{fallback_evaluation.selected_asr_profile.checkpoint}/"
             f"{fallback_evaluation.selected_asr_profile.device}."
         )
-        if self._input_fn is None:
-            return False
         answer = self._input_fn("Use local runtime fallback for this run? [y/N] ")
         return answer.strip().lower() in {"y", "yes"}
 
