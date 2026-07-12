@@ -1,15 +1,21 @@
 import json
 import wave
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from types import SimpleNamespace
 from typing import cast
 
 import pytest
 
 from mena.artifacts import FileSystemArtifactStore
-from mena.diarization import DiarizationProviderUnavailable
-from mena.interaction import ConfirmationRequest, ScriptedInteraction, ScriptedResponse
+from mena.diarization import DiarizationProviderUnavailable, FakeDiarizationProvider
+from mena.interaction import (
+    ChoiceOption,
+    ChoiceRequest,
+    ConfirmationRequest,
+    TextRequest,
+    WorkflowNotice,
+)
 from mena.processing import ArtifactRef, ProcessingErrorInfo, ProcessingStageLedger
 from mena.processing_orchestration import (
     CaptureSegmentInput,
@@ -26,11 +32,164 @@ from mena.processing_orchestration import (
     validate_capture_segment_alignment,
 )
 from mena.profiles import get_capture_profile
-from mena.runtime_profile import RuntimeFallbackUnavailable, RuntimeProfileSelection
-from mena.transcription import TranscriptionProviderUnavailable
+from mena.runtime_profile import RuntimeFallbackUnavailable
+from mena.runtime_stewardship import (
+    RUNTIME_STEWARDSHIP_RELEASE_NOTICE_TOPIC,
+    RuntimeLease,
+    RuntimeReleaseResult,
+)
+from mena.semantic_coherence import FakeSemanticCoherenceProvider, SemanticCoherenceResult
+from mena.settings import AppSettings
+from mena.setup import (
+    CommandIdentity,
+    CommandRun,
+    HardwareFacts,
+    build_runtime_profile_state,
+    default_profile_catalog,
+    detect_local_installation_state,
+    evaluate_setup,
+    get_alpha_local_profile,
+    persist_runtime_profile_state,
+)
+from mena.transcription import (
+    FakeTranscriptionProvider,
+    TranscriptArtifact,
+    TranscriptionProviderUnavailable,
+    TranscriptionRequest,
+)
 
 SESSION_ID = "00000000-0000-0000-0000-000000000001"
 NOW = datetime(2026, 7, 2, 12, 0, 0, tzinfo=UTC)
+COMMAND_IDENTITY = CommandIdentity(
+    current_executable=Path("/home/user/.local/bin/mena"),
+    plain_mena_path=Path("/home/user/.local/bin/mena"),
+    version="0.1.0-test",
+    invocation_mode="installed-product",
+)
+READY_HARDWARE = HardwareFacts(
+    system="Linux",
+    ram_gb=32.0,
+    cuda_available=True,
+    vram_gb=12.0,
+    avx2_available=True,
+)
+CPU_FALLBACK_HARDWARE = HardwareFacts(
+    system="Linux",
+    ram_gb=32.0,
+    cuda_available=False,
+    vram_gb=None,
+    avx2_available=True,
+)
+
+
+class _ReadySetupRunner:
+    def __init__(self, *, ollama_model: str) -> None:
+        self._ollama_model = ollama_model
+        self.which_calls: list[str] = []
+        self.run_calls: list[tuple[str, ...]] = []
+
+    def reset(self) -> None:
+        self.which_calls.clear()
+        self.run_calls.clear()
+
+    def which(self, command: str) -> Path | None:
+        self.which_calls.append(command)
+        return Path("/usr/bin") / command
+
+    def run(
+        self,
+        args: Sequence[str],
+        *,
+        timeout_seconds: float = 30.0,
+        env: Mapping[str, str] | None = None,
+    ) -> CommandRun:
+        command = tuple(args)
+        self.run_calls.append(command)
+        if command == ("ollama", "list"):
+            return CommandRun(
+                args=command,
+                exit_code=0,
+                stdout=f"NAME ID SIZE MODIFIED\n{self._ollama_model} abc 1 GB now\n",
+            )
+        return CommandRun(args=command, exit_code=0)
+
+
+class _NonInteractiveProcessingInteraction:
+    runtime_fallback_confirmation_available = False
+
+    def __init__(self) -> None:
+        self.notices: list[WorkflowNotice] = []
+
+    def choose(self, request: ChoiceRequest) -> ChoiceOption:
+        raise AssertionError("processing workflow should not request choices")
+
+    def confirm(self, request: ConfirmationRequest) -> bool:
+        raise AssertionError("non-interactive processing workflow should not confirm fallback")
+
+    def request_text(self, request: TextRequest) -> str:
+        raise AssertionError("processing workflow should not request text")
+
+    def notify(self, notice: WorkflowNotice) -> None:
+        self.notices.append(notice)
+
+
+class _ConfirmingProcessingInteraction:
+    runtime_fallback_confirmation_available = True
+
+    def __init__(self, response: bool) -> None:
+        self.response = response
+        self.confirmations: list[ConfirmationRequest] = []
+        self.notices: list[WorkflowNotice] = []
+
+    def choose(self, request: ChoiceRequest) -> ChoiceOption:
+        raise AssertionError("processing workflow should not request choices")
+
+    def confirm(self, request: ConfirmationRequest) -> bool:
+        self.confirmations.append(request)
+        return self.response
+
+    def request_text(self, request: TextRequest) -> str:
+        raise AssertionError("processing workflow should not request text")
+
+    def notify(self, notice: WorkflowNotice) -> None:
+        self.notices.append(notice)
+
+
+class _UnavailableTranscriptionProvider(FakeTranscriptionProvider):
+    def transcribe(self, request: TranscriptionRequest) -> TranscriptArtifact:
+        raise TranscriptionProviderUnavailable("CUDA out of memory")
+
+
+class _ReleasingSemanticProvider(FakeSemanticCoherenceProvider):
+    runtime_resource_used = True
+
+    def __init__(
+        self,
+        *,
+        results: Mapping[str, SemanticCoherenceResult],
+        release_status: str = "released",
+        release_detail: str = "Ollama model release completed: unloaded.",
+    ) -> None:
+        super().__init__(results=results)
+        self._release_status = release_status
+        self._release_detail = release_detail
+
+    def release_runtime_resource(self, lease: RuntimeLease) -> RuntimeReleaseResult:
+        return RuntimeReleaseResult(
+            lease=lease,
+            status=self._release_status,
+            detail=self._release_detail,
+        )
+
+
+class _RuntimeRequiredProviderFactory:
+    requires_runtime_profile = True
+
+    def __init__(self, provider_factory: Callable[[], object]) -> None:
+        self._provider_factory = provider_factory
+
+    def __call__(self) -> object:
+        return self._provider_factory()
 
 
 def _segment(source_id: str, index: int, *, status: str = "sealed") -> dict[str, object]:
@@ -79,46 +238,42 @@ def _write_processing_session(tmp_path: Path) -> Path:
     return tmp_path
 
 
-class _FakeTranscription:
-    name = "fake-transcription"
+def _persist_runtime_profile_state(
+    settings: AppSettings,
+    *,
+    runner: _ReadySetupRunner,
+    authorize_local_fallback: bool,
+) -> None:
+    primary_profile = get_alpha_local_profile(settings.local_llm.ollama_model)
+    fallback_profile = default_profile_catalog(settings.local_llm.ollama_model)[1]
+    setup_state = detect_local_installation_state(
+        settings,
+        runner=runner,
+        command_identity=COMMAND_IDENTITY,
+        hardware=READY_HARDWARE,
+    )
+    fallback_state = detect_local_installation_state(
+        settings,
+        runner=runner,
+        command_identity=COMMAND_IDENTITY,
+        hardware=READY_HARDWARE,
+        profile=fallback_profile,
+    )
+    persist_runtime_profile_state(
+        build_runtime_profile_state(
+            evaluate_setup(primary_profile, setup_state),
+            fallback_evaluation=evaluate_setup(fallback_profile, fallback_state),
+            authorize_local_fallback=authorize_local_fallback,
+        ),
+        paths=settings.paths,
+    )
 
-    def transcribe(self) -> None:
-        raise AssertionError("not called")
 
-
-class _FakeDiarization:
-    name = "fake-diarization"
-    config_id = "fake-diarization"
-
-    def diarize(self) -> None:
-        raise AssertionError("not called")
-
-
-class _FakeSemantic:
-    metadata = SimpleNamespace(config_id="fake-semantic", to_dict=lambda: {})
-
-    def check(self) -> None:
-        raise AssertionError("not called")
-
-
-def _successful_processing_stages(**_kwargs: object) -> object:
-    return SimpleNamespace(semantic_coherence_result=SimpleNamespace(skip_reason=None))
-
-
-def test_run_processing_command_delegates_to_injected_stage_runner(
+def test_run_processing_command_runs_pipeline_with_provider_fakes(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    import mena.processing_orchestration as orchestration
-
     session_path = _write_processing_session(tmp_path)
-    monkeypatch.setattr(orchestration, "_requires_runtime_profile", lambda *_args: False)
-    calls: list[dict[str, object]] = []
-
-    def _stage_runner(**kwargs: object) -> object:
-        calls.append(kwargs)
-        return _successful_processing_stages(**kwargs)
 
     assert (
         run_processing_command(
@@ -126,113 +281,274 @@ def test_run_processing_command_delegates_to_injected_stage_runner(
             run_id="run-1",
             attempt=2,
             now=NOW,
-            transcription_provider_factory=_FakeTranscription,
-            diarization_provider_factory=_FakeDiarization,
-            semantic_coherence_provider_factory=_FakeSemantic,
-            processing_stages_runner=_stage_runner,
+            transcription_provider_factory=FakeTranscriptionProvider,
+            diarization_provider_factory=FakeDiarizationProvider,
+            semantic_coherence_provider_factory=lambda: FakeSemanticCoherenceProvider(results={}),
         )
         == 0
     )
 
-    assert calls[0]["session_language"] == "fr-CH"
-    source_inputs = cast(dict[str, object], calls[0]["source_inputs"])
-    assert sorted(source_inputs) == ["local_mic", "system_audio"]
+    store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=session_path)
+    assert len(store.list(artifact_type="transcript")) == 2
+    assert len(store.list(artifact_type="merged_transcript")) == 1
+    assert len(store.list(artifact_type="review_queue")) == 2
     assert "Processing completed for run 'run-1' (attempt 2)." in capsys.readouterr().out
 
 
-def test_run_processing_command_authorizes_runtime_fallback_through_interaction(
+def test_run_processing_command_preserves_noninteractive_fallback_guidance(
     tmp_path: Path,
 ) -> None:
     session_path = _write_processing_session(tmp_path)
-    fallback_evaluation = SimpleNamespace(profile=SimpleNamespace(id="fallback"))
-    observed_authorization: list[bool] = []
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    runner = _ReadySetupRunner(ollama_model=settings.local_llm.ollama_model)
+    interaction = _NonInteractiveProcessingInteraction()
+    _persist_runtime_profile_state(
+        settings,
+        runner=runner,
+        authorize_local_fallback=False,
+    )
 
-    def _runtime_selection(**kwargs: object) -> RuntimeProfileSelection:
-        authorizer = kwargs["authorize_runtime_fallback"]
-        assert callable(authorizer)
-        observed_authorization.append(authorizer("gpu missing", fallback_evaluation))
-        return cast(
-            RuntimeProfileSelection,
-            SimpleNamespace(
-                accepted=SimpleNamespace(),
-                actual=SimpleNamespace(
-                    selected_asr_profile=SimpleNamespace(
-                        id="fake-asr",
-                        checkpoint="tiny",
-                        device="cpu",
-                        compute_type="int8",
-                        reason="test",
-                    )
-                ),
-                fallback_used=True,
+    with pytest.raises(RuntimeFallbackUnavailable, match="pass --allow-runtime-fallback"):
+        run_processing_command(
+            session_path=session_path,
+            run_id="run-1",
+            attempt=1,
+            now=NOW,
+            transcription_provider_factory=_RuntimeRequiredProviderFactory(
+                _UnavailableTranscriptionProvider
             ),
+            diarization_provider_factory=_RuntimeRequiredProviderFactory(FakeDiarizationProvider),
+            semantic_coherence_provider_factory=_RuntimeRequiredProviderFactory(
+                lambda: FakeSemanticCoherenceProvider(results={})
+            ),
+            settings=settings,
+            setup_runner=runner,
+            setup_command_identity=COMMAND_IDENTITY,
+            setup_hardware=READY_HARDWARE,
+            interaction=interaction,
         )
 
-    interaction = ScriptedInteraction(
-        [ScriptedResponse(kind="confirm", topic="runtime_fallback.one_run", value=True)]
+    assert interaction.notices == []
+
+
+def test_run_processing_command_stores_runtime_profile_provenance(
+    tmp_path: Path,
+) -> None:
+    session_path = _write_processing_session(tmp_path)
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    runner = _ReadySetupRunner(ollama_model=settings.local_llm.ollama_model)
+    _persist_runtime_profile_state(
+        settings,
+        runner=runner,
+        authorize_local_fallback=False,
     )
 
     assert (
         run_processing_command(
             session_path=session_path,
-            run_id="run-1",
-            attempt=1,
+            run_id="run-with-runtime",
+            attempt=3,
             now=NOW,
-            diarization_provider_factory=_FakeDiarization,
-            semantic_coherence_provider_factory=_FakeSemantic,
-            interaction=interaction,
-            runtime_selection_fn=_runtime_selection,
-            runtime_profile_provenance_store_fn=lambda **_kwargs: None,
-            processing_stages_runner=_successful_processing_stages,
+            transcription_provider_factory=_RuntimeRequiredProviderFactory(
+                FakeTranscriptionProvider
+            ),
+            diarization_provider_factory=_RuntimeRequiredProviderFactory(FakeDiarizationProvider),
+            semantic_coherence_provider_factory=_RuntimeRequiredProviderFactory(
+                lambda: FakeSemanticCoherenceProvider(results={})
+            ),
+            settings=settings,
+            setup_runner=runner,
+            setup_command_identity=COMMAND_IDENTITY,
+            setup_hardware=READY_HARDWARE,
         )
         == 0
     )
 
-    assert observed_authorization == [True]
-    assert interaction.pending == 0
-    request = interaction.requests[0]
-    assert isinstance(request, ConfirmationRequest)
-    assert request.topic == "runtime_fallback.one_run"
-    assert request.default is False
-    assert request.context["accepted_failure"] == "gpu missing"
-    assert request.context["fallback_evaluation"] is fallback_evaluation
+    store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=session_path)
+    provenance_records = store.list(artifact_type="runtime_profile_provenance")
+    assert len(provenance_records) == 1
+    provenance = json.loads(store.retrieve(provenance_records[0].id))
+    assert provenance["run_id"] == "run-with-runtime"
+    assert provenance["attempt"] == 3
 
 
-def test_run_processing_command_declines_runtime_fallback_through_interaction(
+def test_run_processing_command_revalidates_only_processing_dependencies(
     tmp_path: Path,
 ) -> None:
     session_path = _write_processing_session(tmp_path)
-    fallback_evaluation = SimpleNamespace(profile=SimpleNamespace(id="fallback"))
-
-    def _runtime_selection(**kwargs: object) -> RuntimeProfileSelection:
-        authorizer = kwargs["authorize_runtime_fallback"]
-        assert callable(authorizer)
-        if not authorizer("gpu missing", fallback_evaluation):
-            raise RuntimeFallbackUnavailable(
-                "Accepted runtime profile is unavailable and fallback was declined."
-            )
-        raise AssertionError("fallback should have been declined")
-
-    interaction = ScriptedInteraction(
-        [ScriptedResponse(kind="confirm", topic="runtime_fallback.one_run", value=False)]
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    runner = _ReadySetupRunner(ollama_model=settings.local_llm.ollama_model)
+    _persist_runtime_profile_state(
+        settings,
+        runner=runner,
+        authorize_local_fallback=False,
     )
+    runner.reset()
 
-    with pytest.raises(RuntimeFallbackUnavailable, match="fallback was declined"):
+    with pytest.raises(RuntimeFallbackUnavailable):
         run_processing_command(
             session_path=session_path,
-            run_id="run-1",
+            run_id="run-revalidate",
             attempt=1,
             now=NOW,
-            diarization_provider_factory=_FakeDiarization,
-            semantic_coherence_provider_factory=_FakeSemantic,
-            interaction=interaction,
-            runtime_selection_fn=_runtime_selection,
-            runtime_profile_provenance_store_fn=lambda **_kwargs: None,
-            processing_stages_runner=_successful_processing_stages,
+            transcription_provider_factory=_RuntimeRequiredProviderFactory(
+                _UnavailableTranscriptionProvider
+            ),
+            diarization_provider_factory=_RuntimeRequiredProviderFactory(FakeDiarizationProvider),
+            semantic_coherence_provider_factory=_RuntimeRequiredProviderFactory(
+                lambda: FakeSemanticCoherenceProvider(results={})
+            ),
+            settings=settings,
+            setup_runner=runner,
+            setup_command_identity=COMMAND_IDENTITY,
+            setup_hardware=READY_HARDWARE,
         )
 
-    assert interaction.pending == 0
-    assert interaction.requests[0].topic == "runtime_fallback.one_run"
+    assert "mena" in runner.which_calls
+    assert "ollama" not in runner.which_calls
+    assert "ffplay" not in runner.which_calls
+    assert any("faster_whisper" in " ".join(command) for command in runner.run_calls)
+    assert any("pyannote.audio" in " ".join(command) for command in runner.run_calls)
+
+
+def test_run_processing_command_prompts_for_ready_one_run_runtime_fallback(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    session_path = _write_processing_session(tmp_path)
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    runner = _ReadySetupRunner(ollama_model=settings.local_llm.ollama_model)
+    interaction = _ConfirmingProcessingInteraction(True)
+    _persist_runtime_profile_state(
+        settings,
+        runner=runner,
+        authorize_local_fallback=False,
+    )
+
+    assert (
+        run_processing_command(
+            session_path=session_path,
+            run_id="run-fallback",
+            attempt=1,
+            now=NOW,
+            transcription_provider_factory=_RuntimeRequiredProviderFactory(
+                FakeTranscriptionProvider
+            ),
+            diarization_provider_factory=_RuntimeRequiredProviderFactory(FakeDiarizationProvider),
+            semantic_coherence_provider_factory=_RuntimeRequiredProviderFactory(
+                lambda: FakeSemanticCoherenceProvider(results={})
+            ),
+            settings=settings,
+            setup_runner=runner,
+            setup_command_identity=COMMAND_IDENTITY,
+            setup_hardware=CPU_FALLBACK_HARDWARE,
+            interaction=interaction,
+        )
+        == 0
+    )
+
+    assert [request.topic for request in interaction.confirmations] == ["runtime_fallback.one_run"]
+    assert (
+        "Processing completed for run 'run-fallback' (attempt 1) "
+        "with explicit runtime fallback." in capsys.readouterr().out
+    )
+
+
+def test_run_processing_command_records_terminal_runtime_stewardship_release(
+    tmp_path: Path,
+) -> None:
+    session_path = _write_processing_session(tmp_path)
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    runner = _ReadySetupRunner(ollama_model=settings.local_llm.ollama_model)
+    interaction = _NonInteractiveProcessingInteraction()
+    _persist_runtime_profile_state(
+        settings,
+        runner=runner,
+        authorize_local_fallback=False,
+    )
+
+    assert (
+        run_processing_command(
+            session_path=session_path,
+            run_id="process-release",
+            attempt=1,
+            now=NOW,
+            transcription_provider_factory=_RuntimeRequiredProviderFactory(
+                FakeTranscriptionProvider
+            ),
+            diarization_provider_factory=_RuntimeRequiredProviderFactory(FakeDiarizationProvider),
+            semantic_coherence_provider_factory=_RuntimeRequiredProviderFactory(
+                lambda: _ReleasingSemanticProvider(results={})
+            ),
+            settings=settings,
+            setup_runner=runner,
+            setup_command_identity=COMMAND_IDENTITY,
+            setup_hardware=READY_HARDWARE,
+            interaction=interaction,
+        )
+        == 0
+    )
+
+    store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=session_path)
+    stewardship_records = store.list(artifact_type="runtime_stewardship_provenance")
+    assert len(stewardship_records) == 1
+    payload = json.loads(store.retrieve(stewardship_records[0].id))
+    assert payload["run_id"] == "process-release"
+    assert payload["boundary"] == "process"
+    assert payload["releases"][0]["status"] == "released"
+    assert payload["releases"][0]["lease"]["stage"] == "semantic-review"
+    assert payload["releases"][0]["lease"]["provider"] == "fake"
+    assert len(interaction.notices) == 1
+    assert interaction.notices[0].topic == RUNTIME_STEWARDSHIP_RELEASE_NOTICE_TOPIC
+    assert interaction.notices[0].severity == "info"
+
+
+@pytest.mark.parametrize("release_status", ["failed", "not_supported"])
+def test_run_processing_command_reports_terminal_runtime_release_warning(
+    tmp_path: Path,
+    release_status: str,
+) -> None:
+    session_path = _write_processing_session(tmp_path)
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    runner = _ReadySetupRunner(ollama_model=settings.local_llm.ollama_model)
+    interaction = _NonInteractiveProcessingInteraction()
+    _persist_runtime_profile_state(
+        settings,
+        runner=runner,
+        authorize_local_fallback=False,
+    )
+
+    assert (
+        run_processing_command(
+            session_path=session_path,
+            run_id=f"process-release-{release_status}",
+            attempt=1,
+            now=NOW,
+            transcription_provider_factory=_RuntimeRequiredProviderFactory(
+                FakeTranscriptionProvider
+            ),
+            diarization_provider_factory=_RuntimeRequiredProviderFactory(FakeDiarizationProvider),
+            semantic_coherence_provider_factory=_RuntimeRequiredProviderFactory(
+                lambda: _ReleasingSemanticProvider(
+                    results={},
+                    release_status=release_status,
+                    release_detail=f"Runtime release {release_status}.",
+                )
+            ),
+            settings=settings,
+            setup_runner=runner,
+            setup_command_identity=COMMAND_IDENTITY,
+            setup_hardware=READY_HARDWARE,
+            interaction=interaction,
+        )
+        == 0
+    )
+
+    assert len(interaction.notices) == 1
+    assert interaction.notices[0].topic == RUNTIME_STEWARDSHIP_RELEASE_NOTICE_TOPIC
+    assert interaction.notices[0].severity == "warning"
+    release_result = cast(RuntimeReleaseResult, interaction.notices[0].context["result"])
+    assert release_result.status == release_status
 
 
 def test_run_processing_stages_sequences_room_mic_profile(tmp_path: Path) -> None:
@@ -252,55 +568,6 @@ def test_run_processing_stages_sequences_room_mic_profile(tmp_path: Path) -> Non
             artifact=source_artifact,
         )
     }
-    calls: list[tuple[str, dict[str, object]]] = []
-
-    def _transcription_stage(**kwargs: object) -> object:
-        calls.append(("transcription", kwargs))
-        transcript = store.store(
-            artifact_type="transcript",
-            name="transcripts/room_mic.json",
-            data=b"{}",
-        )
-        return SimpleNamespace(transcript_record=transcript)
-
-    def _diarization_stage(**kwargs: object) -> object:
-        calls.append(("diarization", kwargs))
-        regular = store.store(
-            artifact_type="diarization",
-            name="diarization/regular.json",
-            data=b"{}",
-        )
-        exclusive = store.store(
-            artifact_type="diarization",
-            name="diarization/exclusive.json",
-            data=b"{}",
-        )
-        return SimpleNamespace(
-            skipped=False,
-            artifacts=(
-                SimpleNamespace(kind="regular_timeline"),
-                SimpleNamespace(kind="exclusive_projection"),
-            ),
-            artifact_records=(regular, exclusive),
-        )
-
-    def _room_merge_stage(**kwargs: object) -> object:
-        calls.append(("room_merge", kwargs))
-        merged = store.store(
-            artifact_type="merged_transcript",
-            name="merged/room.json",
-            data=b"{}",
-        )
-        return SimpleNamespace(merged_transcript_record=merged)
-
-    def _confidence_stage(**kwargs: object) -> object:
-        calls.append(("confidence", kwargs))
-        return None
-
-    def _semantic_stage(**kwargs: object) -> object:
-        calls.append(("semantic", kwargs))
-        return SimpleNamespace(skip_reason="provider_unavailable")
-
     result = run_processing_stages(
         session_id=SESSION_ID,
         profile=profile,
@@ -309,28 +576,19 @@ def test_run_processing_stages_sequences_room_mic_profile(tmp_path: Path) -> Non
         ledger=ledger,
         attempt=1,
         now=NOW,
-        transcription_provider=SimpleNamespace(name="transcription"),
-        diarization_provider=SimpleNamespace(name="diarization", config_id="diarization"),
-        semantic_coherence_provider=SimpleNamespace(metadata=SimpleNamespace(config_id="semantic")),
+        transcription_provider=FakeTranscriptionProvider(),
+        diarization_provider=FakeDiarizationProvider(),
+        semantic_coherence_provider=FakeSemanticCoherenceProvider(results={}),
         session_language="it-CH",
-        transcription_stage_runner=_transcription_stage,
-        diarization_stage_runner=_diarization_stage,
-        room_mic_merge_timing_stage_runner=_room_merge_stage,
-        confidence_flagging_stage_runner=_confidence_stage,
-        semantic_coherence_stage_runner=_semantic_stage,
     )
 
-    assert [name for name, _kwargs in calls] == [
-        "transcription",
-        "diarization",
-        "room_merge",
-        "confidence",
-        "semantic",
-    ]
-    assert calls[0][1]["language"] == "it"
-    assert calls[2][1]["room_regular_diarization_record"] is not None
-    assert calls[2][1]["room_exclusive_diarization_record"] is not None
-    assert result.semantic_coherence_result.skip_reason == "provider_unavailable"
+    transcript_record = store.list(artifact_type="transcript")[0]
+    transcript = json.loads(store.retrieve(transcript_record.id))
+    assert transcript["language"]["requested"] == "it"
+    assert len(store.list(artifact_type="diarization")) == 3
+    assert len(store.list(artifact_type="merged_transcript")) == 1
+    assert len(store.list(artifact_type="review_queue")) == 2
+    assert result.semantic_coherence_result.skip_reason is None
 
 
 def test_prepare_source_audio_inputs_stitches_multiple_segments(tmp_path: Path) -> None:

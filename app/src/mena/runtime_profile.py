@@ -1161,9 +1161,26 @@ def production_runtime_required(
         semantic_coherence_provider_factory
     )
     return (
-        transcription_provider_factory is FasterWhisperTranscriptionProvider
-        or diarization_provider_factory is PyannoteCommunityDiarizationProvider
-        or semantic_coherence_provider_factory is OllamaSemanticCoherenceProvider
+        _provider_factory_requires_runtime(
+            transcription_provider_factory,
+            FasterWhisperTranscriptionProvider,
+        )
+        or _provider_factory_requires_runtime(
+            diarization_provider_factory,
+            PyannoteCommunityDiarizationProvider,
+        )
+        or _provider_factory_requires_runtime(
+            semantic_coherence_provider_factory,
+            OllamaSemanticCoherenceProvider,
+        )
+    )
+
+
+def _provider_factory_requires_runtime(
+    factory: ProviderFactory, production_factory: type[Any]
+) -> bool:
+    return factory is production_factory or bool(
+        getattr(factory, "requires_runtime_profile", False)
     )
 
 

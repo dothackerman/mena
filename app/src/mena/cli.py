@@ -31,7 +31,6 @@ from mena.correction_workflow import (
 )
 from mena.diarization import (
     DiarizationError,
-    run_diarization_stage,
 )
 from mena.discovery import (
     AudioDiscovery,
@@ -56,8 +55,6 @@ from mena.merge_timing import (
     MergedTranscriptArtifact,
     MergeTimingContractError,
     MergeTimingError,
-    run_merge_timing_stage,
-    run_room_mic_merge_timing_stage,
 )
 from mena.processing import (
     PROCESSING_STATE_ARTIFACT_TYPE,
@@ -83,7 +80,6 @@ from mena.recording_control import (
 )
 from mena.review_flagging import (
     ReviewFlaggingError,
-    run_confidence_flagging_stage,
 )
 from mena.runtime_profile import (
     RuntimeFallbackUnavailable,
@@ -91,12 +87,10 @@ from mena.runtime_profile import (
 from mena.runtime_stewardship import (
     RUNTIME_STEWARDSHIP_RELEASE_NOTICE_TOPIC,
     RuntimeReleaseResult,
-    record_terminal_runtime_release,
 )
 from mena.semantic_coherence import (
     SEMANTIC_COHERENCE_STAGE,
     SemanticCoherenceError,
-    run_semantic_coherence_stage,
 )
 from mena.session_integrity import (
     SessionIntegrityError,
@@ -129,7 +123,6 @@ from mena.summarization import (
 from mena.timestamps import parse_utc_timestamp
 from mena.transcription import (
     TranscriptionError,
-    run_transcription_stage,
 )
 
 COMMANDS = (
@@ -147,6 +140,13 @@ COMMANDS = (
 WORKER_EXIT_TIMEOUT_SECONDS = 30.0
 ProviderFactory = Callable[[], Any]
 ChoiceT = TypeVar("ChoiceT")
+
+
+def _print_runtime_stewardship_release_notice(result: RuntimeReleaseResult) -> None:
+    if result.status in {"failed", "not_supported"}:
+        print(f"Runtime stewardship warning: {result.detail}")
+    else:
+        print(f"Runtime stewardship: {result.detail}")
 
 
 class ConsoleRecordInteraction:
@@ -451,8 +451,12 @@ class ConsoleCorrectionInteraction:
 class ConsoleProcessingInteraction:
     """Console adapter for processing workflow interaction topics."""
 
-    def __init__(self, input_fn: Callable[[str], str]) -> None:
+    def __init__(self, input_fn: Callable[[str], str] | None) -> None:
         self._input_fn = input_fn
+
+    @property
+    def runtime_fallback_confirmation_available(self) -> bool:
+        return self._input_fn is not None
 
     def choose(self, request: ChoiceRequest) -> ChoiceOption:
         raise ValueError(f"Unsupported processing choice topic '{request.topic}'.")
@@ -460,6 +464,8 @@ class ConsoleProcessingInteraction:
     def confirm(self, request: ConfirmationRequest) -> bool:
         if request.topic != "runtime_fallback.one_run":
             raise ValueError(f"Unsupported processing confirmation topic '{request.topic}'.")
+        if self._input_fn is None:
+            return False
         accepted_failure = str(request.context["accepted_failure"])
         fallback_evaluation = cast(SetupEvaluation, request.context["fallback_evaluation"])
         print(f"Accepted runtime profile is unavailable: {accepted_failure}")
@@ -476,7 +482,11 @@ class ConsoleProcessingInteraction:
         raise ValueError(f"Unsupported processing text topic '{request.topic}'.")
 
     def notify(self, notice: WorkflowNotice) -> None:
-        raise ValueError(f"Unsupported processing notice topic '{notice.topic}'.")
+        if notice.topic != RUNTIME_STEWARDSHIP_RELEASE_NOTICE_TOPIC:
+            raise ValueError(f"Unsupported processing notice topic '{notice.topic}'.")
+        _print_runtime_stewardship_release_notice(
+            cast(RuntimeReleaseResult, notice.context["result"])
+        )
 
 
 class ConsoleSummarizeInteraction:
@@ -553,11 +563,7 @@ class ConsoleSummarizeInteraction:
                 f"{quote(str(context['session_dir']))}"
             )
         elif topic == RUNTIME_STEWARDSHIP_RELEASE_NOTICE_TOPIC:
-            result = cast(RuntimeReleaseResult, context["result"])
-            if result.status in {"failed", "not_supported"}:
-                print(f"Runtime stewardship warning: {result.detail}")
-            else:
-                print(f"Runtime stewardship: {result.detail}")
+            _print_runtime_stewardship_release_notice(cast(RuntimeReleaseResult, context["result"]))
         else:
             raise ValueError(f"Unsupported summarize notice topic '{topic}'.")
 
@@ -778,6 +784,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 DiscoveryFn = Callable[..., AudioDiscovery]
 WorkerFactory = Callable[..., Any]
+ProcessingCommandRunner = Callable[..., int]
 
 
 def main(
@@ -798,6 +805,9 @@ def main(
     setup_runner: CommandRunner | None = None,
     setup_command_identity: CommandIdentity | None = None,
     setup_hardware: HardwareFacts | None = None,
+    processing_command_runner: ProcessingCommandRunner = (
+        processing_orchestration.run_processing_command
+    ),
 ) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -1019,7 +1029,7 @@ def main(
 
             if args.command == "process":
                 print(f"Processing recording: {session_path}")
-            exit_code = processing_orchestration.run_processing_command(
+            exit_code = processing_command_runner(
                 session_path=session_path,
                 run_id=invocation_run_id,
                 attempt=invocation_attempt,
@@ -1033,13 +1043,6 @@ def main(
                 setup_hardware=setup_hardware,
                 allow_runtime_fallback=args.allow_runtime_fallback,
                 interaction=_resolve_runtime_fallback_interaction(input_fn),
-                terminal_llm_release=_record_terminal_local_llm_release,
-                transcription_stage_runner=run_transcription_stage,
-                diarization_stage_runner=run_diarization_stage,
-                merge_timing_stage_runner=run_merge_timing_stage,
-                room_mic_merge_timing_stage_runner=run_room_mic_merge_timing_stage,
-                confidence_flagging_stage_runner=run_confidence_flagging_stage,
-                semantic_coherence_stage_runner=run_semantic_coherence_stage,
             )
             if args.command == "process" and exit_code == 0:
                 print("Processing completed successfully.")
@@ -1357,10 +1360,8 @@ def _resolve_runtime_fallback_input(
 
 def _resolve_runtime_fallback_interaction(
     input_fn: Callable[[str], str] | None,
-) -> InteractionPort | None:
+) -> InteractionPort:
     reader = _resolve_runtime_fallback_input(input_fn)
-    if reader is None:
-        return None
     return ConsoleProcessingInteraction(reader)
 
 
@@ -1423,32 +1424,6 @@ def _resolve_export_interaction(
     input_fn: Callable[[str], str] | None,
 ) -> InteractionPort:
     return ConsoleExportInteraction(_record_input(input_fn))
-
-
-def _record_terminal_local_llm_release(
-    *,
-    store: FileSystemArtifactStore,
-    run_id: str,
-    attempt: int,
-    provider: object,
-    stage: str,
-    boundary: str,
-) -> RuntimeReleaseResult | None:
-    result = record_terminal_runtime_release(
-        store=store,
-        run_id=run_id,
-        attempt=attempt,
-        provider=provider,
-        stage=stage,
-        boundary=boundary,
-    )
-    if result is None:
-        return None
-    if result.status in {"failed", "not_supported"}:
-        print(f"Runtime stewardship warning: {result.detail}")
-    else:
-        print(f"Runtime stewardship: {result.detail}")
-    return result
 
 
 def _run_inspect_command(
