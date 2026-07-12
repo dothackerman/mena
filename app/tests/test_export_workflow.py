@@ -17,6 +17,7 @@ from mena.ollama_summarization import (
 )
 from mena.processing import ArtifactRef
 from mena.session_integrity import SessionIntegrityError
+from mena.session_lock import SessionLockContention, acquire_session_lock
 from mena.sessions import SESSION_RECORD_FILENAME, SESSION_RECORD_VERSION
 from mena.settings import AppSettings
 from mena.summarization import (
@@ -100,6 +101,24 @@ def test_export_workflow_declined_confirmation_cancels_without_export(
     assert store.list(artifact_type=SUMMARY_MARKDOWN_EXPORT_ARTIFACT_TYPE) == ()
 
 
+def test_export_workflow_rejects_locked_session_bundle(tmp_path: Path) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    session_dir, store, merged_record = _build_export_session(
+        settings.paths.sessions_dir / "session"
+    )
+    _persist_summary(store=store, merged_transcript_record=merged_record)
+
+    with (
+        acquire_session_lock(session_dir=session_dir, command="correct"),
+        pytest.raises(SessionLockContention, match="command=correct"),
+    ):
+        run_export_workflow(
+            ExportCommandInput(session_path=session_dir, export_format="markdown"),
+            settings=settings,
+            interaction=ScriptedInteraction(()),
+        )
+
+
 def test_export_workflow_format_flag_skips_confirmation(
     tmp_path: Path,
 ) -> None:
@@ -119,6 +138,28 @@ def test_export_workflow_format_flag_skips_confirmation(
     assert result.status == "success"
     assert interaction.requests == []
     assert [notice.topic for notice in interaction.notices] == ["export.completed"]
+
+
+def test_export_workflow_accepts_session_json_path_when_locking(tmp_path: Path) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    session_dir, store, merged_record = _build_export_session(
+        settings.paths.sessions_dir / "session"
+    )
+    _persist_summary(store=store, merged_transcript_record=merged_record)
+    interaction = ScriptedInteraction(())
+
+    result = run_export_workflow(
+        ExportCommandInput(
+            session_path=session_dir / SESSION_RECORD_FILENAME,
+            export_format="markdown",
+        ),
+        settings=settings,
+        interaction=interaction,
+    )
+
+    assert result.status == "success"
+    assert result.export_path is not None
+    assert str(result.export_path).startswith(str(session_dir))
 
 
 def test_export_workflow_rejects_unsupported_format_without_cli_parser(

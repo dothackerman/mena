@@ -46,6 +46,7 @@ from mena.review_flagging import (
     ReviewQueueArtifact,
     persist_review_queue_artifact,
 )
+from mena.session_lock import SessionLockContention, acquire_session_lock
 from mena.sessions import (
     SESSION_RECORD_FILENAME,
     SESSION_RECORD_VERSION,
@@ -145,6 +146,34 @@ def test_run_correction_workflow_persists_overlay_and_keeps_source_transcript_im
     assert result.overlay_artifact_record.metadata["workflow_status"] == "completed"
     assert result.overlay_artifact_record.metadata["completed_at"] == "2026-05-19T15:20:00Z"
     assert source_path.read_bytes() == source_bytes_before
+
+
+def test_run_correction_workflow_rejects_locked_session_bundle(tmp_path: Path) -> None:
+    session_dir, _, _ = _build_session_bundle(
+        tmp_path,
+        flags=(
+            ReviewFlag(
+                id="flag_low_transcript",
+                segment_id="segment_1",
+                reason_code="low_transcription_confidence",
+                start_seconds=0.0,
+                end_seconds=0.8,
+                source_id="local_mic",
+                speaker_id="you",
+                metadata={},
+            ),
+        ),
+    )
+
+    with (
+        acquire_session_lock(session_dir=session_dir, command="export"),
+        pytest.raises(SessionLockContention, match="command=export"),
+    ):
+        run_correction_workflow(
+            session_path=session_dir,
+            now=NOW,
+            interaction=_interaction(_choose_action("skip")),
+        )
 
 
 def test_run_correction_workflow_records_skip_action(tmp_path: Path) -> None:

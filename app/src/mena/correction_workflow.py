@@ -42,6 +42,7 @@ from mena.review_flagging import (
     ReviewFlaggingContractError,
     ReviewQueueArtifact,
 )
+from mena.session_lock import acquire_session_lock
 from mena.sessions import SessionRecordError, resolve_session, session_id
 from mena.timestamps import utc_timestamp
 from mena.transcription import (
@@ -199,6 +200,29 @@ def run_correction_workflow(
     """Run an interactive correction session and persist a correction overlay."""
 
     session_path = Path(session_path)
+    try:
+        resolved_session = resolve_session(session_path)
+    except SessionRecordError as exc:
+        raise CorrectionWorkflowError(str(exc)) from exc
+    with acquire_session_lock(
+        session_dir=resolved_session.session_dir,
+        command="correct",
+    ):
+        return _run_correction_workflow_unlocked(
+            session_path=session_path,
+            now=now,
+            interaction=interaction,
+            playback_player=playback_player,
+        )
+
+
+def _run_correction_workflow_unlocked(
+    session_path: Path,
+    *,
+    now: datetime | None = None,
+    interaction: InteractionPort,
+    playback_player: PlaybackPlayer | None = None,
+) -> CorrectionWorkflowResult:
     try:
         resolved_session = resolve_session(session_path)
     except SessionRecordError as exc:

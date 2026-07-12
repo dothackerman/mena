@@ -44,6 +44,7 @@ from mena.runtime_stewardship import (
     RUNTIME_STEWARDSHIP_RELEASE_NOTICE_TOPIC,
     RuntimeReleaseResult,
 )
+from mena.session_lock import acquire_session_lock
 from mena.sessions import (
     SESSION_RECORD_FILENAME,
     resolve_session,
@@ -129,6 +130,38 @@ def find_ready_summarize_sessions(
 
 
 def run_summarization_command(
+    *,
+    session_path: Path,
+    manual_notes: str | None,
+    language: str | None,
+    settings: AppSettings,
+    setup_runner: CommandRunner | None = None,
+    setup_command_identity: CommandIdentity | None = None,
+    setup_hardware: HardwareFacts | None = None,
+    allow_runtime_fallback: bool = False,
+    summarization_provider_factory: ProviderFactoryInput = None,
+    interaction: InteractionPort | None = None,
+) -> int:
+    resolved_session = resolve_session(session_path)
+    with acquire_session_lock(
+        session_dir=resolved_session.session_dir,
+        command="summarize",
+    ):
+        return _run_summarization_command_unlocked(
+            session_path=session_path,
+            manual_notes=manual_notes,
+            language=language,
+            settings=settings,
+            setup_runner=setup_runner,
+            setup_command_identity=setup_command_identity,
+            setup_hardware=setup_hardware,
+            allow_runtime_fallback=allow_runtime_fallback,
+            summarization_provider_factory=summarization_provider_factory,
+            interaction=interaction,
+        )
+
+
+def _run_summarization_command_unlocked(
     *,
     session_path: Path,
     manual_notes: str | None,

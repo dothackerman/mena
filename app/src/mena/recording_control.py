@@ -47,6 +47,7 @@ from mena.protocol import (
     WorkerExitedError,
     WorkerProcess,
 )
+from mena.session_lock import acquire_session_lock
 from mena.sessions import (
     append_session_degradation_fact,
     append_session_failure_fact,
@@ -230,178 +231,100 @@ def run_recording_control_workflow(
         name=command.name,
         data_root=data_root,
     )
-    interaction.notify(
-        WorkflowNotice(
-            topic="record.session_created",
-            context={"session_id": created_session.record.id},
-        )
-    )
-    interaction.notify(
-        WorkflowNotice(
-            topic="record.session_record",
-            context={"record_path": created_session.record_path},
-        )
-    )
-    discovery = discoverer(command.profile.id)
-    persist_session_discovery(created_session.record_path, discovery.to_dict())
-    interaction.notify(WorkflowNotice(topic="record.discovery", context={"discovery": discovery}))
-    if command.dry_run:
-        return RecordingControlResult(exit_code=0, record_path=created_session.record_path)
-    if discovery.status is not DiscoveryStatus.AVAILABLE:
-        interaction.notify(WorkflowNotice(topic="record.capture_not_started.discovery_unavailable"))
-        return RecordingControlResult(exit_code=1, record_path=created_session.record_path)
-    try:
-        route_selections = _resolve_route_selections(
-            profile=command.profile.id,
-            discovery=discovery,
-            microphone_route_id=command.microphone_route_id,
-            playback_stream_route_id=command.playback_stream_route_id,
-            output_sink_route_id=command.output_sink_route_id,
-            interaction=interaction,
-        )
-        start_payload = build_start_capture_payload(
-            profile=command.profile.id,
-            language=command.language,
-            discovery=discovery,
-            selections=route_selections,
-        )
-        if command.verbose:
-            interaction.notify(
-                WorkflowNotice(
-                    topic="record.diagnostics",
-                    context={"start_payload": start_payload},
-                )
-            )
-    except (EOFError, KeyboardInterrupt):
-        interaction.notify(WorkflowNotice(topic="record.setup_cancelled"))
-        return RecordingControlResult(exit_code=1, record_path=created_session.record_path)
-    except (CapturePlanningError, ValueError) as exc:
+    with acquire_session_lock(
+        session_dir=created_session.bundle_path,
+        command="record",
+    ):
         interaction.notify(
             WorkflowNotice(
-                topic="record.capture_not_started.error",
-                context={"error": str(exc)},
+                topic="record.session_created",
+                context={"session_id": created_session.record.id},
             )
-        )
-        return RecordingControlResult(exit_code=1, record_path=created_session.record_path)
-    if not command.stop_input_available:
-        interaction.notify(WorkflowNotice(topic="record.capture_not_started.noninteractive_stop"))
-        return RecordingControlResult(exit_code=1, record_path=created_session.record_path)
-    persist_session_capture_plan(
-        created_session.record_path,
-        _capture_plan_from_start_payload(start_payload, status="planned"),
-    )
-    started_at = _utc_timestamp(now)
-    persist_session_recording_lifecycle(
-        created_session.record_path,
-        status="recording",
-        recording=_recording_lifecycle(
-            started_at=started_at,
-            stopped_at=None,
-            stop_reason=None,
-            finalization_status="pending",
-            completed_at=None,
-            error=None,
-        ),
-        capture_plan=_capture_plan_from_start_payload(start_payload, status="active"),
-    )
-    try:
-        worker_kwargs: dict[str, object] = {
-            "session_id": created_session.record.id,
-            "session_dir": created_session.bundle_path,
-        }
-        if command.verbose:
-            worker_kwargs["capture_diagnostics"] = True
-        worker_context = worker_factory(**worker_kwargs)
-        worker = worker_context.__enter__()
-    except (OSError, subprocess.SubprocessError) as exc:
-        _persist_capture_failure(
-            record_path=created_session.record_path,
-            start_payload=start_payload,
-            started_at=started_at,
-            error_message=str(exc),
-            now=now,
         )
         interaction.notify(
-            WorkflowNotice(topic="record.capture_failed", context={"error": str(exc)})
-        )
-        return RecordingControlResult(exit_code=1, record_path=created_session.record_path)
-    try:
-        capture_monitor = _capture_event_monitor(
-            worker,
-            record_path=created_session.record_path,
-            start_payload=start_payload,
-            interaction=interaction,
-        )
-        interrupted_stop = False
-        start_command_sent = False
-        monitor_started = False
-        finalized: ProtocolMessage | None = None
-        try:
-            worker.handshake()
-            interaction.notify(WorkflowNotice(topic="record.consent_notice"))
-            start_command_sent = True
-            worker.start_capture(start_payload)
-            if capture_monitor is not None:
-                capture_monitor.start()
-                monitor_started = True
-            _wait_for_record_stop(interaction, capture_monitor=capture_monitor)
-            finalized = _finalize_recording(
-                worker,
-                capture_monitor if monitor_started else None,
+            WorkflowNotice(
+                topic="record.session_record",
+                context={"record_path": created_session.record_path},
             )
-            exit_code = worker.wait(timeout=command.worker_exit_timeout)
-            if exit_code != 0:
-                raise WorkerExitedError(f"Worker exited with status {exit_code}.")
-        except (EOFError, KeyboardInterrupt):
-            if finalized is not None:
-                interaction.notify(WorkflowNotice(topic="record.worker_teardown_interrupted"))
-            elif not start_command_sent:
-                _persist_capture_failure(
-                    record_path=created_session.record_path,
-                    start_payload=start_payload,
-                    started_at=started_at,
-                    error_message="Recording setup cancelled.",
-                    now=now,
+        )
+        discovery = discoverer(command.profile.id)
+        persist_session_discovery(created_session.record_path, discovery.to_dict())
+        interaction.notify(
+            WorkflowNotice(topic="record.discovery", context={"discovery": discovery})
+        )
+        if command.dry_run:
+            return RecordingControlResult(exit_code=0, record_path=created_session.record_path)
+        if discovery.status is not DiscoveryStatus.AVAILABLE:
+            interaction.notify(
+                WorkflowNotice(topic="record.capture_not_started.discovery_unavailable")
+            )
+            return RecordingControlResult(exit_code=1, record_path=created_session.record_path)
+        try:
+            route_selections = _resolve_route_selections(
+                profile=command.profile.id,
+                discovery=discovery,
+                microphone_route_id=command.microphone_route_id,
+                playback_stream_route_id=command.playback_stream_route_id,
+                output_sink_route_id=command.output_sink_route_id,
+                interaction=interaction,
+            )
+            start_payload = build_start_capture_payload(
+                profile=command.profile.id,
+                language=command.language,
+                discovery=discovery,
+                selections=route_selections,
+            )
+            if command.verbose:
+                interaction.notify(
+                    WorkflowNotice(
+                        topic="record.diagnostics",
+                        context={"start_payload": start_payload},
+                    )
                 )
-                interaction.notify(WorkflowNotice(topic="record.setup_cancelled"))
-                return RecordingControlResult(exit_code=1, record_path=created_session.record_path)
-            else:
-                interaction.notify(WorkflowNotice(topic="record.stop_interrupted"))
-                interrupted_stop = True
-                try:
-                    finalized = _finalize_recording(
-                        worker,
-                        capture_monitor if monitor_started else None,
-                    )
-                    exit_code = worker.wait(timeout=command.worker_exit_timeout)
-                    if exit_code != 0:
-                        raise WorkerExitedError(f"Worker exited with status {exit_code}.")
-                except (
-                    ProtocolError,
-                    WorkerExitedError,
-                    subprocess.TimeoutExpired,
-                    ValueError,
-                ) as exc:
-                    _persist_capture_failure(
-                        record_path=created_session.record_path,
-                        start_payload=start_payload,
-                        started_at=started_at,
-                        error_message=str(exc),
-                        now=now,
-                    )
-                    interaction.notify(
-                        WorkflowNotice(topic="record.capture_failed", context={"error": str(exc)})
-                    )
-                    return RecordingControlResult(
-                        exit_code=1,
-                        record_path=created_session.record_path,
-                    )
-        except (
-            ProtocolError,
-            WorkerExitedError,
-            subprocess.TimeoutExpired,
-            ValueError,
-        ) as exc:
+        except (EOFError, KeyboardInterrupt):
+            interaction.notify(WorkflowNotice(topic="record.setup_cancelled"))
+            return RecordingControlResult(exit_code=1, record_path=created_session.record_path)
+        except (CapturePlanningError, ValueError) as exc:
+            interaction.notify(
+                WorkflowNotice(
+                    topic="record.capture_not_started.error",
+                    context={"error": str(exc)},
+                )
+            )
+            return RecordingControlResult(exit_code=1, record_path=created_session.record_path)
+        if not command.stop_input_available:
+            interaction.notify(
+                WorkflowNotice(topic="record.capture_not_started.noninteractive_stop")
+            )
+            return RecordingControlResult(exit_code=1, record_path=created_session.record_path)
+        persist_session_capture_plan(
+            created_session.record_path,
+            _capture_plan_from_start_payload(start_payload, status="planned"),
+        )
+        started_at = _utc_timestamp(now)
+        persist_session_recording_lifecycle(
+            created_session.record_path,
+            status="recording",
+            recording=_recording_lifecycle(
+                started_at=started_at,
+                stopped_at=None,
+                stop_reason=None,
+                finalization_status="pending",
+                completed_at=None,
+                error=None,
+            ),
+            capture_plan=_capture_plan_from_start_payload(start_payload, status="active"),
+        )
+        try:
+            worker_kwargs: dict[str, object] = {
+                "session_id": created_session.record.id,
+                "session_dir": created_session.bundle_path,
+            }
+            if command.verbose:
+                worker_kwargs["capture_diagnostics"] = True
+            worker_context = worker_factory(**worker_kwargs)
+            worker = worker_context.__enter__()
+        except (OSError, subprocess.SubprocessError) as exc:
             _persist_capture_failure(
                 record_path=created_session.record_path,
                 start_payload=start_payload,
@@ -413,69 +336,161 @@ def run_recording_control_workflow(
                 WorkflowNotice(topic="record.capture_failed", context={"error": str(exc)})
             )
             return RecordingControlResult(exit_code=1, record_path=created_session.record_path)
-    finally:
-        worker_context.__exit__(*sys.exc_info())
-    finalized_payload = CaptureFinalizedPayload.from_dict(finalized.payload)
-    completed_at = finalized_payload.completed_at or _utc_timestamp(now)
-    stop_reason = "interrupted" if interrupted_stop else finalized_payload.stop_reason
-    capture_metadata = (
-        _capture_metadata_from_segments(start_payload, capture_monitor.segments)
-        if capture_monitor is not None
-        else finalized_payload.capture_metadata
-    )
-    source_independence_error = _source_independence_error(
-        capture_metadata,
-        session_dir=created_session.bundle_path,
-    )
-    final_status = finalized_payload.status
-    final_error = finalized_payload.error
-    if source_independence_error is not None:
-        final_status = "failed"
-        final_error = source_independence_error
-    persist_session_capture_metadata(created_session.record_path, capture_metadata)
-    persist_session_recording_lifecycle(
-        created_session.record_path,
-        status=final_status,
-        recording=_recording_lifecycle(
-            started_at=started_at,
-            stopped_at=completed_at,
-            stop_reason=stop_reason,
-            finalization_status=("finalized" if final_status == "recorded" else final_status),
-            completed_at=completed_at,
-            error=final_error,
-        ),
-        capture_plan=_capture_plan_from_start_payload(
-            start_payload,
-            status=("finalized" if final_status == "recorded" else final_status),
-        ),
-    )
-    interaction.notify(WorkflowNotice(topic="record.capture_finalized"))
-    if final_status == "recorded":
-        interaction.notify(
-            WorkflowNotice(
-                topic="record.process_handoff",
-                context={"data_root": data_root, "record_path": created_session.record_path},
+        try:
+            capture_monitor = _capture_event_monitor(
+                worker,
+                record_path=created_session.record_path,
+                start_payload=start_payload,
+                interaction=interaction,
             )
+            interrupted_stop = False
+            start_command_sent = False
+            monitor_started = False
+            finalized: ProtocolMessage | None = None
+            try:
+                worker.handshake()
+                interaction.notify(WorkflowNotice(topic="record.consent_notice"))
+                start_command_sent = True
+                worker.start_capture(start_payload)
+                if capture_monitor is not None:
+                    capture_monitor.start()
+                    monitor_started = True
+                _wait_for_record_stop(interaction, capture_monitor=capture_monitor)
+                finalized = _finalize_recording(
+                    worker,
+                    capture_monitor if monitor_started else None,
+                )
+                exit_code = worker.wait(timeout=command.worker_exit_timeout)
+                if exit_code != 0:
+                    raise WorkerExitedError(f"Worker exited with status {exit_code}.")
+            except (EOFError, KeyboardInterrupt):
+                if finalized is not None:
+                    interaction.notify(WorkflowNotice(topic="record.worker_teardown_interrupted"))
+                elif not start_command_sent:
+                    _persist_capture_failure(
+                        record_path=created_session.record_path,
+                        start_payload=start_payload,
+                        started_at=started_at,
+                        error_message="Recording setup cancelled.",
+                        now=now,
+                    )
+                    interaction.notify(WorkflowNotice(topic="record.setup_cancelled"))
+                    return RecordingControlResult(
+                        exit_code=1, record_path=created_session.record_path
+                    )
+                else:
+                    interaction.notify(WorkflowNotice(topic="record.stop_interrupted"))
+                    interrupted_stop = True
+                    try:
+                        finalized = _finalize_recording(
+                            worker,
+                            capture_monitor if monitor_started else None,
+                        )
+                        exit_code = worker.wait(timeout=command.worker_exit_timeout)
+                        if exit_code != 0:
+                            raise WorkerExitedError(f"Worker exited with status {exit_code}.")
+                    except (
+                        ProtocolError,
+                        WorkerExitedError,
+                        subprocess.TimeoutExpired,
+                        ValueError,
+                    ) as exc:
+                        _persist_capture_failure(
+                            record_path=created_session.record_path,
+                            start_payload=start_payload,
+                            started_at=started_at,
+                            error_message=str(exc),
+                            now=now,
+                        )
+                        interaction.notify(
+                            WorkflowNotice(
+                                topic="record.capture_failed", context={"error": str(exc)}
+                            )
+                        )
+                        return RecordingControlResult(
+                            exit_code=1,
+                            record_path=created_session.record_path,
+                        )
+            except (
+                ProtocolError,
+                WorkerExitedError,
+                subprocess.TimeoutExpired,
+                ValueError,
+            ) as exc:
+                _persist_capture_failure(
+                    record_path=created_session.record_path,
+                    start_payload=start_payload,
+                    started_at=started_at,
+                    error_message=str(exc),
+                    now=now,
+                )
+                interaction.notify(
+                    WorkflowNotice(topic="record.capture_failed", context={"error": str(exc)})
+                )
+                return RecordingControlResult(exit_code=1, record_path=created_session.record_path)
+        finally:
+            worker_context.__exit__(*sys.exc_info())
+        finalized_payload = CaptureFinalizedPayload.from_dict(finalized.payload)
+        completed_at = finalized_payload.completed_at or _utc_timestamp(now)
+        stop_reason = "interrupted" if interrupted_stop else finalized_payload.stop_reason
+        capture_metadata = (
+            _capture_metadata_from_segments(start_payload, capture_monitor.segments)
+            if capture_monitor is not None
+            else finalized_payload.capture_metadata
         )
-    elif final_error:
-        interaction.notify(
-            WorkflowNotice(
-                topic="record.finalized_status_error",
-                context={"status": final_status, "error": final_error},
+        source_independence_error = _source_independence_error(
+            capture_metadata,
+            session_dir=created_session.bundle_path,
+        )
+        final_status = finalized_payload.status
+        final_error = finalized_payload.error
+        if source_independence_error is not None:
+            final_status = "failed"
+            final_error = source_independence_error
+        persist_session_capture_metadata(created_session.record_path, capture_metadata)
+        persist_session_recording_lifecycle(
+            created_session.record_path,
+            status=final_status,
+            recording=_recording_lifecycle(
+                started_at=started_at,
+                stopped_at=completed_at,
+                stop_reason=stop_reason,
+                finalization_status=("finalized" if final_status == "recorded" else final_status),
+                completed_at=completed_at,
+                error=final_error,
+            ),
+            capture_plan=_capture_plan_from_start_payload(
+                start_payload,
+                status=("finalized" if final_status == "recorded" else final_status),
+            ),
+        )
+        interaction.notify(WorkflowNotice(topic="record.capture_finalized"))
+        if final_status == "recorded":
+            interaction.notify(
+                WorkflowNotice(
+                    topic="record.process_handoff",
+                    context={"data_root": data_root, "record_path": created_session.record_path},
+                )
             )
-        )
-    else:
-        interaction.notify(
-            WorkflowNotice(
-                topic="record.finalized_status",
-                context={"status": final_status},
+        elif final_error:
+            interaction.notify(
+                WorkflowNotice(
+                    topic="record.finalized_status_error",
+                    context={"status": final_status, "error": final_error},
+                )
             )
+        else:
+            interaction.notify(
+                WorkflowNotice(
+                    topic="record.finalized_status",
+                    context={"status": final_status},
+                )
+            )
+        return RecordingControlResult(
+            exit_code=1 if final_status == "failed" else 0,
+            record_path=created_session.record_path,
+            final_status=final_status,
         )
-    return RecordingControlResult(
-        exit_code=1 if final_status == "failed" else 0,
-        record_path=created_session.record_path,
-        final_status=final_status,
-    )
 
 
 def _capture_plan_from_start_payload(

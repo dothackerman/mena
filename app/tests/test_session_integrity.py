@@ -21,6 +21,7 @@ from mena.session_integrity import (
     rebuild_session_index,
     verify_session_bundle,
 )
+from mena.session_lock import acquire_session_lock
 from mena.sessions import CreatedSession, create_session, update_session_capture_metadata
 
 
@@ -122,6 +123,16 @@ def test_verify_session_bundle_detects_orphaned_artifact_file(tmp_path: Path) ->
 
     assert not report.ok
     assert "orphaned_artifact_file" in _codes(report)
+
+
+def test_verify_session_bundle_ignores_orchestrator_lock_file(tmp_path: Path) -> None:
+    session = _create_recorded_session(tmp_path)
+
+    with acquire_session_lock(session_dir=session.bundle_path, command="process"):
+        report = verify_session_bundle(session.bundle_path)
+
+    assert report.ok
+    assert "orphaned_artifact_file" not in _codes(report)
 
 
 def test_verify_session_bundle_ignores_hidden_provider_prep_temps(tmp_path: Path) -> None:

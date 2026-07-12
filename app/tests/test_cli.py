@@ -101,6 +101,7 @@ from mena.runtime_stewardship import (
 from mena.semantic_coherence import (
     FakeSemanticCoherenceProvider,
 )
+from mena.session_lock import SessionLockContention, acquire_session_lock
 from mena.sessions import (
     SESSION_RECORD_FILENAME,
     SESSION_RECORD_VERSION,
@@ -190,6 +191,33 @@ def test_main_prints_version(capsys: CaptureFixture[str]) -> None:
     captured = capsys.readouterr()
     assert exit_code == 0
     assert captured.out.strip()
+
+
+def test_main_returns_exit_code_4_for_session_lock_contention(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    session = create_session(
+        profile=parse_capture_profile("online"),
+        data_root=tmp_path,
+        now=datetime(2026, 5, 8, 5, 30, 0, tzinfo=UTC),
+    )
+
+    def _locked_processing_runner(**_kwargs: object) -> int:
+        raise SessionLockContention(
+            f"Session is already locked by orchestrator pid=123 command=summarize "
+            f"for session {session.bundle_path}."
+        )
+
+    exit_code = main(
+        ["process", str(session.bundle_path)],
+        settings=AppSettings.from_env(env={}, home=tmp_path),
+        processing_command_runner=_locked_processing_runner,
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 4
+    assert "pid=123 command=summarize" in captured.out
 
 
 def test_setup_check_reports_product_paths_and_ready_state(
@@ -2230,6 +2258,21 @@ def test_main_inspect_command_reports_bundle_integrity(
     assert '"artifact_count": 0' in captured.out
 
 
+def test_main_inspect_command_succeeds_on_locked_session(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    session_dir = _create_session_record(tmp_path)
+
+    with acquire_session_lock(session_dir=session_dir, command="process"):
+        exit_code = main(["inspect", str(session_dir)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert f"Integrity report for {session_dir}: OK" in captured.out
+    assert '"ok": true' in captured.out
+    assert "orphaned_artifact_file" not in captured.out
+
+
 def test_main_inspect_command_rejects_invalid_session(
     tmp_path: Path, capsys: CaptureFixture[str]
 ) -> None:
@@ -2638,7 +2681,7 @@ def test_console_processing_interaction_renders_runtime_stewardship_release_warn
     assert "Runtime stewardship warning: release failed" in captured.out
 
 
-def test_main_resume_delegates_next_attempt_to_processing_workflow(
+def test_main_resume_runs_next_attempt_through_locked_workflow(
     tmp_path: Path,
 ) -> None:
     session = _build_processing_session(tmp_path)
@@ -2654,18 +2697,14 @@ def test_main_resume_delegates_next_attempt_to_processing_workflow(
         ),
         attempt=4,
     )
-    processing = _ProcessingCommandSpy()
 
-    assert (
-        main(
-            ["resume", str(session.record_path)],
-            processing_command_runner=processing,
-        )
-        == 0
+    assert _main_process_with_fake_providers(["resume", str(session.record_path)]) == 0
+
+    _assert_processing_attempt(
+        session,
+        run_id=failed_state.run_id,
+        attempt=failed_state.attempt + 1,
     )
-
-    assert processing.calls[0]["run_id"] == failed_state.run_id
-    assert processing.calls[0]["attempt"] == failed_state.attempt + 1
 
 
 def test_main_process_reports_provider_validation_errors(
@@ -2733,17 +2772,15 @@ def test_main_resume_retries_latest_retryable_failure(
         ),
         attempt=4,
     )
-    processing = _ProcessingCommandSpy()
-
-    exit_code = main(
-        ["resume", str(session.record_path)],
-        processing_command_runner=processing,
-    )
+    exit_code = _main_process_with_fake_providers(["resume", str(session.record_path)])
 
     captured = capsys.readouterr()
     assert exit_code == 0
-    assert processing.calls[0]["run_id"] == failed_state.run_id
-    assert processing.calls[0]["attempt"] == failed_state.attempt + 1
+    _assert_processing_attempt(
+        session,
+        run_id=failed_state.run_id,
+        attempt=failed_state.attempt + 1,
+    )
     assert "Processing completed successfully." not in captured.out
 
 
@@ -2759,17 +2796,15 @@ def test_main_resume_retries_interrupted_running_state(
         input_artifacts=(),
         attempt=7,
     )
-    processing = _ProcessingCommandSpy()
-
-    exit_code = main(
-        ["resume", str(session.record_path)],
-        processing_command_runner=processing,
-    )
+    exit_code = _main_process_with_fake_providers(["resume", str(session.record_path)])
 
     captured = capsys.readouterr()
     assert exit_code == 0
-    assert processing.calls[0]["run_id"] == running_state.run_id
-    assert processing.calls[0]["attempt"] == running_state.attempt + 1
+    _assert_processing_attempt(
+        session,
+        run_id=running_state.run_id,
+        attempt=running_state.attempt + 1,
+    )
     assert "Processing completed successfully." not in captured.out
 
 
@@ -2799,6 +2834,21 @@ def test_main_resume_without_retryable_failure_reports_no_retry(
         "run-blocked', stage 'transcription', attempt 1: "
         "Non-retryable setup (code=input)" in captured.out
     )
+
+
+def test_main_resume_reports_lock_contention_before_retry_lookup(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    session = create_session(profile=parse_capture_profile("online"), data_root=tmp_path)
+
+    with acquire_session_lock(session_dir=session.bundle_path, command="process"):
+        exit_code = main(["resume", str(session.record_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 4
+    assert "pid=" in captured.out
+    assert "command=process" in captured.out
+    assert "No retryable processing failure found to resume." not in captured.out
 
 
 def test_main_resume_blocks_non_retryable_failure_after_running_checkpoint(
@@ -2866,15 +2916,14 @@ def test_main_resume_after_mid_run_completed_checkpoint_continues(
         started_at=running_state.started_at,
         now=now,
     )
-    processing = _ProcessingCommandSpy()
-    exit_code = main(
-        ["resume", str(session.record_path)],
-        processing_command_runner=processing,
-    )
+    exit_code = _main_process_with_fake_providers(["resume", str(session.record_path)])
 
     assert exit_code == 0
-    assert processing.calls[0]["run_id"] == completed_state.run_id
-    assert processing.calls[0]["attempt"] == completed_state.attempt + 1
+    _assert_processing_attempt(
+        session,
+        run_id=completed_state.run_id,
+        attempt=completed_state.attempt + 1,
+    )
 
 
 def test_main_resume_after_mid_run_skipped_checkpoint_continues(
@@ -2904,15 +2953,14 @@ def test_main_resume_after_mid_run_skipped_checkpoint_continues(
             completed_at="2026-05-08T08:30:00Z",
         )
     )
-    processing = _ProcessingCommandSpy()
-    exit_code = main(
-        ["resume", str(session.record_path)],
-        processing_command_runner=processing,
-    )
+    exit_code = _main_process_with_fake_providers(["resume", str(session.record_path)])
 
     assert exit_code == 0
-    assert processing.calls[0]["run_id"] == skipped_state.run_id
-    assert processing.calls[0]["attempt"] == skipped_state.attempt + 1
+    _assert_processing_attempt(
+        session,
+        run_id=skipped_state.run_id,
+        attempt=skipped_state.attempt + 1,
+    )
 
 
 def test_main_resume_after_final_completed_checkpoint_reports_no_retry(
@@ -3030,15 +3078,14 @@ def test_main_resume_uses_durable_checkpoint_order_when_timestamps_tie(
         attempt=3,
         now=now,
     )
-    processing = _ProcessingCommandSpy()
-    exit_code = main(
-        ["resume", str(session.record_path)],
-        processing_command_runner=processing,
-    )
+    exit_code = _main_process_with_fake_providers(["resume", str(session.record_path)])
 
     assert exit_code == 0
-    assert processing.calls[0]["run_id"] == newer_state.run_id
-    assert processing.calls[0]["attempt"] == newer_state.attempt + 1
+    _assert_processing_attempt(
+        session,
+        run_id=newer_state.run_id,
+        attempt=newer_state.attempt + 1,
+    )
 
 
 def test_main_resume_without_checkpoint_reports_no_retry(
@@ -4249,6 +4296,18 @@ def _completed_processing_payloads(session: CreatedSession) -> list[dict[str, ob
         for payload in _processing_state_payloads(session)
         if payload["status"] == "completed"
     ]
+
+
+def _assert_processing_attempt(
+    session: CreatedSession,
+    *,
+    run_id: str,
+    attempt: int,
+) -> None:
+    assert any(
+        payload["run_id"] == run_id and payload["attempt"] == attempt
+        for payload in _processing_state_payloads(session)
+    )
 
 
 def _unavailable_discoverer(profile: CaptureProfileId) -> AudioDiscovery:
