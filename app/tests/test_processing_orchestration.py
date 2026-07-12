@@ -761,9 +761,12 @@ def test_provider_prep_helpers_reject_incompatible_or_changed_audio(
 @pytest.mark.parametrize(
     ("extra", "match"),
     [
-        ({"route_id": 1}, "route_id must be a string"),
-        ({"route_label": 1}, "route_label must be a string"),
-        ({"capture_mode": 1}, "capture_mode must be a string"),
+        ({"route_id": 1}, "Session field 'route_id' must be a non-empty string or null."),
+        ({"route_id": ""}, "Session field 'route_id' must be a non-empty string or null."),
+        ({"route_label": 1}, "Session field 'route_label' must be a non-empty string or null."),
+        ({"route_label": ""}, "Session field 'route_label' must be a non-empty string or null."),
+        ({"capture_mode": 1}, "Session field 'capture_mode' must be a non-empty string or null."),
+        ({"capture_mode": ""}, "Session field 'capture_mode' must be a non-empty string or null."),
     ],
 )
 def test_collect_capture_segments_rejects_invalid_optional_metadata(
