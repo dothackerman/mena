@@ -357,7 +357,26 @@ def test_prompt_and_runtime_adapter_helpers(
         cli._resolve_runtime_fallback_interaction(explicit), cli.ConsoleProcessingInteraction
     )
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: False))
-    assert cli._resolve_runtime_fallback_interaction(None) is None
+    noninteractive = cli._resolve_runtime_fallback_interaction(None)
+    assert isinstance(noninteractive, cli.ConsoleProcessingInteraction)
+    assert (
+        noninteractive.confirm(
+            ConfirmationRequest(
+                topic="runtime_fallback.one_run",
+                context={
+                    "accepted_failure": "no gpu",
+                    "fallback_evaluation": SimpleNamespace(
+                        profile=SimpleNamespace(id="fallback"),
+                        selected_asr_profile=SimpleNamespace(
+                            checkpoint="small",
+                            device="cpu",
+                        ),
+                    ),
+                },
+            )
+        )
+        is False
+    )
 
     settings = AppSettings.from_env(env={}, home=tmp_path)
     assert cli._effective_record_data_root(tmp_path / "data", settings) == tmp_path / "data"
