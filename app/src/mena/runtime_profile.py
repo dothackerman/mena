@@ -125,6 +125,16 @@ class ResolvedSummarizationFallback:
 
 
 @dataclass(frozen=True)
+class SummarizationFallbackBlocker:
+    provider: str
+    detail: str
+
+    @property
+    def message(self) -> str:
+        return self.detail
+
+
+@dataclass(frozen=True)
 class BoundProcessingRuntime:
     selection: RuntimeProfileSelection
     transcription_provider: TranscriptionProvider
@@ -532,7 +542,7 @@ def _resolve_summarization_fallback(
         )
     probe = mistral_probe or check_mistral_summary_readiness
     probe_env: Mapping[str, str] = os.environ if env is None else env
-    reasons: list[str] = []
+    blockers: list[SummarizationFallbackBlocker] = []
     for entry in ordered:
         if entry.provider == OLLAMA_STAGE_PROVIDER:
             local = _resolve_local_summarization_fallback(
@@ -547,16 +557,27 @@ def _resolve_summarization_fallback(
             )
             if isinstance(local, ResolvedSummarizationFallback):
                 return local
-            reasons.append(local)
+            blockers.append(local)
             continue
         if entry.provider != MISTRAL_STAGE_PROVIDER:
-            reasons.append(
-                f"accepted fallback provider {entry.provider!r} is not supported by this runtime"
+            blockers.append(
+                SummarizationFallbackBlocker(
+                    provider=entry.provider,
+                    detail=(
+                        f"accepted fallback provider {entry.provider!r} is not supported "
+                        "by this runtime"
+                    ),
+                )
             )
             continue
         state = probe(env=probe_env)
         if not (state.key_present and state.reachable and state.model_allowed):
-            reasons.append(f"Mistral fallback is not viable: {state.detail}")
+            blockers.append(
+                SummarizationFallbackBlocker(
+                    provider=MISTRAL_STAGE_PROVIDER,
+                    detail=f"Mistral fallback is not viable: {state.detail}",
+                )
+            )
             continue
         authorization = accepted.fallback_authorization
         if (
@@ -569,9 +590,14 @@ def _resolve_summarization_fallback(
         ):
             source = "interactive"
         else:
-            reasons.append(
-                "Mistral fallback transition is not pre-authorized; re-run setup to "
-                "accept Mistral summarization fallback or confirm interactively"
+            blockers.append(
+                SummarizationFallbackBlocker(
+                    provider=MISTRAL_STAGE_PROVIDER,
+                    detail=(
+                        "Mistral fallback transition is not pre-authorized; re-run setup "
+                        "to accept Mistral summarization fallback or confirm interactively"
+                    ),
+                )
             )
             continue
         return ResolvedSummarizationFallback(
@@ -585,7 +611,8 @@ def _resolve_summarization_fallback(
         )
     raise RuntimeFallbackUnavailable(
         "Accepted summarization provider is unavailable and no accepted fallback "
-        f"provider can run: {failure_reason} Fallback blockers: {'; '.join(reasons)}"
+        "provider can run: "
+        f"{failure_reason} Fallback blockers: {'; '.join(blocker.message for blocker in blockers)}"
     )
 
 
@@ -599,7 +626,7 @@ def _resolve_local_summarization_fallback(
     accepted_stage: StageProfile,
     entry: StageProfile,
     ordered: tuple[StageProfile, ...],
-) -> ResolvedSummarizationFallback | str:
+) -> ResolvedSummarizationFallback | SummarizationFallbackBlocker:
     catalog = default_profile_catalog(entry.model)
     local_profile = next(
         (
@@ -611,7 +638,10 @@ def _resolve_local_summarization_fallback(
         None,
     )
     if local_profile is None:
-        return "Ollama fallback is not supported by this runtime"
+        return SummarizationFallbackBlocker(
+            provider=OLLAMA_STAGE_PROVIDER,
+            detail="Ollama fallback is not supported by this runtime",
+        )
     scope = _runtime_revalidation_scope(SUMMARIZATION_RUNTIME_STAGES, (entry,))
     command_runner = runner or SubprocessCommandRunner()
     detection_profile = _profile_for_scope(local_profile, scope)
@@ -624,11 +654,17 @@ def _resolve_local_summarization_fallback(
     )
     evaluation = _scope_evaluation(evaluate_setup(detection_profile, state), scope)
     if not evaluation.ready:
-        return f"Ollama fallback is not viable: {'; '.join(evaluation.blocking_reasons)}"
+        return SummarizationFallbackBlocker(
+            provider=OLLAMA_STAGE_PROVIDER,
+            detail=f"Ollama fallback is not viable: {'; '.join(evaluation.blocking_reasons)}",
+        )
     if not _automatic_local_fallback_authorized(accepted, scope):
-        return (
-            "Ollama fallback transition is not pre-authorized; re-run setup to accept "
-            "local summarization fallback"
+        return SummarizationFallbackBlocker(
+            provider=OLLAMA_STAGE_PROVIDER,
+            detail=(
+                "Ollama fallback transition is not pre-authorized; re-run setup to accept "
+                "local summarization fallback"
+            ),
         )
     return ResolvedSummarizationFallback(
         plan=SummarizationRuntimePlan(
