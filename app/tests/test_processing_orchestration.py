@@ -1,5 +1,6 @@
 import json
 import wave
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -8,6 +9,13 @@ import pytest
 
 from mena.artifacts import FileSystemArtifactStore
 from mena.diarization import DiarizationProviderUnavailable, FakeDiarizationProvider
+from mena.interaction import (
+    ChoiceOption,
+    ChoiceRequest,
+    ConfirmationRequest,
+    TextRequest,
+    WorkflowNotice,
+)
 from mena.processing import ArtifactRef, ProcessingErrorInfo, ProcessingStageLedger
 from mena.processing_orchestration import (
     CaptureSegmentInput,
@@ -24,11 +32,90 @@ from mena.processing_orchestration import (
     validate_capture_segment_alignment,
 )
 from mena.profiles import get_capture_profile
+from mena.runtime_profile import RuntimeFallbackUnavailable
 from mena.semantic_coherence import FakeSemanticCoherenceProvider
-from mena.transcription import FakeTranscriptionProvider, TranscriptionProviderUnavailable
+from mena.settings import AppSettings
+from mena.setup import (
+    CommandIdentity,
+    CommandRun,
+    HardwareFacts,
+    build_runtime_profile_state,
+    default_profile_catalog,
+    detect_local_installation_state,
+    evaluate_setup,
+    get_alpha_local_profile,
+    persist_runtime_profile_state,
+)
+from mena.transcription import (
+    FakeTranscriptionProvider,
+    TranscriptArtifact,
+    TranscriptionProviderUnavailable,
+    TranscriptionRequest,
+)
 
 SESSION_ID = "00000000-0000-0000-0000-000000000001"
 NOW = datetime(2026, 7, 2, 12, 0, 0, tzinfo=UTC)
+COMMAND_IDENTITY = CommandIdentity(
+    current_executable=Path("/home/user/.local/bin/mena"),
+    plain_mena_path=Path("/home/user/.local/bin/mena"),
+    version="0.1.0-test",
+    invocation_mode="installed-product",
+)
+READY_HARDWARE = HardwareFacts(
+    system="Linux",
+    ram_gb=32.0,
+    cuda_available=True,
+    vram_gb=12.0,
+    avx2_available=True,
+)
+
+
+class _ReadySetupRunner:
+    def __init__(self, *, ollama_model: str) -> None:
+        self._ollama_model = ollama_model
+
+    def which(self, command: str) -> Path | None:
+        return Path("/usr/bin") / command
+
+    def run(
+        self,
+        args: Sequence[str],
+        *,
+        timeout_seconds: float = 30.0,
+        env: Mapping[str, str] | None = None,
+    ) -> CommandRun:
+        command = tuple(args)
+        if command == ("ollama", "list"):
+            return CommandRun(
+                args=command,
+                exit_code=0,
+                stdout=f"NAME ID SIZE MODIFIED\n{self._ollama_model} abc 1 GB now\n",
+            )
+        return CommandRun(args=command, exit_code=0)
+
+
+class _NonInteractiveProcessingInteraction:
+    runtime_fallback_confirmation_available = False
+
+    def __init__(self) -> None:
+        self.notices: list[WorkflowNotice] = []
+
+    def choose(self, request: ChoiceRequest) -> ChoiceOption:
+        raise AssertionError("processing workflow should not request choices")
+
+    def confirm(self, request: ConfirmationRequest) -> bool:
+        raise AssertionError("non-interactive processing workflow should not confirm fallback")
+
+    def request_text(self, request: TextRequest) -> str:
+        raise AssertionError("processing workflow should not request text")
+
+    def notify(self, notice: WorkflowNotice) -> None:
+        self.notices.append(notice)
+
+
+class _UnavailableTranscriptionProvider(FakeTranscriptionProvider):
+    def transcribe(self, request: TranscriptionRequest) -> TranscriptArtifact:
+        raise TranscriptionProviderUnavailable("CUDA out of memory")
 
 
 def _segment(source_id: str, index: int, *, status: str = "sealed") -> dict[str, object]:
@@ -77,6 +164,37 @@ def _write_processing_session(tmp_path: Path) -> Path:
     return tmp_path
 
 
+def _persist_runtime_profile_state(
+    settings: AppSettings,
+    *,
+    runner: _ReadySetupRunner,
+    authorize_local_fallback: bool,
+) -> None:
+    primary_profile = get_alpha_local_profile(settings.local_llm.ollama_model)
+    fallback_profile = default_profile_catalog(settings.local_llm.ollama_model)[1]
+    setup_state = detect_local_installation_state(
+        settings,
+        runner=runner,
+        command_identity=COMMAND_IDENTITY,
+        hardware=READY_HARDWARE,
+    )
+    fallback_state = detect_local_installation_state(
+        settings,
+        runner=runner,
+        command_identity=COMMAND_IDENTITY,
+        hardware=READY_HARDWARE,
+        profile=fallback_profile,
+    )
+    persist_runtime_profile_state(
+        build_runtime_profile_state(
+            evaluate_setup(primary_profile, setup_state),
+            fallback_evaluation=evaluate_setup(fallback_profile, fallback_state),
+            authorize_local_fallback=authorize_local_fallback,
+        ),
+        paths=settings.paths,
+    )
+
+
 def test_run_processing_command_runs_pipeline_with_provider_fakes(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -101,6 +219,37 @@ def test_run_processing_command_runs_pipeline_with_provider_fakes(
     assert len(store.list(artifact_type="merged_transcript")) == 1
     assert len(store.list(artifact_type="review_queue")) == 2
     assert "Processing completed for run 'run-1' (attempt 2)." in capsys.readouterr().out
+
+
+def test_run_processing_command_preserves_noninteractive_fallback_guidance(
+    tmp_path: Path,
+) -> None:
+    session_path = _write_processing_session(tmp_path)
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    runner = _ReadySetupRunner(ollama_model=settings.local_llm.ollama_model)
+    interaction = _NonInteractiveProcessingInteraction()
+    _persist_runtime_profile_state(
+        settings,
+        runner=runner,
+        authorize_local_fallback=False,
+    )
+
+    with pytest.raises(RuntimeFallbackUnavailable, match="pass --allow-runtime-fallback"):
+        run_processing_command(
+            session_path=session_path,
+            run_id="run-1",
+            attempt=1,
+            now=NOW,
+            transcription_provider_factory=_UnavailableTranscriptionProvider,
+            diarization_provider_factory=FakeDiarizationProvider,
+            settings=settings,
+            setup_runner=runner,
+            setup_command_identity=COMMAND_IDENTITY,
+            setup_hardware=READY_HARDWARE,
+            interaction=interaction,
+        )
+
+    assert interaction.notices == []
 
 
 def test_run_processing_stages_sequences_room_mic_profile(tmp_path: Path) -> None:

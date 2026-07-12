@@ -138,20 +138,7 @@ def run_processing_command(
         base_semantic_coherence_provider_factory,
     ):
         effective_settings = settings or AppSettings.from_env()
-        runtime_fallback_authorizer = (
-            None
-            if interaction is None
-            else lambda failure, fallback: interaction.confirm(
-                ConfirmationRequest(
-                    topic="runtime_fallback.one_run",
-                    context={
-                        "accepted_failure": failure,
-                        "fallback_evaluation": fallback,
-                    },
-                    default=False,
-                )
-            )
-        )
+        runtime_fallback_authorizer = _runtime_fallback_authorizer(interaction)
         runtime_bound = resolve_processing_runtime(
             settings=effective_settings,
             store=store,
@@ -873,6 +860,29 @@ def _requires_runtime_profile(
         diarization_provider_factory=diarization_provider_factory,
         semantic_coherence_provider_factory=semantic_coherence_provider_factory,
     )
+
+
+def _runtime_fallback_authorizer(
+    interaction: InteractionPort | None,
+) -> Callable[[str, Any], bool] | None:
+    if interaction is None:
+        return None
+    if not getattr(interaction, "runtime_fallback_confirmation_available", True):
+        return None
+
+    def _authorize(failure: str, fallback: Any) -> bool:
+        return interaction.confirm(
+            ConfirmationRequest(
+                topic="runtime_fallback.one_run",
+                context={
+                    "accepted_failure": failure,
+                    "fallback_evaluation": fallback,
+                },
+                default=False,
+            )
+        )
+
+    return _authorize
 
 
 def _validate_processing_profile_support(profile: CaptureProfile) -> None:

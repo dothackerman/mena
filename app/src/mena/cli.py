@@ -447,6 +447,10 @@ class ConsoleProcessingInteraction:
     def __init__(self, input_fn: Callable[[str], str] | None) -> None:
         self._input_fn = input_fn
 
+    @property
+    def runtime_fallback_confirmation_available(self) -> bool:
+        return self._input_fn is not None
+
     def choose(self, request: ChoiceRequest) -> ChoiceOption:
         raise ValueError(f"Unsupported processing choice topic '{request.topic}'.")
 
