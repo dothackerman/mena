@@ -2369,7 +2369,86 @@ def test_main_list_prints_corrupt_bundle_as_degraded_line_and_exits_zero(
     degraded_line = next(line for line in lines if degraded.record.id[:8] in line)
     assert "DEGRADED" not in healthy_line
     assert "DEGRADED" in degraded_line
+    assert "orphaned_artifact_file" in degraded_line
+    assert "Artifact file is not referenced by the manifest or capture metadata." in degraded_line
     assert str(degraded.bundle_path) in degraded_line
+
+
+def test_main_list_prints_unreadable_session_record_as_degraded_line(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    unreadable = _create_named_runtime_session(
+        settings,
+        name="Broken record",
+        status="recorded",
+        created_at="2026-05-19T12:00:00Z",
+    )
+    unreadable.record_path.write_text("{not json", encoding="utf-8")
+
+    exit_code = main(["list"], settings=settings)
+    captured = capsys.readouterr()
+    lines = [line for line in captured.out.splitlines() if line]
+
+    assert exit_code == 0
+    assert len(lines) == 1
+    fields = lines[0].split(" | ")
+    assert fields[:6] == [
+        "unknown",
+        unreadable.bundle_path.name[:8],
+        "Untitled recording",
+        "unknown",
+        "unknown",
+        str(unreadable.bundle_path),
+    ]
+    assert "DEGRADED" in fields[6]
+    assert "session_record_invalid" in fields[6]
+    assert "session_record_unreadable" in fields[6]
+
+
+def test_main_list_sorts_unparseable_timestamps_last_in_projection_order(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    parseable = _create_named_runtime_session(
+        settings,
+        name="Parseable",
+        status="recorded",
+        created_at="2026-05-19T10:00:00Z",
+    )
+    unparseable_a = _create_named_runtime_session(
+        settings,
+        name="Unparseable A",
+        status="recorded",
+        created_at="2026-05-19T11:00:00Z",
+    )
+    unparseable_b = _create_named_runtime_session(
+        settings,
+        name="Unparseable B",
+        status="recorded",
+        created_at="2026-05-19T12:00:00Z",
+    )
+    for session, created_at in (
+        (unparseable_a, "not-a-date"),
+        (unparseable_b, "also-not-a-date"),
+    ):
+        record = json.loads(session.record_path.read_text(encoding="utf-8"))
+        record["created_at"] = created_at
+        session.record_path.write_text(json.dumps(record), encoding="utf-8")
+    expected_unparseable_order = [
+        session.record.id[:8]
+        for session in sorted(
+            (unparseable_a, unparseable_b),
+            key=lambda item: item.bundle_path,
+        )
+    ]
+
+    exit_code = main(["list"], settings=settings)
+    captured = capsys.readouterr()
+    listed_ids = [line.split(" | ")[1] for line in captured.out.splitlines() if line]
+
+    assert exit_code == 0
+    assert listed_ids == [parseable.record.id[:8], *expected_unparseable_order]
 
 
 def test_main_list_empty_root_prints_no_sessions_and_exits_zero(

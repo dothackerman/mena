@@ -1484,7 +1484,10 @@ def _format_session_index_line(entry: SessionIndexEntry) -> str:
     )
     line = " | ".join(fields)
     if not entry.integrity_ok:
-        line = f"{line} | DEGRADED ({entry.finding_count} integrity finding(s))"
+        reason_suffix = ""
+        if entry.finding_reasons:
+            reason_suffix = ": " + "; ".join(entry.finding_reasons)
+        line = f"{line} | DEGRADED ({entry.finding_count} integrity finding(s){reason_suffix})"
     return line
 
 
