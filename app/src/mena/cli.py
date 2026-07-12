@@ -783,6 +783,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 DiscoveryFn = Callable[..., AudioDiscovery]
 WorkerFactory = Callable[..., Any]
+ProcessingCommandRunner = Callable[..., int]
 
 
 def main(
@@ -803,6 +804,9 @@ def main(
     setup_runner: CommandRunner | None = None,
     setup_command_identity: CommandIdentity | None = None,
     setup_hardware: HardwareFacts | None = None,
+    processing_command_runner: ProcessingCommandRunner = (
+        processing_orchestration.run_processing_command
+    ),
 ) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -1024,7 +1028,7 @@ def main(
 
             if args.command == "process":
                 print(f"Processing recording: {session_path}")
-            exit_code = processing_orchestration.run_processing_command(
+            exit_code = processing_command_runner(
                 session_path=session_path,
                 run_id=invocation_run_id,
                 attempt=invocation_attempt,
