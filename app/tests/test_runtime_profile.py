@@ -1707,6 +1707,47 @@ def test_summarization_runtime_selection_rejects_unauthorized_local_fallback(
         )
 
 
+def test_summarization_runtime_selection_allows_one_run_local_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    setup_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = replace(
+        _accepted_mistral_primary_state(settings=settings, setup_state=setup_state),
+        summarization_fallback_providers=(_ollama_summary_stage(settings),),
+    )
+    persist_runtime_profile_state(accepted, paths=settings.paths)
+    mistral_down = replace(
+        setup_state,
+        mistral_summary=_mistral_summary_state(
+            key_present=False,
+            reachable=False,
+            resolved_model=None,
+            model_allowed=False,
+            detail="MENA_MISTRAL_API_KEY is not set.",
+        ),
+    )
+    monkeypatch.setattr(
+        "mena.runtime_profile.detect_local_installation_state",
+        lambda *_args, **_kwargs: mistral_down,
+    )
+
+    selection = select_summarization_runtime_profile(
+        settings=settings,
+        runner=None,
+        command_identity=None,
+        hardware=None,
+        allow_runtime_fallback=True,
+    )
+
+    assert selection.fallback_used
+    assert selection.fallback_authorization_source == "explicit_one_run"
+    assert selection.summarization is not None
+    assert selection.summarization.accepted_stage.provider == "Mistral"
+    assert selection.summarization.actual_stage.provider == "Ollama"
+
+
 def test_summarization_runtime_selection_uses_accepted_mistral_fallback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2028,6 +2069,50 @@ def test_summarization_stage_failure_selection_can_fallback_from_mistral_to_loca
     assert selection.summarization.accepted_stage.provider == "Mistral"
     assert selection.summarization.actual_stage.provider == "Ollama"
     assert selection.actual.stage_policies == (_ollama_summary_stage(settings),)
+
+
+def test_summarization_stage_failure_selection_allows_one_run_local_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    ready_state = _setup_state(settings=settings, pyannote_token_present=True)
+    accepted = replace(
+        _accepted_mistral_primary_state(settings=settings, setup_state=ready_state),
+        summarization_fallback_providers=(_ollama_summary_stage(settings),),
+    )
+    monkeypatch.setattr(
+        "mena.runtime_profile.detect_local_installation_state",
+        lambda *_args, **_kwargs: ready_state,
+    )
+    accepted_stage = next(
+        stage for stage in accepted.stage_policies if stage.stage == "summarization"
+    )
+    used_plan = SummarizationRuntimePlan(
+        accepted_stage=accepted_stage,
+        actual_stage=accepted_stage,
+        ordered_fallback=accepted.summarization_fallback_providers,
+    )
+
+    selection = select_summarization_runtime_after_stage_failure(
+        settings=settings,
+        runner=None,
+        command_identity=None,
+        hardware=None,
+        accepted=accepted,
+        used_plan=used_plan,
+        failure_reason="Mistral summarization provider is unavailable.",
+        failure_class="SummarizationProviderUnavailable",
+        failed_input_artifacts=("session:artifacts/merged_transcript/merged.json",),
+        allow_runtime_fallback=True,
+    )
+
+    assert selection.fallback_used
+    assert selection.fallback_status == "used_after_stage_failure"
+    assert selection.fallback_authorization_source == "explicit_one_run"
+    assert selection.summarization is not None
+    assert selection.summarization.accepted_stage.provider == "Mistral"
+    assert selection.summarization.actual_stage.provider == "Ollama"
 
 
 def test_summarization_stage_failure_selection_stops_after_the_last_entry(

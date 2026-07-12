@@ -425,6 +425,7 @@ def select_summarization_runtime_profile(
         accepted_stage=accepted_stage,
         ordered=ordered,
         failure_reason=accepted_failure,
+        allow_runtime_fallback=allow_runtime_fallback,
         authorize_remote_summarization_fallback=authorize_remote_summarization_fallback,
         env=env,
         mistral_probe=mistral_probe,
@@ -457,6 +458,7 @@ def select_summarization_runtime_after_stage_failure(
     failure_reason: str,
     failure_class: str,
     failed_input_artifacts: tuple[str, ...] = (),
+    allow_runtime_fallback: bool = False,
     authorize_remote_summarization_fallback: AuthorizeRemoteSummarizationFallback | None = None,
     env: Mapping[str, str] | None = None,
     mistral_probe: MistralSummaryProbe | None = None,
@@ -488,6 +490,7 @@ def select_summarization_runtime_after_stage_failure(
         accepted_stage=used_plan.accepted_stage,
         ordered=remaining,
         failure_reason=failure_reason,
+        allow_runtime_fallback=allow_runtime_fallback,
         authorize_remote_summarization_fallback=authorize_remote_summarization_fallback,
         env=env,
         mistral_probe=mistral_probe,
@@ -523,6 +526,7 @@ def _resolve_summarization_fallback(
     accepted_stage: StageProfile,
     ordered: tuple[StageProfile, ...],
     failure_reason: str,
+    allow_runtime_fallback: bool,
     authorize_remote_summarization_fallback: AuthorizeRemoteSummarizationFallback | None,
     env: Mapping[str, str] | None,
     mistral_probe: MistralSummaryProbe | None,
@@ -530,9 +534,9 @@ def _resolve_summarization_fallback(
     """Resolve the first viable, authorized entry of the accepted ordered list.
 
     Raises ``RuntimeFallbackUnavailable`` with every per-entry reason when no
-    entry can run. ``--allow-runtime-fallback`` style one-run authorization is
-    deliberately not consulted here: it satisfies the local fallback contract
-    (ADR-031) and never authorizes a remote provider transition.
+    entry can run. ``--allow-runtime-fallback`` style one-run authorization can
+    authorize a local Ollama fallback for this invocation, but it never
+    authorizes a remote provider transition.
     """
 
     if not ordered:
@@ -554,6 +558,7 @@ def _resolve_summarization_fallback(
                 accepted_stage=accepted_stage,
                 entry=entry,
                 ordered=ordered,
+                allow_runtime_fallback=allow_runtime_fallback,
             )
             if isinstance(local, ResolvedSummarizationFallback):
                 return local
@@ -626,6 +631,7 @@ def _resolve_local_summarization_fallback(
     accepted_stage: StageProfile,
     entry: StageProfile,
     ordered: tuple[StageProfile, ...],
+    allow_runtime_fallback: bool,
 ) -> ResolvedSummarizationFallback | SummarizationFallbackBlocker:
     catalog = default_profile_catalog(entry.model)
     local_profile = next(
@@ -658,7 +664,11 @@ def _resolve_local_summarization_fallback(
             provider=OLLAMA_STAGE_PROVIDER,
             detail=f"Ollama fallback is not viable: {'; '.join(evaluation.blocking_reasons)}",
         )
-    if not _automatic_local_fallback_authorized(accepted, scope):
+    if allow_runtime_fallback:
+        authorization_source = "explicit_one_run"
+    elif _automatic_local_fallback_authorized(accepted, scope):
+        authorization_source = "setup_authorized"
+    else:
         return SummarizationFallbackBlocker(
             provider=OLLAMA_STAGE_PROVIDER,
             detail=(
@@ -672,7 +682,7 @@ def _resolve_local_summarization_fallback(
             actual_stage=entry,
             ordered_fallback=ordered,
         ),
-        authorization_source="setup_authorized",
+        authorization_source=authorization_source,
         actual=build_runtime_profile_state(evaluation),
         revalidation=evaluation,
     )
@@ -1004,6 +1014,7 @@ def run_summarization_with_runtime_fallback(
                     authorize_remote_summarization_fallback=(
                         authorize_remote_summarization_fallback
                     ),
+                    allow_runtime_fallback=allow_runtime_fallback,
                     env=env,
                     mistral_probe=mistral_probe,
                 )
