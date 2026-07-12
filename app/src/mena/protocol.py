@@ -12,20 +12,7 @@ from types import TracebackType
 from typing import IO, Self
 from uuid import uuid4
 
-from mena.fields import (
-    optional_enum_str,
-    optional_int,
-    optional_number,
-    optional_str,
-    required_bool,
-    required_dict,
-    required_enum_str,
-    required_int,
-    required_list,
-    required_number,
-    required_sha256,
-    required_str,
-)
+from mena.fields import ContractReader, required_sha256
 
 PROTOCOL_MAJOR = 1
 PROTOCOL_MINOR = 1
@@ -61,6 +48,9 @@ MESSAGE_TYPES = frozenset(
 
 class ProtocolError(RuntimeError):
     """Raised when a peer sends an invalid protocol frame."""
+
+
+PROTOCOL_READER = ContractReader("Protocol", ProtocolError)
 
 
 class WorkerExitedError(RuntimeError):
@@ -122,12 +112,12 @@ class ProtocolMessage:
         if not isinstance(data, dict):
             raise ProtocolError("Protocol frame must be a JSON object.")
 
-        version = _required_int(data, "v")
+        version = PROTOCOL_READER.required_int(data, "v")
         if version != ENVELOPE_VERSION:
             raise ProtocolError(
                 f"Unsupported protocol envelope version {version}; expected {ENVELOPE_VERSION}."
             )
-        message_type = _required_str(data, "type")
+        message_type = PROTOCOL_READER.required_str(data, "type")
         validate_message_type(message_type)
         payload = data.get("payload")
         if not isinstance(payload, dict):
@@ -137,8 +127,8 @@ class ProtocolMessage:
         return cls(
             v=version,
             type=message_type,
-            id=_required_str(data, "id"),
-            session_id=_required_str(data, "session_id"),
+            id=PROTOCOL_READER.required_str(data, "id"),
+            session_id=PROTOCOL_READER.required_str(data, "session_id"),
             payload=payload,
         )
 
@@ -191,29 +181,29 @@ class CaptureRouteBindingPayload:
             "capture route binding",
             optional_keys={"backend_target", "node_name", "object_serial", "sink_input_id"},
         )
-        source_id = _optional_enum_str(
+        source_id = _read_optional_enum_str(
             payload,
             "source_id",
             CAPTURE_SOURCE_IDS,
             "capture route binding",
         )
         return cls(
-            role=_required_enum_str(
+            role=_read_enum_str(
                 payload,
                 "role",
                 CAPTURE_ROUTE_ROLES,
                 "capture route binding",
             ),
             source_id=source_id,
-            route_id=_required_str(payload, "route_id"),
-            label=_required_str(payload, "label"),
-            backend=_required_str(payload, "backend"),
-            backend_name=_optional_str(payload, "backend_name", "capture route binding"),
-            backend_target=_optional_str(payload, "backend_target", "capture route binding"),
-            node_name=_optional_str(payload, "node_name", "capture route binding"),
-            object_serial=_optional_str(payload, "object_serial", "capture route binding"),
-            sink_input_id=_optional_str(payload, "sink_input_id", "capture route binding"),
-            required=_required_bool(payload, "required"),
+            route_id=PROTOCOL_READER.required_str(payload, "route_id"),
+            label=PROTOCOL_READER.required_str(payload, "label"),
+            backend=PROTOCOL_READER.required_str(payload, "backend"),
+            backend_name=_read_optional_str(payload, "backend_name", "capture route binding"),
+            backend_target=_read_optional_str(payload, "backend_target", "capture route binding"),
+            node_name=_read_optional_str(payload, "node_name", "capture route binding"),
+            object_serial=_read_optional_str(payload, "object_serial", "capture route binding"),
+            sink_input_id=_read_optional_str(payload, "sink_input_id", "capture route binding"),
+            required=PROTOCOL_READER.required_bool(payload, "required"),
         )
 
 
@@ -244,7 +234,7 @@ class StartCapturePayload:
             {"profile", "language", "segment_seconds", "selected_sources", "routes"},
             "start_capture payload",
         )
-        selected_sources = _required_str_sequence(
+        selected_sources = _read_str_sequence(
             payload,
             "selected_sources",
             "start_capture payload",
@@ -259,7 +249,7 @@ class StartCapturePayload:
             )
         if len(set(selected_sources)) != len(selected_sources):
             raise ProtocolError("start_capture payload selected_sources must be unique.")
-        raw_routes = _required_list(payload, "routes", "start_capture payload")
+        raw_routes = _read_list(payload, "routes", "start_capture payload")
         parsed_routes: list[CaptureRouteBindingPayload] = []
         for route in raw_routes:
             if not isinstance(route, dict):
@@ -269,14 +259,14 @@ class StartCapturePayload:
         if not routes:
             raise ProtocolError("start_capture payload routes must not be empty.")
         return cls(
-            profile=_required_enum_str(
+            profile=_read_enum_str(
                 payload,
                 "profile",
                 CAPTURE_PROFILE_IDS,
                 "start_capture payload",
             ),
-            language=_required_str(payload, "language"),
-            segment_seconds=_required_positive_int(payload, "segment_seconds"),
+            language=PROTOCOL_READER.required_str(payload, "language"),
+            segment_seconds=_read_positive_int(payload, "segment_seconds"),
             selected_sources=selected_sources,
             routes=routes,
         )
@@ -307,7 +297,7 @@ class CaptureStartedPayload:
             {"session_dir", "profile", "segment_seconds", "selected_sources"},
             "capture_started payload",
         )
-        selected_sources = _required_str_sequence(
+        selected_sources = _read_str_sequence(
             payload,
             "selected_sources",
             "capture_started payload",
@@ -321,14 +311,14 @@ class CaptureStartedPayload:
                 f"'{invalid_sources[0]}'."
             )
         return cls(
-            session_dir=_required_str(payload, "session_dir"),
-            profile=_required_enum_str(
+            session_dir=PROTOCOL_READER.required_str(payload, "session_dir"),
+            profile=_read_enum_str(
                 payload,
                 "profile",
                 CAPTURE_PROFILE_IDS,
                 "capture_started payload",
             ),
-            segment_seconds=_required_positive_int(payload, "segment_seconds"),
+            segment_seconds=_read_positive_int(payload, "segment_seconds"),
             selected_sources=selected_sources,
         )
 
@@ -357,14 +347,14 @@ class CaptureStatusPayload:
             "capture_status payload",
         )
         return cls(
-            status=_required_enum_str(
+            status=_read_enum_str(
                 payload,
                 "status",
                 CAPTURE_STATUS_VALUES,
                 "capture_status payload",
             ),
-            elapsed_seconds=_required_non_negative_number(payload, "elapsed_seconds"),
-            sealed_segment_count=_required_non_negative_int(payload, "sealed_segment_count"),
+            elapsed_seconds=_read_non_negative_number(payload, "elapsed_seconds"),
+            sealed_segment_count=_read_non_negative_int(payload, "sealed_segment_count"),
         )
 
 
@@ -417,34 +407,34 @@ class CaptureRouteEventPayload:
             "capture_route_event payload",
         )
         return cls(
-            event=_required_enum_str(
+            event=_read_enum_str(
                 payload,
                 "event",
                 CAPTURE_ROUTE_EVENT_TYPES,
                 "capture_route_event payload",
             ),
-            code=_required_str(payload, "code"),
-            message=_required_str(payload, "message"),
-            source_id=_optional_enum_str(
+            code=PROTOCOL_READER.required_str(payload, "code"),
+            message=PROTOCOL_READER.required_str(payload, "message"),
+            source_id=_read_optional_enum_str(
                 payload,
                 "source_id",
                 CAPTURE_SOURCE_IDS,
                 "capture_route_event payload",
             ),
-            occurred_at=_optional_str(payload, "occurred_at", "capture_route_event payload"),
-            elapsed_seconds=_optional_non_negative_number(
+            occurred_at=_read_optional_str(payload, "occurred_at", "capture_route_event payload"),
+            elapsed_seconds=_read_optional_non_negative_number(
                 payload,
                 "elapsed_seconds",
                 "capture_route_event payload",
             ),
-            segment_index=_optional_positive_int(
+            segment_index=_read_optional_positive_int(
                 payload,
                 "segment_index",
                 "capture_route_event payload",
             ),
-            route_id=_optional_str(payload, "route_id", "capture_route_event payload"),
-            route_label=_optional_str(payload, "route_label", "capture_route_event payload"),
-            capture_mode=_optional_enum_str(
+            route_id=_read_optional_str(payload, "route_id", "capture_route_event payload"),
+            route_label=_read_optional_str(payload, "route_label", "capture_route_event payload"),
+            capture_mode=_read_optional_enum_str(
                 payload,
                 "capture_mode",
                 CAPTURE_MODE_VALUES,
@@ -501,36 +491,36 @@ class SegmentFlushedPayload:
             },
             "segment_flushed payload",
         )
-        segment_format = _required_str(payload, "format")
+        segment_format = PROTOCOL_READER.required_str(payload, "format")
         if segment_format != "wav":
             raise ProtocolError("segment_flushed payload format must be 'wav'.")
         return cls(
-            source_id=_required_enum_str(
+            source_id=_read_enum_str(
                 payload,
                 "source_id",
                 CAPTURE_SOURCE_IDS,
                 "segment_flushed payload",
             ),
-            index=_required_positive_int(payload, "index"),
-            path=_required_str(payload, "path"),
-            sample_rate=_required_positive_int(payload, "sample_rate"),
-            channels=_required_positive_int(payload, "channels"),
-            channel_layout=_required_str(payload, "channel_layout"),
-            sample_format=_required_str(payload, "sample_format"),
-            byte_count=_required_non_negative_int(payload, "byte_count"),
-            duration_seconds=_required_non_negative_number(payload, "duration_seconds"),
-            started_at=_optional_str(payload, "started_at", "segment_flushed payload"),
-            ended_at=_optional_str(payload, "ended_at", "segment_flushed payload"),
-            sha256=_required_sha256(payload, "sha256"),
-            route_id=_optional_str(payload, "route_id", "segment_flushed payload"),
-            route_label=_optional_str(payload, "route_label", "segment_flushed payload"),
-            capture_mode=_optional_enum_str(
+            index=_read_positive_int(payload, "index"),
+            path=PROTOCOL_READER.required_str(payload, "path"),
+            sample_rate=_read_positive_int(payload, "sample_rate"),
+            channels=_read_positive_int(payload, "channels"),
+            channel_layout=PROTOCOL_READER.required_str(payload, "channel_layout"),
+            sample_format=PROTOCOL_READER.required_str(payload, "sample_format"),
+            byte_count=_read_non_negative_int(payload, "byte_count"),
+            duration_seconds=_read_non_negative_number(payload, "duration_seconds"),
+            started_at=_read_optional_str(payload, "started_at", "segment_flushed payload"),
+            ended_at=_read_optional_str(payload, "ended_at", "segment_flushed payload"),
+            sha256=_read_sha256(payload, "sha256"),
+            route_id=_read_optional_str(payload, "route_id", "segment_flushed payload"),
+            route_label=_read_optional_str(payload, "route_label", "segment_flushed payload"),
+            capture_mode=_read_optional_enum_str(
                 payload,
                 "capture_mode",
                 CAPTURE_MODE_VALUES,
                 "segment_flushed payload",
             ),
-            status=_required_enum_str(
+            status=_read_enum_str(
                 payload,
                 "status",
                 SEGMENT_STATUS_VALUES,
@@ -576,7 +566,7 @@ class SegmentsFlushedPayload:
     def from_dict(cls, data: Mapping[str, object]) -> Self:
         payload = _ensure_mapping(data, "segments_flushed payload")
         _require_exact_keys(payload, {"segments"}, "segments_flushed payload")
-        raw_segments = _required_list(payload, "segments", "segments_flushed payload")
+        raw_segments = _read_list(payload, "segments", "segments_flushed payload")
         if not raw_segments:
             raise ProtocolError("segments_flushed payload segments must not be empty.")
         segments: list[SegmentFlushedPayload] = []
@@ -614,27 +604,27 @@ class CaptureFinalizedPayload:
             {"status", "stop_reason", "completed_at", "error", "capture_metadata"},
             "capture_finalized payload",
         )
-        capture_metadata = _required_mapping(
+        capture_metadata = _read_mapping(
             payload,
             "capture_metadata",
             "capture_finalized payload",
         )
         _validate_capture_metadata_or_summary(capture_metadata)
         return cls(
-            status=_required_enum_str(
+            status=_read_enum_str(
                 payload,
                 "status",
                 CAPTURE_FINALIZED_STATUS_VALUES,
                 "capture_finalized payload",
             ),
-            stop_reason=_required_enum_str(
+            stop_reason=_read_enum_str(
                 payload,
                 "stop_reason",
                 CAPTURE_STOP_REASONS,
                 "capture_finalized payload",
             ),
-            completed_at=_optional_str(payload, "completed_at", "capture_finalized payload"),
-            error=_optional_str(payload, "error", "capture_finalized payload"),
+            completed_at=_read_optional_str(payload, "completed_at", "capture_finalized payload"),
+            error=_read_optional_str(payload, "error", "capture_finalized payload"),
             capture_metadata=dict(capture_metadata),
         )
 
@@ -660,11 +650,11 @@ class ErrorPayload:
     def from_dict(cls, data: Mapping[str, object]) -> Self:
         payload = _ensure_mapping(data, "error payload")
         _require_exact_keys(payload, {"code", "message", "recoverable", "details"}, "error payload")
-        details = _required_mapping(payload, "details", "error payload")
+        details = _read_mapping(payload, "details", "error payload")
         return cls(
-            code=_required_str(payload, "code"),
-            message=_required_str(payload, "message"),
-            recoverable=_required_bool(payload, "recoverable"),
+            code=PROTOCOL_READER.required_str(payload, "code"),
+            message=PROTOCOL_READER.required_str(payload, "message"),
+            recoverable=PROTOCOL_READER.required_bool(payload, "recoverable"),
             details=dict(details),
         )
 
@@ -735,7 +725,7 @@ def validate_hello(message: ProtocolMessage) -> None:
         raise ProtocolError(
             f"Unsupported protocol major version {protocol_major}; expected {PROTOCOL_MAJOR}."
         )
-    _required_int(message.payload, "protocol_minor")
+    PROTOCOL_READER.required_int(message.payload, "protocol_minor")
     if message.payload.get("role") != "worker":
         raise ProtocolError("Hello role must be 'worker'.")
 
@@ -877,70 +867,33 @@ class WorkerProcess:
         return stderr
 
 
-def _required_str(data: dict[str, object], key: str) -> str:
-    return required_str(
-        data,
-        key,
-        error=ProtocolError,
-        message=f"Protocol field '{key}' must be a non-empty string.",
-    )
-
-
-def _required_int(data: dict[str, object], key: str) -> int:
-    return required_int(
-        data,
-        key,
-        error=ProtocolError,
-        message=f"Protocol field '{key}' must be an integer.",
-    )
-
-
-def _required_positive_int(data: dict[str, object], key: str) -> int:
-    value = _required_int(data, key)
+def _read_positive_int(data: dict[str, object], key: str) -> int:
+    value = PROTOCOL_READER.required_int(data, key)
     if value < 1:
         raise ProtocolError(f"Protocol field '{key}' must be a positive integer.")
     return value
 
 
-def _required_non_negative_int(data: dict[str, object], key: str) -> int:
-    value = _required_int(data, key)
+def _read_non_negative_int(data: dict[str, object], key: str) -> int:
+    value = PROTOCOL_READER.required_int(data, key)
     if value < 0:
         raise ProtocolError(f"Protocol field '{key}' must be non-negative.")
     return value
 
 
-def _required_bool(data: dict[str, object], key: str) -> bool:
-    return required_bool(
-        data,
-        key,
-        error=ProtocolError,
-        message=f"Protocol field '{key}' must be a boolean.",
-    )
-
-
-def _required_non_negative_number(data: dict[str, object], key: str) -> float:
-    normalized = required_number(
-        data,
-        key,
-        error=ProtocolError,
-        message=f"Protocol field '{key}' must be a number.",
-    )
+def _read_non_negative_number(data: dict[str, object], key: str) -> float:
+    normalized = PROTOCOL_READER.required_number(data, key)
     if normalized < 0:
         raise ProtocolError(f"Protocol field '{key}' must be non-negative.")
     return normalized
 
 
-def _optional_non_negative_number(
+def _read_optional_non_negative_number(
     data: dict[str, object],
     key: str,
     context: str,
 ) -> float | None:
-    normalized = optional_number(
-        data,
-        key,
-        error=ProtocolError,
-        message=f"{context} field '{key}' must be a number or null.",
-    )
+    normalized = ContractReader(context, ProtocolError).optional_number(data, key)
     if normalized is None:
         return None
     if normalized < 0:
@@ -948,17 +901,12 @@ def _optional_non_negative_number(
     return normalized
 
 
-def _optional_positive_int(
+def _read_optional_positive_int(
     data: dict[str, object],
     key: str,
     context: str,
 ) -> int | None:
-    value = optional_int(
-        data,
-        key,
-        error=ProtocolError,
-        message=f"{context} field '{key}' must be an integer or null.",
-    )
+    value = ContractReader(context, ProtocolError).optional_int(data, key)
     if value is None:
         return None
     if value < 1:
@@ -966,50 +914,39 @@ def _optional_positive_int(
     return value
 
 
-def _required_enum_str(
+def _read_enum_str(
     data: dict[str, object],
     key: str,
     allowed_values: frozenset[str],
     context: str,
 ) -> str:
     allowed = ", ".join(sorted(allowed_values))
-    return required_enum_str(
-        data,
-        key,
-        allowed_values,
-        error=ProtocolError,
-        string_message=f"Protocol field '{key}' must be a non-empty string.",
-        enum_message=f"{context} field '{key}' must be one of: {allowed}.",
-    )
+    value = PROTOCOL_READER.required_str(data, key)
+    if value not in allowed_values:
+        raise ProtocolError(f"{context} field '{key}' must be one of: {allowed}.")
+    return value
 
 
-def _optional_enum_str(
+def _read_optional_enum_str(
     data: dict[str, object],
     key: str,
     allowed_values: frozenset[str],
     context: str,
 ) -> str | None:
     allowed = ", ".join(sorted(allowed_values))
-    return optional_enum_str(
-        data,
-        key,
-        allowed_values,
-        error=ProtocolError,
-        string_message=f"{context} field '{key}' must be a non-empty string or null.",
-        enum_message=f"{context} field '{key}' must be one of: {allowed}, or null.",
-    )
+    value = ContractReader(context, ProtocolError).optional_str(data, key)
+    if value is None:
+        return None
+    if value not in allowed_values:
+        raise ProtocolError(f"{context} field '{key}' must be one of: {allowed}, or null.")
+    return value
 
 
-def _optional_str(data: dict[str, object], key: str, context: str) -> str | None:
-    return optional_str(
-        data,
-        key,
-        error=ProtocolError,
-        message=f"{context} field '{key}' must be a non-empty string or null.",
-    )
+def _read_optional_str(data: dict[str, object], key: str, context: str) -> str | None:
+    return ContractReader(context, ProtocolError).optional_str(data, key)
 
 
-def _required_sha256(data: dict[str, object], key: str) -> str:
+def _read_sha256(data: dict[str, object], key: str) -> str:
     return required_sha256(
         data,
         key,
@@ -1025,38 +962,28 @@ def _ensure_mapping(data: Mapping[str, object], context: str) -> dict[str, objec
     return data
 
 
-def _required_mapping(
+def _read_mapping(
     data: dict[str, object],
     key: str,
     context: str,
 ) -> dict[str, object]:
-    return required_dict(
-        data,
-        key,
-        error=ProtocolError,
-        message=f"{context} field '{key}' must be a JSON object.",
-    )
+    return ContractReader(context, ProtocolError).required_dict(data, key)
 
 
-def _required_list(
+def _read_list(
     data: dict[str, object],
     key: str,
     context: str,
 ) -> list[object]:
-    return required_list(
-        data,
-        key,
-        error=ProtocolError,
-        message=f"{context} field '{key}' must be an array.",
-    )
+    return ContractReader(context, ProtocolError).required_list(data, key)
 
 
-def _required_str_sequence(
+def _read_str_sequence(
     data: dict[str, object],
     key: str,
     context: str,
 ) -> tuple[str, ...]:
-    values = _required_list(data, key, context)
+    values = _read_list(data, key, context)
     strings: list[str] = []
     for index, value in enumerate(values):
         if not isinstance(value, str) or not value:
@@ -1103,8 +1030,8 @@ def _validate_capture_metadata(data: dict[str, object]) -> None:
             "sources",
         },
     )
-    segment_count = _required_non_negative_int(data, "segment_count")
-    segments = _required_list(data, "segments", "capture_metadata")
+    segment_count = _read_non_negative_int(data, "segment_count")
+    segments = _read_list(data, "segments", "capture_metadata")
     if segment_count != len(segments):
         raise ProtocolError("capture_metadata segment_count must match segments length.")
     for segment in segments:
@@ -1126,7 +1053,7 @@ def _validate_capture_metadata_summary(data: dict[str, object]) -> None:
             "sources",
         },
     )
-    _required_non_negative_int(data, "segment_count")
+    _read_non_negative_int(data, "segment_count")
 
 
 def _validate_capture_metadata_common(
@@ -1135,13 +1062,13 @@ def _validate_capture_metadata_common(
     expected_keys: set[str],
 ) -> None:
     _require_exact_keys(data, expected_keys, "capture_metadata")
-    if _required_int(data, "version") != 1:
+    if PROTOCOL_READER.required_int(data, "version") != 1:
         raise ProtocolError("capture_metadata field 'version' must be 1.")
-    _required_enum_str(data, "profile", CAPTURE_PROFILE_IDS, "capture_metadata")
-    _required_positive_int(data, "sample_rate")
-    _required_positive_int(data, "channels")
-    _required_positive_int(data, "segment_seconds")
-    sources = _required_list(data, "sources", "capture_metadata")
+    _read_enum_str(data, "profile", CAPTURE_PROFILE_IDS, "capture_metadata")
+    _read_positive_int(data, "sample_rate")
+    _read_positive_int(data, "channels")
+    _read_positive_int(data, "segment_seconds")
+    sources = _read_list(data, "sources", "capture_metadata")
     for source in sources:
         if not isinstance(source, dict):
             raise ProtocolError("capture_metadata sources must contain JSON objects.")
@@ -1161,14 +1088,14 @@ def _validate_capture_source_summary(data: dict[str, object]) -> None:
         },
         "capture source summary",
     )
-    _required_enum_str(data, "source_id", CAPTURE_SOURCE_IDS, "capture source summary")
-    _optional_str(data, "route_id", "capture source summary")
-    _optional_str(data, "route_label", "capture source summary")
-    _optional_enum_str(
+    _read_enum_str(data, "source_id", CAPTURE_SOURCE_IDS, "capture source summary")
+    _read_optional_str(data, "route_id", "capture source summary")
+    _read_optional_str(data, "route_label", "capture source summary")
+    _read_optional_enum_str(
         data,
         "capture_mode",
         CAPTURE_MODE_VALUES,
         "capture source summary",
     )
-    _required_str(data, "channel_layout")
-    _required_non_negative_int(data, "segment_count")
+    PROTOCOL_READER.required_str(data, "channel_layout")
+    _read_non_negative_int(data, "segment_count")

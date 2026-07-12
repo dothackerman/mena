@@ -20,7 +20,7 @@ from mena.diarization import (
     DiarizationProviderUnavailable,
     run_diarization_stage,
 )
-from mena.fields import optional_str, required_int, required_str
+from mena.fields import ContractReader
 from mena.interaction import ConfirmationRequest, InteractionPort, WorkflowNotice
 from mena.merge_timing import (
     MergePolicy,
@@ -64,6 +64,7 @@ from mena.transcription import (
 
 ProviderFactory = Callable[[], Any]
 ProviderFactoryInput = ProviderFactory | None
+SESSION_READER = ContractReader("Session", ValueError)
 
 
 @dataclass(frozen=True)
@@ -479,14 +480,14 @@ def collect_capture_segments(
     for raw_segment in raw_segments:
         if not isinstance(raw_segment, dict):
             raise ValueError("Capture segment metadata must be an object.")
-        source_id = _required_str(raw_segment, "source_id")
+        source_id = SESSION_READER.required_str(raw_segment, "source_id")
         if source_id not in grouped:
             raise ValueError(
                 f"Session contains an unexpected capture source '{source_id}' for processing."
             )
-        index = _required_int(raw_segment, "index")
-        _ = _required_str(raw_segment, "path")
-        status = _required_str(raw_segment, "status")
+        index = _read_positive_session_int(raw_segment, "index")
+        _ = SESSION_READER.required_str(raw_segment, "path")
+        status = SESSION_READER.required_str(raw_segment, "status")
         if status != "sealed":
             raise ValueError(
                 f"Capture segment for source '{source_id}' index {index} is {status}, not sealed."
@@ -505,7 +506,7 @@ def collect_capture_segments(
             raise ValueError("Capture segment capture_mode must be a string when provided.")
         grouped[source_id].append(
             {
-                "path": _required_str(raw_segment, "path"),
+                "path": SESSION_READER.required_str(raw_segment, "path"),
                 "index": index,
                 "status": status,
                 "sha256": expected_sha,
@@ -550,14 +551,14 @@ def prepare_source_audio_inputs(
     for source_id in required_sources:
         segment_inputs: list[CaptureSegmentInput] = []
         for segment_metadata in capture_segments[source_id]:
-            raw_path = _required_str(segment_metadata, "path")
-            index = _required_int(segment_metadata, "index")
+            raw_path = SESSION_READER.required_str(segment_metadata, "path")
+            index = _read_positive_session_int(segment_metadata, "index")
             expected_sha = segment_metadata.get("sha256")
             if expected_sha is not None and not isinstance(expected_sha, str):
                 raise ValueError("Capture segment sha256 must be a string when provided.")
-            route_id = _optional_metadata_str(segment_metadata, "route_id")
-            route_label = _optional_metadata_str(segment_metadata, "route_label")
-            capture_mode = _optional_metadata_str(segment_metadata, "capture_mode")
+            route_id = SESSION_READER.optional_str(segment_metadata, "route_id")
+            route_label = SESSION_READER.optional_str(segment_metadata, "route_label")
+            capture_mode = SESSION_READER.optional_str(segment_metadata, "capture_mode")
             segment_path = Path(raw_path)
             if not segment_path.is_absolute():
                 segment_path = session_dir / segment_path
@@ -617,7 +618,7 @@ def prepare_source_audio_inputs(
                 segments=tuple(segment_inputs),
                 output_path=prep_path,
             )
-            prep_sha = _required_str(prep_metadata, "sha256")
+            prep_sha = SESSION_READER.required_str(prep_metadata, "sha256")
             prep_artifact = _ensure_provider_prep_audio_artifact(
                 store=store,
                 source_id=source_id,
@@ -932,35 +933,11 @@ def _require_provider(
     return require_provider(provider_factory, provider_type, provider_name)
 
 
-def _required_str(payload: dict[str, object], key: str) -> str:
-    value = required_str(
-        payload,
-        key,
-        error=ValueError,
-        message=f"Session field '{key}' is required and must be a non-empty string.",
-    )
-    return value
-
-
-def _required_int(payload: dict[str, object], key: str) -> int:
-    value = required_int(
-        payload,
-        key,
-        error=ValueError,
-        message=f"Session field '{key}' must be a positive integer.",
-    )
+def _read_positive_session_int(payload: dict[str, object], key: str) -> int:
+    value = SESSION_READER.required_int(payload, key)
     if value <= 0:
         raise ValueError(f"Session field '{key}' must be a positive integer.")
     return value
-
-
-def _optional_metadata_str(payload: dict[str, object], key: str) -> str | None:
-    return optional_str(
-        payload,
-        key,
-        error=ValueError,
-        message=f"Session field '{key}' must be a non-empty string or null.",
-    )
 
 
 # Backward-compatibility shims for existing CLI import paths.

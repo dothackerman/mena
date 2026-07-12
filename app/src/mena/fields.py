@@ -4,10 +4,125 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
-from typing import TypeVar
+from dataclasses import dataclass
+from typing import Generic, TypeVar
 
 _TError = TypeVar("_TError", bound=Exception)
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+
+
+@dataclass(frozen=True)
+class ContractReader(Generic[_TError]):
+    context_label: str
+    error: type[_TError]
+
+    def required_str(self, data: Mapping[str, object], key: str) -> str:
+        return required_str(
+            data,
+            key,
+            error=self.error,
+            message=self._message(key, "is required and must be a non-empty string"),
+        )
+
+    def optional_str(self, data: Mapping[str, object], key: str) -> str | None:
+        return optional_str(
+            data,
+            key,
+            error=self.error,
+            message=self._message(key, "must be a non-empty string or null"),
+        )
+
+    def required_nullable_str(self, data: Mapping[str, object], key: str) -> str | None:
+        return required_nullable_str(
+            data,
+            key,
+            error=self.error,
+            missing_message=self._message(key, "is required"),
+            invalid_message=self._message(key, "must be a non-empty string or null"),
+        )
+
+    def required_int(self, data: Mapping[str, object], key: str) -> int:
+        return required_int(
+            data,
+            key,
+            error=self.error,
+            message=self._message(key, "must be an integer"),
+        )
+
+    def optional_int(self, data: Mapping[str, object], key: str) -> int | None:
+        return optional_int(
+            data,
+            key,
+            error=self.error,
+            message=self._message(key, "must be an integer or null"),
+        )
+
+    def required_bool(self, data: Mapping[str, object], key: str) -> bool:
+        return required_bool(
+            data,
+            key,
+            error=self.error,
+            message=self._message(key, "must be a boolean"),
+        )
+
+    def required_number(self, data: Mapping[str, object], key: str) -> float:
+        return required_number(
+            data,
+            key,
+            error=self.error,
+            message=self._message(key, "must be a number"),
+        )
+
+    def optional_number(self, data: Mapping[str, object], key: str) -> float | None:
+        return optional_number(
+            data,
+            key,
+            error=self.error,
+            message=self._message(key, "must be a number or null"),
+        )
+
+    def required_mapping(
+        self,
+        data: Mapping[str, object],
+        key: str,
+    ) -> Mapping[str, object]:
+        return required_mapping(
+            data,
+            key,
+            error=self.error,
+            message=self._message(key, "must be a JSON object"),
+        )
+
+    def required_dict(self, data: Mapping[str, object], key: str) -> dict[str, object]:
+        return required_dict(
+            data,
+            key,
+            error=self.error,
+            message=self._message(key, "must be a JSON object"),
+        )
+
+    def optional_mapping(
+        self,
+        data: Mapping[str, object],
+        key: str,
+    ) -> Mapping[str, object]:
+        return optional_mapping(
+            data,
+            key,
+            error=self.error,
+            message=self._message(key, "must be a JSON object or null"),
+        )
+
+    def required_list(self, data: Mapping[str, object], key: str) -> list[object]:
+        return required_list(
+            data,
+            key,
+            error=self.error,
+            message=self._message(key, "must be an array"),
+        )
+
+    def _message(self, key: str, requirement: str) -> str:
+        return f"{self.context_label} field '{key}' {requirement}."
 
 
 def required_str(
