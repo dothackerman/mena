@@ -1,3 +1,4 @@
+import hashlib
 import json
 from datetime import UTC, datetime
 from importlib.resources import files
@@ -30,11 +31,14 @@ from mena.merge_timing import (
     MergeTimingContractError,
     MergeTimingError,
     MergeTimingInputError,
+    MergeTimingStageResult,
     SegmentConfidence,
+    SourceDiarizationInput,
     SpeakerIdentity,
     persist_merged_transcript_artifact,
-    run_merge_timing_stage,
-    run_room_mic_merge_timing_stage,
+)
+from mena.merge_timing import (
+    run_merge_timing_stage as _run_merge_timing_stage,
 )
 from mena.processing import ArtifactRef, ProcessingStageLedger
 from mena.transcription import (
@@ -50,6 +54,93 @@ from mena.transcription import (
 SESSION_ID = "00000000-0000-0000-0000-000000000001"
 RUN_ID = "run-20260517"
 NOW = datetime(2026, 5, 17, 14, 0, 0, tzinfo=UTC)
+ONLINE_DUAL_STREAM_MERGED_TRANSCRIPT_GOLDEN_SHA256 = (
+    "0fa7e3da930ff2114bf9db0e6618557579d02c651c2093e681c25c3301df4790"
+)
+IN_PERSON_SINGLE_MIC_MERGED_TRANSCRIPT_GOLDEN_SHA256 = (
+    "265d5eaf4a6fdb30c642aafe2a684377d4bcae1f6333f8e9270f1d8d010d11e8"
+)
+
+
+def run_merge_timing_stage(
+    *,
+    store: FileSystemArtifactStore | InMemoryArtifactStore,
+    ledger: ProcessingStageLedger,
+    local_transcript_record: ArtifactRecord,
+    remote_transcript_record: ArtifactRecord,
+    policy: MergePolicy | None = None,
+    remote_regular_diarization_record: ArtifactRecord | None = None,
+    remote_exclusive_diarization_record: ArtifactRecord | None = None,
+    remote_diarization_status: str | None = None,
+    remote_diarization_reason: str | None = None,
+    attempt: int = 1,
+    now: datetime | None = None,
+) -> MergeTimingStageResult:
+    effective_policy = policy or MergePolicy(
+        local_source_id=_metadata_source_id(local_transcript_record) or "local_mic",
+        remote_source_id=_metadata_source_id(remote_transcript_record) or "system_audio",
+    )
+    return _run_merge_timing_stage(
+        store=store,
+        ledger=ledger,
+        policy=effective_policy,
+        transcript_records={
+            effective_policy.local_source_id: local_transcript_record,
+            effective_policy.remote_source_id: remote_transcript_record,
+        },
+        diarization_inputs={
+            effective_policy.remote_source_id: SourceDiarizationInput(
+                regular_record=remote_regular_diarization_record,
+                exclusive_record=remote_exclusive_diarization_record,
+                status=remote_diarization_status,
+                reason=remote_diarization_reason,
+            )
+        },
+        attempt=attempt,
+        now=now,
+    )
+
+
+def run_single_source_merge_timing_stage(
+    *,
+    store: FileSystemArtifactStore | InMemoryArtifactStore,
+    ledger: ProcessingStageLedger,
+    room_transcript_record: ArtifactRecord,
+    policy: MergePolicy | None = None,
+    room_regular_diarization_record: ArtifactRecord | None = None,
+    room_exclusive_diarization_record: ArtifactRecord | None = None,
+    room_diarization_status: str | None = None,
+    room_diarization_reason: str | None = None,
+    attempt: int = 1,
+    now: datetime | None = None,
+) -> MergeTimingStageResult:
+    effective_policy = policy or MergePolicy(
+        capture_profile="in_person_single_mic",
+        room_source_id=_metadata_source_id(room_transcript_record) or "room_mic",
+    )
+    return _run_merge_timing_stage(
+        store=store,
+        ledger=ledger,
+        policy=effective_policy,
+        transcript_records={effective_policy.room_source_id: room_transcript_record},
+        diarization_inputs={
+            effective_policy.room_source_id: SourceDiarizationInput(
+                regular_record=room_regular_diarization_record,
+                exclusive_record=room_exclusive_diarization_record,
+                status=room_diarization_status,
+                reason=room_diarization_reason,
+            )
+        },
+        attempt=attempt,
+        now=now,
+    )
+
+
+def _metadata_source_id(record: ArtifactRecord) -> str | None:
+    value = record.metadata.get("source_id")
+    if isinstance(value, str) and value:
+        return value
+    return None
 
 
 def test_merge_timing_stage_persists_merged_artifact_and_completed_checkpoint(
@@ -132,7 +223,12 @@ def test_merge_timing_stage_persists_merged_artifact_and_completed_checkpoint(
     assert result.state.status == "completed"
     assert result.merged_transcript_record.artifact_type == MERGED_TRANSCRIPT_ARTIFACT_TYPE
     assert result.merged_transcript_record.metadata["contract"] == "merged-transcript.v1"
-    payload = json.loads(store.retrieve(result.merged_transcript_record.id))
+    payload_bytes = store.retrieve(result.merged_transcript_record.id)
+    assert (
+        hashlib.sha256(payload_bytes).hexdigest()
+        == ONLINE_DUAL_STREAM_MERGED_TRANSCRIPT_GOLDEN_SHA256
+    )
+    payload = json.loads(payload_bytes)
     Draft202012Validator(
         _load_merged_transcript_schema(),
         format_checker=FormatChecker(),
@@ -155,7 +251,7 @@ def test_merge_timing_stage_persists_merged_artifact_and_completed_checkpoint(
     ]
 
 
-def test_room_mic_merge_timing_stage_persists_single_source_room_artifact(
+def test_merge_timing_stage_persists_single_source_room_artifact(
     tmp_path: Path,
 ) -> None:
     store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=tmp_path)
@@ -175,7 +271,7 @@ def test_room_mic_merge_timing_stage_persists_single_source_room_artifact(
     )
     ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
 
-    result = run_room_mic_merge_timing_stage(
+    result = run_single_source_merge_timing_stage(
         store=store,
         ledger=ledger,
         room_transcript_record=room_transcript_record,
@@ -188,7 +284,12 @@ def test_room_mic_merge_timing_stage_persists_single_source_room_artifact(
     assert result.state.status == "completed"
     assert result.merged_transcript_record.metadata["room_source_id"] == "room_mic"
     assert result.merged_transcript_record.metadata["room_diarization_status"] == "used"
-    payload = json.loads(store.retrieve(result.merged_transcript_record.id))
+    payload_bytes = store.retrieve(result.merged_transcript_record.id)
+    assert (
+        hashlib.sha256(payload_bytes).hexdigest()
+        == IN_PERSON_SINGLE_MIC_MERGED_TRANSCRIPT_GOLDEN_SHA256
+    )
+    payload = json.loads(payload_bytes)
     Draft202012Validator(
         _load_merged_transcript_schema(),
         format_checker=FormatChecker(),
@@ -205,7 +306,7 @@ def test_room_mic_merge_timing_stage_persists_single_source_room_artifact(
     assert artifact.segments[0].speaker.label == "Room speaker 1"
 
 
-def test_room_mic_merge_timing_rejects_exclusive_capture_profile_mismatch(
+def test_merge_timing_stage_rejects_single_source_exclusive_capture_profile_mismatch(
     tmp_path: Path,
 ) -> None:
     store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=tmp_path)
@@ -237,7 +338,7 @@ def test_room_mic_merge_timing_rejects_exclusive_capture_profile_mismatch(
         MergeTimingError,
         match="Room exclusive diarization capture_profile must match the merge policy",
     ):
-        run_room_mic_merge_timing_stage(
+        run_single_source_merge_timing_stage(
             store=store,
             ledger=ledger,
             room_transcript_record=room_transcript_record,
@@ -247,7 +348,7 @@ def test_room_mic_merge_timing_rejects_exclusive_capture_profile_mismatch(
         )
 
 
-def test_room_mic_merge_timing_stage_reuses_verified_completed_output() -> None:
+def test_merge_timing_stage_reuses_verified_completed_single_source_output() -> None:
     store = InMemoryArtifactStore(session_id=SESSION_ID)
     room_source = store.store(artifact_type="source_audio", name="room.wav", data=b"room")
     room_transcript_record = _persist_transcript(
@@ -257,7 +358,7 @@ def test_room_mic_merge_timing_stage_reuses_verified_completed_output() -> None:
     )
     ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
 
-    first = run_room_mic_merge_timing_stage(
+    first = run_single_source_merge_timing_stage(
         store=store,
         ledger=ledger,
         room_transcript_record=room_transcript_record,
@@ -265,7 +366,7 @@ def test_room_mic_merge_timing_stage_reuses_verified_completed_output() -> None:
         room_diarization_reason="diarization_disabled",
         now=NOW,
     )
-    second = run_room_mic_merge_timing_stage(
+    second = run_single_source_merge_timing_stage(
         store=store,
         ledger=ledger,
         room_transcript_record=room_transcript_record,
@@ -277,6 +378,10 @@ def test_room_mic_merge_timing_stage_reuses_verified_completed_output() -> None:
     assert second.skipped is True
     assert second.skip_reason == "completed_output_reused"
     assert second.merged_transcript_record == first.merged_transcript_record
+    assert (
+        first.merged_transcript_record.metadata["policy_config_id"]
+        == MergePolicy(capture_profile="in_person_single_mic").config_id
+    )
     room_source_info = second.merged_transcript.sources[0]
     room_segment = second.merged_transcript.segments[0]
     assert room_source_info.diarization_status == "skipped"
@@ -324,6 +429,7 @@ def test_merge_timing_stage_reuses_verified_completed_output() -> None:
     assert second.skipped is True
     assert second.skip_reason == "completed_output_reused"
     assert second.merged_transcript_record == first.merged_transcript_record
+    assert first.merged_transcript_record.metadata["policy_config_id"] == MergePolicy().config_id
 
 
 def test_merge_timing_stage_reuse_is_scoped_to_matching_policy_and_inputs() -> None:
