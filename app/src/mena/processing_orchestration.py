@@ -261,6 +261,11 @@ def run_processing_command(
                 interaction.notify(
                     WorkflowNotice(
                         topic=RUNTIME_STEWARDSHIP_RELEASE_NOTICE_TOPIC,
+                        severity=(
+                            "warning"
+                            if release_result.status in {"failed", "not_supported"}
+                            else "info"
+                        ),
                         context={"result": release_result},
                     )
                 )

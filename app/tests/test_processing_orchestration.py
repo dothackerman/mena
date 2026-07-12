@@ -38,7 +38,7 @@ from mena.runtime_stewardship import (
     RuntimeLease,
     RuntimeReleaseResult,
 )
-from mena.semantic_coherence import FakeSemanticCoherenceProvider
+from mena.semantic_coherence import FakeSemanticCoherenceProvider, SemanticCoherenceResult
 from mena.settings import AppSettings
 from mena.setup import (
     CommandIdentity,
@@ -163,11 +163,22 @@ class _UnavailableTranscriptionProvider(FakeTranscriptionProvider):
 class _ReleasingSemanticProvider(FakeSemanticCoherenceProvider):
     runtime_resource_used = True
 
+    def __init__(
+        self,
+        *,
+        results: Mapping[str, SemanticCoherenceResult],
+        release_status: str = "released",
+        release_detail: str = "Ollama model release completed: unloaded.",
+    ) -> None:
+        super().__init__(results=results)
+        self._release_status = release_status
+        self._release_detail = release_detail
+
     def release_runtime_resource(self, lease: RuntimeLease) -> RuntimeReleaseResult:
         return RuntimeReleaseResult(
             lease=lease,
-            status="released",
-            detail="Ollama model release completed: unloaded.",
+            status=self._release_status,
+            detail=self._release_detail,
         )
 
 
@@ -489,6 +500,55 @@ def test_run_processing_command_records_terminal_runtime_stewardship_release(
     assert payload["releases"][0]["lease"]["provider"] == "fake"
     assert len(interaction.notices) == 1
     assert interaction.notices[0].topic == RUNTIME_STEWARDSHIP_RELEASE_NOTICE_TOPIC
+    assert interaction.notices[0].severity == "info"
+
+
+@pytest.mark.parametrize("release_status", ["failed", "not_supported"])
+def test_run_processing_command_reports_terminal_runtime_release_warning(
+    tmp_path: Path,
+    release_status: str,
+) -> None:
+    session_path = _write_processing_session(tmp_path)
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    runner = _ReadySetupRunner(ollama_model=settings.local_llm.ollama_model)
+    interaction = _NonInteractiveProcessingInteraction()
+    _persist_runtime_profile_state(
+        settings,
+        runner=runner,
+        authorize_local_fallback=False,
+    )
+
+    assert (
+        run_processing_command(
+            session_path=session_path,
+            run_id=f"process-release-{release_status}",
+            attempt=1,
+            now=NOW,
+            transcription_provider_factory=_RuntimeRequiredProviderFactory(
+                FakeTranscriptionProvider
+            ),
+            diarization_provider_factory=_RuntimeRequiredProviderFactory(FakeDiarizationProvider),
+            semantic_coherence_provider_factory=_RuntimeRequiredProviderFactory(
+                lambda: _ReleasingSemanticProvider(
+                    results={},
+                    release_status=release_status,
+                    release_detail=f"Runtime release {release_status}.",
+                )
+            ),
+            settings=settings,
+            setup_runner=runner,
+            setup_command_identity=COMMAND_IDENTITY,
+            setup_hardware=READY_HARDWARE,
+            interaction=interaction,
+        )
+        == 0
+    )
+
+    assert len(interaction.notices) == 1
+    assert interaction.notices[0].topic == RUNTIME_STEWARDSHIP_RELEASE_NOTICE_TOPIC
+    assert interaction.notices[0].severity == "warning"
+    release_result = cast(RuntimeReleaseResult, interaction.notices[0].context["result"])
+    assert release_result.status == release_status
 
 
 def test_run_processing_stages_sequences_room_mic_profile(tmp_path: Path) -> None:
