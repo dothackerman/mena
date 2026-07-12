@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Protocol, Self
 from uuid import uuid4
 
-from mena.fields import required_int, required_str
+from mena.fields import ContractReader
 
 ARTIFACT_MANIFEST_FILENAME = "artifact-manifest.v1.json"
 ARTIFACT_MANIFEST_VERSION = 1
@@ -25,6 +25,9 @@ _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 class ArtifactStoreError(RuntimeError):
     """Raised when the artifact store contract cannot be fulfilled."""
+
+
+ARTIFACT_READER = ContractReader("Artifact", ArtifactStoreError)
 
 
 @dataclass(frozen=True)
@@ -56,14 +59,14 @@ class ArtifactRecord:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> Self:
-        artifact_id = _required_str(data, "id")
-        session_id = _required_str(data, "session_id")
-        artifact_type = _required_str(data, "artifact_type")
-        version = _required_int(data, "version")
-        path = _required_str(data, "path")
-        byte_count = _required_int(data, "byte_count")
-        sha256 = _required_str(data, "sha256")
-        status = _required_str(data, "status")
+        artifact_id = ARTIFACT_READER.required_str(data, "id")
+        session_id = ARTIFACT_READER.required_str(data, "session_id")
+        artifact_type = ARTIFACT_READER.required_str(data, "artifact_type")
+        version = ARTIFACT_READER.required_int(data, "version")
+        path = ARTIFACT_READER.required_str(data, "path")
+        byte_count = ARTIFACT_READER.required_int(data, "byte_count")
+        sha256 = ARTIFACT_READER.required_str(data, "sha256")
+        status = ARTIFACT_READER.required_str(data, "status")
         metadata = data.get("metadata", {})
         metadata = _metadata_dict(metadata)
         _validate_artifact_type(artifact_type)
@@ -613,24 +616,6 @@ def _verification(
         actual_byte_count=actual_byte_count,
         status=record.status,
         error=error,
-    )
-
-
-def _required_str(data: Mapping[str, object], key: str) -> str:
-    return required_str(
-        data,
-        key,
-        error=ArtifactStoreError,
-        message=f"Artifact field '{key}' must be a non-empty string.",
-    )
-
-
-def _required_int(data: Mapping[str, object], key: str) -> int:
-    return required_int(
-        data,
-        key,
-        error=ArtifactStoreError,
-        message=f"Artifact field '{key}' must be an integer.",
     )
 
 

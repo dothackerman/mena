@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Self, TypeVar
 
-from mena.fields import optional_str, required_str
+from mena.fields import ContractReader
 
 EnumValue = TypeVar("EnumValue", bound=StrEnum)
 
@@ -76,15 +76,16 @@ class DeviceRoute:
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> Self:
+        reader = ContractReader("device_route", ValueError)
         metadata = data.get("metadata", {})
         if not isinstance(metadata, dict) or not all(
             isinstance(key, str) and isinstance(value, str) for key, value in metadata.items()
         ):
             raise ValueError("device_route.metadata must be an object with string keys and values.")
         return cls(
-            backend=_required_str(data, "backend", "device_route"),
-            route_id=_required_str(data, "route_id", "device_route"),
-            label=_optional_str(data, "label", "device_route"),
+            backend=reader.required_str(data, "backend"),
+            route_id=reader.required_str(data, "route_id"),
+            label=reader.optional_str(data, "label"),
             metadata=dict(metadata),
         )
 
@@ -297,31 +298,13 @@ def _source_contract(
     )
 
 
-def _required_str(data: dict[str, object], key: str, label: str) -> str:
-    return required_str(
-        data,
-        key,
-        error=ValueError,
-        message=f"{label}.{key} must be a non-empty string.",
-    )
-
-
-def _optional_str(data: dict[str, object], key: str, label: str) -> str | None:
-    return optional_str(
-        data,
-        key,
-        error=ValueError,
-        message=f"{label}.{key} must be a non-empty string or null.",
-    )
-
-
 def _enum_value(
     enum_type: type[EnumValue],
     data: dict[str, object],
     key: str,
     label: str,
 ) -> EnumValue:
-    raw_value = _required_str(data, key, label)
+    raw_value = ContractReader(label, ValueError).required_str(data, key)
     try:
         return enum_type(raw_value)
     except ValueError as exc:

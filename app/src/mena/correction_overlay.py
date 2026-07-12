@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Self
 
 from mena.artifacts import ArtifactRecord, ArtifactStore
-from mena.fields import required_int, required_mapping, required_nullable_str, required_str
+from mena.fields import ContractReader
 from mena.merge_timing import (
     MERGED_TRANSCRIPT_ARTIFACT_TYPE,
     MergedTranscriptArtifact,
@@ -90,17 +90,18 @@ class CorrectionEntry:
     def from_dict(cls, data: object) -> Self:
         item = _mapping(data, "Correction entry")
         _reject_unknown_keys(item, CORRECTION_ENTRY_KEYS, "Correction entry")
+        reader = ContractReader("Correction entry", CorrectionOverlayContractError)
         entry = cls(
-            id=_required_str(item, "id", "Correction entry"),
-            segment_id=_required_str(item, "segment_id", "Correction entry"),
-            correction_type=_required_str(item, "correction_type", "Correction entry"),
-            user_action_at=_required_str(item, "user_action_at", "Correction entry"),
-            original_flag_id=_required_nullable_str(item, "original_flag_id", "Correction entry"),
-            speaker_id=_required_nullable_str(item, "speaker_id", "Correction entry"),
-            speaker_label=_required_nullable_str(item, "speaker_label", "Correction entry"),
-            text=_required_nullable_str(item, "text", "Correction entry", allow_empty=True),
-            overlap_detected=_required_nullable_bool(item, "overlap_detected", "Correction entry"),
-            metadata=_required_json_object(item, "metadata", "Correction entry metadata"),
+            id=reader.required_str(item, "id"),
+            segment_id=reader.required_str(item, "segment_id"),
+            correction_type=reader.required_str(item, "correction_type"),
+            user_action_at=reader.required_str(item, "user_action_at"),
+            original_flag_id=reader.required_nullable_str(item, "original_flag_id"),
+            speaker_id=reader.required_nullable_str(item, "speaker_id"),
+            speaker_label=reader.required_nullable_str(item, "speaker_label"),
+            text=_read_required_nullable_str(item, "text", "Correction entry", allow_empty=True),
+            overlap_detected=reader.required_nullable_bool(item, "overlap_detected"),
+            metadata=_read_json_object(item, "metadata", "Correction entry"),
         )
         for value, label in (
             (entry.id, "Correction entry id"),
@@ -147,17 +148,20 @@ class CorrectionOverlayArtifact:
     def from_dict(cls, data: object) -> Self:
         item = _mapping(data, "Correction overlay artifact")
         _reject_unknown_keys(item, CORRECTION_OVERLAY_KEYS, "Correction overlay artifact")
+        reader = ContractReader("Correction overlay artifact", CorrectionOverlayContractError)
         artifact = cls(
-            version=_required_int(item, "version", "Correction overlay artifact"),
-            session_id=_required_str(item, "session_id", "Correction overlay artifact"),
-            source_transcript_artifact=_required_artifact_ref(
+            version=reader.required_int(item, "version"),
+            session_id=reader.required_str(item, "session_id"),
+            source_transcript_artifact=_read_artifact_ref(
                 item, "source_transcript_artifact", "Correction overlay artifact"
             ),
-            review_queue_artifact=_required_nullable_artifact_ref(
+            review_queue_artifact=_read_nullable_artifact_ref(
                 item, "review_queue_artifact", "Correction overlay artifact"
             ),
-            entries=tuple(CorrectionEntry.from_dict(entry) for entry in _list(item, "entries")),
-            created_at=_required_str(item, "created_at", "Correction overlay artifact"),
+            entries=tuple(
+                CorrectionEntry.from_dict(entry) for entry in reader.required_list(item, "entries")
+            ),
+            created_at=reader.required_str(item, "created_at"),
         )
         if artifact.version != CORRECTION_OVERLAY_SCHEMA_VERSION:
             raise CorrectionOverlayContractError("Unsupported correction overlay artifact version.")
@@ -462,23 +466,7 @@ def _reject_unknown_keys(data: Mapping[str, object], allowed: frozenset[str], la
         raise CorrectionOverlayContractError(f"{label} contains unknown fields: {unknown}.")
 
 
-def _list(data: Mapping[str, object], key: str) -> list[object]:
-    value = data.get(key)
-    if not isinstance(value, list):
-        raise CorrectionOverlayContractError(f"{key} must be an array.")
-    return value
-
-
-def _required_str(data: Mapping[str, object], key: str, label: str) -> str:
-    return required_str(
-        data,
-        key,
-        error=CorrectionOverlayContractError,
-        message=f"{label} {key} must be a non-empty string.",
-    )
-
-
-def _required_nullable_str(
+def _read_required_nullable_str(
     data: Mapping[str, object],
     key: str,
     label: str,
@@ -486,58 +474,32 @@ def _required_nullable_str(
     allow_empty: bool = False,
 ) -> str | None:
     if allow_empty:
-        value = _required_key(data, key, label)
+        value = _require_key(data, key, label)
         if value is None:
             return None
         if not isinstance(value, str):
-            raise CorrectionOverlayContractError(
-                f"{label} {key} must be a non-empty string or null."
-            )
+            raise CorrectionOverlayContractError(f"{label} field '{key}' must be a string or null.")
         return value
-    return required_nullable_str(
-        data,
-        key,
-        error=CorrectionOverlayContractError,
-        missing_message=f"{label} {key} is required.",
-        invalid_message=f"{label} {key} must be a non-empty string or null.",
-    )
+    return ContractReader(label, CorrectionOverlayContractError).required_nullable_str(data, key)
 
 
-def _required_int(data: Mapping[str, object], key: str, label: str) -> int:
-    return required_int(
-        data,
-        key,
-        error=CorrectionOverlayContractError,
-        message=f"{label} {key} must be an integer.",
-    )
-
-
-def _required_nullable_bool(data: Mapping[str, object], key: str, label: str) -> bool | None:
-    value = _required_key(data, key, label)
-    if value is None:
-        return None
-    if not isinstance(value, bool):
-        raise CorrectionOverlayContractError(f"{label} {key} must be a boolean or null.")
-    return value
-
-
-def _required_nullable_artifact_ref(
+def _read_nullable_artifact_ref(
     data: Mapping[str, object],
     key: str,
     label: str,
 ) -> ArtifactRef | None:
-    value = _required_key(data, key, label)
+    value = _require_key(data, key, label)
     if value is None:
         return None
     return _artifact_ref_from_dict(value, f"{label} {key}")
 
 
-def _required_artifact_ref(
+def _read_artifact_ref(
     data: Mapping[str, object],
     key: str,
     label: str,
 ) -> ArtifactRef:
-    return _artifact_ref_from_dict(_required_key(data, key, label), f"{label} {key}")
+    return _artifact_ref_from_dict(_require_key(data, key, label), f"{label} {key}")
 
 
 def _artifact_ref_from_dict(data: object, label: str) -> ArtifactRef:
@@ -547,22 +509,17 @@ def _artifact_ref_from_dict(data: object, label: str) -> ArtifactRef:
         raise CorrectionOverlayContractError(f"{label} is invalid: {exc}") from exc
 
 
-def _required_json_object(data: Mapping[str, object], key: str, label: str) -> Mapping[str, object]:
-    value = required_mapping(
-        data,
-        key,
-        error=CorrectionOverlayContractError,
-        message=f"{label} must be an object.",
-    )
+def _read_json_object(data: Mapping[str, object], key: str, label: str) -> Mapping[str, object]:
+    value = ContractReader(label, CorrectionOverlayContractError).required_mapping(data, key)
     for item_key in value:
         if not isinstance(item_key, str):
-            raise CorrectionOverlayContractError(f"{label} keys must be strings.")
+            raise CorrectionOverlayContractError(f"{label} field '{key}' keys must be strings.")
     return value
 
 
-def _required_key(data: Mapping[str, object], key: str, label: str) -> object:
+def _require_key(data: Mapping[str, object], key: str, label: str) -> object:
     if key not in data:
-        raise CorrectionOverlayContractError(f"{label} {key} is required.")
+        raise CorrectionOverlayContractError(f"{label} field '{key}' is required.")
     return data[key]
 
 

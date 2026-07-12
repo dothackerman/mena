@@ -10,6 +10,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from mena.artifacts import FileSystemArtifactStore
+from mena.fields import ContractReader
 from mena.fileops import write_json_atomically
 from mena.processing import has_completed_processing_pipeline
 from mena.profiles import CaptureProfileSelection
@@ -96,6 +97,9 @@ class ProcessableSessionCandidate:
 
 class SessionRecordError(ValueError):
     """Raised when a session record cannot satisfy the session contract."""
+
+
+SESSION_READER = ContractReader("Session", SessionRecordError)
 
 
 def default_data_root() -> Path:
@@ -234,8 +238,8 @@ def processable_session_candidates(
         try:
             record_session_id = session_id(record)
             record_profile = session_profile(record)
-            record_created_at = _required_record_str(record, "created_at")
-            record_completed_at = _required_completed_at(record)
+            record_created_at = SESSION_READER.required_str(record, "created_at")
+            record_completed_at = _read_completed_at(record)
         except SessionRecordError:
             continue
         if not include_processed and _processing_is_complete(session_dir, record):
@@ -246,7 +250,7 @@ def processable_session_candidates(
                     session_dir=session_dir,
                     record_path=record_path,
                     session_id=record_session_id,
-                    name=_optional_record_str(record, "name"),
+                    name=_read_optional_record_str(record, "name"),
                     profile=record_profile,
                     created_at=record_created_at,
                     completed_at=record_completed_at,
@@ -270,10 +274,7 @@ def processable_session_candidates(
 def session_id(session_record: Mapping[str, object]) -> str:
     """Return the required session id from a session record."""
 
-    value = session_record.get("id")
-    if not isinstance(value, str) or not value:
-        raise SessionRecordError("Session field 'id' is required and must be a non-empty string.")
-    return value
+    return SESSION_READER.required_str(session_record, "id")
 
 
 def session_language_or_default(
@@ -291,12 +292,7 @@ def session_language_or_default(
 def session_profile(session_record: Mapping[str, object]) -> str:
     """Return the required capture profile id from a session record."""
 
-    value = session_record.get("profile")
-    if not isinstance(value, str) or not value:
-        raise SessionRecordError(
-            "Session field 'profile' is required and must be a non-empty string."
-        )
-    return value
+    return SESSION_READER.required_str(session_record, "profile")
 
 
 def _processing_is_complete(
@@ -308,14 +304,7 @@ def _processing_is_complete(
     return has_completed_processing_pipeline(store, session_id_value)
 
 
-def _required_record_str(session_record: Mapping[str, object], key: str) -> str:
-    value = session_record.get(key)
-    if not isinstance(value, str) or not value:
-        raise SessionRecordError(f"Session field '{key}' is required and must be a string.")
-    return value
-
-
-def _optional_record_str(session_record: Mapping[str, object], key: str) -> str | None:
+def _read_optional_record_str(session_record: Mapping[str, object], key: str) -> str | None:
     value = session_record.get(key)
     if value is None:
         return None
@@ -324,21 +313,19 @@ def _optional_record_str(session_record: Mapping[str, object], key: str) -> str 
     return value
 
 
-def _required_completed_at(session_record: Mapping[str, object]) -> str:
+def _read_completed_at(session_record: Mapping[str, object]) -> str:
     finalization = session_recording_finalization(session_record)
     value = finalization.get("completed_at")
-    if not isinstance(value, str) or not value:
-        raise SessionRecordError("Session field 'recording.finalization.completed_at' is required.")
-    return value
+    return SESSION_READER.required_str(
+        {"recording.finalization.completed_at": value},
+        "recording.finalization.completed_at",
+    )
 
 
 def session_recording(session_record: Mapping[str, object]) -> Mapping[str, object]:
     """Return the recording lifecycle object from a session record."""
 
-    value = session_record.get("recording")
-    if not isinstance(value, Mapping):
-        raise SessionRecordError("Session field 'recording' is required and must be an object.")
-    return value
+    return SESSION_READER.required_mapping(session_record, "recording")
 
 
 def session_recording_finalization(
@@ -348,11 +335,10 @@ def session_recording_finalization(
 
     recording = session_recording(session_record)
     value = recording.get("finalization")
-    if not isinstance(value, Mapping):
-        raise SessionRecordError(
-            "Session field 'recording.finalization' is required and must be an object."
-        )
-    return value
+    return SESSION_READER.required_mapping(
+        {"recording.finalization": value},
+        "recording.finalization",
+    )
 
 
 def _recording_completed_at(session_record: Mapping[str, object]) -> datetime | None:
