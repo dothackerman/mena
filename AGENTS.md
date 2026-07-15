@@ -121,6 +121,8 @@ Use `docs/ideas/` for:
 - Prefer folder-level rules over file-specific exceptions.
 - Preserve the difference between source inputs, architecture synthesis, research backlog, and research outputs.
 - Keep repository structure legible for future coding and research agents.
+- Use the domain vocabulary in `CONTEXT.md`. Check it before naming new concepts or interpreting persisted values; user-facing CLI wording and durable stored identifiers can differ deliberately (for example capture profile aliases vs their durable ids).
+- For CLI/interface-adapter work, follow `docs/development/add-a-cli-command.md`. The CLI is a view over application workflow modules; `make check` rejects core modules that import the CLI adapter.
 - Follow the repository workflow in `docs/repository-workflow.md` for branch naming and issue references.
 - For GitHub issue relationships, use native GitHub metadata. Do not encode parent/child, blocking, or related-issue lists in issue bodies when GitHub can represent the relationship directly.
 - Treat `develop` as the active integration branch. Do not target `main` until the first shippable version or unless the user explicitly instructs it.
@@ -131,6 +133,7 @@ Use `docs/ideas/` for:
 - Run unreleased code from the checkout with repo-scoped commands such as `cd app && uv run mena ...`.
 - Treat plain `mena ...` as the installed product/UAT command unless the current shell environment explicitly points at the repo virtual environment.
 - Dev smoke tests, fixtures, and agent validation should use explicit scratch paths such as `MENA_DATA_ROOT`, temporary XDG roots, or test fixtures. Do not rely on default product data paths for repo validation unless the user explicitly asks to test the installed product setup.
+- The app test suite enforces this automatically: an autouse fixture in `app/tests/conftest.py` isolates `HOME`, the XDG roots, and `MENA_DATA_ROOT` for every test. Do not remove, bypass, or duplicate it. The scratch-path rule still applies as written to manual runs outside pytest.
 - Installed product/UAT usage should use normal runtime paths and must not depend on the repo checkout, editable package state, or test fixtures.
 - When changing install, runtime path, or preflight behavior, verify which `mena` executable is being exercised and state whether validation used repo/dev invocation or installed product invocation.
 

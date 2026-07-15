@@ -4,12 +4,13 @@ import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
 
 import pytest
 
 import mena.cli as cli
-from mena.artifacts import ArtifactRecord
+from mena.cli import _shared as cli_shared
+from mena.cli import inspect as inspect_command
+from mena.cli import summarize as summarize_command
 from mena.interaction import (
     ChoiceOption,
     ChoiceRequest,
@@ -449,24 +450,6 @@ def test_record_choice_and_data_root_adapter_branches(
     assert cli._effective_record_data_root(None, settings) is None
 
 
-def test_merged_transcript_adapter_edge_branches(tmp_path: Path) -> None:
-    record = cast(ArtifactRecord, SimpleNamespace(id="merged-1", path="merged.json"))
-    unverifiable_store = SimpleNamespace(verify=lambda _record_id: SimpleNamespace(ok=False))
-    assert (
-        cli._merged_transcript_timestamp_key(
-            store=cast(Any, unverifiable_store),
-            record=record,
-        )
-        is None
-    )
-    assert cli._parse_iso_timestamp("") is None
-    assert cli._parse_iso_timestamp("not-a-date") is None
-    assert cli._parse_iso_timestamp("2026-05-19T15:20:00Z") is not None
-
-    empty_store = SimpleNamespace(list=lambda **_kwargs: ())
-    assert cli._resolve_latest_merged_transcript_record(store=cast(Any, empty_store)) is None
-
-
 def test_main_reports_adapter_cancellations_and_errors(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -483,15 +466,20 @@ def test_main_reports_adapter_cancellations_and_errors(
     assert "Recording setup cancelled." in capsys.readouterr().out
 
     monkeypatch.setattr(
-        cli,
-        "_run_summarize_command",
+        summarize_command.workflow,
+        "resolve_summarize_session_path",
+        lambda **_kwargs: tmp_path,
+    )
+    monkeypatch.setattr(
+        summarize_command.workflow,
+        "run_summarization_command",
         lambda **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt),
     )
     assert cli.main(["summarize", str(tmp_path)], settings=settings) == 1
     assert "Summarization cancelled." in capsys.readouterr().out
 
     monkeypatch.setattr(
-        cli,
+        inspect_command.shared,
         "_run_inspect_command",
         lambda **_kwargs: (_ for _ in ()).throw(OSError("manifest missing")),
     )
@@ -579,7 +567,7 @@ def test_setup_cli_interaction_and_command_adapter(
             events=(SetupMessageEvent("setup message"),),
         )
 
-    monkeypatch.setattr(cli, "run_setup_workflow", _run_setup_workflow)
+    monkeypatch.setattr(cli_shared, "run_setup_workflow", _run_setup_workflow)
 
     assert (
         cli._run_setup_command(
