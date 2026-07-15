@@ -32,7 +32,7 @@ from mena.sessions import (
     session_language_or_default,
 )
 from mena.settings import AppSettings
-from mena.setup import HardwareFacts
+from mena.setup import HardwareFacts, PythonSurfaceCheck
 from mena.summarization import (
     REQUIRED_NOTE_PRODUCTS,
     FakeSummarizationProvider,
@@ -848,6 +848,10 @@ def test_summarize_workflow_revalidates_only_summarization_runtime_dependencies(
             asr_model_present=False,
             diarization_model_present=False,
             pyannote_token_present=False,
+            python_surfaces=tuple(
+                PythonSurfaceCheck(requirement=check.requirement, installed=False)
+                for check in runtime.installation_state.python_surfaces
+            ),
         )
 
     def _stage(**kwargs: object) -> SimpleNamespace:

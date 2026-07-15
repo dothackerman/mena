@@ -203,7 +203,7 @@ def _persist_source_transcript(
     end: float,
 ) -> ArtifactRecord:
     source_audio = store.store(
-        artifact_type="capture_audio",
+        artifact_type="source_audio",
         name=f"source/{source_id}.wav",
         data=f"{source_id} fixture audio".encode(),
     )

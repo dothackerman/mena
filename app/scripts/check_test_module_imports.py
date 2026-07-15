@@ -24,7 +24,7 @@ def cross_test_imports(path: Path) -> list[tuple[int, str]]:
             module = node.module or ""
             if _is_test_module(module):
                 violations.append((node.lineno, module))
-            elif node.level > 0:
+            else:
                 for alias in node.names:
                     if _is_test_module(alias.name):
                         violations.append((node.lineno, alias.name))
