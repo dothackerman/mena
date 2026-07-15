@@ -30,6 +30,14 @@ from mena.sessions import (
     RecordingLifecycle,
     SessionRecord,
 )
+from mena.transcription import (
+    TRANSCRIPT_SCHEMA_VERSION,
+    TranscriptArtifact,
+    TranscriptLanguage,
+    TranscriptProviderMetadata,
+    TranscriptSegment,
+    persist_transcript_artifact,
+)
 
 SESSION_ID = "00000000-0000-0000-0000-000000000001"
 
@@ -111,11 +119,23 @@ def _write_session_record(
 def _persist_merged_transcript(
     store: FileSystemArtifactStore, *, session_id: str
 ) -> ArtifactRecord:
-    source_ref = ArtifactRef(
-        id=f"{session_id}:artifacts/transcript/source.json",
-        artifact_type="transcript",
-        version=1,
-        sha256="1" * 64,
+    local_transcript = _persist_source_transcript(
+        store,
+        session_id=session_id,
+        source_id="local_mic",
+        segment_id="local_segment_1",
+        text="Hello",
+        start=0.0,
+        end=0.8,
+    )
+    remote_transcript = _persist_source_transcript(
+        store,
+        session_id=session_id,
+        source_id="system_audio",
+        segment_id="remote_segment_1",
+        text="We need to decide priorities.",
+        start=1.0,
+        end=2.0,
     )
     segments = (
         _segment(
@@ -151,14 +171,14 @@ def _persist_merged_transcript(
             MergedTranscriptSource(
                 source_id="local_mic",
                 channel="local",
-                transcript_artifact=source_ref,
+                transcript_artifact=ArtifactRef.from_record(local_transcript),
                 diarization_status="not_applicable",
                 diarization_reason="local_user_structural_attribution",
             ),
             MergedTranscriptSource(
                 source_id="system_audio",
                 channel="remote",
-                transcript_artifact=source_ref,
+                transcript_artifact=ArtifactRef.from_record(remote_transcript),
                 diarization_status="skipped",
                 diarization_reason="diarization_disabled",
             ),
@@ -169,6 +189,52 @@ def _persist_merged_transcript(
     )
     return persist_merged_transcript_artifact(
         store=store, artifact=artifact, name="merged/merged.json"
+    )
+
+
+def _persist_source_transcript(
+    store: FileSystemArtifactStore,
+    *,
+    session_id: str,
+    source_id: str,
+    segment_id: str,
+    text: str,
+    start: float,
+    end: float,
+) -> ArtifactRecord:
+    source_audio = store.store(
+        artifact_type="capture_audio",
+        name=f"source/{source_id}.wav",
+        data=f"{source_id} fixture audio".encode(),
+    )
+    transcript = TranscriptArtifact(
+        version=TRANSCRIPT_SCHEMA_VERSION,
+        session_id=session_id,
+        source_artifact=ArtifactRef.from_record(source_audio),
+        source_id=source_id,
+        provider=TranscriptProviderMetadata(
+            name="fake",
+            checkpoint="fixture",
+            quantization="none",
+            device="test",
+            timestamp_mode="segment",
+        ),
+        language=TranscriptLanguage(requested="fr", detected="fr", detection_probability=1.0),
+        text=text,
+        segments=(
+            TranscriptSegment(
+                id=segment_id,
+                text=text,
+                start_seconds=start,
+                end_seconds=end,
+            ),
+        ),
+        created_at="2026-05-19T15:00:00Z",
+    )
+    return persist_transcript_artifact(
+        store=store,
+        transcript=transcript,
+        name=f"source/{source_id}.json",
     )
 
 
