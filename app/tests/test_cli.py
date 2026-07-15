@@ -175,6 +175,7 @@ def test_main_exposes_architecture_command_surface(capsys: CaptureFixture[str]) 
             "summarize",
             "export",
             "inspect",
+            "list",
             "setup",
         }
     ]:
@@ -2307,6 +2308,220 @@ def test_main_inspect_command_rejects_broken_bundle(
     assert f"Integrity report for {session_dir}: FAILED" in captured.out
     assert '"ok": false' in captured.out
     assert '"code": "artifact_missing"' in captured.out
+
+
+def _create_named_runtime_session(
+    settings: AppSettings,
+    *,
+    name: str | None,
+    status: str,
+    created_at: str,
+) -> CreatedSession:
+    session = create_session(
+        profile=parse_capture_profile("online"),
+        name=name,
+        data_root=settings.paths.sessions_dir.parent,
+        now=datetime.fromisoformat(created_at.replace("Z", "+00:00")),
+    )
+    persist_session_recording_lifecycle(
+        session.record_path,
+        status=status,
+        recording={
+            "started_at": "2026-05-19T09:59:00Z",
+            "stopped_at": created_at,
+            "stop_reason": "user_stop",
+            "finalization": {
+                "status": "finalized" if status == "recorded" else status,
+                "completed_at": created_at,
+                "error": None if status == "recorded" else "capture failed",
+            },
+        },
+    )
+    return session
+
+
+def _snapshot_tree(root: Path) -> dict[str, bytes]:
+    return {
+        str(path.relative_to(root)): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+def test_main_list_prints_sessions_newest_first_with_six_fields(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    oldest = _create_named_runtime_session(
+        settings, name=None, status="recorded", created_at="2026-05-19T10:00:00Z"
+    )
+    middle = _create_named_runtime_session(
+        settings, name="Team sync", status="failed", created_at="2026-05-19T11:00:00Z"
+    )
+    newest = _create_named_runtime_session(
+        settings, name="Roadmap review", status="recorded", created_at="2026-05-19T12:00:00Z"
+    )
+
+    exit_code = main(["list"], settings=settings)
+    captured = capsys.readouterr()
+    lines = [line for line in captured.out.splitlines() if line]
+
+    assert exit_code == 0
+    assert len(lines) == 3
+    # Newest created_at first; short ids appear in that order.
+    assert lines[0].split(" | ")[1] == newest.record.id[:8]
+    assert lines[1].split(" | ")[1] == middle.record.id[:8]
+    assert lines[2].split(" | ")[1] == oldest.record.id[:8]
+    # Six fields, in the documented order, for the newest session.
+    fields = lines[0].split(" | ")
+    assert fields == [
+        "2026-05-19T12:00:00Z",
+        newest.record.id[:8],
+        "Roadmap review",
+        "online_dual_stream",
+        "recorded",
+        str(newest.bundle_path),
+    ]
+    # A session without a name renders the Untitled placeholder.
+    assert lines[2].split(" | ")[2] == "Untitled recording"
+
+
+def test_main_list_prints_corrupt_bundle_as_degraded_line_and_exits_zero(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    healthy = _create_named_runtime_session(
+        settings, name="Healthy", status="recorded", created_at="2026-05-19T12:00:00Z"
+    )
+    degraded = _create_named_runtime_session(
+        settings, name="Broken", status="recorded", created_at="2026-05-19T10:00:00Z"
+    )
+    # Introduce an orphaned artifact file so integrity verification fails while
+    # the session record itself stays readable and complete.
+    stray = degraded.bundle_path / "artifacts" / "stray" / "stray.json"
+    stray.parent.mkdir(parents=True)
+    stray.write_text("{}", encoding="utf-8")
+
+    exit_code = main(["list"], settings=settings)
+    captured = capsys.readouterr()
+    lines = [line for line in captured.out.splitlines() if line]
+
+    assert exit_code == 0
+    assert len(lines) == 2
+    healthy_line = next(line for line in lines if healthy.record.id[:8] in line)
+    degraded_line = next(line for line in lines if degraded.record.id[:8] in line)
+    assert "DEGRADED" not in healthy_line
+    assert "DEGRADED" in degraded_line
+    assert "orphaned_artifact_file" in degraded_line
+    assert "Artifact file is not referenced by the manifest or capture metadata." in degraded_line
+    assert str(degraded.bundle_path) in degraded_line
+
+
+def test_main_list_prints_unreadable_session_record_as_degraded_line(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    unreadable = _create_named_runtime_session(
+        settings,
+        name="Broken record",
+        status="recorded",
+        created_at="2026-05-19T12:00:00Z",
+    )
+    unreadable.record_path.write_text("{not json", encoding="utf-8")
+
+    exit_code = main(["list"], settings=settings)
+    captured = capsys.readouterr()
+    lines = [line for line in captured.out.splitlines() if line]
+
+    assert exit_code == 0
+    assert len(lines) == 1
+    fields = lines[0].split(" | ")
+    assert fields[:6] == [
+        "unknown",
+        unreadable.bundle_path.name[:8],
+        "Untitled recording",
+        "unknown",
+        "unknown",
+        str(unreadable.bundle_path),
+    ]
+    assert "DEGRADED" in fields[6]
+    assert "session_record_invalid" in fields[6]
+    assert "session_record_unreadable" in fields[6]
+
+
+def test_main_list_sorts_unparseable_timestamps_last_in_projection_order(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    parseable = _create_named_runtime_session(
+        settings,
+        name="Parseable",
+        status="recorded",
+        created_at="2026-05-19T10:00:00Z",
+    )
+    unparseable_a = _create_named_runtime_session(
+        settings,
+        name="Unparseable A",
+        status="recorded",
+        created_at="2026-05-19T11:00:00Z",
+    )
+    unparseable_b = _create_named_runtime_session(
+        settings,
+        name="Unparseable B",
+        status="recorded",
+        created_at="2026-05-19T12:00:00Z",
+    )
+    for session, created_at in (
+        (unparseable_a, "not-a-date"),
+        (unparseable_b, "also-not-a-date"),
+    ):
+        record = json.loads(session.record_path.read_text(encoding="utf-8"))
+        record["created_at"] = created_at
+        session.record_path.write_text(json.dumps(record), encoding="utf-8")
+    expected_unparseable_order = [
+        session.record.id[:8]
+        for session in sorted(
+            (unparseable_a, unparseable_b),
+            key=lambda item: item.bundle_path,
+        )
+    ]
+
+    exit_code = main(["list"], settings=settings)
+    captured = capsys.readouterr()
+    listed_ids = [line.split(" | ")[1] for line in captured.out.splitlines() if line]
+
+    assert exit_code == 0
+    assert listed_ids == [parseable.record.id[:8], *expected_unparseable_order]
+
+
+def test_main_list_empty_root_prints_no_sessions_and_exits_zero(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+
+    exit_code = main(["list"], settings=settings)
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert captured.out.strip() == "No sessions found."
+
+
+def test_main_list_does_not_write_any_index_file(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    settings = AppSettings.from_env(env={}, home=tmp_path)
+    _create_named_runtime_session(
+        settings, name="Only", status="recorded", created_at="2026-05-19T12:00:00Z"
+    )
+    data_root = settings.paths.sessions_dir.parent
+    before = _snapshot_tree(data_root)
+
+    exit_code = main(["list"], settings=settings)
+    capsys.readouterr()
+
+    after = _snapshot_tree(data_root)
+    assert exit_code == 0
+    assert before == after
 
 
 def test_resolve_latest_merged_transcript_record_ignores_corrupt_payload(

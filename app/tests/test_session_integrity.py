@@ -318,7 +318,7 @@ def test_rebuild_session_index_projects_integrity_status(tmp_path: Path) -> None
     assert by_name["Good"].to_dict()["integrity_ok"] is True
 
 
-def test_rebuild_session_index_handles_missing_root_and_skips_invalid_records(
+def test_rebuild_session_index_handles_missing_root_and_projects_invalid_records(
     tmp_path: Path,
 ) -> None:
     sessions_root = tmp_path / "sessions"
@@ -327,7 +327,21 @@ def test_rebuild_session_index_handles_missing_root_and_skips_invalid_records(
     (bad / "session.json").write_text("[]", encoding="utf-8")
 
     assert rebuild_session_index(tmp_path / "missing") == ()
-    assert rebuild_session_index(sessions_root) == ()
+    entries = rebuild_session_index(sessions_root)
+
+    assert len(entries) == 1
+    assert entries[0].session_id == "bad"
+    assert entries[0].created_at == "unknown"
+    assert entries[0].profile == "unknown"
+    assert entries[0].status == "unknown"
+    assert entries[0].integrity_ok is False
+    assert entries[0].finding_count == 3
+    assert entries[0].finding_reasons == (
+        "session_record_invalid: Session record is not readable JSON object: "
+        "Session record must be a JSON object.",
+        "session_id_missing: Session record id must be a non-empty string.",
+        "session_record_unreadable: Session record must be a JSON object.",
+    )
 
 
 def test_processing_state_version_constant_remains_manifested() -> None:

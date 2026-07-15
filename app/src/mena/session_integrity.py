@@ -91,6 +91,7 @@ class SessionIndexEntry:
     name: str | None
     integrity_ok: bool
     finding_count: int
+    finding_reasons: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -102,6 +103,7 @@ class SessionIndexEntry:
             "name": self.name,
             "integrity_ok": self.integrity_ok,
             "finding_count": self.finding_count,
+            "finding_reasons": list(self.finding_reasons),
         }
 
 
@@ -205,21 +207,55 @@ def rebuild_session_index(sessions_root: Path) -> tuple[SessionIndexEntry, ...]:
         report = verify_session_bundle(bundle_path)
         try:
             record = read_session_record(record_path)
-        except (OSError, ValueError, json.JSONDecodeError):
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            entries.append(
+                _degraded_session_index_entry(
+                    bundle_path=bundle_path,
+                    report=report,
+                    extra_reasons=(f"session_record_unreadable: {exc}",),
+                )
+            )
             continue
         session_id = _read_optional_record_str(record, "id")
         created_at = _read_optional_record_str(record, "created_at")
         status = _read_optional_record_str(record, "status")
         profile = _read_optional_record_str(record, "profile")
         name = record.get("name")
-        if (
-            session_id is None
-            or created_at is None
-            or status is None
-            or profile is None
-            or (name is not None and not isinstance(name, str))
-        ):
+        missing_fields = tuple(
+            field
+            for field, value in (
+                ("id", session_id),
+                ("created_at", created_at),
+                ("status", status),
+                ("profile", profile),
+            )
+            if value is None
+        )
+        invalid_fields = ("name",) if name is not None and not isinstance(name, str) else ()
+        if missing_fields or invalid_fields:
+            entries.append(
+                _degraded_session_index_entry(
+                    bundle_path=bundle_path,
+                    report=report,
+                    session_id=session_id,
+                    created_at=created_at,
+                    status=status,
+                    profile=profile,
+                    extra_reasons=(
+                        _index_field_reason(
+                            missing_fields=missing_fields,
+                            invalid_fields=invalid_fields,
+                        ),
+                    ),
+                )
+            )
             continue
+        assert session_id is not None
+        assert created_at is not None
+        assert status is not None
+        assert profile is not None
+        assert name is None or isinstance(name, str)
+        finding_reasons = _finding_reasons(report)
         entries.append(
             SessionIndexEntry(
                 session_id=session_id,
@@ -228,11 +264,58 @@ def rebuild_session_index(sessions_root: Path) -> tuple[SessionIndexEntry, ...]:
                 status=status,
                 profile=profile,
                 name=name,
-                integrity_ok=report.ok,
-                finding_count=len(report.findings),
+                integrity_ok=not finding_reasons,
+                finding_count=len(finding_reasons),
+                finding_reasons=finding_reasons,
             )
         )
     return tuple(entries)
+
+
+UNKNOWN_SESSION_INDEX_FIELD = "unknown"
+
+
+def _degraded_session_index_entry(
+    *,
+    bundle_path: Path,
+    report: SessionIntegrityReport,
+    session_id: str | None = None,
+    created_at: str | None = None,
+    status: str | None = None,
+    profile: str | None = None,
+    extra_reasons: tuple[str, ...] = (),
+) -> SessionIndexEntry:
+    finding_reasons = _finding_reasons(report) + extra_reasons
+    if not finding_reasons:
+        finding_reasons = ("session_index_degraded: Session record cannot be indexed completely.",)
+    return SessionIndexEntry(
+        session_id=session_id or bundle_path.name,
+        bundle_path=bundle_path,
+        created_at=created_at or UNKNOWN_SESSION_INDEX_FIELD,
+        status=status or UNKNOWN_SESSION_INDEX_FIELD,
+        profile=profile or UNKNOWN_SESSION_INDEX_FIELD,
+        name=None,
+        integrity_ok=False,
+        finding_count=len(finding_reasons),
+        finding_reasons=finding_reasons,
+    )
+
+
+def _finding_reasons(report: SessionIntegrityReport) -> tuple[str, ...]:
+    return tuple(f"{finding.code}: {finding.message}" for finding in report.findings)
+
+
+def _index_field_reason(
+    *,
+    missing_fields: tuple[str, ...],
+    invalid_fields: tuple[str, ...],
+) -> str:
+    details: list[str] = []
+    if missing_fields:
+        details.append(f"missing {', '.join(missing_fields)}")
+    if invalid_fields:
+        details.append(f"invalid {', '.join(invalid_fields)}")
+    return "session_index_fields_invalid: Session record has " + " and ".join(details) + "."
 
 
 def _verify_capture_metadata(
