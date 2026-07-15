@@ -17,7 +17,9 @@ def register(
     **_: object,
 ) -> None:
     parser = subparsers.add_parser(
-        "process", parents=[process_session_parent, runtime_fallback_parent]
+        "process",
+        parents=[process_session_parent, runtime_fallback_parent],
+        help="Run post-meeting processing for a session.",
     )
     bind_handler(parser, run)
 

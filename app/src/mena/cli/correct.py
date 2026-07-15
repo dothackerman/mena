@@ -19,7 +19,11 @@ def register(
     session_parent: argparse.ArgumentParser,
     **_: object,
 ) -> None:
-    parser = subparsers.add_parser("correct", parents=[session_parent])
+    parser = subparsers.add_parser(
+        "correct",
+        parents=[session_parent],
+        help="Review and correct flagged transcript segments.",
+    )
     bind_handler(parser, run)
 
 

@@ -27,7 +27,9 @@ def register(
     **_: object,
 ) -> None:
     parser = subparsers.add_parser(
-        "summarize", parents=[optional_session_parent, runtime_fallback_parent]
+        "summarize",
+        parents=[optional_session_parent, runtime_fallback_parent],
+        help="Generate a structured note package for a session.",
     )
     parser.add_argument(
         "--manual-notes", dest="manual_notes", help="Optional path to manual notes file."

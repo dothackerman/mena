@@ -8,7 +8,7 @@ Metadata:
 - Maintainer: architecture session between customer and Codex
 - Source inputs: requirements documents, architecture review, and recorded architecture discussions in this repository
 - Review status: architecture-review feedback incorporated for current architecture baseline
-- Decision coverage: content reflects ADR-032 and ADR-033; later accepted decisions remain authoritative in their individual ADRs until synthesized here
+- Decision coverage: content reflects ADR-032 through ADR-035; later accepted decisions remain authoritative in their individual ADRs until synthesized here
 
 This document captures the current architecture baseline.
 Sections may be revised as research, review, and implementation sharpen earlier wording.
@@ -555,14 +555,26 @@ The summarization step combines:
 - corrected transcript view
 - optional sealed manual-notes artifact
 
-It then produces a summary artifact.
+Per `ADR-034`, it produces one atomic `summary.v3` note-package artifact containing three distinct note products:
+
+- a chronological, segment-grounded timestamped timeline
+- action items with optional owner and due date
+- a non-chronological general summary for quick recall
+
+`important_points` is not a fourth product; reintroducing it requires a product decision.
+The timeline cites merged-transcript segment IDs, and timestamps are derived from those cited segments rather than authored by the model.
+Each product has its own prompt, small output schema, and provider call, while the workflow assembles, accepts, and persists the complete package atomically.
+A rerun therefore creates a new whole package rather than independently regenerating or accepting one product.
+All three calls use the single provider bound for the summarize run and carry per-request provenance.
 
 Manual notes are imported explicitly before summarization, copied into the session bundle, and treated as a versioned sealed input artifact.
 If the user changes the original notes later, the changed notes are imported as a new notes artifact version and summarization is rerun to produce a new summary candidate.
 
 #### Phase 6: Export
 
-The export step renders selected summary artifacts into user-facing output formats such as markdown.
+The export step deterministically stitches the three products from a selected note-package artifact into user-facing output such as Markdown.
+Export never invokes an LLM.
+Sessions containing only a pre-note-package summary contract require a new summarize run before export.
 Export is intentionally separate from summarization because it should be retryable and regenerable without invoking provider runtimes again.
 
 #### Post-Meeting Processing Boundaries
@@ -1400,6 +1412,28 @@ Provider selection must consider:
 - direct Mistral may be accepted as primary, fallback, or only viable provider when the stage policy allows it
 - likely first stage where a more capable remote model might be useful
 
+#### Note-Product Execution Boundary
+
+Status: Confirmed (per `ADR-034` and `ADR-035`)
+
+Summarization separates provider policy from note-product execution mechanics:
+
+- the capability resolver selects and authorizes one provider for the summarize run, owns fallback re-selection, and records route provenance
+- the summarize workflow asks that bound provider for timeline, action-items, and general-summary products through the stable per-product port, then owns package assembly, acceptance, and persistence
+- the bound provider owns how each product call executes; neither the resolver nor the workflow selects `one_shot` versus `reducer`
+
+Provider strategy selection uses explicit prompt-token budget arithmetic shared with the pre-send hard-fail guard.
+A product request that fits the effective model context runs one-shot; a larger request uses consecutive map chunks followed by a product-specific reduce call.
+The pure strategy and chunk-planning arithmetic lives in `note_product_strategy.py`; provider adapters own request mechanics.
+
+Execution strategy is provenance, not provider policy or reuse identity.
+Persisted `summary.v3` request records identify the strategy, call kind (`one_shot`, `map`, or `reduce`), chunk coordinates, and provider token counts, while note-package metadata records each product's effective strategy.
+All products still use the one provider selected for the run, and reuse remains scoped by prompt policy plus effective provider options.
+
+There is no parallel strategy selector in the resolver or workflow.
+Oversized individual segments, irreducible reduce prompts, and ungrounded all-empty timeline reductions fail loudly rather than truncating or fabricating output.
+Hierarchical reduction remains out of scope until evidence justifies it.
+
 Current remote LLM route decision:
 
 - direct Mistral API is the PoC provider candidate for summarization when local execution is unavailable, insufficient, or not the accepted provider for that stage
@@ -1474,7 +1508,7 @@ Processing fallback is explicit per run. If the accepted profile is stale or una
 Per `ADR-033`, Mistral is a normal summarization provider behind the existing summarization port. It sits at the same provider abstraction level as Ollama:
 
 - the summarization request content is the same provider-independent Mena input;
-- the output contract is the same Mena-owned `summary.v1` / `SummaryResult` schema;
+- the output contract is the same Mena-owned `summary.v3` note-package / `SummaryResult` schema;
 - summary artifacts already persist provider name/model metadata;
 - summary reuse is scoped by provider configuration, including non-secret Mistral account/workspace or policy-evidence identity when remote account posture affects authorization;
 - runtime profile provenance already records stage provider/model/device/policy.

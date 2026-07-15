@@ -165,6 +165,22 @@ def test_main_prints_help_without_command(capsys: CaptureFixture[str]) -> None:
     assert "Privacy-first local meeting notes PoC." in captured.out
 
 
+def test_main_help_describes_every_registered_command(capsys: CaptureFixture[str]) -> None:
+    exit_code = main([])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    command_descriptions = {
+        fields[0]: fields[1]
+        for line in captured.out.splitlines()
+        if len(fields := line.split(maxsplit=1)) == 2 and fields[0] in COMMANDS
+    }
+    assert set(command_descriptions) == set(COMMANDS)
+    assert all(description.strip() for description in command_descriptions.values())
+    normalized_help = " ".join(captured.out.split())
+    assert "show Planned; not implemented in the current PoC." in normalized_help
+
+
 def test_main_exposes_architecture_command_surface(capsys: CaptureFixture[str]) -> None:
     assert set(UNIMPLEMENTED_COMMANDS) <= set(COMMANDS)
     for command in UNIMPLEMENTED_COMMANDS:
