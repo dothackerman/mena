@@ -2368,7 +2368,7 @@ Full-text search, cross-session entities, and analytics are future product ideas
 If divergence occurs:
 
 - missing referenced artifact -> mark session broken and stop downstream trust
-- artifact absent from its session manifest -> mark orphaned and require explicit recovery path
+- file under the session artifact directory absent from both the artifact manifest and capture metadata -> mark orphaned and require an explicit recovery path
 - integrity mismatch -> mark artifact invalidated and stop trusting it
 - changed session bundles -> rebuild the in-memory projection on the next `mena list` invocation
 
