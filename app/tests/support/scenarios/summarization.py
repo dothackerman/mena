@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import NAMESPACE_URL, uuid5
 
 from mena.artifacts import ArtifactRecord, FileSystemArtifactStore
 from mena.correction_overlay import (
@@ -32,7 +33,7 @@ class SummarizationSessionSpec:
     directory_name: str = "session"
     created_at: str = "2026-05-19T15:00:00Z"
     name: str | None = None
-    under_sessions_root: bool = False
+    session_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -51,16 +52,16 @@ def arrange_ready_summarization(
 ) -> SummarizationScenario:
     """Persist one coherent pre-summarization scenario."""
     session = session or SummarizationSessionSpec()
-    parent = root / "sessions" if session.under_sessions_root else root
-    session_dir = parent / session.directory_name
+    session_id = session.session_id or _default_session_id(session.directory_name)
+    session_dir = root / session.directory_name
     session_dir.mkdir(parents=True)
-    _write_session_record(session_dir, session=session)
+    _write_session_record(session_dir, session=session, session_id=session_id)
 
-    store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=session_dir)
-    merged_record = _persist_merged_transcript(store)
+    store = FileSystemArtifactStore(session_id=session_id, session_dir=session_dir)
+    merged_record = _persist_merged_transcript(store, session_id=session_id)
     resolved_corrections = corrections if corrections is not None else (_text_correction(),)
     overlay = create_correction_overlay(
-        session_id=SESSION_ID,
+        session_id=session_id,
         source_transcript_artifact=ArtifactRef.from_record(merged_record),
         entries=resolved_corrections,
         now=datetime(2026, 5, 19, 15, 20, 0, tzinfo=UTC),
@@ -77,10 +78,12 @@ def arrange_ready_summarization(
     return SummarizationScenario(session_dir, store, merged_record, overlay_record)
 
 
-def _write_session_record(session_dir: Path, *, session: SummarizationSessionSpec) -> None:
+def _write_session_record(
+    session_dir: Path, *, session: SummarizationSessionSpec, session_id: str
+) -> None:
     record = {
         "version": SESSION_RECORD_VERSION,
-        "id": SESSION_ID,
+        "id": session_id,
         "created_at": session.created_at,
         "name": session.name,
         "status": "created",
@@ -101,16 +104,18 @@ def _write_session_record(session_dir: Path, *, session: SummarizationSessionSpe
     )
 
 
-def _persist_merged_transcript(store: FileSystemArtifactStore) -> ArtifactRecord:
+def _persist_merged_transcript(
+    store: FileSystemArtifactStore, *, session_id: str
+) -> ArtifactRecord:
     source_ref = ArtifactRef(
-        id=f"{SESSION_ID}:artifacts/transcript/source.json",
+        id=f"{session_id}:artifacts/transcript/source.json",
         artifact_type="transcript",
         version=1,
         sha256="1" * 64,
     )
     artifact = MergedTranscriptArtifact(
         version=MERGED_TRANSCRIPT_SCHEMA_VERSION,
-        session_id=SESSION_ID,
+        session_id=session_id,
         policy=MergePolicy(),
         sources=(
             MergedTranscriptSource(
@@ -208,3 +213,9 @@ def _text_correction() -> CorrectionEntry:
         text="Corrected segment.",
         metadata={},
     )
+
+
+def _default_session_id(directory_name: str) -> str:
+    if directory_name == "session":
+        return SESSION_ID
+    return str(uuid5(NAMESPACE_URL, f"https://mena.test/sessions/{directory_name}"))

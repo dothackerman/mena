@@ -222,20 +222,22 @@ def test_summarize_workflow_selects_valid_record_over_corrupt_candidate(
 def test_summarize_workflow_requests_semantic_choice_for_multiple_ready_sessions(
     tmp_path: Path,
 ) -> None:
-    arrange_ready_summarization(
-        root=tmp_path,
+    older = arrange_ready_summarization(
+        root=tmp_path / "sessions",
         session=SummarizationSessionSpec(
-            "older", "2026-05-19T12:00:00Z", "Older Ready Session", True
+            directory_name="older", created_at="2026-05-19T12:00:00Z", name="Older Ready Session"
         ),
         corrections=(),
     )
-    newer = arrange_ready_summarization(
-        root=tmp_path,
+    newest = arrange_ready_summarization(
+        root=tmp_path / "sessions",
         session=SummarizationSessionSpec(
-            "newer", "2026-05-19T13:00:00Z", "Newest Ready Session", True
+            directory_name="newer", created_at="2026-05-19T13:00:00Z", name="Newest Ready Session"
         ),
         corrections=(),
-    ).session_dir
+    )
+    newer = newest.session_dir
+    assert older.merged_record.id != newest.merged_record.id
     interaction = ScriptedInteraction(
         [ScriptedResponse(kind="choose", topic="summarize.session", value=None)]
     )
@@ -385,16 +387,16 @@ def test_summarize_workflow_skips_session_with_unreadable_artifact_manifest(
     tmp_path: Path,
 ) -> None:
     arrange_ready_summarization(
-        root=tmp_path,
+        root=tmp_path / "sessions",
         session=SummarizationSessionSpec(
-            "bad", "2026-05-19T14:00:00Z", "Unreadable Manifest", True
+            directory_name="bad", created_at="2026-05-19T14:00:00Z", name="Unreadable Manifest"
         ),
         corrections=(),
     )
     valid_session = arrange_ready_summarization(
-        root=tmp_path,
+        root=tmp_path / "sessions",
         session=SummarizationSessionSpec(
-            "valid", "2026-05-19T13:00:00Z", "Valid Ready Session", True
+            directory_name="valid", created_at="2026-05-19T13:00:00Z", name="Valid Ready Session"
         ),
         corrections=(),
     ).session_dir

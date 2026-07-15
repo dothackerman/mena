@@ -1706,8 +1706,8 @@ def test_main_summarize_auto_selects_ready_session_when_session_path_is_omitted(
     capsys: CaptureFixture[str],
 ) -> None:
     session_dir = arrange_ready_summarization(
-        root=tmp_path,
-        session=SummarizationSessionSpec("single-session", under_sessions_root=True),
+        root=tmp_path / "sessions",
+        session=SummarizationSessionSpec(directory_name="single-session"),
         corrections=(),
     ).session_dir
     observed: dict[str, Path] = {}
@@ -1735,16 +1735,16 @@ def test_main_summarize_prompts_and_recommends_newest_ready_session(
     capsys: CaptureFixture[str],
 ) -> None:
     arrange_ready_summarization(
-        root=tmp_path,
+        root=tmp_path / "sessions",
         session=SummarizationSessionSpec(
-            "older", "2026-05-19T12:00:00Z", "Older Ready Session", True
+            directory_name="older", created_at="2026-05-19T12:00:00Z", name="Older Ready Session"
         ),
         corrections=(),
     )
     newer_session = arrange_ready_summarization(
-        root=tmp_path,
+        root=tmp_path / "sessions",
         session=SummarizationSessionSpec(
-            "newer", "2026-05-19T13:00:00Z", "Newest Ready Session", True
+            directory_name="newer", created_at="2026-05-19T13:00:00Z", name="Newest Ready Session"
         ),
         corrections=(),
     ).session_dir
@@ -1790,16 +1790,16 @@ def test_main_summarize_ignores_invalid_ready_session_records(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     arrange_ready_summarization(
-        root=tmp_path,
+        root=tmp_path / "sessions",
         session=SummarizationSessionSpec(
-            "invalid-session", "2026-05-19T11:00:00Z", under_sessions_root=True
+            directory_name="invalid-session", created_at="2026-05-19T11:00:00Z"
         ),
         corrections=(),
     )
     valid_session = arrange_ready_summarization(
-        root=tmp_path,
+        root=tmp_path / "sessions",
         session=SummarizationSessionSpec(
-            "valid-session", "2026-05-19T12:00:00Z", under_sessions_root=True
+            directory_name="valid-session", created_at="2026-05-19T12:00:00Z"
         ),
         corrections=(),
     ).session_dir

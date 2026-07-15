@@ -20,14 +20,6 @@ from mena.setup import (
 
 
 @dataclass(frozen=True)
-class LocalRuntimeCapabilities:
-    hardware: HardwareFacts | None = None
-    asr_model_present: bool | None = True
-    diarization_model_present: bool | None = True
-    pyannote_token_present: bool = True
-
-
-@dataclass(frozen=True)
 class AcceptedLocalRuntime:
     installation_state: LocalInstallationState
     accepted_profile_state: RuntimeProfileState
@@ -36,10 +28,8 @@ class AcceptedLocalRuntime:
 def arrange_accepted_local_runtime(
     *,
     settings: AppSettings,
-    capabilities: LocalRuntimeCapabilities | None = None,
 ) -> AcceptedLocalRuntime:
     """Evaluate and persist one accepted local runtime through production contracts."""
-    capabilities = capabilities or LocalRuntimeCapabilities()
     profile = get_alpha_local_profile(settings.local_llm.ollama_model)
     installation = LocalInstallationState(
         command_identity=CommandIdentity(
@@ -49,8 +39,7 @@ def arrange_accepted_local_runtime(
             invocation_mode="installed-product",
         ),
         runtime_paths=settings.paths,
-        hardware=capabilities.hardware
-        or HardwareFacts(
+        hardware=HardwareFacts(
             system="Linux", ram_gb=32.0, cuda_available=True, vram_gb=12.0, avx2_available=True
         ),
         commands=tuple(
@@ -73,9 +62,9 @@ def arrange_accepted_local_runtime(
             model_present=True,
             detail="model present",
         ),
-        asr_model_present=capabilities.asr_model_present,
-        diarization_model_present=capabilities.diarization_model_present,
-        pyannote_token_present=capabilities.pyannote_token_present,
+        asr_model_present=True,
+        diarization_model_present=True,
+        pyannote_token_present=True,
         python_executable=Path("/usr/bin/python3"),
     )
     accepted = build_runtime_profile_state(evaluate_setup(profile, installation))
