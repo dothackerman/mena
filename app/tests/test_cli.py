@@ -21,6 +21,7 @@ from mena.artifacts import (
 from mena.capture import make_wav_bytes
 from mena.cli import (
     COMMANDS,
+    UNIMPLEMENTED_COMMANDS,
     WORKER_EXIT_TIMEOUT_SECONDS,
     ConsoleCorrectionInteraction,
     ConsoleProcessingInteraction,
@@ -164,26 +165,56 @@ def test_main_prints_help_without_command(capsys: CaptureFixture[str]) -> None:
 
 
 def test_main_exposes_architecture_command_surface(capsys: CaptureFixture[str]) -> None:
-    for command in [
-        command
-        for command in COMMANDS[1:]
-        if command
-        not in {
-            "correct",
-            "process",
-            "resume",
-            "summarize",
-            "export",
-            "inspect",
-            "list",
-            "setup",
-        }
-    ]:
+    assert set(UNIMPLEMENTED_COMMANDS) <= set(COMMANDS)
+    for command in UNIMPLEMENTED_COMMANDS:
         exit_code = main([command])
         captured = capsys.readouterr()
 
         assert exit_code == 0
         assert f"Command '{command}' is not implemented yet." in captured.out
+
+
+def test_main_defaults_resolve_under_isolated_test_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    projected_roots: list[Path] = []
+    resolved_settings: list[AppSettings] = []
+    default_settings_factory = AppSettings.from_env
+
+    def _settings_from_env(
+        _cls: type[AppSettings],
+        env: Mapping[str, str] | None = None,
+        *,
+        home: Path | None = None,
+        config_path: Path | None = None,
+    ) -> AppSettings:
+        settings = default_settings_factory(
+            env,
+            home=home,
+            config_path=config_path,
+        )
+        resolved_settings.append(settings)
+        return settings
+
+    def _rebuild_session_index(sessions_root: Path) -> tuple[()]:
+        projected_roots.append(sessions_root)
+        return ()
+
+    monkeypatch.setattr(AppSettings, "from_env", classmethod(_settings_from_env))
+    monkeypatch.setattr(cli_module, "rebuild_session_index", _rebuild_session_index)
+
+    exit_code = main(["list"])
+
+    assert exit_code == 0
+    assert projected_roots == [tmp_path / "mena-data" / "sessions"]
+    assert len(resolved_settings) == 1
+    assert resolved_settings[0].paths.data_home == tmp_path / "xdg-data" / "mena"
+    assert resolved_settings[0].paths.config_home == tmp_path / "xdg-config" / "mena"
+    assert resolved_settings[0].paths.cache_home == tmp_path / "xdg-cache" / "mena"
+    assert resolved_settings[0].paths.state_home == tmp_path / "xdg-state" / "mena"
+    assert "No sessions found." in capsys.readouterr().out
 
 
 def test_main_prints_version(capsys: CaptureFixture[str]) -> None:

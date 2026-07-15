@@ -137,6 +137,7 @@ COMMANDS = (
     "inspect",
     "resume",
 )
+UNIMPLEMENTED_COMMANDS = ("show",)
 WORKER_EXIT_TIMEOUT_SECONDS = 30.0
 ProviderFactory = Callable[[], Any]
 ChoiceT = TypeVar("ChoiceT")
@@ -1076,6 +1077,7 @@ def main(
             print("Processing workflow interrupted.")
             return 1
 
+    assert args.command in UNIMPLEMENTED_COMMANDS
     print(f"Command '{args.command}' is not implemented yet.")
     return 0
 
