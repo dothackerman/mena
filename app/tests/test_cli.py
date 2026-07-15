@@ -19,18 +19,16 @@ from mena.artifacts import (
     session_artifact_manifest_path,
 )
 from mena.capture import make_wav_bytes
-from mena.cli import (
-    COMMANDS,
-    UNIMPLEMENTED_COMMANDS,
-    WORKER_EXIT_TIMEOUT_SECONDS,
-    ConsoleCorrectionInteraction,
+from mena.cli import list as list_command
+from mena.cli import main
+from mena.cli import setup as setup_command
+from mena.cli import summarize as summarize_command
+from mena.cli._runtime_fallback import (
     ConsoleProcessingInteraction,
-    _resolve_record_language,
-    _resolve_record_profile,
     _resolve_runtime_fallback_input,
-    main,
 )
-from mena.cli import _shared as cli_shared
+from mena.cli.correct import ConsoleCorrectionInteraction
+from mena.cli.record import _resolve_record_language, _resolve_record_profile
 from mena.correction_overlay import (
     CorrectionEntry,
     create_correction_overlay,
@@ -82,6 +80,7 @@ from mena.protocol import (
     StartCapturePayload,
     WorkerProcess,
 )
+from mena.recording_control import WORKER_EXIT_TIMEOUT_SECONDS
 from mena.review_flagging import (
     REVIEW_QUEUE_SCHEMA_VERSION,
     ConfidenceFlaggingPolicy,
@@ -154,6 +153,20 @@ from test_correction_workflow import (
     _build_session_bundle as _build_correction_session_bundle,
 )
 
+COMMANDS = (
+    "record",
+    "setup",
+    "list",
+    "show",
+    "process",
+    "correct",
+    "summarize",
+    "export",
+    "inspect",
+    "resume",
+)
+UNIMPLEMENTED_COMMANDS = ("show",)
+
 SESSION_ID = "00000000-0000-0000-0000-000000000001"
 
 
@@ -220,7 +233,7 @@ def test_main_defaults_resolve_under_isolated_test_paths(
         return ()
 
     monkeypatch.setattr(AppSettings, "from_env", classmethod(_settings_from_env))
-    monkeypatch.setattr(cli_shared, "rebuild_session_index", _rebuild_session_index)
+    monkeypatch.setattr(list_command, "rebuild_session_index", _rebuild_session_index)
 
     exit_code = main(["list"])
 
@@ -5046,7 +5059,7 @@ def test_main_summarize_exits_3_when_summarization_fallback_is_unavailable(
 def test_console_summarize_interaction_renders_completion_handoff(
     capsys: CaptureFixture[str],
 ) -> None:
-    interaction = cli_module.ConsoleSummarizeInteraction(None)
+    interaction = summarize_command.ConsoleSummarizeInteraction(None)
 
     interaction.notify(
         WorkflowNotice(
@@ -5071,7 +5084,7 @@ def test_console_summarize_interaction_renders_completion_handoff(
 def test_console_summarize_interaction_renders_runtime_stewardship_release_notice(
     capsys: CaptureFixture[str],
 ) -> None:
-    interaction = cli_module.ConsoleSummarizeInteraction(None)
+    interaction = summarize_command.ConsoleSummarizeInteraction(None)
     release = RuntimeReleaseResult(
         lease=RuntimeLease(
             resource_kind="local_llm",
@@ -5098,7 +5111,7 @@ def test_console_summarize_interaction_renders_runtime_stewardship_release_notic
 def test_console_summarize_interaction_renders_runtime_stewardship_release_warning(
     capsys: CaptureFixture[str],
 ) -> None:
-    interaction = cli_module.ConsoleSummarizeInteraction(None)
+    interaction = summarize_command.ConsoleSummarizeInteraction(None)
     release = RuntimeReleaseResult(
         lease=RuntimeLease(
             resource_kind="local_llm",
@@ -5126,7 +5139,7 @@ def test_console_summarize_interaction_confirms_remote_fallback(
     capsys: CaptureFixture[str],
 ) -> None:
     answers = iter(["y"])
-    interaction = cli_module.ConsoleSummarizeInteraction(lambda _prompt: next(answers))
+    interaction = summarize_command.ConsoleSummarizeInteraction(lambda _prompt: next(answers))
 
     accepted = interaction.confirm(
         ConfirmationRequest(
@@ -5147,7 +5160,7 @@ def test_console_summarize_interaction_confirms_remote_fallback(
 def test_console_summarize_interaction_declines_remote_fallback_non_interactively(
     capsys: CaptureFixture[str],
 ) -> None:
-    interaction = cli_module.ConsoleSummarizeInteraction(None)
+    interaction = summarize_command.ConsoleSummarizeInteraction(None)
 
     accepted = interaction.confirm(
         ConfirmationRequest(
@@ -5162,7 +5175,7 @@ def test_console_summarize_interaction_declines_remote_fallback_non_interactivel
 
 
 def test_console_summarize_interaction_rejects_unknown_confirmation_topics() -> None:
-    interaction = cli_module.ConsoleSummarizeInteraction(lambda _prompt: "y")
+    interaction = summarize_command.ConsoleSummarizeInteraction(lambda _prompt: "y")
 
     with pytest.raises(ValueError, match="Unsupported summarize confirmation topic"):
         interaction.confirm(ConfirmationRequest(topic="summarize.other"))
@@ -5182,7 +5195,7 @@ def test_cli_setup_interaction_renders_the_disclosure_before_prompting(
         prompts.append(prompt)
         return "y"
 
-    interaction = cli_module._CliSetupInteraction(input_fn=_answer)
+    interaction = setup_command._CliSetupInteraction(input_fn=_answer)
     accepted = interaction.confirm(
         ConfirmationRequest(
             topic="setup.mistral_summary_disclosure",
