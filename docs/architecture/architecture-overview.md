@@ -4,10 +4,11 @@ Status: arc42-structured architecture overview; provisional where marked
 
 Metadata:
 
-- Last updated: 2026-05-01
+- Last updated: 2026-07-15
 - Maintainer: architecture session between customer and Codex
 - Source inputs: requirements documents, architecture review, and recorded architecture discussions in this repository
 - Review status: architecture-review feedback incorporated for current architecture baseline
+- Decision coverage: content reflects ADR-032 and ADR-033; later accepted decisions remain authoritative in their individual ADRs until synthesized here
 
 This document captures the current architecture baseline.
 Sections may be revised as research, review, and implementation sharpen earlier wording.
@@ -636,13 +637,15 @@ The PoC CLI is an adapter, but the application layer still needs a stable verb s
 The initial architecture-facing command set is:
 
 - `record`: create a session, select/confirm capture profile, meeting language, and devices/routes, show the consent disclaimer, run recording, finalize source artifacts, and print the processing handoff
-- `list`: list known sessions from the rebuildable global index
-- `show`: inspect one session's state and artifacts
+- `setup`: run Linux alpha setup/preflight
+- `list`: list known sessions from a projection rebuilt from session bundles for each invocation; no global index is persisted
+- `show`: planned, not implemented in the current PoC
 - `process`: run or resume automated post-meeting processing
 - `correct`: run or resume the correction workflow
 - `summarize`: generate or regenerate a structured summary artifact
 - `export`: generate or inspect final markdown outputs from summary artifacts
-- `resume`: continue the next pending step for a session where that is unambiguous
+- `inspect`: verify and report one session bundle's integrity
+- `resume`: resume the latest retryable processing failure; non-retryable failures and non-processing workflow steps are out of scope
 
 Exact CLI flags and prompt wording are interface-adapter details.
 The application services must not depend on terminal-specific control flow.
@@ -780,6 +783,10 @@ For the CLI PoC, this single-writer rule means:
 - only one active orchestrator may operate on a given session bundle at a time
 - each new CLI invocation reconstructs authority from the session bundle before acting
 - concurrent orchestrator access to the same session must be rejected or made to wait
+
+The current CLI implements this rule with an exclusive per-bundle `orchestrator.lock`.
+Contention is reported with exit code `4` rather than waiting.
+Locks held by dead or reused same-host process identities are reclaimed as stale; the lock implementation owns the exact reclaim mechanics.
 
 Reasoning:
 

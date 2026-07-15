@@ -14,6 +14,11 @@ A global index that stores meeting content would become a parallel source of tru
 
 Use a narrow rebuildable global index.
 
+## Implementation status
+
+Implemented as a projection rebuilt from session bundles for each `mena list` invocation.
+The projection is never persisted.
+
 ## Consequences
 
 The index supports session discovery only and does not become canonical meeting-content storage.
