@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import sys
 from pathlib import Path
@@ -8,8 +9,13 @@ from types import SimpleNamespace
 import pytest
 
 import mena.cli as cli
-from mena.cli import _shared as cli_shared
+from mena.cli import _console as console
+from mena.cli import _runtime_fallback as runtime_fallback
+from mena.cli import correct as correct_command
 from mena.cli import inspect as inspect_command
+from mena.cli import processing as processing_command
+from mena.cli import record as record_command
+from mena.cli import setup as setup_command
 from mena.cli import summarize as summarize_command
 from mena.interaction import (
     ChoiceOption,
@@ -22,10 +28,22 @@ from mena.settings import AppSettings
 from mena.setup_workflow import SetupMessageEvent, SetupWorkflowResult
 
 
+def test_cli_package_exports_only_supported_entry_point() -> None:
+    assert cli.__all__ == ["main"]
+
+
+def test_runtime_fallback_shared_seam_excludes_processing_specific_interaction() -> None:
+    source = inspect.getsource(runtime_fallback)
+
+    assert "SetupEvaluation" not in source
+    assert "selected_asr_profile" not in source
+    assert hasattr(processing_command, "ConsoleProcessingInteraction")
+
+
 def test_console_record_interaction_reports_adapter_notices(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    interaction = cli.ConsoleRecordInteraction(lambda _prompt: "q")
+    interaction = record_command.ConsoleRecordInteraction(lambda _prompt: "q")
 
     for notice in (
         WorkflowNotice(topic="record.session_created", context={"session_id": "session-1"}),
@@ -138,7 +156,7 @@ def test_console_record_interaction_reports_handoff_playback_loss_summary(
         ),
         encoding="utf-8",
     )
-    interaction = cli.ConsoleRecordInteraction(lambda _prompt: "q")
+    interaction = record_command.ConsoleRecordInteraction(lambda _prompt: "q")
     interaction.notify(
         WorkflowNotice(
             topic="record.process_handoff",
@@ -182,7 +200,7 @@ def test_console_record_interaction_handoff_does_not_overstate_unrecorded_mic(
         ),
         encoding="utf-8",
     )
-    interaction = cli.ConsoleRecordInteraction(lambda _prompt: "q")
+    interaction = record_command.ConsoleRecordInteraction(lambda _prompt: "q")
     interaction.notify(
         WorkflowNotice(
             topic="record.process_handoff",
@@ -226,7 +244,7 @@ def test_console_record_interaction_reports_playback_loss_without_other_source(
         ),
         encoding="utf-8",
     )
-    interaction = cli.ConsoleRecordInteraction(lambda _prompt: "q")
+    interaction = record_command.ConsoleRecordInteraction(lambda _prompt: "q")
 
     interaction.notify(
         WorkflowNotice(
@@ -259,7 +277,7 @@ def test_console_record_interaction_reports_playback_loss_without_other_source(
 
 
 def test_console_record_interaction_rejects_noninteractive_choices_and_text() -> None:
-    interaction = cli.ConsoleRecordInteraction(None)
+    interaction = record_command.ConsoleRecordInteraction(None)
 
     with pytest.raises(ValueError, match="pass --mic"):
         interaction.choose(
@@ -293,12 +311,12 @@ def test_console_record_interaction_rejects_noninteractive_choices_and_text() ->
     with pytest.raises(ValueError, match="Unsupported record confirmation topic"):
         interaction.confirm(ConfirmationRequest(topic="record.unsupported"))
     with pytest.raises(ValueError, match="Unsupported record text topic"):
-        cli.ConsoleRecordInteraction(lambda _prompt: "q").request_text(
+        record_command.ConsoleRecordInteraction(lambda _prompt: "q").request_text(
             TextRequest(topic="record.unsupported")
         )
 
     with pytest.raises(ValueError, match="Unsupported record choice topic"):
-        cli._record_choice_prompt_metadata("record.capture_route.unknown")
+        record_command._record_choice_prompt_metadata("record.capture_route.unknown")
 
 
 def test_prompt_and_runtime_adapter_helpers(
@@ -312,7 +330,7 @@ def test_prompt_and_runtime_adapter_helpers(
     )
 
     assert (
-        cli._prompt_choice(
+        console._prompt_choice(
             header="Choices:",
             label="choices",
             choices=choices,
@@ -323,7 +341,7 @@ def test_prompt_and_runtime_adapter_helpers(
         == "two"
     )
     with pytest.raises(ValueError, match="Invalid default"):
-        cli._prompt_choice(
+        console._prompt_choice(
             header="Choices:",
             label="choices",
             choices=choices,
@@ -332,7 +350,7 @@ def test_prompt_and_runtime_adapter_helpers(
             default_index=3,
         )
     with pytest.raises(ValueError, match="Invalid choices selection 'x'"):
-        cli._prompt_choice(
+        console._prompt_choice(
             header="Choices:",
             label="choices",
             choices=choices,
@@ -340,7 +358,7 @@ def test_prompt_and_runtime_adapter_helpers(
             input_fn=lambda _prompt: "x",
         )
     with pytest.raises(ValueError, match="Invalid choices selection '3'"):
-        cli._prompt_choice(
+        console._prompt_choice(
             header="Choices:",
             label="choices",
             choices=choices,
@@ -351,15 +369,16 @@ def test_prompt_and_runtime_adapter_helpers(
     def explicit(prompt: str) -> str:
         return prompt
 
-    assert cli._record_input(explicit) is explicit
+    assert console._resolve_console_input(explicit) is explicit
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
-    assert cli._record_input(None) is input
+    assert console._resolve_console_input(None) is input
     assert isinstance(
-        cli._resolve_runtime_fallback_interaction(explicit), cli.ConsoleProcessingInteraction
+        processing_command._resolve_processing_interaction(explicit),
+        processing_command.ConsoleProcessingInteraction,
     )
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: False))
-    noninteractive = cli._resolve_runtime_fallback_interaction(None)
-    assert isinstance(noninteractive, cli.ConsoleProcessingInteraction)
+    noninteractive = processing_command._resolve_processing_interaction(None)
+    assert isinstance(noninteractive, processing_command.ConsoleProcessingInteraction)
     assert (
         noninteractive.confirm(
             ConfirmationRequest(
@@ -380,16 +399,18 @@ def test_prompt_and_runtime_adapter_helpers(
     )
 
     settings = AppSettings.from_env(env={}, home=tmp_path)
-    assert cli._effective_record_data_root(tmp_path / "data", settings) == tmp_path / "data"
-    assert cli._format_process_handoff_command(tmp_path / "data") == (
+    assert (
+        record_command._effective_record_data_root(tmp_path / "data", settings) == tmp_path / "data"
+    )
+    assert record_command._format_process_handoff_command(tmp_path / "data") == (
         f"MENA_DATA_ROOT={tmp_path / 'data'} mena process"
     )
-    assert cli._format_process_handoff_command(None) == "mena process"
-    assert cli._resolve_process_session_path(str(tmp_path / "session.json"), settings) == (
-        tmp_path / "session.json"
-    )
+    assert record_command._format_process_handoff_command(None) == "mena process"
+    assert processing_command._resolve_process_session_path(
+        str(tmp_path / "session.json"), settings
+    ) == (tmp_path / "session.json")
     with pytest.raises(ValueError, match="no recorded sessions"):
-        cli._resolve_process_session_path(None, settings)
+        processing_command._resolve_process_session_path(None, settings)
 
 
 def test_record_choice_and_data_root_adapter_branches(
@@ -401,7 +422,7 @@ def test_record_choice_and_data_root_adapter_branches(
         prompts.append(prompt)
         return ""
 
-    interaction = cli.ConsoleRecordInteraction(_input)
+    interaction = record_command.ConsoleRecordInteraction(_input)
     selected = interaction.choose(
         ChoiceRequest(
             topic="record.capture_route.output_sink",
@@ -415,20 +436,22 @@ def test_record_choice_and_data_root_adapter_branches(
 
     assert selected.option_id == "two"
     assert prompts == ["Select meeting audio output [2]: "]
-    assert cli._record_choice_prompt_metadata("record.capture_route.playback_stream") == (
+    assert record_command._record_choice_prompt_metadata(
+        "record.capture_route.playback_stream"
+    ) == (
         "playback stream",
         "--playback-stream",
         "Playback streams:",
         "playback streams",
     )
-    assert cli._record_choice_prompt_metadata("record.capture_route.output_sink") == (
+    assert record_command._record_choice_prompt_metadata("record.capture_route.output_sink") == (
         "meeting audio output",
         "--output-sink",
         "Where do you hear the meeting?",
         "meeting audio output",
     )
 
-    invalid_selection = cli.ConsoleRecordInteraction(lambda _prompt: "x")
+    invalid_selection = record_command.ConsoleRecordInteraction(lambda _prompt: "x")
     with pytest.raises(ValueError, match="Invalid meeting audio output selection 'x'"):
         invalid_selection.choose(
             ChoiceRequest(
@@ -440,14 +463,14 @@ def test_record_choice_and_data_root_adapter_branches(
                 default_option_id=None,
             )
         )
-    assert cli._resolve_record_profile(None, input_fn=lambda _prompt: "2").id.value == (
+    assert record_command._resolve_record_profile(None, input_fn=lambda _prompt: "2").id.value == (
         "in_person_single_mic"
     )
 
     xdg_home = tmp_path / "xdg"
     settings = AppSettings.from_env(env={"XDG_DATA_HOME": str(xdg_home)}, home=tmp_path)
 
-    assert cli._effective_record_data_root(None, settings) is None
+    assert record_command._effective_record_data_root(None, settings) is None
 
 
 def test_main_reports_adapter_cancellations_and_errors(
@@ -479,7 +502,7 @@ def test_main_reports_adapter_cancellations_and_errors(
     assert "Summarization cancelled." in capsys.readouterr().out
 
     monkeypatch.setattr(
-        inspect_command.shared,
+        inspect_command,
         "_run_inspect_command",
         lambda **_kwargs: (_ for _ in ()).throw(OSError("manifest missing")),
     )
@@ -501,8 +524,8 @@ def test_main_reports_adapter_cancellations_and_errors(
 
 
 def test_console_correction_and_processing_reject_unsupported_topics() -> None:
-    correction = cli.ConsoleCorrectionInteraction(lambda _prompt: "no")
-    processing_interaction = cli.ConsoleProcessingInteraction(lambda _prompt: "no")
+    correction = correct_command.ConsoleCorrectionInteraction(lambda _prompt: "no")
+    processing_interaction = processing_command.ConsoleProcessingInteraction(lambda _prompt: "no")
 
     with pytest.raises(ValueError, match="Unsupported correction choice topic"):
         correction.choose(
@@ -520,11 +543,11 @@ def test_console_correction_and_processing_reject_unsupported_topics() -> None:
     with pytest.raises(ValueError, match="Unsupported correction notice topic"):
         correction.notify(WorkflowNotice(topic="correction.unsupported"))
 
-    assert cli._correction_action_option_id("play") == "playback"
-    assert cli._correction_action_option_id("reassign") == "speaker_reassignment"
-    assert cli._correction_action_option_id("text") == "text_edit"
-    assert cli._correction_action_option_id("overlap") == "overlap_mark"
-    assert cli._correction_action_option_id("?") is None
+    assert correct_command._correction_action_option_id("play") == "playback"
+    assert correct_command._correction_action_option_id("reassign") == "speaker_reassignment"
+    assert correct_command._correction_action_option_id("text") == "text_edit"
+    assert correct_command._correction_action_option_id("overlap") == "overlap_mark"
+    assert correct_command._correction_action_option_id("?") is None
 
     with pytest.raises(ValueError, match="Unsupported processing choice topic"):
         processing_interaction.choose(
@@ -544,7 +567,7 @@ def test_setup_cli_interaction_and_command_adapter(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    interaction = cli._CliSetupInteraction(lambda _prompt: "yes")
+    interaction = setup_command._CliSetupInteraction(lambda _prompt: "yes")
 
     assert interaction.confirm(ConfirmationRequest(topic="setup.primary_actions"))
     assert interaction.confirm(ConfirmationRequest(topic="setup.fallback_actions"))
@@ -567,10 +590,10 @@ def test_setup_cli_interaction_and_command_adapter(
             events=(SetupMessageEvent("setup message"),),
         )
 
-    monkeypatch.setattr(cli_shared, "run_setup_workflow", _run_setup_workflow)
+    monkeypatch.setattr(setup_command, "run_setup_workflow", _run_setup_workflow)
 
     assert (
-        cli._run_setup_command(
+        setup_command._run_setup_command(
             check_only=False,
             assume_yes=True,
             authorize_local_fallback=False,

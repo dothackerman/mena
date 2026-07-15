@@ -1,4 +1,4 @@
-"""CLI interface adapter and compatibility facade."""
+"""CLI composition root and supported console entry point."""
 
 from __future__ import annotations
 
@@ -8,41 +8,6 @@ from datetime import datetime
 from pathlib import Path
 
 from mena.cli import correct, export, inspect, list, process, record, resume, setup, show, summarize
-from mena.cli._shared import (  # noqa: F401 - compatibility facade
-    COMMANDS,
-    UNIMPLEMENTED_COMMANDS,
-    WORKER_EXIT_TIMEOUT_SECONDS,
-    ConsoleCorrectionInteraction,
-    ConsoleExportInteraction,
-    ConsoleProcessingInteraction,
-    ConsoleRecordInteraction,
-    ConsoleSummarizeInteraction,
-    _choice_default_index,
-    _CliSetupInteraction,
-    _correction_action_option_id,
-    _correction_handoff_available,
-    _effective_record_data_root,
-    _format_process_handoff_command,
-    _format_processable_session_candidate,
-    _format_session_index_line,
-    _parse_iso_timestamp,
-    _prompt_choice,
-    _record_choice_prompt_metadata,
-    _record_input,
-    _resolve_export_interaction,
-    _resolve_process_session_path,
-    _resolve_record_language,
-    _resolve_record_profile,
-    _resolve_runtime_fallback_input,
-    _resolve_runtime_fallback_interaction,
-    _run_export_command,
-    _run_inspect_command,
-    _run_list_command,
-    _run_setup_command,
-    _run_summarize_command,
-    _settings_with_sessions_root,
-    _sort_session_index_newest_first,
-)
 from mena.cli.composition import (
     CliDependencies,
     CommandContext,
@@ -190,42 +155,4 @@ def main(
     )
 
 
-__all__ = [
-    "COMMANDS",
-    "UNIMPLEMENTED_COMMANDS",
-    "WORKER_EXIT_TIMEOUT_SECONDS",
-    "CliDependencies",
-    "ConsoleCorrectionInteraction",
-    "ConsoleExportInteraction",
-    "ConsoleProcessingInteraction",
-    "ConsoleRecordInteraction",
-    "ConsoleSummarizeInteraction",
-    "_CliSetupInteraction",
-    "_choice_default_index",
-    "_correction_action_option_id",
-    "_correction_handoff_available",
-    "_effective_record_data_root",
-    "_format_process_handoff_command",
-    "_format_processable_session_candidate",
-    "_format_session_index_line",
-    "_parse_iso_timestamp",
-    "_prompt_choice",
-    "_record_choice_prompt_metadata",
-    "_record_input",
-    "_resolve_export_interaction",
-    "_resolve_process_session_path",
-    "_resolve_record_language",
-    "_resolve_record_profile",
-    "_resolve_runtime_fallback_input",
-    "_resolve_runtime_fallback_interaction",
-    "_run_export_command",
-    "_run_inspect_command",
-    "_run_list_command",
-    "_run_setup_command",
-    "_run_summarize_command",
-    "_settings_with_sessions_root",
-    "_sort_session_index_newest_first",
-    "build_parser",
-    "main",
-    "run",
-]
+__all__ = ["main"]

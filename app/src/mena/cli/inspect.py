@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
-from mena.artifacts import ArtifactStoreError
-from mena.cli import _shared
+from mena.artifacts import (
+    ArtifactStoreError,
+)
 from mena.cli.command import bind_handler
 from mena.cli.composition import CommandContext
-
-shared = _shared
+from mena.session_integrity import (
+    verify_session_bundle,
+)
 
 
 def register(
@@ -29,7 +32,17 @@ def register(
 
 def run(args: argparse.Namespace, context: CommandContext) -> int:
     try:
-        return _shared._run_inspect_command(session_path=Path(args.session_path))
+        return _run_inspect_command(session_path=Path(args.session_path))
     except (ArtifactStoreError, ValueError, OSError) as exc:
         print(f"Cannot inspect session: {exc}")
         return 1
+
+
+def _run_inspect_command(
+    *,
+    session_path: Path,
+) -> int:
+    report = verify_session_bundle(session_path)
+    print(f"Integrity report for {session_path}: {'OK' if report.ok else 'FAILED'}")
+    print(json.dumps(report.to_dict(), sort_keys=True, indent=2))
+    return 0 if report.ok else 1
