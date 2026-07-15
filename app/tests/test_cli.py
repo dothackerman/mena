@@ -186,6 +186,26 @@ def test_main_exposes_architecture_command_surface(capsys: CaptureFixture[str]) 
         assert f"Command '{command}' is not implemented yet." in captured.out
 
 
+def test_main_defaults_resolve_under_isolated_test_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    projected_roots: list[Path] = []
+
+    def _rebuild_session_index(sessions_root: Path) -> tuple[()]:
+        projected_roots.append(sessions_root)
+        return ()
+
+    monkeypatch.setattr(cli_module, "rebuild_session_index", _rebuild_session_index)
+
+    exit_code = main(["list"])
+
+    assert exit_code == 0
+    assert projected_roots == [tmp_path / "mena-data" / "sessions"]
+    assert "No sessions found." in capsys.readouterr().out
+
+
 def test_main_prints_version(capsys: CaptureFixture[str]) -> None:
     exit_code = main(["--version"])
 
