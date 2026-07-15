@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import sys
 from pathlib import Path
@@ -9,6 +10,7 @@ import pytest
 
 import mena.cli as cli
 from mena.cli import _console as console
+from mena.cli import _runtime_fallback as runtime_fallback
 from mena.cli import correct as correct_command
 from mena.cli import inspect as inspect_command
 from mena.cli import processing as processing_command
@@ -28,6 +30,14 @@ from mena.setup_workflow import SetupMessageEvent, SetupWorkflowResult
 
 def test_cli_package_exports_only_supported_entry_point() -> None:
     assert cli.__all__ == ["main"]
+
+
+def test_runtime_fallback_shared_seam_excludes_processing_specific_interaction() -> None:
+    source = inspect.getsource(runtime_fallback)
+
+    assert "SetupEvaluation" not in source
+    assert "selected_asr_profile" not in source
+    assert hasattr(processing_command, "ConsoleProcessingInteraction")
 
 
 def test_console_record_interaction_reports_adapter_notices(
