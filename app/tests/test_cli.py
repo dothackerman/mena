@@ -177,7 +177,8 @@ def test_main_help_describes_every_registered_command(capsys: CaptureFixture[str
     }
     assert set(command_descriptions) == set(COMMANDS)
     assert all(description.strip() for description in command_descriptions.values())
-    assert command_descriptions["show"] == "Planned; not implemented in the current PoC."
+    normalized_help = " ".join(captured.out.split())
+    assert "show Planned; not implemented in the current PoC." in normalized_help
 
 
 def test_main_exposes_architecture_command_surface(capsys: CaptureFixture[str]) -> None:
