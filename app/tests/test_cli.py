@@ -21,6 +21,7 @@ from mena.artifacts import (
 from mena.capture import make_wav_bytes
 from mena.cli import (
     COMMANDS,
+    UNIMPLEMENTED_COMMANDS,
     WORKER_EXIT_TIMEOUT_SECONDS,
     ConsoleCorrectionInteraction,
     ConsoleProcessingInteraction,
@@ -164,21 +165,8 @@ def test_main_prints_help_without_command(capsys: CaptureFixture[str]) -> None:
 
 
 def test_main_exposes_architecture_command_surface(capsys: CaptureFixture[str]) -> None:
-    for command in [
-        command
-        for command in COMMANDS[1:]
-        if command
-        not in {
-            "correct",
-            "process",
-            "resume",
-            "summarize",
-            "export",
-            "inspect",
-            "list",
-            "setup",
-        }
-    ]:
+    assert set(UNIMPLEMENTED_COMMANDS) <= set(COMMANDS)
+    for command in UNIMPLEMENTED_COMMANDS:
         exit_code = main([command])
         captured = capsys.readouterr()
 
