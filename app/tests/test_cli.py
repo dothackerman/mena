@@ -1902,9 +1902,10 @@ def test_main_summarize_reports_missing_merged_transcript(
     tmp_path: Path,
     capsys: CaptureFixture[str],
 ) -> None:
-    session_dir = _create_session_record(tmp_path)
+    scenario = arrange_ready_summarization(root=tmp_path)
+    (scenario.session_dir / scenario.merged_record.path).unlink()
 
-    exit_code = main(["summarize", str(session_dir)])
+    exit_code = main(["summarize", str(scenario.session_dir)])
     captured = capsys.readouterr()
 
     assert exit_code == 1
@@ -1929,12 +1930,22 @@ def test_main_summarize_rejects_when_no_completed_correction_overlay_is_availabl
     tmp_path: Path,
     capsys: CaptureFixture[str],
 ) -> None:
-    session_dir = _create_session_record(tmp_path)
-    _persist_merged_transcript(
-        store=FileSystemArtifactStore(session_id=SESSION_ID, session_dir=session_dir)
+    scenario = arrange_ready_summarization(root=tmp_path)
+    manifest_path = scenario.store.manifest_path
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert isinstance(manifest, dict)
+    artifacts = manifest["artifacts"]
+    assert isinstance(artifacts, list)
+    manifest["artifacts"] = [
+        artifact
+        for artifact in artifacts
+        if isinstance(artifact, dict) and artifact.get("id") != scenario.overlay_record.id
+    ]
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
 
-    exit_code = main(["summarize", str(session_dir)])
+    exit_code = main(["summarize", str(scenario.session_dir)])
     captured = capsys.readouterr()
 
     assert exit_code == 1
