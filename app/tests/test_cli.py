@@ -27,11 +27,6 @@ from mena.cli._console import _resolve_console_input
 from mena.cli.correct import ConsoleCorrectionInteraction
 from mena.cli.processing import ConsoleProcessingInteraction
 from mena.cli.record import _resolve_record_language, _resolve_record_profile
-from mena.correction_overlay import (
-    CorrectionEntry,
-    create_correction_overlay,
-    persist_correction_overlay_artifact,
-)
 from mena.diarization import FakeDiarizationProvider
 from mena.discovery import (
     AudioDiscovery,
@@ -145,6 +140,11 @@ from mena.transcription import (
     TranscriptProviderMetadata,
     TranscriptSegment,
     persist_transcript_artifact,
+)
+from support.runtime_profiles import arrange_accepted_local_runtime
+from support.scenarios.summarization import (
+    SummarizationSessionSpec,
+    arrange_ready_summarization,
 )
 from test_correction_workflow import (
     _build_session_bundle as _build_correction_session_bundle,
@@ -1106,7 +1106,8 @@ def test_main_summarize_rejects_empty_explicit_cli_language(
     tmp_path: Path,
     capsys: CaptureFixture[str],
 ) -> None:
-    session_dir, _, _, _ = _build_summarize_session_bundle(tmp_path)
+    scenario = arrange_ready_summarization(root=tmp_path)
+    session_dir = scenario.session_dir
     config_path = tmp_path / "config.toml"
     config_path.write_text("[summary]\nlanguage = 'fr-CH'\n", encoding="utf-8")
 
@@ -1667,7 +1668,8 @@ def test_main_summarize_accepts_session_json_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    session_dir, _, _, _ = _build_summarize_session_bundle(tmp_path)
+    scenario = arrange_ready_summarization(root=tmp_path)
+    session_dir = scenario.session_dir
     session_json_path = session_dir / SESSION_RECORD_FILENAME
     observed: dict[str, object] = {}
 
@@ -1703,11 +1705,11 @@ def test_main_summarize_auto_selects_ready_session_when_session_path_is_omitted(
     monkeypatch: pytest.MonkeyPatch,
     capsys: CaptureFixture[str],
 ) -> None:
-    session_dir = _build_ready_summarize_session_bundle_with_metadata(
-        tmp_path,
-        directory_name="single-session",
-        created_at="2026-05-19T15:00:00Z",
-    )
+    session_dir = arrange_ready_summarization(
+        root=tmp_path,
+        session=SummarizationSessionSpec("single-session", under_sessions_root=True),
+        corrections=(),
+    ).session_dir
     observed: dict[str, Path] = {}
 
     def _fake_run_summarization_command(**kwargs: object) -> int:
@@ -1732,18 +1734,20 @@ def test_main_summarize_prompts_and_recommends_newest_ready_session(
     monkeypatch: pytest.MonkeyPatch,
     capsys: CaptureFixture[str],
 ) -> None:
-    _build_ready_summarize_session_bundle_with_metadata(
-        tmp_path,
-        directory_name="older",
-        created_at="2026-05-19T12:00:00Z",
-        name="Older Ready Session",
+    arrange_ready_summarization(
+        root=tmp_path,
+        session=SummarizationSessionSpec(
+            "older", "2026-05-19T12:00:00Z", "Older Ready Session", True
+        ),
+        corrections=(),
     )
-    newer_session = _build_ready_summarize_session_bundle_with_metadata(
-        tmp_path,
-        directory_name="newer",
-        created_at="2026-05-19T13:00:00Z",
-        name="Newest Ready Session",
-    )
+    newer_session = arrange_ready_summarization(
+        root=tmp_path,
+        session=SummarizationSessionSpec(
+            "newer", "2026-05-19T13:00:00Z", "Newest Ready Session", True
+        ),
+        corrections=(),
+    ).session_dir
     observed: dict[str, Path] = {}
 
     def _fake_run_summarization_command(**kwargs: object) -> int:
@@ -1785,16 +1789,20 @@ def test_main_summarize_ignores_invalid_ready_session_records(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _build_ready_summarize_session_bundle_with_metadata(
-        tmp_path,
-        directory_name="invalid-session",
-        created_at="2026-05-19T11:00:00Z",
+    arrange_ready_summarization(
+        root=tmp_path,
+        session=SummarizationSessionSpec(
+            "invalid-session", "2026-05-19T11:00:00Z", under_sessions_root=True
+        ),
+        corrections=(),
     )
-    valid_session = _build_ready_summarize_session_bundle_with_metadata(
-        tmp_path,
-        directory_name="valid-session",
-        created_at="2026-05-19T12:00:00Z",
-    )
+    valid_session = arrange_ready_summarization(
+        root=tmp_path,
+        session=SummarizationSessionSpec(
+            "valid-session", "2026-05-19T12:00:00Z", under_sessions_root=True
+        ),
+        corrections=(),
+    ).session_dir
     invalid_session = tmp_path / "sessions" / "bad-session"
     invalid_session.mkdir(parents=True)
     # Not a valid session record; should be ignored during candidate discovery.
@@ -1822,11 +1830,14 @@ def test_main_summarize_requires_accepted_runtime_profile_state(
     monkeypatch: pytest.MonkeyPatch,
     capsys: CaptureFixture[str],
 ) -> None:
-    session_dir, _, _, _ = _build_summarize_session_bundle(tmp_path)
+    scenario = arrange_ready_summarization(root=tmp_path)
+    session_dir = scenario.session_dir
     settings = AppSettings.from_env(env={}, home=tmp_path)
+    runtime = arrange_accepted_local_runtime(settings=settings)
+    (settings.paths.state_home / "setup-state.json").unlink()
     monkeypatch.setattr(
         "mena.runtime_profile.detect_local_installation_state",
-        lambda *_args, **_kwargs: _setup_state(settings=settings, pyannote_token_present=True),
+        lambda *_args, **_kwargs: runtime.installation_state,
     )
 
     exit_code = main(["summarize", str(session_dir)], settings=settings)
@@ -1842,15 +1853,13 @@ def test_summarize_runtime_scope_still_checks_ollama_after_bad_hardware_probe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings.from_env(env={}, home=tmp_path)
-    ready_state = _setup_state(settings=settings, pyannote_token_present=True)
-    accepted = build_runtime_profile_state(evaluate_setup(get_alpha_local_profile(), ready_state))
-    persist_runtime_profile_state(accepted, paths=settings.paths)
+    runtime = arrange_accepted_local_runtime(settings=settings)
 
     def _detect_summary_state(
         _settings: AppSettings,
         **_kwargs: object,
     ) -> LocalInstallationState:
-        state = _setup_state(settings=settings, pyannote_token_present=True)
+        state = runtime.installation_state
         return replace(
             state,
             hardware=HardwareFacts(
@@ -1948,7 +1957,9 @@ def test_main_summarize_reports_stage_failure(
         _run_command_fails,
     )
 
-    session_dir, _, _, _ = _build_summarize_session_bundle(tmp_path)
+    scenario = arrange_ready_summarization(root=tmp_path)
+
+    session_dir = scenario.session_dir
     settings = AppSettings.from_env(env={}, home=tmp_path)
     exit_code = main(["summarize", str(session_dir)], settings=settings)
     captured = capsys.readouterr()
@@ -3756,99 +3767,6 @@ class TimeoutCapturingWorkerProcess(FakeWorkerProcess):
         return 0
 
 
-def _build_summarize_session_bundle(
-    tmp_path: Path,
-) -> tuple[Path, FileSystemArtifactStore, ArtifactRecord, ArtifactRecord]:
-    session_dir = _create_session_record(tmp_path)
-    store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=session_dir)
-    merged_record = _persist_merged_transcript(store=store)
-    source_ref = ArtifactRef.from_record(merged_record)
-    overlay_artifact = create_correction_overlay(
-        session_id=SESSION_ID,
-        source_transcript_artifact=source_ref,
-        entries=(
-            CorrectionEntry(
-                id="entry_1",
-                segment_id="segment_2",
-                correction_type="text_edit",
-                original_flag_id="flag_1",
-                user_action_at="2026-05-19T15:20:01Z",
-                text="Corrected segment.",
-                metadata={},
-            ),
-        ),
-        now=datetime(2026, 5, 19, 15, 20, 0, tzinfo=UTC),
-    )
-    overlay_record = persist_correction_overlay_artifact(
-        store=store,
-        artifact=overlay_artifact,
-        name="overlay/active.json",
-        metadata={
-            "workflow_status": "completed",
-            "completed_at": "2026-05-19T15:20:00Z",
-        },
-    )
-    return session_dir, store, merged_record, overlay_record
-
-
-def _build_ready_summarize_session_bundle_with_metadata(
-    tmp_path: Path,
-    *,
-    directory_name: str,
-    created_at: str,
-    name: str | None = None,
-) -> Path:
-    session_dir = tmp_path / "sessions" / directory_name
-    session_dir.mkdir(parents=True)
-    record_data = {
-        "version": SESSION_RECORD_VERSION,
-        "id": SESSION_ID,
-        "created_at": created_at,
-        "name": name,
-        "status": "created",
-        "profile": "online_dual_stream",
-        "language": "fr-CH",
-        "recording": {
-            "started_at": None,
-            "stopped_at": None,
-            "stop_reason": None,
-            "finalization": {
-                "status": "not_started",
-                "completed_at": None,
-                "error": None,
-            },
-        },
-        "capture_plan": None,
-        "degradations": [],
-        "failures": [],
-    }
-    (session_dir / SESSION_RECORD_FILENAME).write_text(
-        json.dumps(record_data, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-
-    store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=session_dir)
-    merged_record = _persist_merged_transcript(store=store)
-    source_ref = ArtifactRef.from_record(merged_record)
-    overlay_artifact = create_correction_overlay(
-        session_id=SESSION_ID,
-        source_transcript_artifact=source_ref,
-        entries=(),
-        now=datetime(2026, 5, 19, 15, 20, 0, tzinfo=UTC),
-    )
-    persist_correction_overlay_artifact(
-        store=store,
-        artifact=overlay_artifact,
-        name=f"overlay/{directory_name}.json",
-        metadata={
-            "workflow_status": "completed",
-            "completed_at": "2026-05-19T15:20:00Z",
-        },
-    )
-
-    return session_dir
-
-
 def _build_verified_export_session_bundle(
     tmp_path: Path,
 ) -> tuple[Path, FileSystemArtifactStore, ArtifactRecord]:
@@ -5009,7 +4927,8 @@ def test_main_summarize_exits_3_when_summarization_fallback_is_unavailable(
     monkeypatch: pytest.MonkeyPatch,
     capsys: CaptureFixture[str],
 ) -> None:
-    session_dir, _, _, _ = _build_summarize_session_bundle(tmp_path)
+    scenario = arrange_ready_summarization(root=tmp_path)
+    session_dir = scenario.session_dir
     settings = AppSettings.from_env(env={}, home=tmp_path)
 
     def _raise_unavailable(**_kwargs: object) -> int:
