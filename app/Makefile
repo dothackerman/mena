@@ -16,6 +16,7 @@ lint:
 
 import-boundaries:
 	uv run python scripts/check_cli_import_boundary.py
+	uv run python scripts/check_test_module_imports.py
 
 pre-commit:
 	cd .. && uv run --project app pre-commit run --config .pre-commit-config.yaml --all-files

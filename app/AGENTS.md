@@ -24,6 +24,15 @@ If global or user-level Codex instructions conflict with this file for `app/` wo
 - Keep committed test fixtures under `app/fixtures/`.
 - Do not commit private meeting recordings or real customer meeting content as fixtures.
 
+## Test Support Ownership
+
+- Test modules must not import other `test_*` modules. Put deliberately shared arrangement under `tests/support/`.
+- The import check temporarily ratchets five enumerated legacy imports; do not add exceptions. Remove each exception when its capability gains deliberate test support.
+- Test support arranges valid state only. Keep SUT invocation, providers, monkeypatching, pytest fixtures, and assertions in the consuming test module.
+- Prefer one capability-oriented arranger with canonical valid defaults and named typed results. Do not create positional aggregate tuples, arbitrary override bags, global fixture registries, or universal scenario builders.
+- Reuse production constructors, evaluators, validators, and persistence paths. Corrupt valid state explicitly in the negative test instead of adding unsafe switches to an arranger.
+- Keep low-level constructors private until a second capability proves identical independent reuse.
+
 ## Architecture Interpretation
 
 - Follow `docs/architecture/architecture-overview.md`.
