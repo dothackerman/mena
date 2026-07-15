@@ -68,11 +68,10 @@ from summarize_test_support import (
 SESSION_ID = "00000000-0000-0000-0000-000000000001"
 
 
-def _setup_state(
+def _summarization_setup_state(
     *,
     settings: AppSettings,
     hardware: HardwareFacts | None = None,
-    ollama_model_present: bool = True,
     asr_model_present: bool | None = True,
     diarization_model_present: bool | None = True,
     pyannote_token_present: bool = False,
@@ -122,12 +121,8 @@ def _setup_state(
             model=settings.local_llm.ollama_model,
             command=CommandCheck("ollama", Path("/usr/bin/ollama")),
             reachable=True,
-            model_present=ollama_model_present,
-            detail=(
-                "model present"
-                if ollama_model_present
-                else f"model {settings.local_llm.ollama_model} is not listed by Ollama"
-            ),
+            model_present=True,
+            detail="model present",
         ),
         asr_model_present=asr_model_present,
         diarization_model_present=diarization_model_present,
@@ -171,7 +166,10 @@ def _persist_ready_summarization_runtime(
     settings: AppSettings,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    setup_state = _setup_state(settings=settings, pyannote_token_present=True)
+    setup_state = _summarization_setup_state(
+        settings=settings,
+        pyannote_token_present=True,
+    )
     accepted = build_runtime_profile_state(evaluate_setup(get_alpha_local_profile(), setup_state))
     persist_runtime_profile_state(accepted, paths=settings.paths)
     monkeypatch.setattr(
@@ -879,7 +877,10 @@ def test_summarize_workflow_revalidates_only_summarization_runtime_dependencies(
 ) -> None:
     session_dir, store, _, _ = _build_summarize_session_bundle(tmp_path)
     settings = AppSettings.from_env(env={}, home=tmp_path)
-    ready_state = _setup_state(settings=settings, pyannote_token_present=True)
+    ready_state = _summarization_setup_state(
+        settings=settings,
+        pyannote_token_present=True,
+    )
     accepted = build_runtime_profile_state(evaluate_setup(get_alpha_local_profile(), ready_state))
     persist_runtime_profile_state(accepted, paths=settings.paths)
     observed_profile_stages: list[tuple[str, ...]] = []
@@ -890,7 +891,7 @@ def test_summarize_workflow_revalidates_only_summarization_runtime_dependencies(
     ) -> object:
         profile = cast(SimpleNamespace, kwargs["profile"])
         observed_profile_stages.append(tuple(stage.stage for stage in profile.stages))
-        return _setup_state(
+        return _summarization_setup_state(
             settings=settings,
             hardware=HardwareFacts(
                 system="Linux",
