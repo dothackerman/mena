@@ -645,7 +645,7 @@ The initial architecture-facing command set is:
 - `summarize`: generate or regenerate a structured summary artifact
 - `export`: generate or inspect final markdown outputs from summary artifacts
 - `inspect`: verify and report one session bundle's integrity
-- `resume`: resume the latest retryable processing failure; non-retryable failures and non-processing workflow steps are out of scope
+- `resume`: continue an interrupted or incomplete processing run from its latest resumable checkpoint, including retryable failures; non-retryable failures and non-processing workflow steps are out of scope
 
 Exact CLI flags and prompt wording are interface-adapter details.
 The application services must not depend on terminal-specific control flow.
@@ -677,7 +677,7 @@ The `Session Orchestrator Process` owns:
 
 For the CLI PoC, the `Session Orchestrator Process` is per CLI invocation.
 There is no daemon.
-Continuity across commands comes from reconstructing session state from the session bundle and global index.
+Continuity across commands comes from reconstructing session state from session bundles and their durable artifacts.
 
 Reasoning:
 
@@ -784,8 +784,8 @@ For the CLI PoC, this single-writer rule means:
 - each new CLI invocation reconstructs authority from the session bundle before acting
 - concurrent orchestrator access to the same session must be rejected or made to wait
 
-The current CLI implements this rule with an exclusive per-bundle `orchestrator.lock`.
-Contention is reported with exit code `4` rather than waiting.
+Mutating orchestrator workflows implement this rule with an exclusive per-bundle `orchestrator.lock`.
+Contention is reported with exit code `4` rather than waiting, while read-only `inspect` verifies the bundle without acquiring the orchestrator lock.
 Locks held by dead or reused same-host process identities are reclaimed as stale; the lock implementation owns the exact reclaim mechanics.
 
 Reasoning:
@@ -2020,7 +2020,7 @@ Future desktop-app architecture may revisit it because background lifecycle expe
 - durable capture results belong in artifacts and session records
 - raw audio must not flow through the control protocol
 - the CLI PoC uses per-invocation orchestrators, not a daemon
-- continuity across commands is reconstructed from session bundles and the global index
+- continuity across commands is reconstructed from session bundles and their durable artifacts
 - adapter-specific termination triggers map to neutral lifecycle semantics
 - duplicate stop/finalization paths must be safe
 - CLI PoC orphan behavior is graceful stop and seal, not indefinite recording
@@ -2298,6 +2298,9 @@ When diarization produces speaker embeddings and the correction workflow confirm
 This artifact satisfies `REQ-F18` as per-session forward-compatibility storage only.
 It does not implement cross-session speaker matching, profile clustering, enrollment, or automatic identification; those remain deferred in [Speaker Profile Learning](../ideas/speaker-profile-learning.md).
 
+Implementation status: accepted but deliberately deferred under the smallest-slice guardrail.
+The current PoC has no speaker-anchor artifact implementation.
+
 The speaker-anchor artifact should link:
 
 - stable source-audio or segment references
@@ -2340,16 +2343,16 @@ The architecture uses:
 
 - artifact-first persistence
 - a per-session ledger (`Session Record`)
-- a lightweight rebuildable global index
+- an on-demand, in-memory session-discovery projection
 
 That means:
 
 - files/artifacts are primary for captured and generated content
 - the `Session Record` is primary for one session's lifecycle and references
-- the global index is a projection and must be rebuildable
+- the session-discovery projection is rebuilt from session bundles for each `mena list` invocation and is never persisted
 
-The global index is intentionally narrow in the PoC.
-It supports session discovery for commands such as `list`, `show`, and `resume`.
+The session-discovery projection is intentionally narrow in the PoC.
+It supports `mena list`; other commands resolve explicit session paths or scan session bundles through their owning workflow.
 It may contain:
 
 - session id
@@ -2365,9 +2368,9 @@ Full-text search, cross-session entities, and analytics are future product ideas
 If divergence occurs:
 
 - missing referenced artifact -> mark session broken and stop downstream trust
-- unindexed artifact -> mark orphaned and require explicit recovery path
+- artifact absent from its session manifest -> mark orphaned and require explicit recovery path
 - integrity mismatch -> mark artifact invalidated and stop trusting it
-- stale index with consistent bundles -> rebuild the index
+- changed session bundles -> rebuild the in-memory projection on the next `mena list` invocation
 
 #### Manual Notes as Versioned Input Artifacts
 
@@ -2626,11 +2629,11 @@ Expected:
 
 Scenario:
 
-- the global index becomes stale or corrupted
+- session bundles change between discovery requests
 
 Expected:
 
-- the index can be rebuilt from `Session Bundles` and `Session Records`
+- each discovery request rebuilds its in-memory projection from current `Session Bundles` and `Session Records`
 
 #### 4. Local Operability
 
