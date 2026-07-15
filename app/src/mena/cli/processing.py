@@ -7,6 +7,7 @@ import json
 from collections.abc import Callable
 from pathlib import Path
 from shlex import quote
+from typing import cast
 from uuid import uuid4
 
 from mena import processing_orchestration
@@ -16,9 +17,17 @@ from mena.artifacts import (
     FileSystemArtifactStore,
 )
 from mena.cli._console import _prompt_choice, _resolve_console_input
-from mena.cli._runtime_fallback import _resolve_runtime_fallback_interaction
+from mena.cli._runtime_fallback import _print_runtime_stewardship_release_notice
 from mena.cli.composition import CommandContext
 from mena.diarization import DiarizationError
+from mena.interaction import (
+    ChoiceOption,
+    ChoiceRequest,
+    ConfirmationRequest,
+    InteractionPort,
+    TextRequest,
+    WorkflowNotice,
+)
 from mena.merge_timing import MergeTimingError
 from mena.processing import (
     PROCESSING_STATE_ARTIFACT_TYPE,
@@ -28,6 +37,10 @@ from mena.processing import (
 from mena.provider_validation import ProviderValidationError
 from mena.review_flagging import ReviewFlaggingError
 from mena.runtime_profile import RuntimeFallbackUnavailable
+from mena.runtime_stewardship import (
+    RUNTIME_STEWARDSHIP_RELEASE_NOTICE_TOPIC,
+    RuntimeReleaseResult,
+)
 from mena.semantic_coherence import (
     SEMANTIC_COHERENCE_STAGE,
     SemanticCoherenceError,
@@ -40,6 +53,7 @@ from mena.sessions import (
     session_id,
 )
 from mena.settings import AppSettings
+from mena.setup import SetupEvaluation
 from mena.transcription import TranscriptionError
 
 
@@ -59,7 +73,7 @@ def run(args: argparse.Namespace, context: CommandContext, *, resume: bool) -> i
                 setup_command_identity=dependencies.setup_command_identity,
                 setup_hardware=dependencies.setup_hardware,
                 allow_runtime_fallback=args.allow_runtime_fallback,
-                interaction=_resolve_runtime_fallback_interaction(dependencies.input_fn),
+                interaction=_resolve_processing_interaction(dependencies.input_fn),
             )
         else:
             session_path = _resolve_process_session_path(
@@ -79,7 +93,7 @@ def run(args: argparse.Namespace, context: CommandContext, *, resume: bool) -> i
                 setup_command_identity=dependencies.setup_command_identity,
                 setup_hardware=dependencies.setup_hardware,
                 allow_runtime_fallback=args.allow_runtime_fallback,
-                interaction=_resolve_runtime_fallback_interaction(dependencies.input_fn),
+                interaction=_resolve_processing_interaction(dependencies.input_fn),
                 orchestrator_command="process",
             )
         if not resume and exit_code == 0:
@@ -113,6 +127,53 @@ def run(args: argparse.Namespace, context: CommandContext, *, resume: bool) -> i
     except (EOFError, KeyboardInterrupt):
         print("Processing workflow interrupted.")
         return 1
+
+
+class ConsoleProcessingInteraction:
+    """Console adapter for process and resume workflow interaction topics."""
+
+    def __init__(self, input_fn: Callable[[str], str] | None) -> None:
+        self._input_fn = input_fn
+
+    @property
+    def runtime_fallback_confirmation_available(self) -> bool:
+        return self._input_fn is not None
+
+    def choose(self, request: ChoiceRequest) -> ChoiceOption:
+        raise ValueError(f"Unsupported processing choice topic '{request.topic}'.")
+
+    def confirm(self, request: ConfirmationRequest) -> bool:
+        if request.topic != "runtime_fallback.one_run":
+            raise ValueError(f"Unsupported processing confirmation topic '{request.topic}'.")
+        if self._input_fn is None:
+            return False
+        accepted_failure = str(request.context["accepted_failure"])
+        fallback_evaluation = cast(SetupEvaluation, request.context["fallback_evaluation"])
+        print(f"Accepted runtime profile is unavailable: {accepted_failure}")
+        print(
+            "One-run local runtime fallback is ready: "
+            f"{fallback_evaluation.profile.id} using "
+            f"{fallback_evaluation.selected_asr_profile.checkpoint}/"
+            f"{fallback_evaluation.selected_asr_profile.device}."
+        )
+        answer = self._input_fn("Use local runtime fallback for this run? [y/N] ")
+        return answer.strip().lower() in {"y", "yes"}
+
+    def request_text(self, request: TextRequest) -> str:
+        raise ValueError(f"Unsupported processing text topic '{request.topic}'.")
+
+    def notify(self, notice: WorkflowNotice) -> None:
+        if notice.topic != RUNTIME_STEWARDSHIP_RELEASE_NOTICE_TOPIC:
+            raise ValueError(f"Unsupported processing notice topic '{notice.topic}'.")
+        _print_runtime_stewardship_release_notice(
+            cast(RuntimeReleaseResult, notice.context["result"])
+        )
+
+
+def _resolve_processing_interaction(
+    input_fn: Callable[[str], str] | None,
+) -> InteractionPort:
+    return ConsoleProcessingInteraction(_resolve_console_input(input_fn))
 
 
 def _resolve_process_session_path(

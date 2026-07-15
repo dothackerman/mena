@@ -23,11 +23,9 @@ from mena.cli import list as list_command
 from mena.cli import main
 from mena.cli import setup as setup_command
 from mena.cli import summarize as summarize_command
-from mena.cli._runtime_fallback import (
-    ConsoleRuntimeFallbackInteraction,
-    _resolve_runtime_fallback_input,
-)
+from mena.cli._console import _resolve_console_input
 from mena.cli.correct import ConsoleCorrectionInteraction
+from mena.cli.processing import ConsoleProcessingInteraction
 from mena.cli.record import _resolve_record_language, _resolve_record_profile
 from mena.correction_overlay import (
     CorrectionEntry,
@@ -2757,7 +2755,7 @@ def test_console_processing_interaction_preserves_runtime_fallback_prompt(
         prompts.append(prompt)
         return answer
 
-    interaction = ConsoleRuntimeFallbackInteraction(_input)
+    interaction = ConsoleProcessingInteraction(_input)
     fallback_evaluation = SimpleNamespace(
         profile=SimpleNamespace(id="linux-alpha-local-cpu-fallback-v1"),
         selected_asr_profile=SimpleNamespace(checkpoint="small", device="cpu"),
@@ -2790,11 +2788,11 @@ def test_console_processing_interaction_rejects_unsupported_confirmation_topic()
     def _input(_prompt: str) -> str:
         raise AssertionError("not called")
 
-    interaction = ConsoleRuntimeFallbackInteraction(_input)
+    interaction = ConsoleProcessingInteraction(_input)
 
     with pytest.raises(
         ValueError,
-        match="Unsupported runtime-fallback confirmation topic 'record.capture_route.microphone'",
+        match="Unsupported processing confirmation topic 'record.capture_route.microphone'",
     ):
         interaction.confirm(ConfirmationRequest(topic="record.capture_route.microphone"))
 
@@ -2860,21 +2858,21 @@ def test_main_process_without_path_delegates_latest_session_to_processing_workfl
     assert f"Next command: mena correct {session.record_path}" in captured.out
 
 
-def test_resolve_runtime_fallback_input_guards_non_tty(
+def test_resolve_console_input_guards_non_tty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def explicit(_prompt: str) -> str:
         return "y"
 
     # An explicit input function is always honored verbatim.
-    assert _resolve_runtime_fallback_input(explicit) is explicit
+    assert _resolve_console_input(explicit) is explicit
     # On a real TTY, the builtin input prompt is used.
     monkeypatch.setattr("sys.stdin", SimpleNamespace(isatty=lambda: True))
-    assert _resolve_runtime_fallback_input(None) is input
+    assert _resolve_console_input(None) is input
     # On a non-TTY stdin, no prompt is wired so the fallback raises an actionable
     # error instead of input() raising EOFError.
     monkeypatch.setattr("sys.stdin", SimpleNamespace(isatty=lambda: False))
-    assert _resolve_runtime_fallback_input(None) is None
+    assert _resolve_console_input(None) is None
 
 
 def test_main_process_maps_unauthorized_runtime_fallback_to_exit_3(
@@ -2906,7 +2904,7 @@ def test_main_process_maps_unauthorized_runtime_fallback_to_exit_3(
 def test_console_processing_interaction_renders_runtime_stewardship_release_notice(
     capsys: CaptureFixture[str],
 ) -> None:
-    interaction = ConsoleRuntimeFallbackInteraction(None)
+    interaction = ConsoleProcessingInteraction(None)
     release = RuntimeReleaseResult(
         lease=RuntimeLease(
             resource_kind="local_llm",
@@ -2933,7 +2931,7 @@ def test_console_processing_interaction_renders_runtime_stewardship_release_noti
 def test_console_processing_interaction_renders_runtime_stewardship_release_warning(
     capsys: CaptureFixture[str],
 ) -> None:
-    interaction = ConsoleRuntimeFallbackInteraction(None)
+    interaction = ConsoleProcessingInteraction(None)
     release = RuntimeReleaseResult(
         lease=RuntimeLease(
             resource_kind="local_llm",

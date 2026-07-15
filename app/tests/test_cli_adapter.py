@@ -9,7 +9,6 @@ import pytest
 
 import mena.cli as cli
 from mena.cli import _console as console
-from mena.cli import _runtime_fallback as runtime_fallback
 from mena.cli import correct as correct_command
 from mena.cli import inspect as inspect_command
 from mena.cli import processing as processing_command
@@ -364,12 +363,12 @@ def test_prompt_and_runtime_adapter_helpers(
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
     assert console._resolve_console_input(None) is input
     assert isinstance(
-        runtime_fallback._resolve_runtime_fallback_interaction(explicit),
-        runtime_fallback.ConsoleRuntimeFallbackInteraction,
+        processing_command._resolve_processing_interaction(explicit),
+        processing_command.ConsoleProcessingInteraction,
     )
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: False))
-    noninteractive = runtime_fallback._resolve_runtime_fallback_interaction(None)
-    assert isinstance(noninteractive, runtime_fallback.ConsoleRuntimeFallbackInteraction)
+    noninteractive = processing_command._resolve_processing_interaction(None)
+    assert isinstance(noninteractive, processing_command.ConsoleProcessingInteraction)
     assert (
         noninteractive.confirm(
             ConfirmationRequest(
@@ -516,9 +515,7 @@ def test_main_reports_adapter_cancellations_and_errors(
 
 def test_console_correction_and_processing_reject_unsupported_topics() -> None:
     correction = correct_command.ConsoleCorrectionInteraction(lambda _prompt: "no")
-    processing_interaction = runtime_fallback.ConsoleRuntimeFallbackInteraction(
-        lambda _prompt: "no"
-    )
+    processing_interaction = processing_command.ConsoleProcessingInteraction(lambda _prompt: "no")
 
     with pytest.raises(ValueError, match="Unsupported correction choice topic"):
         correction.choose(
@@ -542,16 +539,16 @@ def test_console_correction_and_processing_reject_unsupported_topics() -> None:
     assert correct_command._correction_action_option_id("overlap") == "overlap_mark"
     assert correct_command._correction_action_option_id("?") is None
 
-    with pytest.raises(ValueError, match="Unsupported runtime-fallback choice topic"):
+    with pytest.raises(ValueError, match="Unsupported processing choice topic"):
         processing_interaction.choose(
             ChoiceRequest(
                 topic="processing.unsupported",
                 options=(ChoiceOption(option_id="skip", label="Skip"),),
             )
         )
-    with pytest.raises(ValueError, match="Unsupported runtime-fallback text topic"):
+    with pytest.raises(ValueError, match="Unsupported processing text topic"):
         processing_interaction.request_text(TextRequest(topic="processing.unsupported"))
-    with pytest.raises(ValueError, match="Unsupported runtime-fallback notice topic"):
+    with pytest.raises(ValueError, match="Unsupported processing notice topic"):
         processing_interaction.notify(WorkflowNotice(topic="processing.unsupported"))
 
 
