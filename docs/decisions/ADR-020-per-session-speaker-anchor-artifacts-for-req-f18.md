@@ -14,6 +14,11 @@ Cross-session speaker matching (REQ-F18) is deferred, but the data needed for it
 
 Persist per-session speaker anchor artifacts for `REQ-F18`.
 
+## Implementation status
+
+Accepted but not yet implemented.
+Implementation is deliberately deferred under the smallest-slice guardrail; no speaker-anchor artifact code exists in the current PoC.
+
 ## Consequences
 
 Corrected speaker labels and associated embeddings are stored inside session bundles for forward compatibility, while cross-session matching remains deferred.
