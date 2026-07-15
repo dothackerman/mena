@@ -24,7 +24,7 @@ from mena.cli import main
 from mena.cli import setup as setup_command
 from mena.cli import summarize as summarize_command
 from mena.cli._runtime_fallback import (
-    ConsoleProcessingInteraction,
+    ConsoleRuntimeFallbackInteraction,
     _resolve_runtime_fallback_input,
 )
 from mena.cli.correct import ConsoleCorrectionInteraction
@@ -2757,7 +2757,7 @@ def test_console_processing_interaction_preserves_runtime_fallback_prompt(
         prompts.append(prompt)
         return answer
 
-    interaction = ConsoleProcessingInteraction(_input)
+    interaction = ConsoleRuntimeFallbackInteraction(_input)
     fallback_evaluation = SimpleNamespace(
         profile=SimpleNamespace(id="linux-alpha-local-cpu-fallback-v1"),
         selected_asr_profile=SimpleNamespace(checkpoint="small", device="cpu"),
@@ -2790,11 +2790,11 @@ def test_console_processing_interaction_rejects_unsupported_confirmation_topic()
     def _input(_prompt: str) -> str:
         raise AssertionError("not called")
 
-    interaction = ConsoleProcessingInteraction(_input)
+    interaction = ConsoleRuntimeFallbackInteraction(_input)
 
     with pytest.raises(
         ValueError,
-        match="Unsupported processing confirmation topic 'record.capture_route.microphone'",
+        match="Unsupported runtime-fallback confirmation topic 'record.capture_route.microphone'",
     ):
         interaction.confirm(ConfirmationRequest(topic="record.capture_route.microphone"))
 
@@ -2906,7 +2906,7 @@ def test_main_process_maps_unauthorized_runtime_fallback_to_exit_3(
 def test_console_processing_interaction_renders_runtime_stewardship_release_notice(
     capsys: CaptureFixture[str],
 ) -> None:
-    interaction = ConsoleProcessingInteraction(None)
+    interaction = ConsoleRuntimeFallbackInteraction(None)
     release = RuntimeReleaseResult(
         lease=RuntimeLease(
             resource_kind="local_llm",
@@ -2933,7 +2933,7 @@ def test_console_processing_interaction_renders_runtime_stewardship_release_noti
 def test_console_processing_interaction_renders_runtime_stewardship_release_warning(
     capsys: CaptureFixture[str],
 ) -> None:
-    interaction = ConsoleProcessingInteraction(None)
+    interaction = ConsoleRuntimeFallbackInteraction(None)
     release = RuntimeReleaseResult(
         lease=RuntimeLease(
             resource_kind="local_llm",

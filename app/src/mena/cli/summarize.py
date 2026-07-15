@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable
-from pathlib import Path
 from shlex import quote
 from typing import cast
 
@@ -19,13 +18,12 @@ from mena.cli._console import (
 )
 from mena.cli._runtime_fallback import _print_runtime_stewardship_release_notice
 from mena.cli.command import bind_handler
-from mena.cli.composition import CommandContext, ProviderFactory
+from mena.cli.composition import CommandContext
 from mena.correction_overlay import CorrectionOverlayContractError
 from mena.interaction import (
     ChoiceOption,
     ChoiceRequest,
     ConfirmationRequest,
-    InteractionPort,
     TextRequest,
     WorkflowNotice,
 )
@@ -36,12 +34,7 @@ from mena.runtime_stewardship import (
     RuntimeReleaseResult,
 )
 from mena.session_lock import SessionLockContention
-from mena.settings import AppSettings, SettingsError, validate_summary_language
-from mena.setup import (
-    CommandIdentity,
-    CommandRunner,
-    HardwareFacts,
-)
+from mena.settings import SettingsError, validate_summary_language
 from mena.summarization import SummarizationError
 
 workflow = summarize_workflow
@@ -198,30 +191,3 @@ def _format_summarize_choice(option: ChoiceOption, *, recommended: bool = False)
     if recommended:
         label = f"{label} [recommended]"
     return label
-
-
-def _run_summarize_command(
-    *,
-    session_path: Path,
-    manual_notes: str | None,
-    language: str | None,
-    settings: AppSettings,
-    setup_runner: CommandRunner | None = None,
-    setup_command_identity: CommandIdentity | None = None,
-    setup_hardware: HardwareFacts | None = None,
-    allow_runtime_fallback: bool = False,
-    summarization_provider_factory: ProviderFactory | None = None,
-    interaction: InteractionPort | None = None,
-) -> int:
-    return summarize_workflow.run_summarization_command(
-        session_path=session_path,
-        manual_notes=manual_notes,
-        language=language,
-        settings=settings,
-        setup_runner=setup_runner,
-        setup_command_identity=setup_command_identity,
-        setup_hardware=setup_hardware,
-        allow_runtime_fallback=allow_runtime_fallback,
-        summarization_provider_factory=summarization_provider_factory,
-        interaction=interaction,
-    )

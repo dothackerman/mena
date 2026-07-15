@@ -125,29 +125,6 @@ class ConsoleExportInteraction:
             raise ValueError(f"Unsupported export notice topic '{topic}'.")
 
 
-def _run_export_command(
-    *,
-    session_path: Path | None,
-    summary_artifact_id: str | None,
-    export_format: export_workflow.ExportFormat | None,
-    settings: AppSettings,
-    input_fn: Callable[[str], str] | None,
-) -> int:
-    result = export_workflow.run_export_workflow(
-        export_workflow.ExportCommandInput(
-            session_path=session_path,
-            summary_artifact_id=summary_artifact_id,
-            export_format=export_format,
-        ),
-        settings=settings,
-        interaction=_resolve_export_interaction(input_fn),
-    )
-    if result.status == "cancelled":
-        print("Export cancelled.")
-        return 1
-    return 0
-
-
 def _settings_with_sessions_root(settings: AppSettings, sessions_root: Path) -> AppSettings:
     return replace(
         settings,

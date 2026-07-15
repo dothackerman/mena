@@ -30,8 +30,8 @@ def _print_runtime_stewardship_release_notice(result: RuntimeReleaseResult) -> N
         print(f"Runtime stewardship: {result.detail}")
 
 
-class ConsoleProcessingInteraction:
-    """Console adapter for processing workflow interaction topics."""
+class ConsoleRuntimeFallbackInteraction:
+    """Console adapter for shared runtime-fallback interaction topics."""
 
     def __init__(self, input_fn: Callable[[str], str] | None) -> None:
         self._input_fn = input_fn
@@ -41,11 +41,11 @@ class ConsoleProcessingInteraction:
         return self._input_fn is not None
 
     def choose(self, request: ChoiceRequest) -> ChoiceOption:
-        raise ValueError(f"Unsupported processing choice topic '{request.topic}'.")
+        raise ValueError(f"Unsupported runtime-fallback choice topic '{request.topic}'.")
 
     def confirm(self, request: ConfirmationRequest) -> bool:
         if request.topic != "runtime_fallback.one_run":
-            raise ValueError(f"Unsupported processing confirmation topic '{request.topic}'.")
+            raise ValueError(f"Unsupported runtime-fallback confirmation topic '{request.topic}'.")
         if self._input_fn is None:
             return False
         accepted_failure = str(request.context["accepted_failure"])
@@ -61,11 +61,11 @@ class ConsoleProcessingInteraction:
         return answer.strip().lower() in {"y", "yes"}
 
     def request_text(self, request: TextRequest) -> str:
-        raise ValueError(f"Unsupported processing text topic '{request.topic}'.")
+        raise ValueError(f"Unsupported runtime-fallback text topic '{request.topic}'.")
 
     def notify(self, notice: WorkflowNotice) -> None:
         if notice.topic != RUNTIME_STEWARDSHIP_RELEASE_NOTICE_TOPIC:
-            raise ValueError(f"Unsupported processing notice topic '{notice.topic}'.")
+            raise ValueError(f"Unsupported runtime-fallback notice topic '{notice.topic}'.")
         _print_runtime_stewardship_release_notice(
             cast(RuntimeReleaseResult, notice.context["result"])
         )
@@ -92,4 +92,4 @@ def _resolve_runtime_fallback_interaction(
     input_fn: Callable[[str], str] | None,
 ) -> InteractionPort:
     reader = _resolve_runtime_fallback_input(input_fn)
-    return ConsoleProcessingInteraction(reader)
+    return ConsoleRuntimeFallbackInteraction(reader)
