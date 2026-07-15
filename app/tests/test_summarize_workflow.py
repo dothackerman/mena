@@ -204,6 +204,26 @@ def test_summarize_workflow_filters_invalid_merged_transcripts(tmp_path: Path) -
     assert _merged_transcript_timestamp_key(store=file_store, record=corrupt) is None
 
 
+def test_summarize_workflow_selects_valid_record_over_corrupt_candidate(
+    tmp_path: Path,
+) -> None:
+    _, store, valid_record, _ = _build_summarize_session_bundle(tmp_path)
+    corrupt_record = store.store(
+        artifact_type=MERGED_TRANSCRIPT_ARTIFACT_TYPE,
+        name="merged/invalid.json",
+        data=b"not-json",
+        version=1,
+        status="sealed",
+        metadata={"contract": "merged-transcript.v1"},
+    )
+
+    resolved = _resolve_latest_merged_transcript_record(store=store)
+
+    assert resolved is not None
+    assert resolved.id == valid_record.id
+    assert resolved.id != corrupt_record.id
+
+
 def test_summarize_workflow_requests_semantic_choice_for_multiple_ready_sessions(
     tmp_path: Path,
 ) -> None:

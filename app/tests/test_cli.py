@@ -137,7 +137,6 @@ from mena.summarization import (
     SummaryTimelineEntry,
     persist_summary_artifact,
 )
-from mena.summarize_workflow import _resolve_latest_merged_transcript_record
 from mena.transcription import (
     TRANSCRIPT_SCHEMA_VERSION,
     FakeTranscriptionProvider,
@@ -2581,27 +2580,6 @@ def test_main_list_does_not_write_any_index_file(
     after = _snapshot_tree(data_root)
     assert exit_code == 0
     assert before == after
-
-
-def test_resolve_latest_merged_transcript_record_ignores_corrupt_payload(
-    tmp_path: Path,
-) -> None:
-    session_dir = _create_session_record(tmp_path)
-    store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=session_dir)
-    valid_record = _persist_merged_transcript(store=store)
-    corrupt_record = store.store(
-        artifact_type=MERGED_TRANSCRIPT_ARTIFACT_TYPE,
-        name="merged/invalid.json",
-        data=b"not-json",
-        version=1,
-        status="sealed",
-        metadata={"contract": "merged-transcript.v1"},
-    )
-    resolved = _resolve_latest_merged_transcript_record(store=store)
-
-    assert resolved is not None
-    assert resolved.id == valid_record.id
-    assert resolved.id != corrupt_record.id
 
 
 def test_main_correct_handles_artifact_store_errors(
