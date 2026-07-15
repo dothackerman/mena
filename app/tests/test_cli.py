@@ -25,12 +25,12 @@ from mena.cli import (
     WORKER_EXIT_TIMEOUT_SECONDS,
     ConsoleCorrectionInteraction,
     ConsoleProcessingInteraction,
-    _resolve_latest_merged_transcript_record,
     _resolve_record_language,
     _resolve_record_profile,
     _resolve_runtime_fallback_input,
     main,
 )
+from mena.cli import _shared as cli_shared
 from mena.correction_overlay import (
     CorrectionEntry,
     create_correction_overlay,
@@ -140,6 +140,7 @@ from mena.summarization import (
     SummaryTimelineEntry,
     persist_summary_artifact,
 )
+from mena.summarize_workflow import _resolve_latest_merged_transcript_record
 from mena.transcription import (
     TRANSCRIPT_SCHEMA_VERSION,
     FakeTranscriptionProvider,
@@ -203,7 +204,7 @@ def test_main_defaults_resolve_under_isolated_test_paths(
         return ()
 
     monkeypatch.setattr(AppSettings, "from_env", classmethod(_settings_from_env))
-    monkeypatch.setattr(cli_module, "rebuild_session_index", _rebuild_session_index)
+    monkeypatch.setattr(cli_shared, "rebuild_session_index", _rebuild_session_index)
 
     exit_code = main(["list"])
 

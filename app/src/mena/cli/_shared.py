@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import sys
@@ -12,33 +11,15 @@ from datetime import datetime
 from pathlib import Path
 from shlex import quote
 from typing import Any, TypeVar, cast
-from uuid import uuid4
 
-from mena import export_workflow, processing_orchestration, summarize_workflow
+from mena import export_workflow, summarize_workflow
 from mena.artifacts import (
-    ArtifactRecord,
     ArtifactStore,
-    ArtifactStoreError,
     FileSystemArtifactStore,
-)
-from mena.correction_overlay import (
-    CorrectionOverlayContractError,
-)
-from mena.correction_workflow import (
-    CorrectionWorkflowError,
-    PlaybackPlayer,
-    run_correction_workflow,
-)
-from mena.diarization import (
-    DiarizationError,
 )
 from mena.discovery import (
     AudioDiscovery,
-    discover_audio_routes,
     format_discovery,
-)
-from mena.export import (
-    SummaryMarkdownExportError,
 )
 from mena.interaction import (
     ChoiceOption,
@@ -48,13 +29,6 @@ from mena.interaction import (
     TextRequest,
     WorkflowNotice,
 )
-from mena.manual_notes import ManualNotesIngestionError
-from mena.merge_timing import (
-    MERGED_TRANSCRIPT_ARTIFACT_TYPE,
-    MergedTranscriptArtifact,
-    MergeTimingContractError,
-    MergeTimingError,
-)
 from mena.processing import (
     PROCESSING_STATE_ARTIFACT_TYPE,
     ProcessingStageState,
@@ -62,24 +36,13 @@ from mena.processing import (
 )
 from mena.profiles import (
     CaptureProfileSelection,
-    capture_profile_choices,
     parse_capture_profile,
 )
 from mena.protocol import (
     StartCapturePayload,
-    WorkerProcess,
 )
-from mena.provider_validation import ProviderValidationError
 from mena.recording_control import (
-    RecordCommandInput,
     format_record_diagnostics,
-    run_recording_control_workflow,
-)
-from mena.review_flagging import (
-    ReviewFlaggingError,
-)
-from mena.runtime_profile import (
-    RuntimeFallbackUnavailable,
 )
 from mena.runtime_stewardship import (
     RUNTIME_STEWARDSHIP_RELEASE_NOTICE_TOPIC,
@@ -87,15 +50,12 @@ from mena.runtime_stewardship import (
 )
 from mena.semantic_coherence import (
     SEMANTIC_COHERENCE_STAGE,
-    SemanticCoherenceError,
 )
 from mena.session_integrity import (
     SessionIndexEntry,
-    SessionIntegrityError,
     rebuild_session_index,
     verify_session_bundle,
 )
-from mena.session_lock import SessionLockContention
 from mena.sessions import (
     ProcessableSessionCandidate,
     processable_session_candidates,
@@ -103,7 +63,7 @@ from mena.sessions import (
     resolve_session,
     session_id,
 )
-from mena.settings import DATA_ROOT_ENV_VAR, AppSettings, SettingsError, validate_summary_language
+from mena.settings import DATA_ROOT_ENV_VAR, AppSettings, validate_summary_language
 from mena.setup import (
     CommandIdentity,
     CommandRunner,
@@ -117,13 +77,7 @@ from mena.setup_workflow import (
     SetupWorkflowOptions,
     run_setup_workflow,
 )
-from mena.summarization import (
-    SummarizationError,
-)
 from mena.timestamps import parse_utc_timestamp
-from mena.transcription import (
-    TranscriptionError,
-)
 
 COMMANDS = (
     "record",
@@ -618,470 +572,6 @@ def _correction_action_option_id(raw: str) -> str | None:
     return None
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="mena",
-        description="Privacy-first local meeting notes PoC.",
-    )
-    parser.add_argument("--version", action="store_true", help="Show the package version.")
-
-    subparsers = parser.add_subparsers(dest="command")
-    record_parser = subparsers.add_parser("record", help="Create a recording session.")
-    record_parser.add_argument(
-        "--profile",
-        choices=capture_profile_choices(),
-        help="Capture profile for this recording session.",
-    )
-    record_parser.add_argument("--name", help="Friendly session name for human reference.")
-    record_parser.add_argument(
-        "--language",
-        default=None,
-        help="Meeting language to persist as the session language.",
-    )
-    record_parser.add_argument("--mic", default=None, help="Microphone route id to capture.")
-    record_parser.add_argument(
-        "--playback-stream",
-        default=None,
-        help="Playback stream route id to capture for online meetings.",
-    )
-    record_parser.add_argument(
-        "--output-sink",
-        default=None,
-        help="Meeting audio output route id.",
-    )
-    record_parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Create a session and print read-only audio discovery without starting capture.",
-    )
-    record_parser.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Print route planning details and write worker capture diagnostics to stderr.",
-    )
-    record_parser.add_argument(
-        "--worker-exit-timeout",
-        type=float,
-        default=WORKER_EXIT_TIMEOUT_SECONDS,
-        help="Seconds to wait for capture worker teardown after stop_capture.",
-    )
-    record_parser.set_defaults(command="record")
-
-    setup_parser = subparsers.add_parser("setup", help="Run Linux alpha setup/preflight.")
-    setup_parser.add_argument(
-        "--check",
-        action="store_true",
-        help="Only evaluate local install/provider readiness; do not mutate.",
-    )
-    setup_parser.add_argument(
-        "--yes",
-        action="store_true",
-        help="Confirm planned automated setup actions without prompting.",
-    )
-    setup_parser.add_argument(
-        "--authorize-local-fallback",
-        action="store_true",
-        help="Authorize automatic local runtime fallback when the fallback profile is ready.",
-    )
-    setup_parser.add_argument(
-        "--summarization-provider",
-        choices=("local", "mistral"),
-        default="local",
-        help=(
-            "Accepted summarization primary provider. 'mistral' uses the fixed "
-            "allow-listed direct Mistral model and requires the disclosure to be "
-            "accepted."
-        ),
-    )
-    setup_parser.add_argument(
-        "--authorize-mistral-summary-fallback",
-        action="store_true",
-        help=(
-            "Accept Mistral as the first ordered summarization fallback provider "
-            "for a local primary; requires the disclosure to be accepted."
-        ),
-    )
-    setup_parser.add_argument(
-        "--accept-mistral-summary-disclosure",
-        action="store_true",
-        help=(
-            "Acknowledge the Mistral summarization disclosure non-interactively. "
-            "--yes alone never accepts the disclosure."
-        ),
-    )
-    setup_parser.set_defaults(command="setup")
-
-    for command in COMMANDS[1:]:
-        if command == "setup":
-            continue
-        subparser = subparsers.add_parser(command)
-        if command in {"correct", "process", "resume", "summarize", "export", "inspect"}:
-            if command == "export":
-                subparser.add_argument(
-                    "session_path",
-                    nargs="?",
-                    help="Path to the session directory or session.json.",
-                )
-            elif command == "process":
-                subparser.add_argument(
-                    "session_path",
-                    nargs="?",
-                    help=(
-                        "Path to the session directory or session.json. "
-                        "Defaults to the latest recorded session."
-                    ),
-                )
-            elif command == "summarize":
-                subparser.add_argument(
-                    "session_path",
-                    nargs="?",
-                    help="Path to the session directory or session.json.",
-                    default=None,
-                )
-            else:
-                subparser.add_argument(
-                    "session_path",
-                    help="Path to the session directory or session.json.",
-                )
-        if command in {"process", "resume", "summarize"}:
-            subparser.add_argument(
-                "--allow-runtime-fallback",
-                action="store_true",
-                help=(
-                    "Allow explicit one-run fallback if the accepted runtime profile is "
-                    "unavailable."
-                ),
-            )
-
-        if command == "export":
-            subparser.add_argument(
-                "--format",
-                choices=("markdown",),
-                dest="export_format",
-                default=None,
-                help="Export output format.",
-            )
-            subparser.add_argument(
-                "--summary-artifact-id",
-                dest="summary_artifact_id",
-                default=None,
-                help="Optional explicit summary artifact id to export.",
-            )
-        if command == "summarize":
-            subparser.add_argument(
-                "--manual-notes",
-                dest="manual_notes",
-                help="Optional path to manual notes file.",
-            )
-            subparser.add_argument(
-                "--language",
-                default=None,
-                help="Language code for the summary model prompt.",
-            )
-        subparser.set_defaults(command=command)
-
-    return parser
-
-
-DiscoveryFn = Callable[..., AudioDiscovery]
-WorkerFactory = Callable[..., Any]
-ProcessingCommandRunner = Callable[..., int]
-
-
-def main(
-    argv: Sequence[str] | None = None,
-    *,
-    data_root: Path | None = None,
-    discoverer: DiscoveryFn = discover_audio_routes,
-    worker_factory: WorkerFactory = WorkerProcess,
-    now: datetime | None = None,
-    run_id: str | None = None,
-    transcription_provider_factory: ProviderFactory | None = None,
-    diarization_provider_factory: ProviderFactory | None = None,
-    semantic_coherence_provider_factory: ProviderFactory | None = None,
-    summarization_provider_factory: ProviderFactory | None = None,
-    settings: AppSettings | None = None,
-    config_path: Path | None = None,
-    input_fn: Callable[[str], str] | None = None,
-    playback_player: PlaybackPlayer | None = None,
-    setup_runner: CommandRunner | None = None,
-    setup_command_identity: CommandIdentity | None = None,
-    setup_hardware: HardwareFacts | None = None,
-    processing_command_runner: ProcessingCommandRunner = (
-        processing_orchestration.run_processing_command
-    ),
-) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-
-    if args.version:
-        from mena import __version__
-
-        print(__version__)
-        return 0
-
-    if args.command is None:
-        parser.print_help()
-        return 0
-
-    try:
-        app_settings = settings or AppSettings.from_env(config_path=config_path)
-        sessions_root = (
-            data_root / "sessions" if data_root is not None else app_settings.paths.sessions_dir
-        )
-    except SettingsError as exc:
-        print(f"Cannot load configuration: {exc}")
-        return 1
-
-    effective_semantic_coherence_provider_factory = semantic_coherence_provider_factory
-
-    if args.command == "setup":
-        return _run_setup_command(
-            check_only=args.check,
-            assume_yes=args.yes,
-            authorize_local_fallback=args.authorize_local_fallback,
-            summarization_provider=args.summarization_provider,
-            mistral_summary_fallback=args.authorize_mistral_summary_fallback,
-            accept_mistral_disclosure=args.accept_mistral_summary_disclosure,
-            settings=app_settings,
-            input_fn=input_fn,
-            runner=setup_runner,
-            command_identity=setup_command_identity,
-            hardware=setup_hardware,
-        )
-
-    if args.command == "record":
-        try:
-            profile = _resolve_record_profile(args.profile, input_fn=input_fn)
-            language = _resolve_record_language(
-                args.language,
-                default_language=app_settings.summary.language,
-                input_fn=input_fn,
-                dry_run=args.dry_run,
-            )
-        except ValueError as exc:
-            print(f"Cannot start recording: {exc}")
-            return 1
-        except (EOFError, KeyboardInterrupt):
-            print("Recording setup cancelled.")
-            return 1
-
-        try:
-            result = run_recording_control_workflow(
-                RecordCommandInput(
-                    profile=profile,
-                    language=language,
-                    name=args.name,
-                    microphone_route_id=args.mic,
-                    playback_stream_route_id=args.playback_stream,
-                    output_sink_route_id=args.output_sink,
-                    dry_run=args.dry_run,
-                    verbose=args.verbose,
-                    worker_exit_timeout=args.worker_exit_timeout,
-                    stop_input_available=_record_input(input_fn) is not None,
-                ),
-                data_root=_effective_record_data_root(data_root, app_settings),
-                discoverer=discoverer,
-                worker_factory=worker_factory,
-                interaction=ConsoleRecordInteraction(input_fn),
-                now=now,
-            )
-        except SessionLockContention as exc:
-            print(f"Cannot start recording: {exc}")
-            return 4
-        return result.exit_code
-
-    if args.command == "correct":
-        try:
-            run_correction_workflow(
-                session_path=Path(args.session_path),
-                now=now,
-                interaction=ConsoleCorrectionInteraction(input_fn),
-                playback_player=playback_player,
-            )
-        except SessionLockContention as exc:
-            print(f"Cannot run correction workflow: {exc}")
-            return 4
-        except (ArtifactStoreError, CorrectionWorkflowError) as exc:
-            print(f"Cannot run correction workflow: {exc}")
-            return 1
-        except (EOFError, KeyboardInterrupt):
-            print("Correction workflow cancelled.")
-            return 1
-        return 0
-
-    if args.command == "summarize":
-        try:
-            interaction = ConsoleSummarizeInteraction(input_fn)
-            resolved_session_path = summarize_workflow.resolve_summarize_session_path(
-                explicit_session_path=args.session_path,
-                sessions_root=sessions_root,
-                interaction=interaction,
-            )
-            return _run_summarize_command(
-                session_path=resolved_session_path,
-                manual_notes=args.manual_notes,
-                language=(
-                    None
-                    if args.language is None
-                    else validate_summary_language(args.language, "--language")
-                ),
-                settings=app_settings,
-                setup_runner=setup_runner,
-                setup_command_identity=setup_command_identity,
-                setup_hardware=setup_hardware,
-                allow_runtime_fallback=args.allow_runtime_fallback,
-                summarization_provider_factory=summarization_provider_factory,
-                interaction=interaction,
-            )
-        except SessionLockContention as exc:
-            print(f"Cannot summarize session: {exc}")
-            return 4
-        except RuntimeFallbackUnavailable as exc:
-            # Recoverable: the accepted summarization provider failed and an
-            # accepted fallback exists but is not authorized (or none is
-            # configured). Exit code 3 mirrors the processing contract.
-            print(f"Cannot summarize session: {exc}")
-            return 3
-        except (
-            ArtifactStoreError,
-            CorrectionOverlayContractError,
-            ManualNotesIngestionError,
-            SettingsError,
-            SummarizationError,
-            ValueError,
-        ) as exc:
-            print(f"Cannot summarize session: {exc}")
-            return 1
-        except (EOFError, KeyboardInterrupt):
-            print("Summarization cancelled.")
-            return 1
-    if args.command == "export":
-        try:
-            return _run_export_command(
-                session_path=Path(args.session_path) if args.session_path else None,
-                summary_artifact_id=args.summary_artifact_id,
-                export_format=args.export_format,
-                settings=_settings_with_sessions_root(app_settings, sessions_root),
-                input_fn=input_fn,
-            )
-        except SessionLockContention as exc:
-            print(f"Cannot export session summary markdown: {exc}")
-            return 4
-        except (
-            ArtifactStoreError,
-            SummaryMarkdownExportError,
-            SessionIntegrityError,
-            OSError,
-            ValueError,
-        ) as exc:
-            print(f"Cannot export session summary markdown: {exc}")
-            return 1
-        except (EOFError, KeyboardInterrupt):
-            print("Export cancelled.")
-            return 1
-
-    if args.command == "list":
-        return _run_list_command(sessions_root=sessions_root)
-
-    if args.command == "inspect":
-        try:
-            return _run_inspect_command(session_path=Path(args.session_path))
-        except (
-            ArtifactStoreError,
-            ValueError,
-            OSError,
-        ) as exc:
-            print(f"Cannot inspect session: {exc}")
-            return 1
-
-    if args.command in {"process", "resume"}:
-        try:
-            if args.command == "process":
-                invocation_run_id = run_id or str(uuid4())
-                invocation_attempt = 1
-                session_path = _resolve_process_session_path(
-                    args.session_path,
-                    app_settings,
-                    input_fn=input_fn,
-                )
-                if args.command == "process":
-                    print(f"Processing recording: {session_path}")
-                exit_code = processing_command_runner(
-                    session_path=session_path,
-                    run_id=invocation_run_id,
-                    attempt=invocation_attempt,
-                    now=now,
-                    transcription_provider_factory=transcription_provider_factory,
-                    diarization_provider_factory=diarization_provider_factory,
-                    semantic_coherence_provider_factory=(
-                        effective_semantic_coherence_provider_factory
-                    ),
-                    settings=app_settings,
-                    setup_runner=setup_runner,
-                    setup_command_identity=setup_command_identity,
-                    setup_hardware=setup_hardware,
-                    allow_runtime_fallback=args.allow_runtime_fallback,
-                    interaction=_resolve_runtime_fallback_interaction(input_fn),
-                    orchestrator_command=args.command,
-                )
-            else:
-                session_path = Path(args.session_path)
-                exit_code = processing_orchestration.run_resume_processing_command(
-                    session_path=session_path,
-                    now=now,
-                    transcription_provider_factory=transcription_provider_factory,
-                    diarization_provider_factory=diarization_provider_factory,
-                    semantic_coherence_provider_factory=(
-                        effective_semantic_coherence_provider_factory
-                    ),
-                    settings=app_settings,
-                    setup_runner=setup_runner,
-                    setup_command_identity=setup_command_identity,
-                    setup_hardware=setup_hardware,
-                    allow_runtime_fallback=args.allow_runtime_fallback,
-                    interaction=_resolve_runtime_fallback_interaction(input_fn),
-                )
-            if args.command == "process" and exit_code == 0:
-                print("Processing completed successfully.")
-                if _correction_handoff_available(session_path):
-                    print(f"Next command: mena correct {quote(str(session_path))}")
-            return exit_code
-        except processing_orchestration.ProcessingResumeUnavailable as exc:
-            print(str(exc))
-            return 1
-        except RuntimeFallbackUnavailable as exc:
-            # Recoverable: a GPU stage failed and a CPU fallback exists but is not
-            # authorized. Distinct exit code 3 lets an automated caller re-invoke
-            # with --allow-runtime-fallback instead of treating it as a hard error.
-            print(f"Cannot run processing workflow: {exc}")
-            return 3
-        except SessionLockContention as exc:
-            print(f"Cannot run processing workflow: {exc}")
-            return 4
-        except (
-            ArtifactStoreError,
-            ProcessingStateError,
-            ValueError,
-            TranscriptionError,
-            DiarizationError,
-            MergeTimingError,
-            ReviewFlaggingError,
-            SemanticCoherenceError,
-            ProviderValidationError,
-            OSError,
-        ) as exc:
-            print(f"Cannot run processing workflow: {exc}")
-            return 1
-        except (EOFError, KeyboardInterrupt):
-            print("Processing workflow interrupted.")
-            return 1
-
-    assert args.command in UNIMPLEMENTED_COMMANDS
-    print(f"Command '{args.command}' is not implemented yet.")
-    return 0
-
-
 def _resolve_record_profile(
     raw_profile: str | None,
     *,
@@ -1498,40 +988,6 @@ def _run_inspect_command(
     print(f"Integrity report for {session_path}: {'OK' if report.ok else 'FAILED'}")
     print(json.dumps(report.to_dict(), sort_keys=True, indent=2))
     return 0 if report.ok else 1
-
-
-def _resolve_latest_merged_transcript_record(
-    *,
-    store: ArtifactStore,
-) -> ArtifactRecord | None:
-    best: tuple[tuple[datetime, str, str], ArtifactRecord] | None = None
-    for record in store.list(artifact_type=MERGED_TRANSCRIPT_ARTIFACT_TYPE, status="sealed"):
-        key = _merged_transcript_timestamp_key(store=store, record=record)
-        if key is None:
-            continue
-        item = (key, record)
-        if best is None or item > best:
-            best = item
-    return None if best is None else best[1]
-
-
-def _merged_transcript_timestamp_key(
-    *,
-    store: ArtifactStore,
-    record: ArtifactRecord,
-) -> tuple[datetime, str, str] | None:
-    if not store.verify(record.id).ok:
-        return None
-    try:
-        merged = MergedTranscriptArtifact.from_dict(
-            json.loads(store.retrieve(record.id).decode("utf-8"))
-        )
-    except (json.JSONDecodeError, UnicodeDecodeError, MergeTimingContractError):
-        return None
-    created_at = _parse_iso_timestamp(merged.created_at)
-    if created_at is None:
-        return None
-    return (created_at, record.path, record.id)
 
 
 def _parse_iso_timestamp(value: str) -> datetime | None:
