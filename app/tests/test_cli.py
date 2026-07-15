@@ -27,11 +27,6 @@ from mena.cli._console import _resolve_console_input
 from mena.cli.correct import ConsoleCorrectionInteraction
 from mena.cli.processing import ConsoleProcessingInteraction
 from mena.cli.record import _resolve_record_language, _resolve_record_profile
-from mena.correction_overlay import (
-    CorrectionEntry,
-    create_correction_overlay,
-    persist_correction_overlay_artifact,
-)
 from mena.diarization import FakeDiarizationProvider
 from mena.discovery import (
     AudioDiscovery,
@@ -145,6 +140,10 @@ from mena.transcription import (
     TranscriptProviderMetadata,
     TranscriptSegment,
     persist_transcript_artifact,
+)
+from summarize_test_support import (
+    _build_ready_summarize_session_bundle_with_metadata,
+    _build_summarize_session_bundle,
 )
 from test_correction_workflow import (
     _build_session_bundle as _build_correction_session_bundle,
@@ -3754,99 +3753,6 @@ class TimeoutCapturingWorkerProcess(FakeWorkerProcess):
     def wait(self, timeout: float | None = None) -> int:
         self.__class__.last_timeout = timeout
         return 0
-
-
-def _build_summarize_session_bundle(
-    tmp_path: Path,
-) -> tuple[Path, FileSystemArtifactStore, ArtifactRecord, ArtifactRecord]:
-    session_dir = _create_session_record(tmp_path)
-    store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=session_dir)
-    merged_record = _persist_merged_transcript(store=store)
-    source_ref = ArtifactRef.from_record(merged_record)
-    overlay_artifact = create_correction_overlay(
-        session_id=SESSION_ID,
-        source_transcript_artifact=source_ref,
-        entries=(
-            CorrectionEntry(
-                id="entry_1",
-                segment_id="segment_2",
-                correction_type="text_edit",
-                original_flag_id="flag_1",
-                user_action_at="2026-05-19T15:20:01Z",
-                text="Corrected segment.",
-                metadata={},
-            ),
-        ),
-        now=datetime(2026, 5, 19, 15, 20, 0, tzinfo=UTC),
-    )
-    overlay_record = persist_correction_overlay_artifact(
-        store=store,
-        artifact=overlay_artifact,
-        name="overlay/active.json",
-        metadata={
-            "workflow_status": "completed",
-            "completed_at": "2026-05-19T15:20:00Z",
-        },
-    )
-    return session_dir, store, merged_record, overlay_record
-
-
-def _build_ready_summarize_session_bundle_with_metadata(
-    tmp_path: Path,
-    *,
-    directory_name: str,
-    created_at: str,
-    name: str | None = None,
-) -> Path:
-    session_dir = tmp_path / "sessions" / directory_name
-    session_dir.mkdir(parents=True)
-    record_data = {
-        "version": SESSION_RECORD_VERSION,
-        "id": SESSION_ID,
-        "created_at": created_at,
-        "name": name,
-        "status": "created",
-        "profile": "online_dual_stream",
-        "language": "fr-CH",
-        "recording": {
-            "started_at": None,
-            "stopped_at": None,
-            "stop_reason": None,
-            "finalization": {
-                "status": "not_started",
-                "completed_at": None,
-                "error": None,
-            },
-        },
-        "capture_plan": None,
-        "degradations": [],
-        "failures": [],
-    }
-    (session_dir / SESSION_RECORD_FILENAME).write_text(
-        json.dumps(record_data, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-
-    store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=session_dir)
-    merged_record = _persist_merged_transcript(store=store)
-    source_ref = ArtifactRef.from_record(merged_record)
-    overlay_artifact = create_correction_overlay(
-        session_id=SESSION_ID,
-        source_transcript_artifact=source_ref,
-        entries=(),
-        now=datetime(2026, 5, 19, 15, 20, 0, tzinfo=UTC),
-    )
-    persist_correction_overlay_artifact(
-        store=store,
-        artifact=overlay_artifact,
-        name=f"overlay/{directory_name}.json",
-        metadata={
-            "workflow_status": "completed",
-            "completed_at": "2026-05-19T15:20:00Z",
-        },
-    )
-
-    return session_dir
 
 
 def _build_verified_export_session_bundle(
