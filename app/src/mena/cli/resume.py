@@ -16,7 +16,11 @@ def register(
     runtime_fallback_parent: argparse.ArgumentParser,
     **_: object,
 ) -> None:
-    parser = subparsers.add_parser("resume", parents=[session_parent, runtime_fallback_parent])
+    parser = subparsers.add_parser(
+        "resume",
+        parents=[session_parent, runtime_fallback_parent],
+        help="Continue an interrupted or incomplete processing run.",
+    )
     bind_handler(parser, run)
 
 

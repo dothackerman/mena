@@ -19,7 +19,11 @@ def register(
     session_parent: argparse.ArgumentParser,
     **_: object,
 ) -> None:
-    parser = subparsers.add_parser("inspect", parents=[session_parent])
+    parser = subparsers.add_parser(
+        "inspect",
+        parents=[session_parent],
+        help="Verify and report a session bundle's integrity.",
+    )
     bind_handler(parser, run)
 
 

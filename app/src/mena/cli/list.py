@@ -10,7 +10,7 @@ from mena.cli.composition import CommandContext
 
 
 def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser], **_: object) -> None:
-    parser = subparsers.add_parser("list")
+    parser = subparsers.add_parser("list", help="List discovered session bundles.")
     bind_handler(parser, run)
 
 

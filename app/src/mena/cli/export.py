@@ -21,7 +21,11 @@ def register(
     optional_session_parent: argparse.ArgumentParser,
     **_: object,
 ) -> None:
-    parser = subparsers.add_parser("export", parents=[optional_session_parent])
+    parser = subparsers.add_parser(
+        "export",
+        parents=[optional_session_parent],
+        help="Render a persisted note package as Markdown.",
+    )
     parser.add_argument(
         "--format",
         choices=("markdown",),

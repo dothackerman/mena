@@ -165,6 +165,30 @@ def test_main_prints_help_without_command(capsys: CaptureFixture[str]) -> None:
     assert "Privacy-first local meeting notes PoC." in captured.out
 
 
+def test_main_help_describes_every_registered_command(capsys: CaptureFixture[str]) -> None:
+    expected_descriptions = {
+        "record": "Create a recording session.",
+        "setup": "Run Linux alpha setup/preflight.",
+        "list": "List discovered session bundles.",
+        "show": "Planned; not implemented in the current PoC.",
+        "process": "Run post-meeting processing for a session.",
+        "correct": "Review and correct flagged transcript segments.",
+        "summarize": "Generate a structured note package for a session.",
+        "export": "Render a persisted note package as Markdown.",
+        "inspect": "Verify and report a session bundle's integrity.",
+        "resume": "Continue an interrupted or incomplete processing run.",
+    }
+
+    exit_code = main([])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert set(expected_descriptions) == set(COMMANDS)
+    for command, description in expected_descriptions.items():
+        assert command in captured.out
+        assert description in captured.out
+
+
 def test_main_exposes_architecture_command_surface(capsys: CaptureFixture[str]) -> None:
     assert set(UNIMPLEMENTED_COMMANDS) <= set(COMMANDS)
     for command in UNIMPLEMENTED_COMMANDS:
