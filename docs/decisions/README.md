@@ -24,6 +24,13 @@ Proposed → Accepted → [Superseded | Deprecated | Rejected]
 - **Deprecated** — no longer relevant. Must include reason.
 - **Rejected** — never accepted. Kept for the record.
 
+An accepted decision may be **partially superseded** when a later decision
+explicitly identifies the clause it replaces. The earlier record remains
+Accepted and authoritative for every unaffected clause; the later decision is
+authoritative only for the identified clause. The later decision must name the
+earlier record and superseded clause. The earlier accepted record remains
+unchanged.
+
 **Decisions are never deleted.**
 
 ## Template
@@ -91,5 +98,6 @@ Proposed → Accepted → [Superseded | Deprecated | Rejected]
 | ADR-033 | Architecture | Mistral summarization provider and ordered fallback | Accepted | 2026-06-28 |
 | ADR-034 | Architecture | Three-product note package with per-product generation contracts | Accepted | 2026-07-03 |
 | ADR-035 | Architecture | Provider-owned note-product execution strategy | Accepted | 2026-07-06 |
+| ADR-036 | Architecture | Runtime profiles own stage-model selection | Accepted | 2026-08-04 |
 | PDR-001 | Product | Automatic correction overlay selection | Accepted | 2026-05-20 |
 | PDR-004 | Product | Mistral summarization disclosure and consent | Accepted | 2026-06-29 |

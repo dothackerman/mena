@@ -4,11 +4,11 @@ Status: arc42-structured architecture overview; provisional where marked
 
 Metadata:
 
-- Last updated: 2026-07-15
+- Last updated: 2026-08-04
 - Maintainer: architecture session between customer and Codex
 - Source inputs: requirements documents, architecture review, and recorded architecture discussions in this repository
 - Review status: architecture-review feedback incorporated for current architecture baseline
-- Decision coverage: content reflects ADR-032 through ADR-035; later accepted decisions remain authoritative in their individual ADRs until synthesized here
+- Decision coverage: content reflects ADR-032 through ADR-036; later accepted decisions remain authoritative in their individual ADRs until synthesized here
 
 This document captures the current architecture baseline.
 Sections may be revised as research, review, and implementation sharpen earlier wording.
@@ -1458,11 +1458,11 @@ When provider readiness or user/operator acknowledgement is missing, the product
 
 #### PoC Provider Adapter Decisions
 
-Status: Confirmed (per `ADR-021`, `ADR-022`, `ADR-023`)
+Status: Confirmed (per `ADR-021`, `ADR-022`, `ADR-023`, `ADR-036`)
 
 The architecture preserves provider-port replaceability, but the PoC pins concrete first adapters so coding agents can ship without re-litigating the choice:
 
-- **Local LLM (summarisation, semantic flagging) — `ADR-021`, with resource stewardship from `ADR-030`.** PoC default adapter is **Ollama**. A second adapter for owned `llama.cpp` (`llama-server`) should be added as an early hardening slice once model-dependent workflow code is stable enough to validate the Inference Port boundary. Default model profile: 3B-4B-parameter quantised instruct model; 1B-3B fallback profile on <=8 GB RAM machines; 7B is opt-in for stronger machines; 12B-class models are not the baseline. vLLM is out of scope for the PoC. Workflow code asks for stage-level capabilities ("structured summary", "semantic coherence check"), not for `/v1/chat/completions`. Mena manages Mena-owned local LLM model residency at stage boundaries; it does not stop the Ollama daemon as routine behavior.
+- **Local LLM (summarisation, semantic flagging) — `ADR-021` and `ADR-036`, with resource stewardship from `ADR-030`.** PoC default adapter is **Ollama**. A second adapter for owned `llama.cpp` (`llama-server`) should be added as an early hardening slice once model-dependent workflow code is stable enough to validate the Inference Port boundary. Bundled stage-focused runtime profiles own supported stage-model selection; exact model identifiers and model-size tiers are runtime policy, not architectural defaults. The current bundled Ollama profiles select `llama3.1:8b` for both summarization and semantic review. Accepted runtime-profile state records the machine/user choice, and per-request provenance records the model actually executed. vLLM is out of scope for the PoC. Workflow code asks for stage-level capabilities ("structured summary", "semantic coherence check"), not for `/v1/chat/completions`. Mena manages Mena-owned local LLM model residency at stage boundaries; it does not stop the Ollama daemon as routine behavior.
 - **ASR — `ADR-022`.** PoC primary ASR adapter is **`faster-whisper`** with hardware-selected Whisper-family profiles. `large-v3-turbo` is the quality ceiling for machines with sufficient VRAM/RAM headroom, not a universal default; `large-v3` is retained only as an explicit quality-reference rerun on stronger machines. Installation/preflight should choose a suitable model-size configuration from available VRAM/RAM and adapter capability. **`whisper.cpp`** is the first fallback adapter for weaker or more brittle environments (CPU-only, ≤8 GB RAM, no AVX2). Provider metadata (provider name, checkpoint, quantisation, device type, decode parameters including `condition_on_previous_text` and `hallucination_silence_threshold`, detected language, timestamp mode) is persisted with every transcript so reruns are deterministic. Vocabulary support uses `initial_prompt` and hotword hints (soft biasing); deterministic vocabulary control remains out of scope.
 - **Diarisation — `ADR-023`.** PoC adapter is **`pyannote/speaker-diarization-community-1`**, invoked **scenario-aware**: not run on the local mic in `online_dual_stream` (structural attribution from the local mic is sufficient), run on the remote/system stream only when there are multiple remote speakers worth distinguishing, and run on the room mic for `in_person_single_mic`. The combined dual-stream is **not** fed to `community-1` because the model card requires mono input and downmixes stereo by averaging. Three diarisation artifacts are persisted: regular timeline (preserves overlap), exclusive projection, and correction overlay. Confidence is a **product-level heuristic layer** (overlap presence, very short speaker turns, speaker-flipping rate, regular-vs-exclusive disagreement, speaker-count instability) rather than a model signal — `community-1` does not expose calibrated confidence. Graceful degradation uses coarse labels (`You`, `Remote speaker 1`, `Speaker unknown`, `Room`) rather than confident-but-wrong identities.
 
@@ -1480,7 +1480,7 @@ The architecture distinguishes:
 - `Local installation state`: what this machine currently has installed, downloaded, configured, and reachable
 - `User or administrator choice`: the selected setup path among profiles that are policy-allowed and viable on the detected machine
 
-A profile may include stage coverage, provider adapters, runtime commands, model identifiers, dependency surfaces, storage expectations, policy constraints, and hardware requirements.
+A profile may include stage coverage, provider adapters, runtime commands, model identifiers, dependency surfaces, storage expectations, policy constraints, and hardware requirements. Per `ADR-036`, the bundled profile catalog owns supported stage-model selection; the architecture does not duplicate those selections as permanent model defaults.
 Local installation state may satisfy, partially satisfy, or fail to satisfy a profile, but it is not itself a product recommendation.
 
 Setup flow must separate:
@@ -2538,7 +2538,7 @@ Status: Open
 - Validate actual incremental implementation cost of `in_person_single_mic`; current architecture assumes it is a capture-profile extension implemented after `online_dual_stream`.
 - Compare local summarization output against direct ZDR Mistral output during PoC testing where the operator-attested allow-conditions in `ADR-033` are met.
 - Validate `ADR-024` device/route discovery and tiered fallback behaviour against representative meeting tools (Zoom desktop, kMeet, Google Meet in-browser) and identify per-client quirks.
-- Validate `ADR-021` model profile thresholds against representative tester hardware (modern dev laptop, 16 GB no-dGPU, 8 GB no-dGPU) and confirm the chunked map-reduce summarisation strategy.
+- Validate bundled local-LLM stage-model selections against representative tester hardware (modern dev laptop, 16 GB no-dGPU, 8 GB no-dGPU) and the current note-product execution strategy; update runtime profile policy from that evidence without reopening `ADR-021` unless its runtime-adapter boundary changes.
 - Validate `ADR-030` resource stewardship thresholds and release behavior on constrained GPU machines during #40/#78 UAT.
 - Validate `ADR-033` user-facing disclosure copy with at least one tester before enabling direct Mistral summarization by default in any environment.
 - R-03 (future OS compatibility) and R-07 (install/update/uninstall) are now Ready and remain to be executed.
