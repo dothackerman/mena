@@ -24,6 +24,13 @@ Proposed → Accepted → [Superseded | Deprecated | Rejected]
 - **Deprecated** — no longer relevant. Must include reason.
 - **Rejected** — never accepted. Kept for the record.
 
+An accepted decision may be **partially superseded** when a later decision
+explicitly identifies the clause it replaces. The earlier record remains
+Accepted and authoritative for every unaffected clause; the later decision is
+authoritative only for the identified clause. The later decision must name the
+earlier record and superseded clause. The earlier accepted record remains
+unchanged.
+
 **Decisions are never deleted.**
 
 ## Template
