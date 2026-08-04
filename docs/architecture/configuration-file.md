@@ -50,10 +50,19 @@ language = "en"
 
 [ollama]
 endpoint = "http://localhost:11434"
-model = "llama3.2:3b"
+model = "llama3.1:8b"
 ```
 
 Unknown sections or keys are configuration errors. Values must have the expected TOML type.
+
+`llama3.1:8b` is the current built-in runtime-policy value used to construct the
+bundled Ollama profiles for both summarization and semantic review. It is not an
+architectural default. The `[ollama].model` value is a user override of that
+current bundled selection; setup evaluates and persists the resulting stage
+choice in accepted runtime-profile state. Later processing uses that accepted
+state rather than silently reverting to the configuration value, and request
+provenance records the model that actually executed (per `ADR-029` and
+`ADR-036`).
 
 ## Environment Overrides
 
