@@ -19,6 +19,7 @@ from mena.local_llm import (
     LocalLLMContractError,
     LocalLLMProviderMetadata,
     LocalLLMProviderUnavailable,
+    LocalLLMTimeout,
     local_ollama_endpoint,
     ollama_message_content,
     post_ollama_json,
@@ -268,7 +269,7 @@ class OllamaSemanticCoherenceProvider:
                 payload=payload,
                 timeout_seconds=self.timeout_seconds,
             )
-        except LocalLLMProviderUnavailable as exc:
+        except (LocalLLMProviderUnavailable, LocalLLMTimeout) as exc:
             raise SemanticCoherenceProviderUnavailable(
                 "Ollama semantic coherence provider is unavailable."
             ) from exc
@@ -284,7 +285,7 @@ class OllamaSemanticCoherenceProvider:
                 model=self.metadata.model,
                 timeout_seconds=self.timeout_seconds,
             )
-        except LocalLLMProviderUnavailable as exc:
+        except (LocalLLMProviderUnavailable, LocalLLMTimeout) as exc:
             raise SemanticCoherenceProviderUnavailable(
                 "Ollama semantic coherence provider is unavailable during release."
             ) from exc

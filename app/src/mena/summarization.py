@@ -93,6 +93,7 @@ __all__ = [
     "SummarizationPolicy",
     "SummarizationProvider",
     "SummarizationProviderMetadata",
+    "SummarizationTimeout",
     "SummarizationProviderUnavailable",
     "SummarizationRequest",
     "SummarizationStageResult",
@@ -115,6 +116,10 @@ __all__ = [
 
 class SummarizationProviderUnavailable(SummarizationError):
     """Raised when a summarization provider cannot be reached."""
+
+
+class SummarizationTimeout(SummarizationError):
+    """Raised when a summarization request exceeds its bounded deadline."""
 
 
 @dataclass(frozen=True)
@@ -468,8 +473,12 @@ def run_summarization_stage(
             input_artifacts=input_artifacts,
             error=ProcessingErrorInfo(
                 message=_processing_error_message(exc),
-                retryable=isinstance(exc, SummarizationProviderUnavailable),
-                code="summarization_failed",
+                retryable=isinstance(exc, (SummarizationProviderUnavailable, SummarizationTimeout)),
+                code=(
+                    "summarization_timeout"
+                    if isinstance(exc, SummarizationTimeout)
+                    else "summarization_failed"
+                ),
             ),
             attempt=attempt,
             started_at=started.started_at,
@@ -478,6 +487,8 @@ def run_summarization_stage(
         message = failed.error.message if failed.error else str(exc)
         if isinstance(exc, SummarizationProviderUnavailable):
             raise SummarizationProviderUnavailable(message) from exc
+        if isinstance(exc, SummarizationTimeout):
+            raise SummarizationTimeout(message) from exc
         raise SummarizationError(message) from exc
 
     completed = ledger.mark_completed(
