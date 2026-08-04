@@ -12,6 +12,8 @@ Can post-extraction meaning-level selection and abstraction turn the bounded ord
 
 This experiment followed the product-owner feedback checkpoint from the first #210 replay. It did not change ASR, rerun extraction, compare models, run RC7, or change production behavior.
 
+Durable inputs to this experiment are [the product-owner feedback](2026-08-04-ordinary-session-owner-feedback.md) and [the Swiss-German transcript-quality diagnosis](2026-08-04-swiss-german-transcript-quality-diagnosis.md). The owner-feedback note remains authoritative for the expected user-visible timeline shape.
+
 ## Controlled design
 
 The experiment reused the first replay's 53 timeline candidates, 54 action candidates, and 54 general-summary candidates. It kept `llama3.1:8b`, an 8,192-token context, temperature `0`, seed `0`, and the persisted German transcript fixed.
