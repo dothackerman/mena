@@ -12,6 +12,7 @@ from mena.local_llm import (
     OLLAMA_DEFAULT_MODEL,
     LocalLLMContractError,
     LocalLLMProviderUnavailable,
+    LocalLLMTimeout,
     local_ollama_endpoint,
     ollama_message_content,
     ollama_token_counts,
@@ -50,16 +51,28 @@ from mena.note_product_strategy import (
     select_note_product_strategy,
 )
 from mena.runtime_stewardship import RuntimeLease, RuntimeReleaseResult
-from mena.summarization import SummarizationProviderMetadata, SummarizationProviderUnavailable
+from mena.summarization import (
+    SummarizationError,
+    SummarizationProviderMetadata,
+    SummarizationProviderUnavailable,
+    SummarizationTimeout,
+)
 
 OLLAMA_SUMMARIZATION_NUM_CTX = 8192
 OLLAMA_SUMMARIZATION_SEED = 0
 OLLAMA_SUMMARIZATION_TEMPERATURE = 0
+OLLAMA_SUMMARIZATION_GENERATION_TIMEOUT_SECONDS = 600.0
+OLLAMA_SUMMARIZATION_RELEASE_TIMEOUT_SECONDS = 60.0
 OLLAMA_DETERMINISTIC_OPTIONS: dict[str, object] = {
     "temperature": OLLAMA_SUMMARIZATION_TEMPERATURE,
     "seed": OLLAMA_SUMMARIZATION_SEED,
     "num_ctx": OLLAMA_SUMMARIZATION_NUM_CTX,
 }
+
+
+def _generation_timeout_message() -> str:
+    minutes = OLLAMA_SUMMARIZATION_GENERATION_TIMEOUT_SECONDS / 60
+    return f"Local Ollama summarization timed out after the {minutes:g}-minute request ceiling."
 
 
 @dataclass(frozen=True)
@@ -131,7 +144,6 @@ class OllamaSummarizationProvider:
         *,
         model: str = OLLAMA_DEFAULT_MODEL,
         endpoint: str = OLLAMA_DEFAULT_ENDPOINT,
-        timeout_seconds: float = 60.0,
     ) -> None:
         self.metadata = SummarizationProviderMetadata(
             name="ollama",
@@ -141,7 +153,6 @@ class OllamaSummarizationProvider:
             temperature=OLLAMA_SUMMARIZATION_TEMPERATURE,
             seed=OLLAMA_SUMMARIZATION_SEED,
         )
-        self.timeout_seconds = timeout_seconds
         self._runtime_resource_used = False
 
     @property
@@ -383,8 +394,10 @@ class OllamaSummarizationProvider:
                 endpoint=str(self.metadata.endpoint),
                 path=path,
                 payload=payload,
-                timeout_seconds=self.timeout_seconds,
+                timeout_seconds=OLLAMA_SUMMARIZATION_GENERATION_TIMEOUT_SECONDS,
             )
+        except LocalLLMTimeout as exc:
+            raise SummarizationTimeout(_generation_timeout_message()) from exc
         except LocalLLMProviderUnavailable as exc:
             raise SummarizationProviderUnavailable(
                 "Ollama summarization provider is unavailable."
@@ -399,8 +412,12 @@ class OllamaSummarizationProvider:
             done_reason = unload_ollama_model(
                 endpoint=str(self.metadata.endpoint),
                 model=self.metadata.model,
-                timeout_seconds=self.timeout_seconds,
+                timeout_seconds=OLLAMA_SUMMARIZATION_RELEASE_TIMEOUT_SECONDS,
             )
+        except LocalLLMTimeout as exc:
+            raise SummarizationError(
+                "Ollama model release timed out at the terminal cleanup boundary."
+            ) from exc
         except LocalLLMProviderUnavailable as exc:
             raise SummarizationProviderUnavailable(
                 "Ollama summarization provider is unavailable during release."

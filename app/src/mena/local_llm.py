@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Mapping
@@ -22,6 +23,10 @@ class LocalLLMContractError(LocalLLMError):
 
 class LocalLLMProviderUnavailable(LocalLLMError):
     """Raised when the configured local LLM provider cannot be reached."""
+
+
+class LocalLLMTimeout(LocalLLMError):
+    """Raised when a local LLM request exceeds its bounded request deadline."""
 
 
 @dataclass(frozen=True)
@@ -89,6 +94,12 @@ def post_ollama_json(
     try:
         with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
             body = response.read().decode("utf-8")
+    except TimeoutError as exc:
+        raise LocalLLMTimeout("Ollama request timed out.") from exc
+    except urllib.error.URLError as exc:
+        if isinstance(exc.reason, TimeoutError):
+            raise LocalLLMTimeout("Ollama request timed out.") from exc
+        raise LocalLLMProviderUnavailable("Ollama provider is unavailable.") from exc
     except OSError as exc:
         raise LocalLLMProviderUnavailable("Ollama provider is unavailable.") from exc
     try:
