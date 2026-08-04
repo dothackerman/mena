@@ -48,8 +48,8 @@ Those defects matter for exact terminology and polish. They did not erase the ce
 
 The first export's failures cannot be explained by ASR alone:
 
-- 10 of 18 timeline entries were verbatim source segments after case and whitespace normalization;
-- 11 of 12 action entries were verbatim source segments by the same test;
+- 10 of 18 timeline entries were verbatim source segments;
+- 11 of 12 action entries were verbatim source segments;
 - the timeline ended at 7:08 of a 20:25 meeting;
 - timeline entries had only a start timestamp rather than phase intervals;
 - most action entries were statements, questions, or discussion fragments rather than explicit commitments;
