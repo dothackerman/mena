@@ -26,8 +26,8 @@ from mena.note_package import SummaryActionItem, SummaryResult, SummaryTimelineE
 from mena.summary_markdown import format_summary_markdown
 
 FIXTURE = Path(
-    "/home/oriol/.local/share/mena/sessions/c575b55f-352f-47b9-96c5-affc7d5f29d7_2026-06-30T130940Z"
-)
+    "~/.local/share/mena/sessions/c575b55f-352f-47b9-96c5-affc7d5f29d7_2026-06-30T130940Z"
+).expanduser()
 TRANSCRIPT = (
     FIXTURE
     / "artifacts/merged_transcript"
@@ -38,8 +38,8 @@ TRANSCRIPT = (
 )
 NOTES = FIXTURE / "artifacts/manual_notes/raw/2026-06-30_Meeting_Alex-ddab7d4cb233.md"
 DEFAULT_OUT = Path(
-    "/home/oriol/.openclaw/workspace/product-manager/uat/mena/session-c575b55f-2026-06-30/issue-199-session-2"
-)
+    "~/.openclaw/workspace/product-manager/uat/mena/session-c575b55f-2026-06-30/issue-199-session-2"
+).expanduser()
 PRODUCTS = ("timeline", "action_items", "general_summary")
 NUM_CTX = 8192
 PROMPT_BUDGET = int(NUM_CTX * 0.85)
