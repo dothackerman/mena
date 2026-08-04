@@ -1,5 +1,14 @@
 # Bounded long-input generation strategies: final report
 
+> **Status correction (2026-08-04).** Despite the historical filename, this is
+> the report for #199 experiment 1, not a final strategy-selection verdict. The
+> completed comparison below falsified plain hierarchy and exposed the output-
+> capacity problem in unconstrained evidence retention, but the two arms did
+> not solve the same final-product problem and therefore cannot select a
+> winner. A later source-aware prototype also failed operationally before
+> producing a package. Issue #207 continues the research with a user-visible,
+> bounded baseline before controlled aggregation comparisons.
+
 **Issue.** [#199](https://github.com/dothackerman/mena/issues/199) asks which bounded long-input strategy Mena should use for each `summary.v3` note product before implementing the real #114 note package work.
 
 **Privacy boundary.** This report uses only sanitized benchmark metrics plus private local inspection of generated outputs. It does not quote or publish the RC7 meeting transcript, manual notes, private generated note products, or Gemma partial-run data.
@@ -9,15 +18,16 @@
 1. **Budgeted hierarchy:** chunk-level product extraction followed by bounded recursive merge.
 2. **Evidence-first aggregation:** chunk-level product extraction into atomic records for timeline/action items, deterministic ordering/deduplication for those products, and bounded synthesis for the general summary.
 
-## Verdict
+## Experiment 1 interpretation
 
-Mena should implement a **product-specific hybrid**, not one universal reducer:
+The evidence supports testing a **product-specific hybrid**, not implementing
+one universal reducer as a settled production choice:
 
 - **Timeline:** evidence-first extraction into atomic, source-addressed events, followed by deterministic validation, chronological ordering, deduplication, and explicit capacity handling.
 - **Action items:** evidence-first extraction into atomic candidates with owner/due/status/source fields, deterministic duplicate grouping, explicit conflict representation, and explicit capacity handling.
 - **General summary:** bounded hierarchical reduction is acceptable only for summary prose, but merge stages should carry source references and coverage metadata, and should rehydrate selected source/evidence context rather than reducing pure prose summaries.
 
-The Llama run reinforced the source-review conclusion: chunking alone is not an architecture. The system needs mechanical prompt-budget invariants plus product-specific information contracts.
+The Llama run reinforced the source-review conclusion: chunking alone is not an architecture. The system needs mechanical prompt-budget invariants plus product-specific information contracts. The exact extraction and aggregation contracts remain hypotheses for #207 to test.
 
 ## Sanitized Results
 
@@ -43,6 +53,32 @@ Private local inspection matched the metrics:
 - Evidence-first timeline/action products preserved far more source-addressed atomic records and retained several probe facts.
 - Evidence-first also exposed the next required production boundary: valid evidence can exceed a human-readable final product size, so Mena needs an explicit final-capacity policy instead of dumping every candidate into the note package.
 - Neither prototype is production-ready for general-summary quality; the summary path needs source-aware bounded reduction, not plain recursive prose compression.
+
+### Session 2 source-aware prototype: controlled operational failure
+
+The later commit `2c5fcac` attempted the #199 Candidate C source-aware
+hierarchy. It retained private request and response artifacts locally and did
+not publish their content. The sanitized operational facts recoverable from
+the call index and run log are:
+
+| Result | Value |
+|---|---:|
+| Source chunks | 28 |
+| Completed model calls | 368 |
+| Elapsed model-call time | 15,669.745s (about 4h21m) |
+| Prompt evaluation tokens | 475,092 |
+| Generated tokens | 183,608 |
+| Maximum preflight prompt bytes | 6,417 |
+| Terminal result | `non_contracting_reduction` |
+| Complete three-product package | no |
+
+Timeline and action-item intermediate/final artifacts were produced privately,
+and general-summary extraction completed, but general-summary consolidation
+failed its contraction check before package assembly. Candidate D was not run.
+The valid conclusion is operational rather than qualitative: a graph can keep
+every individual request within context while remaining unusably expensive,
+and a per-call contraction check does not replace a predeclared whole-run call
+graph, wall-time envelope, checkpoints, and resumability.
 
 ## Architectural Implications
 
@@ -72,9 +108,10 @@ Evidence-first aggregation moved the bottleneck from raw transcript size to vali
 
 General summary can tolerate salience compression, so a tree is appropriate there. But the source review and this benchmark both argue against pure summary-of-summaries. Merge stages should carry source ids, coverage metadata, and optionally selected raw/evidence context so that later levels can recover support instead of amplifying earlier omissions.
 
-## Recommended #114 Implementation Shape
+## Hypothesis carried into #207
 
-Implement a shared bounded generation substrate plus product-specific strategy modules:
+Prototype and evaluate a bounded generation substrate plus product-specific
+strategy modules before proposing production work for #114:
 
 - **Provider budget service:** effective context, tokenizer/request measurement, output reservation, safety margin, and normalized `provider_budget_mismatch`.
 - **Source chunker:** stable source-unit ids, transcript/manual-note references, and no source-unit splitting that destroys citation addressability.
@@ -104,5 +141,6 @@ This report depends on the Phase 1 source review in [`r-bounded-long-input-strat
 
 - This report does not choose UI presentation for oversized evidence products.
 - This report does not promote the throwaway prototype into production code.
+- This report does not select a winning #199 candidate or unblock #114.
 - This report does not publish private meeting content or generated private note products.
 - This report does not authorize a GitHub PR, issue creation, or push.
