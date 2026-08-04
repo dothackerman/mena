@@ -23,6 +23,7 @@ try:
         Limits,
         Replay,
         _find_artifact,
+        _model_info,
         _time,
         _valid_ids,
         checkpoint_id,
@@ -35,6 +36,7 @@ except ModuleNotFoundError:  # Direct execution adds this file's folder to sys.p
         Limits,
         Replay,
         _find_artifact,
+        _model_info,
         _time,
         _valid_ids,
         checkpoint_id,
@@ -52,21 +54,16 @@ class MeaningLimits:
     timeline_minimum: int = 4
     timeline_maximum: int = 8
     actions_per_chunk: int = 3
-    summary_sections: int = 2
+    summary_drafts: int = 2
 
 
 def _normalized(text: str) -> str:
     return " ".join(text.casefold().split()).strip(" .,!?:;\"'“”„")
 
 
-def _all_product_source_ids(package: dict[str, Any]) -> set[str]:
-    items = list(package.get("timeline", [])) + list(package.get("general_summary_sections", []))
-    return {
-        source_id
-        for item in items
-        for source_id in item.get("source_segment_ids", [])
-        if isinstance(source_id, str)
-    }
+def _contains_required_terms(text: str, required_terms: list[str]) -> bool:
+    normalized = _normalized(text)
+    return all(_normalized(term) in normalized for term in required_terms)
 
 
 def evaluate_package(
@@ -95,11 +92,15 @@ def evaluate_package(
     )
     verbatim_ratio = verbatim_count / len(timeline) if timeline else 1.0
 
-    visible_source_ids = _all_product_source_ids(package)
+    visible_items = list(timeline) + list(package.get("general_summary_drafts", []))
     missing_topics = [
         topic["name"]
         for topic in rubric["required_topics"]
-        if not visible_source_ids.intersection(topic["source_segment_ids"])
+        if not any(
+            set(item.get("source_segment_ids", [])).intersection(topic["source_segment_ids"])
+            and _contains_required_terms(str(item.get("text", "")), topic["required_terms"])
+            for item in visible_items
+        )
     ]
 
     expected_actions = rubric["explicit_actions"]
@@ -111,6 +112,7 @@ def evaluate_package(
             expected
             for expected in expected_actions
             if cited.intersection(expected["source_segment_ids"])
+            and _contains_required_terms(str(action.get("text", "")), expected["required_terms"])
         ]
         if not matches:
             non_commitment_action_indexes.append(index)
@@ -228,9 +230,9 @@ TIMELINE_SCHEMA = {
 SUMMARY_PLAN_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["sections"],
+    "required": ["groups"],
     "properties": {
-        "sections": {
+        "groups": {
             "type": "array",
             "minItems": 1,
             "maxItems": 2,
@@ -252,7 +254,7 @@ SUMMARY_PLAN_SCHEMA = {
     },
 }
 
-SUMMARY_SECTION_SCHEMA = {
+SUMMARY_DRAFT_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
     "required": ["text", "source_segment_ids"],
@@ -266,6 +268,31 @@ SUMMARY_SECTION_SCHEMA = {
         },
     },
 }
+
+
+def validate_frozen_controls(
+    *,
+    baseline: dict[str, Any],
+    requested_model: str,
+    current_model: dict[str, Any],
+    transcript_sha256: str,
+) -> None:
+    baseline_runtime = baseline.get("runtime_profile", {})
+    if (
+        baseline_runtime.get("num_ctx") != NUM_CTX
+        or baseline_runtime.get("temperature") != 0
+        or baseline_runtime.get("seed") != 0
+    ):
+        raise BoundExceeded("controlled_runtime_drift")
+    baseline_model = baseline.get("model", {})
+    if (
+        baseline_model.get("tag") != requested_model
+        or current_model.get("tag") != requested_model
+        or baseline_model.get("show") != current_model.get("show")
+    ):
+        raise BoundExceeded("controlled_model_drift")
+    if baseline.get("transcript", {}).get("sha256") != transcript_sha256:
+        raise BoundExceeded("controlled_transcript_drift")
 
 
 def _load_checkpoint(path: Path) -> Any:
@@ -339,7 +366,7 @@ def _render(package: dict[str, Any]) -> str:
         for item in package["timeline"]
     )
     actions = "\n".join(f"- {item['text']}" for item in package["action_items"])
-    summary = "\n\n".join(item["text"] for item in package["general_summary_sections"])
+    summary = package["general_summary"]
     return (
         f"## Zeitverlauf\n\n{timeline}\n\n## Aufgaben\n\n{actions}\n\n"
         f"## Zusammenfassung\n\n{summary}\n"
@@ -352,7 +379,7 @@ def build_call_plan(*, chunk_count: int, limits: MeaningLimits) -> dict[str, Any
         "commitment_classification": chunk_count,
         "timeline_consolidation": 1,
         "summary_planning": 1,
-        "summary_section_generation": limits.summary_sections,
+        "general_summary_drafting": limits.summary_drafts,
     }
     maximum = sum(stages.values())
     if maximum > limits.max_calls:
@@ -366,7 +393,7 @@ def build_call_plan(*, chunk_count: int, limits: MeaningLimits) -> dict[str, Any
             "commitment_classification": "remaining frozen action-candidate chunks",
             "timeline_consolidation": "one pending bounded consolidation",
             "summary_planning": "one pending whole-meeting plan",
-            "summary_section_generation": "remaining planned sections",
+            "general_summary_drafting": "remaining planned drafts",
         },
     }
 
@@ -383,6 +410,7 @@ def run(
     started = time.monotonic()
     output.mkdir(parents=True, exist_ok=True)
     transcript_path = _find_artifact(session, "merged_transcript", "attempt-*.json")
+    transcript_sha256 = sha256_file(transcript_path)
     raw = json.loads(transcript_path.read_text())
     segments = [
         {
@@ -395,6 +423,14 @@ def run(
         for item in raw["segments"]
     ]
     source = {item["id"]: item for item in segments}
+    baseline_manifest = _load_checkpoint(baseline_output / "checkpoints/01-manifest.json")
+    current_model = _model_info(model)
+    validate_frozen_controls(
+        baseline=baseline_manifest,
+        requested_model=model,
+        current_model=current_model,
+        transcript_sha256=transcript_sha256,
+    )
     chunk_plan = _load_checkpoint(baseline_output / "checkpoints/02-chunk-plan.json")
     frozen = _load_checkpoint(baseline_output / "checkpoints/03-extracted-candidates.json")
     chunks = chunk_plan["chunks"]
@@ -406,7 +442,7 @@ def run(
         "schema_version": SCHEMA_VERSION,
         "prompt_version": PROMPT_VERSION,
         "source_session_record_sha256": sha256_file(session / "session.json"),
-        "transcript_sha256": sha256_file(transcript_path),
+        "transcript_sha256": transcript_sha256,
         "frozen_candidates_sha256": sha256_file(
             baseline_output / "checkpoints/03-extracted-candidates.json"
         ),
@@ -415,7 +451,7 @@ def run(
             ["git", "rev-parse", "HEAD"], check=True, capture_output=True, text=True
         ).stdout.strip(),
         "code_sha256": sha256_file(Path(__file__)),
-        "model": model,
+        "model": current_model,
         "runtime": {"num_ctx": NUM_CTX, "temperature": 0, "seed": 0},
         "limits": asdict(limits),
     }
@@ -504,7 +540,8 @@ def run(
         stage="summary_planning",
         product="general_summary",
         system=(
-            "Plane höchstens zwei Abschnitte für eine kurze deutsche Zusammenfassung des ganzen "
+            "Plane höchstens zwei Evidenzgruppen für eine kurze deutsche Zusammenfassung des "
+            "ganzen "
             "Gesprächs. Wähle zentrale Unterscheidungen, Entscheidungen und Ergebnisse statt "
             "Nebendetails. Verwende nur gelieferte Timeline-Indizes."
         ),
@@ -514,10 +551,10 @@ def run(
         },
         schema=SUMMARY_PLAN_SCHEMA,
     )
-    sections: list[dict[str, Any]] = []
-    for section in plan_response["sections"][: limits.summary_sections]:
+    drafts: list[dict[str, Any]] = []
+    for group in plan_response["groups"][: limits.summary_drafts]:
         selected = [
-            timeline[index] for index in section["timeline_indexes"] if 0 <= index < len(timeline)
+            timeline[index] for index in group["timeline_indexes"] if 0 <= index < len(timeline)
         ]
         ids = list(
             dict.fromkeys(
@@ -525,7 +562,7 @@ def run(
             )
         )[:20]
         generated = replay.call(
-            stage="summary_section_generation",
+            stage="general_summary_drafting",
             product="general_summary",
             system=(
                 "Schreibe einen knappen deutschen Absatz als Erinnerungshilfe. Abstrahiere die "
@@ -534,30 +571,30 @@ def run(
                 "gelieferte Segment-IDs."
             ),
             user={
-                "title": section["title"],
+                "title": group["title"],
                 "phases": selected,
                 "original_evidence": [source[source_id] for source_id in ids],
             },
-            schema=SUMMARY_SECTION_SCHEMA,
+            schema=SUMMARY_DRAFT_SCHEMA,
         )
         valid_ids = _valid_ids(generated, source)
         if not valid_ids or not isinstance(generated.get("text"), str):
             raise BoundExceeded("summary_provenance_violation")
-        sections.append({"text": generated["text"].strip(), "source_segment_ids": valid_ids})
+        drafts.append({"text": generated["text"].strip(), "source_segment_ids": valid_ids})
 
     package = {
         "language": "de",
         "timeline": timeline,
         "action_items": actions,
-        "general_summary_sections": sections,
+        "general_summary": "\n\n".join(item["text"] for item in drafts),
+        "general_summary_drafts": drafts,
     }
+    rubric = json.loads(rubric_path.read_text())
+    evaluation = evaluate_package(package=package, segments=segments, rubric=rubric)
+    package["experiment_status"] = "accepted" if evaluation["passed"] else "incomplete"
     (output / "note-package-private.json").write_text(
         json.dumps(package, ensure_ascii=False, indent=2)
     )
-    export = output / "meaning-level-session-notes.md"
-    export.write_text(_render(package))
-    rubric = json.loads(rubric_path.read_text())
-    evaluation = evaluate_package(package=package, segments=segments, rubric=rubric)
     evaluation["experiment"] = {
         "call_plan": call_plan,
         "actual_calls": len(replay.calls),
@@ -581,6 +618,9 @@ def run(
             indent=2,
         )
     )
+    suffix = "md" if evaluation["passed"] else "incomplete.md"
+    export = output / f"meaning-level-session-notes.{suffix}"
+    export.write_text(_render(package))
     return export
 
 

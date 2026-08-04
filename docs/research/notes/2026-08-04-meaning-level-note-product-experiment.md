@@ -21,8 +21,8 @@ Only post-extraction processing changed:
 - each of the nine frozen transcript chunks produced at most one meaning-level timeline phase;
 - each chunk classified at most three explicit commitments from its frozen action candidates;
 - one bounded call consolidated chunk phases into four to eight chronological phases;
-- one whole-meeting plan selected at most two summary sections;
-- two source-rehydrated calls drafted the summary sections;
+- one whole-meeting plan selected at most two internal evidence groups;
+- two source-rehydrated calls produced internal drafts that were assembled into one general summary;
 - timestamps remained derived from cited source segments.
 
 The dry call graph declared 22 calls and a 10,800-second wall-time ceiling. No retries or recursive reducers were allowed. All meeting-derived inputs and outputs remained in private temporary storage.
@@ -79,6 +79,16 @@ Three mechanisms remain inadequate:
 3. **Positive-only action generation is too permissive on the local 8B model.** Stronger wording did not reliably distinguish commitments from statements. The next action experiment needs an explicit candidate-level keep/reject decision with rejection reasons and a deterministic acceptance gate before rendering.
 
 The frozen candidate inventory also remains noisy. Because this run changed aggregation without first establishing an extraction reference set, the result cannot separate candidate quality from abstraction capability beyond the observed action-classification failure.
+
+## Local self-review
+
+Review against issue #210, ADR-034/ADR-035, repository vocabulary, privacy boundaries, and the controlled-experiment claim found three follow-up defects in the reusable prototype:
+
+- it recorded but did not enforce the frozen model/runtime/transcript controls;
+- its automated semantic checks treated citation overlap as sufficient evidence of the expected meaning;
+- a failed coverage check still left a normal-looking Markdown filename.
+
+Follow-up code now refuses model/runtime/transcript drift, requires both labelled evidence and expected semantic terms, names internal prose as drafts rather than note-product sections, and marks red output as incomplete. These changes were not used to rerun or rewrite the experiment reported above; the original code hash and private outputs remain preserved in its manifest.
 
 ## Recommendation
 
