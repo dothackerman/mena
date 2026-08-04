@@ -27,7 +27,9 @@ from mena.merge_timing import (
     persist_merged_transcript_artifact,
 )
 from mena.ollama_summarization import (
+    OLLAMA_SUMMARIZATION_GENERATION_TIMEOUT_SECONDS,
     OLLAMA_SUMMARIZATION_NUM_CTX,
+    OLLAMA_SUMMARIZATION_RELEASE_TIMEOUT_SECONDS,
     OLLAMA_SUMMARIZATION_SEED,
     OllamaSummarizationProvider,
 )
@@ -47,6 +49,7 @@ from mena.summarization import (
     SummarizationProviderMetadata,
     SummarizationProviderUnavailable,
     SummarizationRequest,
+    SummarizationTimeout,
     SummarizationTokenBudgetError,
     SummaryActionItem,
     SummaryArtifact,
@@ -701,6 +704,68 @@ def test_summarization_stage_marks_failed_checkpoint_when_provider_unavailable()
     assert failed.error.code == "summarization_failed"
 
 
+def test_summarization_stage_persists_retryable_timeout_distinctly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = FileSystemArtifactStore(session_id=SESSION_ID, session_dir=tmp_path)
+    merged_record = _persist_merged_transcript(store=store)
+    ledger = ProcessingStageLedger(store=store, session_id=SESSION_ID, run_id=RUN_ID)
+    provider = OllamaSummarizationProvider(model="test-model")
+    monkeypatch.setattr(
+        "mena.local_llm.urllib.request.urlopen",
+        lambda _request, *, timeout: (_ for _ in ()).throw(TimeoutError("expired")),
+    )
+
+    with pytest.raises(SummarizationTimeout, match="10-minute request ceiling"):
+        run_summarization_stage(
+            store=store,
+            ledger=ledger,
+            merged_transcript_record=merged_record,
+            provider=provider,
+            now=NOW,
+        )
+
+    reloaded_ledger = ProcessingStageLedger(
+        store=FileSystemArtifactStore(session_id=SESSION_ID, session_dir=tmp_path),
+        session_id=SESSION_ID,
+        run_id=RUN_ID,
+    )
+    failed = reloaded_ledger.states(stage=SUMMARIZATION_STAGE)[-1]
+    assert failed.error is not None
+    assert failed.error.retryable is True
+    assert failed.error.code == "summarization_timeout"
+
+    unavailable_run_id = f"{RUN_ID}-unavailable"
+    unavailable_ledger = ProcessingStageLedger(
+        store=store,
+        session_id=SESSION_ID,
+        run_id=unavailable_run_id,
+    )
+    monkeypatch.setattr(
+        "mena.local_llm.urllib.request.urlopen",
+        lambda _request, *, timeout: (_ for _ in ()).throw(ConnectionRefusedError("refused")),
+    )
+    with pytest.raises(SummarizationProviderUnavailable, match="provider is unavailable"):
+        run_summarization_stage(
+            store=store,
+            ledger=unavailable_ledger,
+            merged_transcript_record=merged_record,
+            provider=OllamaSummarizationProvider(model="test-model"),
+            now=NOW,
+        )
+
+    reloaded_unavailable = ProcessingStageLedger(
+        store=FileSystemArtifactStore(session_id=SESSION_ID, session_dir=tmp_path),
+        session_id=SESSION_ID,
+        run_id=unavailable_run_id,
+    ).states(stage=SUMMARIZATION_STAGE)[-1]
+    assert reloaded_unavailable.error is not None
+    assert reloaded_unavailable.error.retryable is True
+    assert reloaded_unavailable.error.code == "summarization_failed"
+    assert reloaded_unavailable.error.message != failed.error.message
+
+
 def test_summarization_stage_sanitizes_raw_provider_output_in_failed_checkpoint() -> None:
     class InvalidContractProvider:
         metadata = FakeSummarizationProvider(result=_summary_result()).metadata
@@ -1320,6 +1385,45 @@ def test_ollama_provider_short_input_records_one_shot_strategy(
     assert [record.call for record in result.request_records] == ["one_shot"] * 3
     assert all(record.chunk_index is None for record in result.request_records)
     assert all(record.chunk_count is None for record in result.request_records)
+
+
+def test_ollama_generation_ceiling_covers_one_shot_map_and_reduce_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OllamaSummarizationProvider(model="test-model")
+    seen: list[tuple[str, float]] = []
+
+    def fake_post_ollama_json(**kwargs: object) -> dict[str, object]:
+        payload = cast(dict[str, object], kwargs["payload"])
+        timeout = cast(float, kwargs["timeout_seconds"])
+        messages = cast(list[dict[str, str]], payload["messages"])
+        task = cast(str, json.loads(messages[1]["content"])["task"])
+        seen.append((task, timeout))
+        product = _product_key(payload)
+        if task == "meeting_notes_chunk":
+            response = json.loads(json.dumps(_reducer_map_responses()[product]))
+            if product == "timeline":
+                response_payload = json.loads(response["message"]["content"])
+                user_payload = json.loads(messages[1]["content"])
+                first_segment_id = user_payload["transcript"]["segments"][0]["id"]
+                response_payload["timeline"][0]["source_segment_ids"] = [first_segment_id]
+                response["message"]["content"] = json.dumps(response_payload)
+            return cast(dict[str, object], response)
+        return _fake_product_responses()[product]
+
+    monkeypatch.setattr("mena.ollama_summarization.post_ollama_json", fake_post_ollama_json)
+
+    provider.summarize(_summary_request())
+    provider.summarize(_long_summary_request())
+
+    assert {task for task, _timeout in seen} == {
+        "meeting_notes",
+        "meeting_notes_chunk",
+        "meeting_notes_reduce",
+    }
+    assert all(
+        timeout == OLLAMA_SUMMARIZATION_GENERATION_TIMEOUT_SECONDS for _task, timeout in seen
+    )
 
 
 def test_ollama_provider_reducer_fails_loudly_when_reduce_candidates_exceed_budget(
@@ -2204,6 +2308,61 @@ def test_ollama_summarization_provider_marks_resource_used_before_failed_chat_ca
     assert provider.runtime_resource_used is True
 
 
+def test_ollama_summarization_generation_uses_emergency_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OllamaSummarizationProvider(model="test-model")
+    captured: list[float] = []
+
+    def fake_post_ollama_json(**kwargs: object) -> dict[str, object]:
+        timeout = cast(float, kwargs["timeout_seconds"])
+        captured.append(timeout)
+        if timeout <= 60:
+            raise TimeoutError("historical request boundary")
+        return _fake_product_responses()["timeline"]
+
+    monkeypatch.setattr("mena.ollama_summarization.post_ollama_json", fake_post_ollama_json)
+
+    provider._post_json("/api/chat", {"model": "test-model"})
+
+    assert captured == [OLLAMA_SUMMARIZATION_GENERATION_TIMEOUT_SECONDS]
+    assert OLLAMA_SUMMARIZATION_GENERATION_TIMEOUT_SECONDS == 600.0
+
+
+def test_ollama_summarization_timeout_reports_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OllamaSummarizationProvider(model="test-model")
+    monkeypatch.setattr(
+        "mena.local_llm.urllib.request.urlopen",
+        lambda _request, *, timeout: (_ for _ in ()).throw(TimeoutError("expired")),
+    )
+
+    with pytest.raises(SummarizationTimeout, match="10-minute request ceiling"):
+        provider._post_json("/api/chat", {"model": "test-model"})
+
+
+def test_ollama_summarization_release_timeout_stays_bounded_cleanup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OllamaSummarizationProvider(model="test-model")
+    monkeypatch.setattr(
+        "mena.local_llm.urllib.request.urlopen",
+        lambda _request, *, timeout: (_ for _ in ()).throw(TimeoutError("expired")),
+    )
+    lease = RuntimeLease(
+        resource_kind="local_llm",
+        stage="summarization",
+        boundary="summarize",
+        provider="ollama",
+        model="test-model",
+    )
+
+    with pytest.raises(SummarizationError, match="release timed out") as exc_info:
+        provider.release_runtime_resource(lease)
+    assert "unavailable" not in str(exc_info.value).lower()
+
+
 def test_ollama_summarization_provider_releases_runtime_resource(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2244,8 +2403,11 @@ def test_ollama_summarization_provider_releases_runtime_resource(
     assert captured == {
         "endpoint": "http://localhost:11434",
         "model": "test-model",
-        "timeout_seconds": provider.timeout_seconds,
+        "timeout_seconds": OLLAMA_SUMMARIZATION_RELEASE_TIMEOUT_SECONDS,
     }
+    assert OLLAMA_SUMMARIZATION_RELEASE_TIMEOUT_SECONDS < (
+        OLLAMA_SUMMARIZATION_GENERATION_TIMEOUT_SECONDS
+    )
 
 
 def _persist_merged_transcript(

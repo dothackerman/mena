@@ -1,11 +1,99 @@
 from __future__ import annotations
 
 import json
+import urllib.error
 from typing import Any
 
 import pytest
 
-from mena.local_llm import LocalLLMContractError, ollama_token_counts, unload_ollama_model
+from mena.local_llm import (
+    LocalLLMContractError,
+    LocalLLMProviderUnavailable,
+    LocalLLMTimeout,
+    ollama_token_counts,
+    post_ollama_json,
+    unload_ollama_model,
+)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [TimeoutError("timed out"), urllib.error.URLError(TimeoutError("timed out"))],
+)
+def test_post_ollama_json_distinguishes_request_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    failure: BaseException,
+) -> None:
+    monkeypatch.setattr(
+        "mena.local_llm.urllib.request.urlopen",
+        lambda _request, *, timeout: (_ for _ in ()).throw(failure),
+    )
+
+    with pytest.raises(LocalLLMTimeout, match="request timed out"):
+        post_ollama_json(
+            endpoint="http://localhost:11434",
+            path="/api/chat",
+            payload={},
+            timeout_seconds=600.0,
+        )
+
+
+def test_post_ollama_json_keeps_connection_failure_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "mena.local_llm.urllib.request.urlopen",
+        lambda _request, *, timeout: (_ for _ in ()).throw(ConnectionRefusedError()),
+    )
+
+    with pytest.raises(LocalLLMProviderUnavailable, match="provider is unavailable"):
+        post_ollama_json(
+            endpoint="http://localhost:11434",
+            path="/api/chat",
+            payload={},
+            timeout_seconds=600.0,
+        )
+
+    monkeypatch.setattr(
+        "mena.local_llm.urllib.request.urlopen",
+        lambda _request, *, timeout: (_ for _ in ()).throw(
+            urllib.error.URLError("connection refused")
+        ),
+    )
+    with pytest.raises(LocalLLMProviderUnavailable, match="provider is unavailable"):
+        post_ollama_json(
+            endpoint="http://localhost:11434",
+            path="/api/chat",
+            payload={},
+            timeout_seconds=600.0,
+        )
+
+
+def test_post_ollama_json_distinguishes_timeout_while_reading_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class TimeoutResponse:
+        def __enter__(self) -> TimeoutResponse:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            raise TimeoutError("timed out while reading")
+
+    monkeypatch.setattr(
+        "mena.local_llm.urllib.request.urlopen",
+        lambda _request, *, timeout: TimeoutResponse(),
+    )
+
+    with pytest.raises(LocalLLMTimeout, match="request timed out"):
+        post_ollama_json(
+            endpoint="http://localhost:11434",
+            path="/api/chat",
+            payload={},
+            timeout_seconds=600.0,
+        )
 
 
 def test_unload_ollama_model_posts_empty_chat_with_zero_keep_alive(

@@ -64,7 +64,11 @@ from mena.setup import (
     mistral_summary_stage_profile,
     persist_runtime_profile_state,
 )
-from mena.summarization import SummarizationError, SummarizationProviderUnavailable
+from mena.summarization import (
+    SummarizationError,
+    SummarizationProviderUnavailable,
+    SummarizationTimeout,
+)
 from mena.transcription import (
     FasterWhisperModelProfile,
     FasterWhisperTranscriptionProvider,
@@ -1381,6 +1385,52 @@ def test_run_summarization_with_runtime_fallback_observes_terminal_release_on_fa
         )
 
     assert [result.detail for result in observed] == ["Ollama model release failed."]
+
+
+def test_summarization_timeout_skips_fallback_and_still_releases(tmp_path: Path) -> None:
+    plan = _summarization_plan()
+    selection = cast(
+        RuntimeProfileSelection,
+        SimpleNamespace(accepted="accepted-state", actual="primary-state", summarization=plan),
+    )
+    fallback_calls: list[object] = []
+    release_attempts: list[int] = []
+    stored_profiles: list[dict[str, object]] = []
+
+    def _unexpected_fallback(**kwargs: object) -> RuntimeProfileSelection:
+        fallback_calls.append(kwargs)
+        raise AssertionError("timeout must not enter provider-unavailable fallback")
+
+    def _release(**kwargs: object) -> None:
+        release_attempts.append(cast(int, kwargs["attempt"]))
+
+    with pytest.raises(SummarizationTimeout, match="10-minute request ceiling"):
+        run_summarization_with_runtime_fallback(
+            settings=cast(AppSettings, SimpleNamespace()),
+            store=FileSystemArtifactStore(session_id="session", session_dir=tmp_path),
+            run_id="summarize-timeout",
+            attempt=1,
+            runner=None,
+            command_identity=None,
+            hardware=None,
+            allow_runtime_fallback=False,
+            authorize_remote_summarization_fallback=None,
+            run=lambda _provider, _attempt: (_ for _ in ()).throw(
+                SummarizationTimeout(
+                    "Local Ollama summarization timed out after the 10-minute request ceiling."
+                )
+            ),
+            failed_input_artifacts=("merged", "overlay"),
+            summarization_provider_factory=lambda: _ReleasableSummarization("primary"),
+            runtime_profile_selector_fn=lambda **_kwargs: selection,
+            runtime_profile_selector_after_failure_fn=_unexpected_fallback,
+            runtime_profile_store_fn=lambda **kwargs: stored_profiles.append(kwargs),
+            terminal_release_fn=_release,
+        )
+
+    assert fallback_calls == []
+    assert release_attempts == [1]
+    assert [profile.get("name_suffix") for profile in stored_profiles] == [None]
 
 
 def _mistral_summary_state(

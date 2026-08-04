@@ -651,6 +651,13 @@ def test_ollama_post_json_handles_success_invalid_json_and_unavailable(
     with pytest.raises(SemanticCoherenceProviderUnavailable, match="provider is unavailable"):
         provider._post_json("/api/chat", {"model": "test-model"})
 
+    monkeypatch.setattr(
+        "mena.local_llm.urllib.request.urlopen",
+        lambda _request, *, timeout: (_ for _ in ()).throw(TimeoutError("expired")),
+    )
+    with pytest.raises(SemanticCoherenceProviderUnavailable, match="provider is unavailable"):
+        provider._post_json("/api/chat", {"model": "test-model"})
+
 
 def test_ollama_semantic_provider_marks_runtime_resource_used_before_failed_chat_call(
     monkeypatch: pytest.MonkeyPatch,
@@ -712,6 +719,26 @@ def test_ollama_semantic_provider_releases_runtime_resource(
         "model": "test-model",
         "timeout_seconds": provider.timeout_seconds,
     }
+
+
+def test_ollama_semantic_release_timeout_preserves_unavailable_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OllamaSemanticCoherenceProvider(model="test-model")
+    monkeypatch.setattr(
+        "mena.local_llm.urllib.request.urlopen",
+        lambda _request, *, timeout: (_ for _ in ()).throw(TimeoutError("expired")),
+    )
+    lease = RuntimeLease(
+        resource_kind="local_llm",
+        stage="semantic-review",
+        boundary="process",
+        provider="ollama",
+        model="test-model",
+    )
+
+    with pytest.raises(SemanticCoherenceProviderUnavailable, match="unavailable during release"):
+        provider.release_runtime_resource(lease)
 
 
 @pytest.mark.parametrize(

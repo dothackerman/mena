@@ -127,6 +127,7 @@ from mena.summarization import (
     ProductRequestRecord,
     SummarizationError,
     SummarizationPolicy,
+    SummarizationTimeout,
     SummaryArtifact,
     SummaryResult,
     SummaryTimelineEntry,
@@ -1978,6 +1979,34 @@ def test_main_summarize_reports_stage_failure(
     # The adapter maps a workflow SummarizationError to exit code 1.
     assert exit_code == 1
     assert "Cannot summarize session: Local summary provider is unavailable." in captured.out
+
+
+def test_main_summarize_reports_local_timeout_without_unavailable_wording(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    def _run_command_fails(**_kwargs: object) -> int:
+        raise SummarizationTimeout(
+            "Local Ollama summarization timed out after the 10-minute request ceiling."
+        )
+
+    monkeypatch.setattr(
+        "mena.summarize_workflow.run_summarization_command",
+        _run_command_fails,
+    )
+    scenario = arrange_ready_summarization(root=tmp_path)
+
+    exit_code = main(
+        ["summarize", str(scenario.session_dir)],
+        settings=AppSettings.from_env(env={}, home=tmp_path),
+    )
+    output = capsys.readouterr().out
+
+    assert exit_code == 1
+    assert "timed out after the 10-minute request ceiling" in output
+    assert "provider unavailable" not in output.lower()
+    assert "model is unavailable" not in output.lower()
 
 
 def test_main_export_command_exports_latest_summary_markdown(
